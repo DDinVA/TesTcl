@@ -75,6 +75,16 @@ it "should replace existing Vary http response headers with Accept-Encoding valu
 
 #### Installing JTcl including jtcl-irule extensions
 
+##### Running the bundled test suite
+
+From the TesTcl checkout, run:
+
+    ./tests.sh tclsh
+
+The runner configures `TCLLIBPATH` to the checkout automatically, so the
+package-based tests work without a separate environment setup. Use
+`./tests.sh jtcl` when testing the JTcl/iRule operator extension.
+
 ##### Install JTcl
 Download [JTcl](https://jtcl-project.github.io/jtcl/), unzip it and add it to your path.
 

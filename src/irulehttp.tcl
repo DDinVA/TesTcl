@@ -158,8 +158,8 @@ proc ::testcl::HTTP::cookie {cmd args} {
         log::log debug "There is no Cookie header."
         return {}
       }
-      set cookies [lindex $headers(Cookie)]
-      set res [llength cookies]
+      set cookies $headers(Cookie)
+      set res [llength $cookies]
 
       log::log debug "number of all cookies: $res"
       return $res
@@ -251,7 +251,7 @@ proc ::testcl::HTTP::cookie {cmd args} {
       
       set newcookies {}
       if { $name eq "" } {
-        unset $headers(Cookie)
+        unset headers(Cookie)
         log::log debug "all cookies removed"
       } else {
         set arg [lindex $args 0]
@@ -512,7 +512,7 @@ proc ::testcl::HTTP::header {cmd args} {
         set-cookie2 1
         transfer-encoding 1
       }
-      foreach $n $args {
+      foreach n $args {
         set allowed_headers([string tolower $n]) 1
       }
       foreach $n [array names headers] {
