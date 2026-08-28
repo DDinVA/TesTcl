@@ -154,6 +154,39 @@ namespace eval ::itest::semantic {
         variable subscriber ""
     }
 
+    namespace eval ::state::message {
+        variable proto generic
+        variable type request
+        variable fields {}
+    }
+
+    namespace eval ::state::mr {
+        variable payload ""
+        variable payload_length 0
+        variable collect_length 0
+        variable peer ""
+        variable route_status unrouted
+        variable route ""
+        variable route_target ""
+        variable available_for_routing true
+        variable always_match_port false
+        variable ignore_peer_port false
+        variable connect_back_port 0
+        variable connection_instance "0 of 1"
+        variable connection_mode per-peer
+        variable equivalent_transport ""
+        variable flow_id "flow-0"
+        variable instance "/Common/mr_router"
+        variable max_retries 3
+        variable transport "config /Common/mr_router"
+        variable retry_count 0
+        variable stored {}
+        variable streamed ""
+        variable dropped false
+        variable released false
+        variable response ""
+    }
+
     proc _profile_enabled {name} {
         set wanted [string toupper $name]
         foreach profile $::orch::config(profiles) {
@@ -2171,6 +2204,373 @@ namespace eval ::itest::semantic {
     proc radius_authenticate_command {args} {
         ::itest::log_decision radius authenticate $args
         return 0
+    }
+
+    proc _mr_require_event {command_name} {
+        if {$::itest::current_event ni {
+            CLIENT_ACCEPTED CLIENT_CLOSED CLIENT_DATA SERVER_CLOSED SERVER_CONNECTED SERVER_DATA
+            MR_INGRESS MR_EGRESS MR_FAILED MR_DATA GENERICMESSAGE_INGRESS GENERICMESSAGE_EGRESS
+        }} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc mr_clear_message {} {
+        foreach {name value} {
+            payload ""
+            payload_length 0
+            collect_length 0
+            peer ""
+            route_status unrouted
+            route ""
+            route_target ""
+            available_for_routing true
+            always_match_port false
+            ignore_peer_port false
+            connect_back_port 0
+            connection_instance "0 of 1"
+            connection_mode per-peer
+            equivalent_transport ""
+            flow_id "flow-0"
+            instance "/Common/mr_router"
+            max_retries 3
+            transport "config /Common/mr_router"
+            retry_count 0
+            stored {}
+            streamed ""
+            dropped false
+            released false
+            response ""
+        } {
+            set ::state::mr::$name $value
+        }
+        set ::state::message::proto generic
+        set ::state::message::type request
+        set ::state::message::fields {}
+    }
+
+    proc mr_reset_connection {} { mr_clear_message }
+
+    proc mr_prepare_message {} {
+        set ::state::mr::route_status unrouted
+        set ::state::mr::route ""
+        set ::state::mr::route_target ""
+        set ::state::mr::retry_count 0
+        set ::state::mr::stored {}
+        set ::state::mr::streamed ""
+        set ::state::mr::dropped false
+        set ::state::mr::released false
+        set ::state::mr::response ""
+    }
+
+    proc _mr_bool {value field} {
+        set normalized [string tolower $value]
+        if {$normalized ni {0 1 true false enabled disabled}} {
+            error "MR $field must be a boolean"
+        }
+        return [expr {$normalized in {1 true enabled}}]
+    }
+
+    proc _mr_toggle {field args} {
+        _mr_require_event "MR::$field"
+        if {[llength $args] > 1} { error "MR::$field accepts zero or one value" }
+        if {[llength $args] == 1} {
+            set ::state::mr::$field [_mr_bool [lindex $args 0] $field]
+        }
+        return [set ::state::mr::$field]
+    }
+
+    proc mr_always_match_port_command {args} { return [_mr_toggle always_match_port {*}$args] }
+    proc mr_available_for_routing_command {args} { return [_mr_toggle available_for_routing {*}$args] }
+    proc mr_ignore_peer_port_command {args} { return [_mr_toggle ignore_peer_port {*}$args] }
+
+    proc mr_collect_command {args} {
+        _mr_require_event MR::collect
+        if {[llength $args] > 1} { error "MR::collect accepts zero or one byte count" }
+        if {[llength $args] == 0} {
+            set ::state::mr::collect_length -1
+        } else {
+            set value [lindex $args 0]
+            if {![string is integer -strict $value] || $value < 0} { error "MR::collect requires a non-negative byte count" }
+            set ::state::mr::collect_length $value
+        }
+        return $::state::mr::collect_length
+    }
+
+    proc mr_connect_back_port_command {args} {
+        _mr_require_event MR::connect_back_port
+        if {[llength $args] > 1} { error "MR::connect_back_port accepts zero or one port" }
+        if {[llength $args] == 1} {
+            set value [lindex $args 0]
+            if {![string is integer -strict $value] || $value < 0 || $value > 65535} { error "MR::connect_back_port must be a port" }
+            set ::state::mr::connect_back_port $value
+        }
+        return $::state::mr::connect_back_port
+    }
+
+    proc mr_connection_instance_command {args} {
+        _mr_require_event MR::connection_instance
+        if {[llength $args] != 0} { error "MR::connection_instance takes no arguments" }
+        return $::state::mr::connection_instance
+    }
+    proc mr_connection_mode_command {args} {
+        _mr_require_event MR::connection_mode
+        if {[llength $args] != 0} { error "MR::connection_mode takes no arguments" }
+        return $::state::mr::connection_mode
+    }
+    proc mr_equivalent_transport_command {args} {
+        _mr_require_event MR::equivalent_transport
+        if {[llength $args] > 1} { error "MR::equivalent_transport accepts zero or one value" }
+        if {[llength $args] == 1} { set ::state::mr::equivalent_transport [lindex $args 0] }
+        return $::state::mr::equivalent_transport
+    }
+    proc mr_flow_id_command {args} {
+        _mr_require_event MR::flow_id
+        if {[llength $args] != 0} { error "MR::flow_id takes no arguments" }
+        return $::state::mr::flow_id
+    }
+    proc mr_instance_command {args} {
+        _mr_require_event MR::instance
+        if {[llength $args] != 0} { error "MR::instance takes no arguments" }
+        return $::state::mr::instance
+    }
+    proc mr_max_retries_command {args} {
+        _mr_require_event MR::max_retries
+        if {[llength $args] != 0} { error "MR::max_retries takes no arguments" }
+        return $::state::mr::max_retries
+    }
+    proc mr_protocol_command {args} {
+        _mr_require_event MR::protocol
+        if {[llength $args] != 0} { error "MR::protocol takes no arguments" }
+        return $::state::message::proto
+    }
+    proc mr_transport_command {args} {
+        _mr_require_event MR::transport
+        if {[llength $args] != 0} { error "MR::transport takes no arguments" }
+        return $::state::mr::transport
+    }
+
+    proc mr_payload_command {args} {
+        _mr_require_event MR::payload
+        if {[llength $args] > 1} { error "MR::payload accepts only length" }
+        if {[llength $args] == 1 && [lindex $args 0] eq "length"} {
+            return $::state::mr::payload_length
+        }
+        if {[llength $args] == 1} { error "MR::payload accepts only length" }
+        return $::state::mr::payload
+    }
+
+    proc mr_peer_command {args} {
+        _mr_require_event MR::peer
+        if {[llength $args] < 1} { error "MR::peer requires a peer name" }
+        set ::state::mr::peer [lindex $args 0]
+        ::itest::log_decision mr peer $args
+        return $::state::mr::peer
+    }
+
+    proc mr_prime_command {args} {
+        _mr_require_event MR::prime
+        set ::state::mr::route_status primed
+        set ::state::mr::route [join $args " "]
+        ::itest::log_decision mr prime $args
+        return ""
+    }
+
+    proc mr_release_command {args} {
+        _mr_require_event MR::release
+        if {[llength $args] != 0} { error "MR::release takes no arguments" }
+        set ::state::mr::collect_length 0
+        set ::state::mr::released true
+        return ""
+    }
+
+    proc mr_retry_command {args} {
+        _mr_require_event MR::retry
+        if {[llength $args] != 0} { error "MR::retry takes no arguments" }
+        incr ::state::mr::retry_count
+        set ::state::mr::route_status unrouted
+        ::itest::log_decision mr retry $::state::mr::retry_count
+        return ""
+    }
+
+    proc mr_return_command {args} {
+        _mr_require_event MR::return
+        if {[llength $args] > 1} { error "MR::return accepts zero or one route status" }
+        set status "returned by irule"
+        if {[llength $args] == 1} { set status [lindex $args 0] }
+        if {$status ne "returned by irule" && $status ni {
+            no_route_found queue_full no_connection connection_closing
+            internal_error max_retries_exceeded
+        }} {
+            error "MR::return route status is invalid"
+        }
+        set ::state::mr::route_status $status
+        set ::state::mr::response returned
+        return ""
+    }
+
+    proc mr_stream_command {args} {
+        _mr_require_event MR::stream
+        set end 0
+        if {[llength $args] == 2 && [lindex $args 0] eq "end"} {
+            set end 1
+            set value [lindex $args 1]
+        } elseif {[llength $args] == 1} {
+            set value [lindex $args 0]
+        } else {
+            error "MR::stream accepts bytes or end bytes"
+        }
+        if {[string bytelength $::state::mr::streamed] + [string bytelength $value] > 2097152} {
+            error "MR::stream payload exceeds the 2 MiB limit"
+        }
+        append ::state::mr::streamed $value
+        if {$end} { set ::state::mr::route_status streamed }
+        return ""
+    }
+
+    proc mr_message_command {args} {
+        _mr_require_event MR::message
+        if {[llength $args] < 1} { error "MR::message requires a subcommand" }
+        set subcommand [lindex $args 0]
+        switch -- $subcommand {
+            clone {
+                set count [expr {[llength $args] - 1}]
+                if {$count == 2 && [lindex $args 1] eq "-count"} { set count [lindex $args 2] }
+                if {![string is integer -strict $count] || $count < 1} { error "MR::message clone requires one or more clones" }
+                set ::state::mr::clone_count $count
+                ::itest::log_decision mr clone $count
+                return $count
+            }
+            route {
+                set ::state::mr::route [join [lrange $args 1 end] " "]
+                set ::state::mr::route_status routed
+                return $::state::mr::route
+            }
+            nexthop {
+                if {[llength $args] != 2} { error "MR::message nexthop requires a value" }
+                set ::state::mr::route_target [lindex $args 1]
+                return $::state::mr::route_target
+            }
+            retry_count { return $::state::mr::retry_count }
+            pick_host { return $::state::mr::peer }
+            default { error "unsupported MR::message subcommand $subcommand" }
+        }
+    }
+
+    proc mr_store_command {args} {
+        _mr_require_event MR::store
+        set stored {}
+        foreach name $args {
+            if {[catch {uplevel 2 [list set $name]} value]} { continue }
+            dict set stored $name $value
+        }
+        set ::state::mr::stored $stored
+        return ""
+    }
+
+    proc mr_restore_command {args} {
+        _mr_require_event MR::restore
+        set stored $::state::mr::stored
+        set names $args
+        if {[llength $names] == 0} { set names [dict keys $stored] }
+        foreach name $names {
+            if {![dict exists $stored $name]} { continue }
+            uplevel 2 [list set $name [dict get $stored $name]]
+        }
+        return ""
+    }
+
+    proc _message_field_get {name} {
+        if {![dict exists $::state::message::fields $name]} { return "" }
+        return [dict get $::state::message::fields $name]
+    }
+
+    proc message_field_command {args} {
+        _mr_require_event MESSAGE::field
+        if {[llength $args] == 1 && [lindex $args 0] eq "names"} {
+            return [dict keys $::state::message::fields]
+        }
+        if {[llength $args] >= 2 && [lindex $args 0] eq "value"} {
+            set name [lindex $args 1]
+            if {[llength $args] == 2} { return [_message_field_get $name] }
+            if {[llength $args] == 3} {
+                dict set ::state::message::fields $name [lindex $args 2]
+                return [lindex $args 2]
+            }
+        }
+        error "MESSAGE::field expects names or value field [value]"
+    }
+
+    proc message_proto_command {args} {
+        _mr_require_event MESSAGE::proto
+        if {[llength $args] != 0} { error "MESSAGE::proto takes no arguments" }
+        return [string toupper $::state::message::proto]
+    }
+    proc message_type_command {args} {
+        _mr_require_event MESSAGE::type
+        if {[llength $args] != 0} { error "MESSAGE::type takes no arguments" }
+        return $::state::message::type
+    }
+
+    proc genericmessage_message_command {args} {
+        _mr_require_event GENERICMESSAGE::message
+        if {[llength $args] == 0} { return $::state::mr::payload }
+        set field [string tolower [lindex $args 0]]
+        if {$field in {len length}} {
+            if {[llength $args] != 1} { error "GENERICMESSAGE::message length takes no value" }
+            return $::state::mr::payload_length
+        }
+        if {$field eq "data"} {
+            if {[llength $args] == 1} { return $::state::mr::payload }
+            if {[llength $args] == 2} {
+                set ::state::mr::payload [lindex $args 1]
+                set ::state::mr::payload_length [string bytelength $::state::mr::payload]
+                return $::state::mr::payload
+            }
+        }
+        if {$field in {src source dst dest destination}} {
+            set key [expr {$field in {src source} ? "src" : "dst"}]
+            if {[llength $args] == 1} { return [_message_field_get $key] }
+            if {[llength $args] == 2} {
+                dict set ::state::message::fields $key [lindex $args 1]
+                return [lindex $args 1]
+            }
+        }
+        if {$field eq "is_request"} {
+            if {[llength $args] == 1} { return [expr {$::state::message::type eq "request"}] }
+            if {[llength $args] == 2} {
+                set ::state::message::type [expr {[_mr_bool [lindex $args 1] is_request] ? "request" : "response"}]
+                return [expr {$::state::message::type eq "request"}]
+            }
+        }
+        error "unsupported GENERICMESSAGE::message field $field"
+    }
+
+    proc genericmessage_peer_command {args} {
+        _mr_require_event GENERICMESSAGE::peer
+        if {[llength $args] == 0} { return $::state::mr::peer }
+        if {[llength $args] != 2 || [lindex $args 0] ne "name"} { error "GENERICMESSAGE::peer accepts name and an optional value" }
+        set ::state::mr::peer [lindex $args 1]
+        return $::state::mr::peer
+    }
+
+    proc genericmessage_route_command {args} {
+        _mr_require_event GENERICMESSAGE::route
+        if {[llength $args] < 1} { error "GENERICMESSAGE::route requires add, delete, or lookup" }
+        switch -- [lindex $args 0] {
+            add {
+                set ::state::mr::route [join [lrange $args 1 end] " "]
+                set ::state::mr::route_status routed
+                return $::state::mr::route
+            }
+            delete {
+                set ::state::mr::route ""
+                set ::state::mr::route_status unrouted
+                return ""
+            }
+            lookup { return $::state::mr::route }
+            default { error "unsupported GENERICMESSAGE::route operation" }
+        }
     }
 
     proc lb_snapshot {} {
@@ -5116,6 +5516,35 @@ foreach {name proc_name} {
     RADIUS::rtdom ::itest::semantic::radius_rtdom_command
     RADIUS::subscriber ::itest::semantic::radius_subscriber_command
     radius_authenticate ::itest::semantic::radius_authenticate_command
+    MESSAGE::field ::itest::semantic::message_field_command
+    MESSAGE::proto ::itest::semantic::message_proto_command
+    MESSAGE::type ::itest::semantic::message_type_command
+    GENERICMESSAGE::message ::itest::semantic::genericmessage_message_command
+    GENERICMESSAGE::peer ::itest::semantic::genericmessage_peer_command
+    GENERICMESSAGE::route ::itest::semantic::genericmessage_route_command
+    MR::always_match_port ::itest::semantic::mr_always_match_port_command
+    MR::available_for_routing ::itest::semantic::mr_available_for_routing_command
+    MR::collect ::itest::semantic::mr_collect_command
+    MR::connect_back_port ::itest::semantic::mr_connect_back_port_command
+    MR::connection_instance ::itest::semantic::mr_connection_instance_command
+    MR::connection_mode ::itest::semantic::mr_connection_mode_command
+    MR::equivalent_transport ::itest::semantic::mr_equivalent_transport_command
+    MR::flow_id ::itest::semantic::mr_flow_id_command
+    MR::ignore_peer_port ::itest::semantic::mr_ignore_peer_port_command
+    MR::instance ::itest::semantic::mr_instance_command
+    MR::max_retries ::itest::semantic::mr_max_retries_command
+    MR::message ::itest::semantic::mr_message_command
+    MR::payload ::itest::semantic::mr_payload_command
+    MR::peer ::itest::semantic::mr_peer_command
+    MR::prime ::itest::semantic::mr_prime_command
+    MR::protocol ::itest::semantic::mr_protocol_command
+    MR::release ::itest::semantic::mr_release_command
+    MR::restore ::itest::semantic::mr_restore_command
+    MR::retry ::itest::semantic::mr_retry_command
+    MR::return ::itest::semantic::mr_return_command
+    MR::store ::itest::semantic::mr_store_command
+    MR::stream ::itest::semantic::mr_stream_command
+    MR::transport ::itest::semantic::mr_transport_command
 } {
     ::itest::register_command $name $proc_name
 }

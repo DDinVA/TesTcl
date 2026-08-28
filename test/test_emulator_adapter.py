@@ -4026,6 +4026,104 @@ when DNS_REQUEST {
             thread.join(timeout=5)
             server.server_close()
 
+    def test_mr_structured_message_routes_and_exposes_message_state(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["MR"],
+                "irule": """
+when MR_INGRESS {
+    log local0. "proto=[MESSAGE::proto] type=[MESSAGE::type] kind=[MESSAGE::field value kind]"
+    MR::peer peer-a
+    MR::message route config tcp_tc host 192.0.2.10:5060
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "mr",
+                        "proto": "generic",
+                        "type": "request",
+                        "fields": {"kind": "ping", "src": "client-a"},
+                        "payload": "hello",
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = result["trace"][0]["events"][-1]
+        self.assertEqual(event["event"], "MR_INGRESS")
+        self.assertTrue(event["fired"])
+        self.assertTrue(any("proto=GENERIC type=request kind=ping" in log for log in event["logs"]))
+        self.assertEqual(event["state"]["message"]["fields"], '"kind" "ping" "src" "client-a"')
+        self.assertEqual(event["state"]["mr"]["peer"], "peer-a")
+        self.assertEqual(event["state"]["mr"]["route_status"], "routed")
+        self.assertEqual(result["trace"][0]["proto"], "generic")
+
+    def test_mr_collect_fires_data_event_and_preserves_payload_bytes(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["MR"],
+                "irule": "when MR_INGRESS { MR::collect 3 }\nwhen MR_DATA { log local0. \"data=[MR::payload] len=[MR::payload length]\" }",
+                "packets": [
+                    {
+                        "protocol": "mr",
+                        "payload_hex": "0001020304",
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        events = result["trace"][0]["events"]
+        self.assertEqual([event["event"] for event in events[-2:]], ["MR_INGRESS", "MR_DATA"])
+        self.assertEqual(events[-1]["state"]["mr"]["payload_length"], "5")
+        self.assertTrue(any("len=5" in log for log in events[-1]["logs"]))
+
+    def test_mr_egress_and_route_failure_events_are_stateful(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["MR"],
+                "irule": "when MR_EGRESS { log local0. egress }\nwhen MR_FAILED { MR::retry; log local0. \"retry=[MR::message retry_count]\" }",
+                "packets": [
+                    {
+                        "protocol": "mr",
+                        "direction": "server_to_client",
+                        "route_status": "failed",
+                        "payload": "response",
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        events = result["trace"][0]["events"]
+        self.assertEqual([event["event"] for event in events[-2:]], ["MR_EGRESS", "MR_FAILED"])
+        self.assertEqual(events[-1]["state"]["mr"]["retry_count"], "1")
+        self.assertTrue(any("retry=1" in log for log in events[-1]["logs"]))
+
+    def test_mr_payload_mutation_uses_utf8_byte_length_and_validates_return_status(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["MR"],
+                "irule": "when MR_INGRESS { GENERICMESSAGE::message data \"π\"; log local0. \"len=[GENERICMESSAGE::message length]\" }",
+                "packets": [{"protocol": "mr", "payload": "old"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = result["trace"][0]["events"][-1]
+        self.assertEqual(event["state"]["mr"]["payload_length"], "2")
+        self.assertTrue(any("len=2" in log for log in event["logs"]))
+
+        returned = self.adapter.run_scenario(
+            {
+                "profiles": ["MR"],
+                "irule": "when MR_INGRESS { MR::return no_route_found }",
+                "packets": [{"protocol": "mr", "payload": "x"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            returned["trace"][0]["events"][-1]["state"]["mr"]["route_status"],
+            "no_route_found",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

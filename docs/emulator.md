@@ -311,6 +311,35 @@ See the F5 [`DIAMETER`](https://clouddocs.f5.com/api/irules/DIAMETER.html),
 [`DIAMETER::avp`](https://clouddocs.f5.com/api/irules/DIAMETER__avp.html), and
 [`DIAMETER::header`](https://clouddocs.f5.com/api/irules/DIAMETER__header.html)
 references for the production command/event contract.
+Message Routing Framework support is also pinned to the 17.5 catalog.
+Structured `protocol: "mr"` packets model generic-message ingress and egress
+over TCP, with `MR_DATA` emitted when an ingress rule requests payload
+collection and `MR_FAILED` available for an explicitly failed route. The
+semantic overlay exposes `MESSAGE::proto`, `MESSAGE::type`,
+`MESSAGE::field`, `GENERICMESSAGE::message`, `GENERICMESSAGE::peer`,
+`GENERICMESSAGE::route`, and the core `MR::` state controls for collection,
+routing, retry, return, streaming, and stored variables. This is a bounded
+message-router model: it does not open real peer connections, implement a
+production route table, or reproduce TMM connection selection and retry
+timers.
+
+```json
+{
+  "profiles": ["MR"],
+  "irule": "when MR_INGRESS { if {[MESSAGE::type] eq \"request\"} { MR::message route config tcp_tc host 192.0.2.10:5060 } }",
+  "packets": [{
+    "protocol": "mr",
+    "proto": "generic",
+    "type": "request",
+    "fields": {"kind": "health-check"},
+    "payload": "ping"
+  }]
+}
+```
+See the F5 [`MR::message`](https://clouddocs.f5.com/api/irules/MR__message.html),
+[`MR::collect`](https://clouddocs.f5.com/api/irules/MR__collect.html), and
+[`MESSAGE::field`](https://clouddocs.f5.com/api/irules/MESSAGE__field.html)
+references for the production command/event contract.
 RADIUS support is pinned to the 17.5 AAA event model. Structured
 `protocol: "radius"` packets and raw UDP packets on ports 1812/1813 drive
 `RADIUS_AAA_AUTH_REQUEST`, `RADIUS_AAA_AUTH_RESPONSE`,

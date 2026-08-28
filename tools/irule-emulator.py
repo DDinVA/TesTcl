@@ -263,6 +263,37 @@ EVENT_STATE_FIELDS = {
         "rtdom",
         "subscriber",
     },
+    "message": {
+        "proto",
+        "type",
+        "fields",
+    },
+    "mr": {
+        "payload",
+        "payload_length",
+        "peer",
+        "route_status",
+        "route",
+        "route_target",
+        "collect_length",
+        "available_for_routing",
+        "always_match_port",
+        "ignore_peer_port",
+        "connect_back_port",
+        "connection_instance",
+        "connection_mode",
+        "equivalent_transport",
+        "flow_id",
+        "instance",
+        "max_retries",
+        "transport",
+        "retry_count",
+        "stored",
+        "streamed",
+        "dropped",
+        "released",
+        "response",
+    },
 }
 EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
@@ -274,6 +305,8 @@ EVENT_STATE_NAMESPACES = {
     "sip": "::state::sip",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
+    "message": "::state::message",
+    "mr": "::state::mr",
 }
 
 
@@ -519,6 +552,35 @@ SEMANTIC_MOCK_COMMANDS = {
     "RADIUS::rtdom",
     "RADIUS::subscriber",
     "radius_authenticate",
+    "MESSAGE::field",
+    "MESSAGE::proto",
+    "MESSAGE::type",
+    "GENERICMESSAGE::message",
+    "GENERICMESSAGE::peer",
+    "GENERICMESSAGE::route",
+    "MR::always_match_port",
+    "MR::available_for_routing",
+    "MR::collect",
+    "MR::connect_back_port",
+    "MR::connection_instance",
+    "MR::connection_mode",
+    "MR::equivalent_transport",
+    "MR::flow_id",
+    "MR::ignore_peer_port",
+    "MR::instance",
+    "MR::max_retries",
+    "MR::message",
+    "MR::payload",
+    "MR::peer",
+    "MR::prime",
+    "MR::protocol",
+    "MR::release",
+    "MR::restore",
+    "MR::retry",
+    "MR::return",
+    "MR::store",
+    "MR::stream",
+    "MR::transport",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1392,7 +1454,7 @@ TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "wire"}
+PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -1540,6 +1602,16 @@ PACKET_PROTOCOL_FIELDS = {
         "rtdom",
         "subscriber",
     },
+    "mr": {
+        "proto",
+        "type",
+        "fields",
+        "payload",
+        "payload_hex",
+        "peer",
+        "route_status",
+        "route",
+    },
 }
 PACKET_EVENT_ADAPTERS = {
     "RULE_INIT": "trace initialization",
@@ -1589,6 +1661,12 @@ PACKET_EVENT_ADAPTERS = {
     "RADIUS_AAA_AUTH_RESPONSE": "RADIUS authentication response",
     "RADIUS_AAA_ACCT_REQUEST": "RADIUS accounting request",
     "RADIUS_AAA_ACCT_RESPONSE": "RADIUS accounting response",
+    "MR_INGRESS": "Message Routing Framework ingress",
+    "MR_EGRESS": "Message Routing Framework egress",
+    "MR_FAILED": "Message Routing Framework route failure",
+    "MR_DATA": "Message Routing Framework collected payload",
+    "GENERICMESSAGE_INGRESS": "generic message ingress",
+    "GENERICMESSAGE_EGRESS": "generic message egress",
 }
 
 
@@ -3783,6 +3861,29 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = _require_string(
                     packet[field], f"packet {index} {field}"
                 )
+            elif protocol == "mr" and field == "fields":
+                value = packet[field]
+                if not isinstance(value, dict) or not all(
+                    isinstance(key, str) and isinstance(item, (bool, str, int, float))
+                    for key, item in value.items()
+                ):
+                    raise EmulatorInputError(
+                        f"packet {index} fields must be an object of scalar values"
+                    )
+                normalised[field] = {
+                    key: _packet_scalar(item, f"packet {index} fields.{key}")
+                    for key, item in value.items()
+                }
+            elif protocol == "mr" and field in {
+                "proto",
+                "payload_hex",
+                "peer",
+                "route_status",
+                "route",
+            }:
+                normalised[field] = _require_string(
+                    packet[field], f"packet {index} {field}"
+                )
             else:
                 normalised[field] = _packet_scalar(packet[field], f"packet {index} {field}")
 
@@ -4001,6 +4102,43 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                         f"packet {index} RADIUS encoder produced an incomplete message"
                     )
                 normalised.update(parsed[0])
+        if protocol == "mr":
+            if "payload" in normalised and "payload_hex" in normalised:
+                raise EmulatorInputError(
+                    f"packet {index} MR payload cannot be combined with payload_hex"
+                )
+            proto = str(normalised.get("proto", "generic")).lower()
+            if proto not in {"generic", "sip", "diameter"}:
+                raise EmulatorInputError(
+                    f"packet {index} MR proto must be generic, sip, or diameter"
+                )
+            packet_type = str(normalised.get("type", "request")).lower()
+            if packet_type not in {"request", "response"}:
+                raise EmulatorInputError(
+                    f"packet {index} MR type must be request or response"
+                )
+            if "payload_hex" in normalised:
+                payload = _radius_hex(normalised["payload_hex"], f"packet {index} payload_hex")
+            else:
+                try:
+                    payload = str(normalised.get("payload", "")).encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise EmulatorInputError(
+                        f"packet {index} MR payload must be valid UTF-8"
+                    ) from exc
+            if len(payload) > STREAM_MAX_BYTES:
+                raise EmulatorInputError(
+                    f"packet {index} MR payload exceeds the {STREAM_MAX_BYTES // (1024 * 1024)} MiB limit"
+                )
+            normalised["proto"] = proto
+            normalised["type"] = packet_type
+            normalised.setdefault("fields", {})
+            normalised.setdefault("peer", "")
+            normalised.setdefault("route_status", "unrouted")
+            normalised.setdefault("route", "")
+            normalised["payload"] = _decode_wire_text(payload)
+            normalised["payload_length"] = len(payload)
+            normalised["_mr_payload"] = payload
         packets.append(normalised)
     return packets
 
@@ -4397,7 +4535,7 @@ class EmulatorSession:
         for layer, values in state.items():
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter", "radius"} and field in {"payload", "message", "authenticator"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr"} and field in {"payload", "message", "authenticator"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -4476,7 +4614,7 @@ class EmulatorSession:
         protocol = packet["protocol"]
         if protocol == "sip" and packet.get("transport", "tcp") == "udp":
             connection.update({"protocol": "17", "transport": "udp"})
-        elif protocol in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter"}:
+        elif protocol in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter", "mr"}:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol in {"udp", "dns", "radius"}:
             connection.update({"protocol": "17", "transport": "udp"})
@@ -4671,6 +4809,28 @@ class EmulatorSession:
                 "authenticator_hex",
             )
             state["radius"] = radius_state
+        elif protocol == "mr":
+            fields = packet.get("fields", {})
+            message_state: dict[str, str] = {
+                "proto": str(packet.get("proto", "generic")),
+                "type": str(packet.get("type", "request")),
+                "fields": " ".join(
+                    _tcl_quote(str(item))
+                    for key, value in fields.items()
+                    for item in (key, value)
+                ),
+            }
+            state["message"] = message_state
+            mr_state: dict[str, str] = {}
+            for field in EVENT_STATE_FIELDS["mr"]:
+                if field in packet:
+                    mr_state[field] = _packet_scalar(packet[field], field)
+            payload = packet.get("_mr_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                payload = str(packet.get("payload", "")).encode("utf-8")
+            mr_state["payload"] = bytes(payload)
+            mr_state["payload_length"] = str(len(payload))
+            state["mr"] = mr_state
         return state
 
     def _current_sip_event_state(
@@ -4707,6 +4867,27 @@ class EmulatorSession:
         for field in EVENT_STATE_FIELDS["diameter"]:
             raw = session.eval_tcl(f"set ::state::diameter::{field}")
             diameter_state[field] = raw
+        return state
+
+    def _current_mr_event_state(
+        self, session: Any, packet: dict[str, Any]
+    ) -> dict[str, dict[str, str]]:
+        """Build a Message Routing Framework event from mutable Tcl state."""
+        state: dict[str, dict[str, str]] = {
+            "connection": self._packet_connection_state(packet),
+            "message": {},
+            "mr": {},
+        }
+        for field in EVENT_STATE_FIELDS["message"]:
+            state["message"][field] = session.eval_tcl(f"set ::state::message::{field}")
+        for field in EVENT_STATE_FIELDS["mr"]:
+            if field == "payload":
+                payload_hex = session.eval_tcl(
+                    "binary encode hex $::state::mr::payload"
+                )
+                state["mr"][field] = bytes.fromhex(str(payload_hex))
+            else:
+                state["mr"][field] = session.eval_tcl(f"set ::state::mr::{field}")
         return state
 
     @staticmethod
@@ -4821,7 +5002,7 @@ class EmulatorSession:
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
-        if packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter"}:
+        if packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter", "mr"}:
             return
         source = packet["source"]
         destination = packet["destination"]
@@ -4848,6 +5029,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::mqtt_reset_connection")
         session.eval_tcl("::itest::semantic::sip_reset_connection")
         session.eval_tcl("::itest::semantic::diameter_reset_connection")
+        session.eval_tcl("::itest::semantic::mr_reset_connection")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
         events.append(
             self._fire_event_on_worker(
@@ -5401,6 +5583,31 @@ class EmulatorSession:
                 "payload_hex",
                 "rtdom",
                 "subscriber",
+                "proto",
+                "fields",
+                "payload_length",
+                "peer",
+                "route_status",
+                "route",
+                "route_target",
+                "collect_length",
+                "available_for_routing",
+                "always_match_port",
+                "ignore_peer_port",
+                "connect_back_port",
+                "connection_instance",
+                "connection_mode",
+                "equivalent_transport",
+                "flow_id",
+                "instance",
+                "max_retries",
+                "transport",
+                "retry_count",
+                "stored",
+                "streamed",
+                "dropped",
+                "released",
+                "response",
                 "timestamp",
                 "seq",
                 "ack",
@@ -5695,6 +5902,54 @@ class EmulatorSession:
                         session, event_name, self._packet_event_state(packet)
                     )
                 )
+                continue
+
+            if protocol == "mr":
+                self._activate_packet_connection(session, packet, entry["events"])
+                if direction == "server_to_client" and not self._server_connection_open:
+                    self._configure_packet_connection(session, packet)
+                    entry["events"].append(
+                        self._fire_event_on_worker(
+                            session,
+                            "SERVER_CONNECTED",
+                            {"connection": self._packet_connection_state(packet)},
+                        )
+                    )
+                    self._server_connection_open = True
+                session.eval_tcl("::itest::semantic::mr_prepare_message")
+                ingress_event = "MR_INGRESS" if direction == "client_to_server" else "MR_EGRESS"
+                entry["events"].append(
+                    self._fire_event_on_worker(
+                        session, ingress_event, self._packet_event_state(packet)
+                    )
+                )
+                try:
+                    collect_length = int(
+                        session.eval_tcl("set ::state::mr::collect_length")
+                    )
+                except (TypeError, ValueError):
+                    raise EmulatorInputError("invalid MR collection length") from None
+                payload = packet.get("_mr_payload", b"")
+                if (
+                    direction == "client_to_server"
+                    and collect_length != 0
+                    and (collect_length < 0 or len(payload) >= collect_length)
+                ):
+                    entry["events"].append(
+                        self._fire_event_on_worker(
+                            session,
+                            "MR_DATA",
+                            self._current_mr_event_state(session, packet),
+                        )
+                    )
+                if packet.get("route_status") in {"failed", "no_route_found"}:
+                    entry["events"].append(
+                        self._fire_event_on_worker(
+                            session,
+                            "MR_FAILED",
+                            self._current_mr_event_state(session, packet),
+                        )
+                    )
                 continue
 
             if protocol == "websocket":
