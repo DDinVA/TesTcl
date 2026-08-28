@@ -1866,9 +1866,11 @@ namespace eval ::itest::semantic {
         set source [lindex $args 0]
         set delimiter [lindex $args 1]
         set field [lindex $args 2]
-        if {$delimiter eq ""} { error "getfield delimiter must not be empty" }
         if {![string is integer -strict $field] || $field < 1} {
             error "getfield field number must be a positive integer"
+        }
+        if {$delimiter eq ""} {
+            return [string index $source [expr {$field - 1}]]
         }
         set fields [list]
         set cursor 0

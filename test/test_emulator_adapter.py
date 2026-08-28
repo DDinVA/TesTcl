@@ -209,7 +209,7 @@ when HTTP_REQUEST_DATA { log local0. "should-not-fire" }
                 },
                 "irule": """
 when HTTP_REQUEST {
-    log local0. "findstr=[findstr [HTTP::path] / 1] field=[getfield [HTTP::host] . 2]"
+    log local0. "findstr=[findstr [HTTP::path] / 1] field=[getfield [HTTP::host] . 2] char=[getfield abc {} 2]"
     log local0. "findclass=[findclass /api routes] matchclass=[matchclass /api equals routes]"
     log local0. "active=[active_members -list api_pool] all=[members -list api_pool] nodes=[nodes -list api_pool]"
     log local0. "substr=[substr prefix:/api?x=1 7 ?]"
@@ -224,6 +224,7 @@ when HTTP_REQUEST {
         logs = result["results"][0]["logs"]
         self.assertTrue(any("findstr=api/v1" in entry for entry in logs))
         self.assertTrue(any("field=example" in entry for entry in logs))
+        self.assertTrue(any("char=b" in entry for entry in logs))
         self.assertTrue(any("findclass=/api api_pool matchclass=1" in entry for entry in logs))
         self.assertTrue(any("active={10.0.0.10 80} {10.0.0.11 80}" in entry for entry in logs))
         self.assertTrue(any("all={10.0.0.10 80} {10.0.0.11 80}" in entry for entry in logs))
