@@ -35,6 +35,13 @@ namespace eval ::itest::semantic {
     variable ws_disconnect_reason ""
     variable ws_masking "remask"
 
+    variable mqtt_enabled 1
+    variable mqtt_collection_requested 0
+    variable mqtt_collection_length 0
+    variable mqtt_release_requested 0
+    variable mqtt_dropped 0
+    variable mqtt_disconnect_requested 0
+
     namespace eval ::state::websocket {
         variable request_headers {}
         variable response_headers {}
@@ -48,6 +55,34 @@ namespace eval ::itest::semantic {
         variable mask ""
         variable payload ""
         variable payload_length 0
+    }
+
+    namespace eval ::state::mqtt {
+        variable type ""
+        variable protocol_name "MQTT"
+        variable protocol_version 4
+        variable client_id ""
+        variable clean_session 1
+        variable keep_alive 60
+        variable username ""
+        variable password ""
+        variable will_topic ""
+        variable will_message ""
+        variable will_qos 0
+        variable will_retain 0
+        variable packet_id 0
+        variable qos 0
+        variable dup 0
+        variable retain 0
+        variable topic ""
+        variable payload ""
+        variable payload_length 0
+        variable message ""
+        variable message_length 0
+        variable return_code 0
+        variable return_code_list {}
+        variable session_present 0
+        variable topic_list {}
     }
 
     proc _profile_enabled {name} {
@@ -178,6 +213,76 @@ namespace eval ::itest::semantic {
             variable payload ""
             variable payload_length 0
         }
+    }
+
+    proc mqtt_reset_connection {} {
+        variable mqtt_enabled
+        variable mqtt_collection_requested
+        variable mqtt_collection_length
+        variable mqtt_release_requested
+        variable mqtt_dropped
+        variable mqtt_disconnect_requested
+        set mqtt_enabled 1
+        set mqtt_collection_requested 0
+        set mqtt_collection_length 0
+        set mqtt_release_requested 0
+        set mqtt_dropped 0
+        set mqtt_disconnect_requested 0
+        namespace eval ::state::mqtt {
+            variable type ""
+            variable protocol_name "MQTT"
+            variable protocol_version 4
+            variable client_id ""
+            variable clean_session 1
+            variable keep_alive 60
+            variable username ""
+            variable password ""
+            variable will_topic ""
+            variable will_message ""
+            variable will_qos 0
+            variable will_retain 0
+            variable packet_id 0
+            variable qos 0
+            variable dup 0
+            variable retain 0
+            variable topic ""
+            variable payload ""
+            variable payload_length 0
+            variable message ""
+            variable message_length 0
+            variable return_code 0
+            variable return_code_list {}
+            variable session_present 0
+            variable topic_list {}
+        }
+    }
+
+    proc mqtt_prepare_message {} {
+        variable mqtt_release_requested
+        variable mqtt_dropped
+        variable mqtt_disconnect_requested
+        set mqtt_release_requested 0
+        set mqtt_dropped 0
+        set mqtt_disconnect_requested 0
+    }
+
+    proc _mqtt_require_event {allowed command_name} {
+        if {$::itest::current_event ni $allowed} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc mqtt_collection_snapshot {} {
+        variable mqtt_collection_requested
+        variable mqtt_collection_length
+        variable mqtt_release_requested
+        return [list requested $mqtt_collection_requested length $mqtt_collection_length released $mqtt_release_requested]
+    }
+
+    proc mqtt_flags_snapshot {} {
+        variable mqtt_dropped
+        variable mqtt_disconnect_requested
+        return [list dropped $mqtt_dropped disconnect $mqtt_disconnect_requested]
     }
 
     proc ws_collection_snapshot {} {
@@ -451,6 +556,244 @@ namespace eval ::itest::semantic {
             error "WS::disconnect reason must be at most 123 bytes"
         }
         ::itest::log_decision ws disconnect [list $code $ws_disconnect_reason]
+        return ""
+    }
+
+    proc mqtt_field_command {field allowed command_name args} {
+        _mqtt_require_event $allowed $command_name
+        if {[llength $args] > 1} {
+            error "$command_name accepts zero or one argument"
+        }
+        set variable_name ::state::mqtt::$field
+        if {[llength $args] == 0} {
+            return [set $variable_name]
+        }
+        set value [lindex $args 0]
+        set $variable_name $value
+        ::itest::log_decision mqtt ${field}_set $value
+        return $value
+    }
+
+    proc mqtt_integer_field_command {field allowed command_name minimum maximum args} {
+        _mqtt_require_event $allowed $command_name
+        if {[llength $args] > 1} {
+            error "$command_name accepts zero or one argument"
+        }
+        set variable_name ::state::mqtt::$field
+        if {[llength $args] == 0} {
+            return [set $variable_name]
+        }
+        set value [lindex $args 0]
+        if {![string is integer -strict $value] || $value < $minimum || $value > $maximum} {
+            error "$command_name value is out of range"
+        }
+        set $variable_name $value
+        ::itest::log_decision mqtt ${field}_set $value
+        return $value
+    }
+
+    proc mqtt_boolean_field_command {field allowed command_name args} {
+        _mqtt_require_event $allowed $command_name
+        if {[llength $args] > 1} {
+            error "$command_name accepts zero or one argument"
+        }
+        set variable_name ::state::mqtt::$field
+        if {[llength $args] == 0} {
+            return [set $variable_name]
+        }
+        set value [lindex $args 0]
+        if {$value ni {0 1 true false}} {
+            error "$command_name value must be 0 or 1"
+        }
+        set value [expr {$value in {1 true}}]
+        set $variable_name $value
+        ::itest::log_decision mqtt ${field}_set $value
+        return $value
+    }
+
+    proc mqtt_clean_session_command {args} {
+        return [mqtt_boolean_field_command clean_session {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::clean_session {*}$args]
+    }
+
+    proc mqtt_client_id_command {args} {
+        return [mqtt_field_command client_id {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::client_id {*}$args]
+    }
+
+    proc mqtt_keep_alive_command {args} {
+        return [mqtt_integer_field_command keep_alive {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::keep_alive 0 65535 {*}$args]
+    }
+
+    proc mqtt_password_command {args} {
+        return [mqtt_field_command password {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::password {*}$args]
+    }
+
+    proc mqtt_protocol_name_command {args} {
+        return [mqtt_field_command protocol_name {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::protocol_name {*}$args]
+    }
+
+    proc mqtt_protocol_version_command {args} {
+        return [mqtt_integer_field_command protocol_version {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::protocol_version 0 255 {*}$args]
+    }
+
+    proc mqtt_packet_id_command {args} {
+        return [mqtt_integer_field_command packet_id {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::packet_id 0 65535 {*}$args]
+    }
+
+    proc mqtt_qos_command {args} {
+        return [mqtt_integer_field_command qos {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::qos 0 2 {*}$args]
+    }
+
+    proc mqtt_dup_command {args} {
+        return [mqtt_boolean_field_command dup {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::dup {*}$args]
+    }
+
+    proc mqtt_retain_command {args} {
+        return [mqtt_boolean_field_command retain {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::retain {*}$args]
+    }
+
+    proc mqtt_return_code_command {args} {
+        return [mqtt_integer_field_command return_code {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::return_code 0 255 {*}$args]
+    }
+
+    proc mqtt_session_present_command {args} {
+        return [mqtt_boolean_field_command session_present {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::session_present {*}$args]
+    }
+
+    proc mqtt_topic_command {args} {
+        return [mqtt_field_command topic {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::topic {*}$args]
+    }
+
+    proc mqtt_username_command {args} {
+        return [mqtt_field_command username {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::username {*}$args]
+    }
+
+    proc mqtt_return_code_list_command {args} {
+        return [mqtt_field_command return_code_list {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::return_code_list {*}$args]
+    }
+
+    proc mqtt_type_command {args} {
+        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::type
+        if {[llength $args] != 0} {
+            error "MQTT::type takes no arguments"
+        }
+        return $::state::mqtt::type
+    }
+
+    proc mqtt_length_command {args} {
+        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::length
+        if {[llength $args] != 0} {
+            error "MQTT::length takes no arguments"
+        }
+        return $::state::mqtt::message_length
+    }
+
+    proc mqtt_message_command {args} {
+        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_EGRESS MQTT_SERVER_EGRESS} MQTT::message
+        if {[llength $args] != 0} {
+            error "MQTT::message takes no arguments"
+        }
+        return $::state::mqtt::message
+    }
+
+    proc mqtt_collect_command {args} {
+        variable mqtt_collection_requested
+        variable mqtt_collection_length
+        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::collect
+        if {[llength $args] > 1} {
+            error "MQTT::collect accepts zero or one length"
+        }
+        set length 0
+        if {[llength $args] == 1} {
+            set length [lindex $args 0]
+            if {![string is integer -strict $length] || $length < 1} {
+                error "MQTT::collect length must be a positive integer"
+            }
+        }
+        set mqtt_collection_requested 1
+        set mqtt_collection_length $length
+        ::itest::log_decision mqtt collect $length
+        return ""
+    }
+
+    proc mqtt_release_command {args} {
+        variable mqtt_collection_requested
+        variable mqtt_collection_length
+        variable mqtt_release_requested
+        _mqtt_require_event {MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::release
+        if {[llength $args] != 0} {
+            error "MQTT::release takes no arguments"
+        }
+        set mqtt_collection_requested 0
+        set mqtt_collection_length 0
+        set mqtt_release_requested 1
+        ::itest::log_decision mqtt release
+        return ""
+    }
+
+    proc mqtt_payload_command {args} {
+        _mqtt_require_event {MQTT_CLIENT_DATA MQTT_SERVER_DATA MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS} MQTT::payload
+        set payload $::state::mqtt::payload
+        if {[llength $args] == 0} {
+            if {$::itest::current_event ni {MQTT_CLIENT_DATA MQTT_SERVER_DATA}} {
+                error "MQTT::payload requires a data event"
+            }
+            return $payload
+        }
+        if {[llength $args] == 1 && [lindex $args 0] eq "length"} {
+            return [::itest::cmd::_payload_bytelength $payload]
+        }
+        if {[llength $args] != 2 || [lindex $args 0] ni {replace prepend append}} {
+            error "unsupported MQTT::payload syntax"
+        }
+        if {$::itest::current_event ni {MQTT_CLIENT_DATA MQTT_SERVER_DATA}} {
+            error "MQTT::payload mutation requires a data event"
+        }
+        set operation [lindex $args 0]
+        set value [::itest::cmd::_payload_bytes [lindex $args 1]]
+        switch -exact -- $operation {
+            replace { set payload $value }
+            prepend { set payload [::itest::cmd::_payload_bytes "${value}${payload}"] }
+            append { set payload [::itest::cmd::_payload_bytes "${payload}${value}"] }
+        }
+        set ::state::mqtt::payload $payload
+        set ::state::mqtt::payload_length [::itest::cmd::_payload_bytelength $payload]
+        ::itest::log_decision mqtt payload_$operation [lindex $args 1]
+        return ""
+    }
+
+    proc mqtt_drop_command {args} {
+        variable mqtt_dropped
+        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::drop
+        if {[llength $args] != 0} { error "MQTT::drop takes no arguments" }
+        set mqtt_dropped 1
+        ::itest::log_decision mqtt drop
+        return ""
+    }
+
+    proc mqtt_disconnect_command {args} {
+        variable mqtt_disconnect_requested
+        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::disconnect
+        if {[llength $args] != 0} { error "MQTT::disconnect takes no arguments" }
+        set mqtt_disconnect_requested 1
+        ::itest::log_decision mqtt disconnect
+        return ""
+    }
+
+    proc mqtt_disable_command {args} {
+        variable mqtt_enabled
+        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::disable
+        if {[llength $args] != 0} { error "MQTT::disable takes no arguments" }
+        set mqtt_enabled 0
+        ::itest::log_decision mqtt disable
+        return ""
+    }
+
+    proc mqtt_enable_command {args} {
+        variable mqtt_enabled
+        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::enable
+        if {[llength $args] != 0} { error "MQTT::enable takes no arguments" }
+        set mqtt_enabled 1
+        ::itest::log_decision mqtt enable
         return ""
     }
 
@@ -2993,6 +3336,40 @@ foreach {original replacement} {
         } $replacement]
     }
 }
+foreach {original replacement} {
+    mqtt_clean_session mqtt_clean_session_command
+    mqtt_client_id mqtt_client_id_command
+    mqtt_collect mqtt_collect_command
+    mqtt_disable mqtt_disable_command
+    mqtt_disconnect mqtt_disconnect_command
+    mqtt_drop mqtt_drop_command
+    mqtt_dup mqtt_dup_command
+    mqtt_enable mqtt_enable_command
+    mqtt_keep_alive mqtt_keep_alive_command
+    mqtt_length mqtt_length_command
+    mqtt_message mqtt_message_command
+    mqtt_packet_id mqtt_packet_id_command
+    mqtt_password mqtt_password_command
+    mqtt_payload mqtt_payload_command
+    mqtt_protocol_name mqtt_protocol_name_command
+    mqtt_protocol_version mqtt_protocol_version_command
+    mqtt_qos mqtt_qos_command
+    mqtt_release mqtt_release_command
+    mqtt_retain mqtt_retain_command
+    mqtt_return_code mqtt_return_code_command
+    mqtt_return_code_list mqtt_return_code_list_command
+    mqtt_session_present mqtt_session_present_command
+    mqtt_topic mqtt_topic_command
+    mqtt_type mqtt_type_command
+    mqtt_username mqtt_username_command
+} {
+    if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
+        ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
+        proc ::itest::cmd::$original {args} [format {
+            return [eval [linsert $args 0 ::itest::semantic::%s]]
+        } $replacement]
+    }
+}
 if {[::tmm::_orig_info commands ::itest::cmd::http_header] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::http_header ::itest::cmd::_testcl_http_header_orig
     proc ::itest::cmd::http_header {args} {
@@ -3208,6 +3585,31 @@ foreach {name proc_name} {
     DNS::origin ::itest::semantic::dns_origin
     DNS::question ::itest::semantic::dns_question
     class ::itest::cmd::cmd_class
+    MQTT::clean_session ::itest::cmd::mqtt_clean_session
+    MQTT::client_id ::itest::cmd::mqtt_client_id
+    MQTT::collect ::itest::cmd::mqtt_collect
+    MQTT::disable ::itest::cmd::mqtt_disable
+    MQTT::disconnect ::itest::cmd::mqtt_disconnect
+    MQTT::drop ::itest::cmd::mqtt_drop
+    MQTT::dup ::itest::cmd::mqtt_dup
+    MQTT::enable ::itest::cmd::mqtt_enable
+    MQTT::keep_alive ::itest::cmd::mqtt_keep_alive
+    MQTT::length ::itest::cmd::mqtt_length
+    MQTT::message ::itest::cmd::mqtt_message
+    MQTT::packet_id ::itest::cmd::mqtt_packet_id
+    MQTT::password ::itest::cmd::mqtt_password
+    MQTT::payload ::itest::cmd::mqtt_payload
+    MQTT::protocol_name ::itest::cmd::mqtt_protocol_name
+    MQTT::protocol_version ::itest::cmd::mqtt_protocol_version
+    MQTT::qos ::itest::cmd::mqtt_qos
+    MQTT::release ::itest::cmd::mqtt_release
+    MQTT::retain ::itest::cmd::mqtt_retain
+    MQTT::return_code ::itest::cmd::mqtt_return_code
+    MQTT::return_code_list ::itest::cmd::mqtt_return_code_list
+    MQTT::session_present ::itest::cmd::mqtt_session_present
+    MQTT::topic ::itest::cmd::mqtt_topic
+    MQTT::type ::itest::cmd::mqtt_type
+    MQTT::username ::itest::cmd::mqtt_username
 } {
     ::itest::register_command $name $proc_name
 }

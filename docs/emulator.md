@@ -237,6 +237,19 @@ structured packet adapter: it models the HTTP upgrade and the eight WebSocket
 frame/data events, and the raw TCP/PCAP path decodes RFC 6455 frames after a
 successful upgrade. Compressed frames using unsupported RSV extensions are
 rejected; pcapng and IPv4 fragment handling remain outside this slice.
+MQTT support is pinned to the 17.5-era MQTT 3.1.1 event model: structured
+`CONNECT`, `CONNACK`, `PUBLISH`, subscription, acknowledgement, ping, and
+disconnect packets can drive `MQTT_CLIENT_INGRESS`/`MQTT_SERVER_INGRESS`, while
+`MQTT::collect` on a `PUBLISH` drives the corresponding `*_DATA` event with the
+collected payload. Raw MQTT-over-TCP payloads are decoded after bounded TCP
+reassembly, including messages split across segments and multiple messages in
+one segment. `MQTT::payload`, `MQTT::drop`, `MQTT::release`, and the common
+MQTT field getters/setters are semantic mocks; `MQTT::replace`, `respond`,
+`insert`, and `will` remain explicitly reported as generated-stub catalog
+entries. See the F5 [`MQTT`](https://clouddocs.f5.com/api/irules/MQTT.html),
+[`MQTT::collect`](https://clouddocs.f5.com/api/irules/MQTT__collect.html), and
+[`MQTT::payload`](https://clouddocs.f5.com/api/irules/MQTT__payload.html)
+references for the production command/event contract.
 For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
 performs bounded sequence-aware TCP application reassembly across records and

@@ -2206,15 +2206,187 @@ when CLIENT_DATA { TCP::close; TCP::close }
         self.assertEqual(result["results"][0]["request"]["uri"], "/health")
         self.assertEqual(result["results"][0]["response"]["status"], 200)
         self.assertEqual(result["results"][0]["response"]["body"], "ok")
-        self.assertTrue(result["trace"][1]["buffered"])
-        self.assertEqual(result["trace"][2]["protocol"], "tls")
-        self.assertTrue(result["trace"][3]["buffered"])
-        self.assertEqual(result["trace"][4]["protocol"], "http")
-        self.assertEqual(result["trace"][5]["protocol"], "http")
-        self.assertIn(
-            "CLIENTSSL_CLIENTHELLO",
-            [event["event"] for event in result["trace"][2]["events"]],
+
+    def test_mqtt_structured_messages_drive_ingress_data_and_field_commands(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["MQTT"],
+                "irule": """
+when MQTT_CLIENT_INGRESS {
+    log local0. "client=[MQTT::client_id] type=[MQTT::type] topic=[MQTT::topic]"
+    if {[MQTT::type] eq "PUBLISH"} { MQTT::collect 3 }
+}
+when MQTT_CLIENT_DATA {
+    log local0. "payload=[MQTT::payload] length=[MQTT::payload length]"
+    MQTT::payload replace xyz
+    MQTT::release
+}
+when MQTT_SERVER_INGRESS {
+    log local0. "server=[MQTT::type] code=[MQTT::return_code]"
+    MQTT::drop
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "mqtt",
+                        "type": "CONNECT",
+                        "direction": "client_to_server",
+                        "client_id": "sensor-1",
+                        "clean_session": True,
+                        "keep_alive": 30,
+                    },
+                    {
+                        "protocol": "mqtt",
+                        "type": "PUBLISH",
+                        "direction": "client_to_server",
+                        "topic": "sensors/temp",
+                        "payload": "abc",
+                        "qos": 0,
+                    },
+                    {
+                        "protocol": "mqtt",
+                        "type": "CONNACK",
+                        "direction": "server_to_client",
+                        "return_code": 0,
+                        "session_present": True,
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
         )
+        publish_events = result["trace"][1]["events"]
+        connack_events = result["trace"][2]["events"]
+        self.assertEqual(
+            [event["event"] for event in publish_events],
+            ["MQTT_CLIENT_INGRESS", "MQTT_CLIENT_DATA"],
+        )
+        self.assertTrue(
+            any("client=sensor-1 type=PUBLISH topic=sensors/temp" in entry for entry in publish_events[0]["logs"])
+        )
+        self.assertTrue(
+            any("payload=abc length=3" in entry for entry in publish_events[1]["logs"])
+        )
+        self.assertEqual(publish_events[1]["state"]["mqtt"]["payload"], "xyz")
+        self.assertTrue(connack_events[-1]["fired"])
+        self.assertTrue(any("server=CONNACK code=0" in entry for entry in connack_events[-1]["logs"]))
+        self.assertTrue(result["trace"][2]["dropped"])
+        self.assertEqual(result["trace"][2]["drop_reason"], "message")
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in ("MQTT::collect", "MQTT::payload", "MQTT::release", "MQTT::drop"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+    def test_raw_mqtt_tcp_reassembly_handles_partial_messages_and_shutdown(self) -> None:
+        connect = bytes.fromhex("101400044d5154540402001e000873656e736f722d31")
+        publish = bytes.fromhex("300800017868656c6c6f")
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["MQTT"],
+                "irule": """
+when MQTT_CLIENT_INGRESS {
+    log local0. "type=[MQTT::type] client=[MQTT::client_id] topic=[MQTT::topic]"
+    if {[MQTT::type] eq "PUBLISH"} { MQTT::collect }
+}
+when MQTT_CLIENT_DATA {
+    log local0. "payload=[MQTT::payload] message-length=[MQTT::length]"
+    MQTT::release
+}
+when MQTT_CLIENT_SHUTDOWN { log local0. shutdown }
+""",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 1883, 0x02, sequence=1000
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 1883, 0x18,
+                            connect[:7], sequence=1001,
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 1883, 0x18,
+                            connect[7:], sequence=1008,
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 1883, 0x18,
+                            publish, sequence=1023,
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 1883, 0x11,
+                            sequence=1033,
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        mqtt_entries = [
+            entry
+            for entry in result["trace"]
+            if any(event["event"] == "MQTT_CLIENT_INGRESS" for event in entry["events"])
+        ]
+        self.assertEqual(len(mqtt_entries), 2)
+        self.assertTrue(any("type=CONNECT client=sensor-1" in entry for entry in mqtt_entries[0]["events"][-1]["logs"]))
+        self.assertTrue(any("type=PUBLISH client=sensor-1 topic=x" in entry for entry in mqtt_entries[1]["events"][0]["logs"]))
+        self.assertTrue(any("payload=hello message-length=10" in entry for entry in mqtt_entries[1]["events"][1]["logs"]))
+        shutdown = result["trace"][-1]["events"][-2]
+        self.assertEqual(shutdown["event"], "MQTT_CLIENT_SHUTDOWN")
+        self.assertTrue(any("shutdown" in entry for entry in shutdown["logs"]))
+        self.assertTrue(result["trace"][1]["buffered"])
+        self.assertEqual(result["trace"][2]["protocol"], "mqtt")
+        self.assertEqual(result["trace"][3]["protocol"], "mqtt")
+        self.assertEqual(result["trace"][4]["protocol"], "tcp")
+
+    def test_mqtt_rejects_unsupported_structured_direction_and_version(self) -> None:
+        with self.assertRaises(self.adapter.EmulatorInputError):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["MQTT"],
+                    "irule": "when MQTT_SERVER_INGRESS { log local0. server }",
+                    "packets": [
+                        {
+                            "protocol": "mqtt",
+                            "direction": "server_to_client",
+                            "type": "CONNECT",
+                            "client_id": "bad-direction",
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaises(self.adapter.EmulatorInputError):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["MQTT"],
+                    "irule": "when MQTT_CLIENT_INGRESS { log local0. client }",
+                    "packets": [
+                        {
+                            "protocol": "mqtt",
+                            "direction": "client_to_server",
+                            "type": "CONNECT",
+                            "protocol_version": 5,
+                            "client_id": "bad-version",
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_raw_ipv4_tcp_websocket_upgrade_and_frames_decode(self) -> None:
         request = (

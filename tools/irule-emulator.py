@@ -150,6 +150,33 @@ EVENT_STATE_FIELDS = {
         "payload",
         "payload_length",
     },
+    "mqtt": {
+        "type",
+        "protocol_name",
+        "protocol_version",
+        "client_id",
+        "clean_session",
+        "keep_alive",
+        "username",
+        "password",
+        "will_topic",
+        "will_message",
+        "will_qos",
+        "will_retain",
+        "packet_id",
+        "qos",
+        "dup",
+        "retain",
+        "topic",
+        "payload",
+        "payload_length",
+        "message",
+        "message_length",
+        "return_code",
+        "return_code_list",
+        "session_present",
+        "topic_list",
+    },
 }
 EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
@@ -157,6 +184,7 @@ EVENT_STATE_NAMESPACES = {
     "tls_server": "::state::tls::server",
     "dns": "::state::dns",
     "websocket": "::state::websocket",
+    "mqtt": "::state::mqtt",
 }
 
 
@@ -322,6 +350,31 @@ SEMANTIC_MOCK_COMMANDS = {
     "URI::port",
     "URI::protocol",
     "URI::query",
+    "MQTT::clean_session",
+    "MQTT::client_id",
+    "MQTT::collect",
+    "MQTT::disable",
+    "MQTT::disconnect",
+    "MQTT::drop",
+    "MQTT::dup",
+    "MQTT::enable",
+    "MQTT::keep_alive",
+    "MQTT::length",
+    "MQTT::message",
+    "MQTT::packet_id",
+    "MQTT::password",
+    "MQTT::payload",
+    "MQTT::protocol_name",
+    "MQTT::protocol_version",
+    "MQTT::qos",
+    "MQTT::release",
+    "MQTT::retain",
+    "MQTT::return_code",
+    "MQTT::return_code_list",
+    "MQTT::session_present",
+    "MQTT::topic",
+    "MQTT::type",
+    "MQTT::username",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1106,12 +1159,13 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
 PACKET_MAX_COUNT = 1000
 STREAM_MAX_BYTES = 2 * 1024 * 1024
 WEBSOCKET_MAX_FRAME_BYTES = STREAM_MAX_BYTES
+MQTT_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 MAX_PACKET_STREAMS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "wire"}
+PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "mqtt", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -1187,6 +1241,30 @@ PACKET_PROTOCOL_FIELDS = {
         "masked",
         "mask",
     },
+    "mqtt": {
+        "type",
+        "protocol_name",
+        "protocol_version",
+        "client_id",
+        "clean_session",
+        "keep_alive",
+        "username",
+        "password",
+        "will_topic",
+        "will_message",
+        "will_qos",
+        "will_retain",
+        "packet_id",
+        "qos",
+        "dup",
+        "retain",
+        "topic",
+        "payload",
+        "return_code",
+        "return_code_list",
+        "session_present",
+        "topic_list",
+    },
 }
 PACKET_EVENT_ADAPTERS = {
     "RULE_INIT": "trace initialization",
@@ -1218,6 +1296,11 @@ PACKET_EVENT_ADAPTERS = {
     "WS_SERVER_FRAME_DONE": "WebSocket server frame end",
     "WS_CLIENT_DATA": "collected WebSocket client frame data",
     "WS_SERVER_DATA": "collected WebSocket server frame data",
+    "MQTT_CLIENT_INGRESS": "MQTT message received from client",
+    "MQTT_CLIENT_DATA": "collected MQTT client PUBLISH payload",
+    "MQTT_SERVER_INGRESS": "MQTT message received from server",
+    "MQTT_SERVER_DATA": "collected MQTT server PUBLISH payload",
+    "MQTT_CLIENT_SHUTDOWN": "MQTT client TCP shutdown",
 }
 
 
@@ -1918,6 +2001,463 @@ def _decode_websocket_frames(
     return frames, payload[position:]
 
 
+MQTT_PACKET_TYPES = {
+    1: "CONNECT",
+    2: "CONNACK",
+    3: "PUBLISH",
+    4: "PUBACK",
+    5: "PUBREC",
+    6: "PUBREL",
+    7: "PUBCOMP",
+    8: "SUBSCRIBE",
+    9: "SUBACK",
+    10: "UNSUBSCRIBE",
+    11: "UNSUBACK",
+    12: "PINGREQ",
+    13: "PINGRESP",
+    14: "DISCONNECT",
+}
+MQTT_FIXED_FLAGS = {
+    1: 0,
+    2: 0,
+    4: 0,
+    5: 2,
+    6: 2,
+    7: 0,
+    8: 2,
+    9: 0,
+    10: 2,
+    11: 0,
+    12: 0,
+    13: 0,
+    14: 0,
+}
+MQTT_CLIENT_PACKET_TYPES = frozenset(
+    {
+        "CONNECT",
+        "PUBLISH",
+        "PUBACK",
+        "PUBREC",
+        "PUBREL",
+        "PUBCOMP",
+        "SUBSCRIBE",
+        "UNSUBSCRIBE",
+        "PINGREQ",
+        "DISCONNECT",
+    }
+)
+MQTT_SERVER_PACKET_TYPES = frozenset(
+    {
+        "CONNACK",
+        "PUBLISH",
+        "PUBACK",
+        "PUBREC",
+        "PUBREL",
+        "PUBCOMP",
+        "SUBACK",
+        "UNSUBACK",
+        "PINGRESP",
+    }
+)
+
+
+def _mqtt_read_utf8(payload: bytes, position: int) -> tuple[str, int]:
+    if position + 2 > len(payload):
+        raise EmulatorInputError("MQTT UTF-8 field is truncated")
+    length = int.from_bytes(payload[position : position + 2], "big")
+    position += 2
+    end = position + length
+    if end > len(payload):
+        raise EmulatorInputError("MQTT UTF-8 field exceeds the message")
+    try:
+        value = payload[position:end].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EmulatorInputError("MQTT UTF-8 field is invalid") from exc
+    if "\x00" in value:
+        raise EmulatorInputError("MQTT UTF-8 fields cannot contain NUL")
+    return value, end
+
+
+def _mqtt_remaining_length(payload: bytes) -> tuple[int, int] | None:
+    value = 0
+    multiplier = 1
+    for offset in range(4):
+        position = 1 + offset
+        if position >= len(payload):
+            return None
+        digit = payload[position]
+        value += (digit & 0x7F) * multiplier
+        if digit & 0x80 == 0:
+            return value, position + 1
+        multiplier *= 128
+    raise EmulatorInputError("MQTT remaining length uses more than four bytes")
+
+
+def _decode_mqtt_message(
+    payload: bytes, direction: str
+) -> tuple[dict[str, Any], int] | None:
+    if not payload:
+        return None
+    packet_type_number = payload[0] >> 4
+    packet_type = MQTT_PACKET_TYPES.get(packet_type_number)
+    if packet_type is None:
+        raise EmulatorInputError(f"unsupported MQTT packet type {packet_type_number}")
+    allowed_types = (
+        MQTT_CLIENT_PACKET_TYPES
+        if direction == "client_to_server"
+        else MQTT_SERVER_PACKET_TYPES
+    )
+    if packet_type not in allowed_types:
+        side = "client" if direction == "client_to_server" else "server"
+        raise EmulatorInputError(
+            f"MQTT {side} direction cannot carry {packet_type}"
+        )
+    flags = payload[0] & 0x0F
+    expected_flags = MQTT_FIXED_FLAGS.get(packet_type_number)
+    if expected_flags is not None and flags != expected_flags:
+        raise EmulatorInputError(
+            f"invalid MQTT flags 0x{flags:x} for {packet_type}"
+        )
+    if packet_type_number == 3 and (flags >> 1) & 0x03 == 3:
+        raise EmulatorInputError("MQTT PUBLISH uses reserved QoS 3")
+    remaining = _mqtt_remaining_length(payload)
+    if remaining is None:
+        return None
+    remaining_length, body_start = remaining
+    total_length = body_start + remaining_length
+    if remaining_length > MQTT_MAX_MESSAGE_BYTES or total_length > MQTT_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"MQTT message exceeds the {MQTT_MAX_MESSAGE_BYTES // (1024 * 1024)} MiB limit"
+        )
+    if len(payload) < total_length:
+        return None
+    body = payload[body_start:total_length]
+    result: dict[str, Any] = {
+        "protocol": "mqtt",
+        "direction": direction,
+        "type": packet_type,
+        "message_length": total_length,
+        "_wire_payload": bytes(payload[:total_length]),
+    }
+    cursor = 0
+    if packet_type == "CONNECT":
+        protocol_name, cursor = _mqtt_read_utf8(body, cursor)
+        if cursor + 4 > len(body):
+            raise EmulatorInputError("MQTT CONNECT variable header is truncated")
+        protocol_version = body[cursor]
+        connect_flags = body[cursor + 1]
+        keep_alive = int.from_bytes(body[cursor + 2 : cursor + 4], "big")
+        cursor += 4
+        if protocol_name != "MQTT" or protocol_version != 4:
+            raise EmulatorInputError(
+                "only MQTT 3.1.1 CONNECT packets are supported"
+            )
+        if connect_flags & 0x01:
+            raise EmulatorInputError("MQTT CONNECT reserved flag is set")
+        if connect_flags & 0x40 and not connect_flags & 0x80:
+            raise EmulatorInputError("MQTT CONNECT password requires a username")
+        will_flag = bool(connect_flags & 0x04)
+        will_qos = (connect_flags >> 3) & 0x03
+        if not will_flag and will_qos:
+            raise EmulatorInputError("MQTT CONNECT will QoS is set without a will")
+        if will_qos == 3:
+            raise EmulatorInputError("MQTT CONNECT uses reserved will QoS 3")
+        client_id, cursor = _mqtt_read_utf8(body, cursor)
+        result.update(
+            {
+                "protocol_name": protocol_name,
+                "protocol_version": protocol_version,
+                "client_id": client_id,
+                "clean_session": bool(connect_flags & 0x02),
+                "keep_alive": keep_alive,
+            }
+        )
+        if will_flag:
+            result["will_qos"] = will_qos
+            result["will_retain"] = bool(connect_flags & 0x20)
+            result["will_topic"], cursor = _mqtt_read_utf8(body, cursor)
+            result["will_message"], cursor = _mqtt_read_utf8(body, cursor)
+        if connect_flags & 0x80:
+            result["username"], cursor = _mqtt_read_utf8(body, cursor)
+        if connect_flags & 0x40:
+            result["password"], cursor = _mqtt_read_utf8(body, cursor)
+        if cursor != len(body):
+            raise EmulatorInputError("MQTT CONNECT contains trailing bytes")
+    elif packet_type == "CONNACK":
+        if len(body) != 2:
+            raise EmulatorInputError("MQTT CONNACK must contain two bytes")
+        result["session_present"] = bool(body[0] & 0x01)
+        result["return_code"] = body[1]
+        if body[1] not in {0, 1, 2, 3, 4, 5, 0x80}:
+            raise EmulatorInputError("MQTT CONNACK has an invalid return code")
+        if body[0] & 0xFE or (body[1] != 0 and body[0] & 0x01):
+            raise EmulatorInputError("MQTT CONNACK has invalid session state")
+    elif packet_type == "PUBLISH":
+        result["dup"] = bool(flags & 0x08)
+        result["qos"] = (flags >> 1) & 0x03
+        result["retain"] = bool(flags & 0x01)
+        result["topic"], cursor = _mqtt_read_utf8(body, cursor)
+        if not result["topic"]:
+            raise EmulatorInputError("MQTT PUBLISH topic must not be empty")
+        if result["qos"]:
+            if cursor + 2 > len(body):
+                raise EmulatorInputError("MQTT PUBLISH packet id is truncated")
+            result["packet_id"] = int.from_bytes(body[cursor : cursor + 2], "big")
+            cursor += 2
+            if result["packet_id"] == 0:
+                raise EmulatorInputError("MQTT PUBLISH packet id must be nonzero")
+        message_payload = body[cursor:]
+        result["payload"] = _decode_wire_text(message_payload)
+        result["_mqtt_payload"] = message_payload
+    elif packet_type in {"PUBACK", "PUBREC", "PUBREL", "PUBCOMP", "UNSUBACK"}:
+        if len(body) != 2:
+            raise EmulatorInputError(f"MQTT {packet_type} must contain a packet id")
+        result["packet_id"] = int.from_bytes(body, "big")
+        if result["packet_id"] == 0:
+            raise EmulatorInputError(f"MQTT {packet_type} packet id must be nonzero")
+    elif packet_type in {"SUBSCRIBE", "UNSUBSCRIBE"}:
+        if len(body) < 2:
+            raise EmulatorInputError(f"MQTT {packet_type} is missing a packet id")
+        result["packet_id"] = int.from_bytes(body[:2], "big")
+        if result["packet_id"] == 0:
+            raise EmulatorInputError(f"MQTT {packet_type} packet id must be nonzero")
+        cursor = 2
+        topics: list[list[Any]] = []
+        while cursor < len(body):
+            topic, cursor = _mqtt_read_utf8(body, cursor)
+            if packet_type == "SUBSCRIBE":
+                if cursor >= len(body):
+                    raise EmulatorInputError("MQTT SUBSCRIBE topic QoS is truncated")
+                requested_qos = body[cursor]
+                cursor += 1
+                if requested_qos > 2:
+                    raise EmulatorInputError("MQTT SUBSCRIBE uses invalid QoS")
+                topics.append([topic, requested_qos])
+            else:
+                topics.append([topic])
+        result["topic_list"] = json.dumps(topics, separators=(",", ":"))
+    elif packet_type == "SUBACK":
+        if len(body) < 3:
+            raise EmulatorInputError("MQTT SUBACK is missing a packet id")
+        result["packet_id"] = int.from_bytes(body[:2], "big")
+        if result["packet_id"] == 0:
+            raise EmulatorInputError("MQTT SUBACK packet id must be nonzero")
+        if any(code not in {0, 1, 2, 0x80} for code in body[2:]):
+            raise EmulatorInputError("MQTT SUBACK contains an invalid return code")
+        result["return_code_list"] = json.dumps(list(body[2:]), separators=(",", ":"))
+    elif body:
+        raise EmulatorInputError(f"MQTT {packet_type} must not contain a payload")
+    return result, total_length
+
+
+def _decode_mqtt_messages(
+    payload: bytes, direction: str
+) -> tuple[list[dict[str, Any]], bytes]:
+    messages: list[dict[str, Any]] = []
+    position = 0
+    while position < len(payload):
+        decoded = _decode_mqtt_message(payload[position:], direction)
+        if decoded is None:
+            break
+        message, consumed = decoded
+        if consumed <= 0:
+            raise EmulatorInputError("MQTT decoder returned an invalid message length")
+        messages.append(message)
+        if len(messages) > PACKET_MAX_COUNT:
+            raise EmulatorInputError(
+                f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} MQTT messages"
+            )
+        position += consumed
+    return messages, payload[position:]
+
+
+def _mqtt_encode_utf8(value: Any, field: str) -> bytes:
+    text = str(value)
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise EmulatorInputError(f"MQTT {field} must be valid UTF-8") from exc
+    if len(encoded) > 65535:
+        raise EmulatorInputError(f"MQTT {field} exceeds the two-byte length limit")
+    return len(encoded).to_bytes(2, "big") + encoded
+
+
+def _mqtt_encode_remaining_length(length: int) -> bytes:
+    if length < 0 or length > 268_435_455:
+        raise EmulatorInputError("MQTT remaining length is out of range")
+    encoded = bytearray()
+    while True:
+        digit = length % 128
+        length //= 128
+        if length:
+            digit |= 0x80
+        encoded.append(digit)
+        if not length:
+            return bytes(encoded)
+
+
+def _mqtt_int(packet: dict[str, Any], field: str, default: int = 0) -> int:
+    value = packet.get(field, default)
+    if isinstance(value, bool):
+        raise EmulatorInputError(f"MQTT {field} must be an integer")
+    try:
+        integer = int(value)
+    except (TypeError, ValueError):
+        raise EmulatorInputError(f"MQTT {field} must be an integer") from None
+    if not 0 <= integer <= 65535:
+        raise EmulatorInputError(f"MQTT {field} must be between 0 and 65535")
+    return integer
+
+
+def _mqtt_byte(packet: dict[str, Any], field: str, default: int = 0) -> int:
+    value = _mqtt_int(packet, field, default)
+    if value > 255:
+        raise EmulatorInputError(f"MQTT {field} must be between 0 and 255")
+    return value
+
+
+def _mqtt_flag(packet: dict[str, Any], field: str, default: bool = False) -> bool:
+    value = packet.get(field, default)
+    return str(value).lower() in {"1", "true"}
+
+
+def _mqtt_topic_list(packet: dict[str, Any]) -> list[list[Any]]:
+    raw = packet.get("topic_list", "[]")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise EmulatorInputError("MQTT topic_list must be JSON") from exc
+    if not isinstance(raw, list):
+        raise EmulatorInputError("MQTT topic_list must be an array")
+    result: list[list[Any]] = []
+    for item in raw:
+        if not isinstance(item, list) or not item or not isinstance(item[0], str):
+            raise EmulatorInputError("MQTT topic_list entries must contain a topic")
+        result.append(item)
+    return result
+
+
+def _encode_mqtt_message(packet: dict[str, Any]) -> bytes:
+    packet_type = str(packet.get("type", "")).upper()
+    numbers = {
+        "CONNECT": 1,
+        "CONNACK": 2,
+        "PUBLISH": 3,
+        "PUBACK": 4,
+        "PUBREC": 5,
+        "PUBREL": 6,
+        "PUBCOMP": 7,
+        "SUBSCRIBE": 8,
+        "SUBACK": 9,
+        "UNSUBSCRIBE": 10,
+        "UNSUBACK": 11,
+        "PINGREQ": 12,
+        "PINGRESP": 13,
+        "DISCONNECT": 14,
+    }
+    if packet_type not in numbers:
+        raise EmulatorInputError(f"unsupported MQTT packet type: {packet_type}")
+    flags = MQTT_FIXED_FLAGS.get(numbers[packet_type], 0)
+    body = bytearray()
+    if packet_type == "CONNECT":
+        body += _mqtt_encode_utf8(packet.get("protocol_name", "MQTT"), "protocol_name")
+        protocol_version = _mqtt_int(packet, "protocol_version", 4)
+        if packet.get("protocol_name", "MQTT") != "MQTT" or protocol_version != 4:
+            raise EmulatorInputError("only MQTT 3.1.1 CONNECT packets are supported")
+        body.append(protocol_version)
+        will_topic = packet.get("will_topic", "")
+        will_message = packet.get("will_message", "")
+        has_will = "will_topic" in packet or "will_message" in packet
+        will_qos = _mqtt_int(packet, "will_qos", 0)
+        if will_qos > 2:
+            raise EmulatorInputError("MQTT will_qos must be 0, 1, or 2")
+        connect_flags = (_mqtt_flag(packet, "clean_session", True) << 1)
+        if has_will:
+            connect_flags |= 0x04 | (will_qos << 3) | (_mqtt_flag(packet, "will_retain") << 5)
+        if "password" in packet:
+            connect_flags |= 0x40
+        if "username" in packet:
+            connect_flags |= 0x80
+        body.append(connect_flags)
+        body += _mqtt_int(packet, "keep_alive", 60).to_bytes(2, "big")
+        body += _mqtt_encode_utf8(packet.get("client_id", ""), "client_id")
+        if has_will:
+            body += _mqtt_encode_utf8(will_topic, "will_topic")
+            body += _mqtt_encode_utf8(will_message, "will_message")
+        if "username" in packet:
+            body += _mqtt_encode_utf8(packet["username"], "username")
+        if "password" in packet:
+            body += _mqtt_encode_utf8(packet["password"], "password")
+    elif packet_type == "CONNACK":
+        return_code = _mqtt_byte(packet, "return_code", 0)
+        if return_code not in {0, 1, 2, 3, 4, 5, 0x80}:
+            raise EmulatorInputError("MQTT CONNACK has an invalid return code")
+        session_present = _mqtt_flag(packet, "session_present")
+        if session_present and return_code != 0:
+            raise EmulatorInputError(
+                "MQTT CONNACK session_present requires a zero return code"
+            )
+        body += bytes([session_present, return_code])
+    elif packet_type == "PUBLISH":
+        qos = _mqtt_int(packet, "qos", 0)
+        if qos > 2:
+            raise EmulatorInputError("MQTT qos must be 0, 1, or 2")
+        flags = (_mqtt_flag(packet, "dup") << 3) | (qos << 1) | _mqtt_flag(packet, "retain")
+        topic = str(packet.get("topic", ""))
+        if not topic:
+            raise EmulatorInputError("MQTT PUBLISH topic must not be empty")
+        body += _mqtt_encode_utf8(topic, "topic")
+        if qos:
+            packet_id = _mqtt_int(packet, "packet_id")
+            if packet_id == 0:
+                raise EmulatorInputError("MQTT PUBLISH packet id must be nonzero")
+            body += packet_id.to_bytes(2, "big")
+        payload = packet.get("payload", "")
+        body += payload if isinstance(payload, (bytes, bytearray)) else str(payload).encode("utf-8")
+    elif packet_type in {"PUBACK", "PUBREC", "PUBREL", "PUBCOMP", "UNSUBACK"}:
+        packet_id = _mqtt_int(packet, "packet_id")
+        if packet_id == 0:
+            raise EmulatorInputError(f"MQTT {packet_type} packet id must be nonzero")
+        body += packet_id.to_bytes(2, "big")
+    elif packet_type in {"SUBSCRIBE", "UNSUBSCRIBE"}:
+        packet_id = _mqtt_int(packet, "packet_id")
+        if packet_id == 0:
+            raise EmulatorInputError(f"MQTT {packet_type} packet id must be nonzero")
+        body += packet_id.to_bytes(2, "big")
+        for item in _mqtt_topic_list(packet):
+            body += _mqtt_encode_utf8(item[0], "topic")
+            if not item[0]:
+                raise EmulatorInputError("MQTT topic filters must not be empty")
+            if packet_type == "SUBSCRIBE":
+                try:
+                    requested_qos = int(item[1])
+                except (IndexError, TypeError, ValueError) as exc:
+                    raise EmulatorInputError(
+                        "MQTT SUBSCRIBE topic QoS must be 0, 1, or 2"
+                    ) from exc
+                if requested_qos < 0 or requested_qos > 2:
+                    raise EmulatorInputError("MQTT SUBSCRIBE topic QoS must be 0, 1, or 2")
+                body.append(requested_qos)
+    elif packet_type == "SUBACK":
+        packet_id = _mqtt_int(packet, "packet_id")
+        if packet_id == 0:
+            raise EmulatorInputError("MQTT SUBACK packet id must be nonzero")
+        body += packet_id.to_bytes(2, "big")
+        raw_codes = packet.get("return_code_list", "[]")
+        if isinstance(raw_codes, str):
+            try:
+                raw_codes = json.loads(raw_codes)
+            except json.JSONDecodeError as exc:
+                raise EmulatorInputError("MQTT return_code_list must be JSON") from exc
+        if not isinstance(raw_codes, list):
+            raise EmulatorInputError("MQTT return_code_list must be an array")
+        if not raw_codes:
+            raise EmulatorInputError("MQTT SUBACK requires at least one return code")
+        body += bytes(_mqtt_byte({"value": code}, "value") for code in raw_codes)
+    return bytes([(numbers[packet_type] << 4) | flags]) + _mqtt_encode_remaining_length(len(body)) + body
+
+
 def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or not raw:
         raise EmulatorInputError("packets must be a non-empty array")
@@ -2038,6 +2578,12 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                         raise EmulatorInputError(
                             f"unsupported WebSocket packet type: {packet_type}"
                         )
+                elif protocol == "mqtt":
+                    packet_type = packet_type.upper()
+                    if packet_type not in MQTT_PACKET_TYPES.values():
+                        raise EmulatorInputError(
+                            f"unsupported MQTT packet type: {packet_type}"
+                        )
                 normalised[field] = packet_type
             else:
                 normalised[field] = _packet_scalar(packet[field], f"packet {index} {field}")
@@ -2115,6 +2661,30 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     normalised["fin"] = "1"
                 if "masked" not in normalised:
                     normalised["masked"] = "1" if direction == "client_to_server" else "0"
+        if protocol == "mqtt":
+            packet_type = normalised.get("type")
+            if packet_type is None:
+                raise EmulatorInputError(f"packet {index} MQTT packets require type")
+            valid_types = (
+                MQTT_CLIENT_PACKET_TYPES
+                if direction == "client_to_server"
+                else MQTT_SERVER_PACKET_TYPES
+            )
+            if packet_type not in valid_types:
+                side = "client" if direction == "client_to_server" else "server"
+                raise EmulatorInputError(
+                    f"packet {index} MQTT {side} direction cannot carry {packet_type}"
+                )
+            if packet_type == "PUBLISH" and "topic" not in normalised:
+                raise EmulatorInputError(f"packet {index} MQTT PUBLISH packets require topic")
+            if packet_type in {"CONNECT", "PUBLISH"} and "payload" not in normalised:
+                normalised.setdefault("payload", "")
+            payload = normalised.get("payload", "")
+            try:
+                normalised["_mqtt_payload"] = payload.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise EmulatorInputError(f"packet {index} MQTT payload must be valid UTF-8") from exc
+            normalised["_wire_payload"] = _encode_mqtt_message(normalised)
         packets.append(normalised)
     return packets
 
@@ -2280,6 +2850,9 @@ class EmulatorSession:
         self._tcp_buffers = {"client": "", "server": ""}
         self._packet_streams: dict[tuple[Any, ...], _TcpStream] = {}
         self._websocket_raw_active = False
+        self._mqtt_raw_active = any(
+            str(profile).upper() == "MQTT" for profile in self._profiles
+        )
         self._thread.start()
         self._started.wait()
         if self._startup_error is not None:
@@ -2481,7 +3054,7 @@ class EmulatorSession:
         for layer, values in state.items():
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer == "websocket" and field == "payload":
+                if layer in {"websocket", "mqtt"} and field in {"payload", "message"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -2552,7 +3125,7 @@ class EmulatorSession:
         if "port" in destination:
             connection[f"{destination_prefix}_port"] = str(destination["port"])
         protocol = packet["protocol"]
-        if protocol in {"tcp", "tls", "http", "websocket"}:
+        if protocol in {"tcp", "tls", "http", "websocket", "mqtt"}:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol in {"udp", "dns"}:
             connection.update({"protocol": "17", "transport": "udp"})
@@ -2636,6 +3209,23 @@ class EmulatorSession:
                 )
             if websocket_state:
                 state["websocket"] = websocket_state
+        elif protocol == "mqtt":
+            mqtt_state: dict[str, str] = {}
+            for field in EVENT_STATE_FIELDS["mqtt"]:
+                if field in packet:
+                    mqtt_state[field] = _packet_scalar(packet[field], field)
+            wire_payload = packet.get("_mqtt_payload")
+            if not isinstance(wire_payload, (bytes, bytearray)):
+                payload = packet.get("payload", "")
+                wire_payload = payload.encode("utf-8")
+            mqtt_state["payload"] = bytes(wire_payload)
+            mqtt_state["payload_length"] = str(len(wire_payload))
+            message = packet.get("_wire_payload")
+            if not isinstance(message, (bytes, bytearray)):
+                message = _encode_mqtt_message(packet)
+            mqtt_state["message"] = bytes(message)
+            mqtt_state["message_length"] = str(len(message))
+            state["mqtt"] = mqtt_state
         return state
 
     @staticmethod
@@ -2750,7 +3340,7 @@ class EmulatorSession:
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
-        if packet["protocol"] not in {"tcp", "tls", "http", "websocket"}:
+        if packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt"}:
             return
         source = packet["source"]
         destination = packet["destination"]
@@ -2770,10 +3360,11 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http", "websocket"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
+        session.eval_tcl("::itest::semantic::mqtt_reset_connection")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
         events.append(
             self._fire_event_on_worker(
@@ -2885,6 +3476,12 @@ class EmulatorSession:
         methods = (b"GET", b"POST", b"PUT", b"PATCH", b"DELETE", b"HEAD", b"OPTIONS", b"CONNECT", b"TRACE")
         return any(method.startswith(payload) or payload.startswith(method + b" ") for method in methods)
 
+    @staticmethod
+    def _looks_like_mqtt_prefix(payload: bytes) -> bool:
+        if not payload or payload[0] >> 4 not in MQTT_PACKET_TYPES:
+            return False
+        return True
+
     def _reassemble_packet(
         self, packet: dict[str, Any], packet_index: int
     ) -> tuple[dict[str, Any] | None, int]:
@@ -2971,6 +3568,32 @@ class EmulatorSession:
                 first = decoded_frames[0]
                 if len(decoded_frames) > 1:
                     first["_coalesced_packets"] = decoded_frames[1:]
+                return first, len(combined) - len(remaining)
+            stream.buffer = combined
+            if not has_gap:
+                stream.segments.clear()
+            if stream.buffered_bytes > STREAM_MAX_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"packet stream exceeds the {STREAM_MAX_BYTES // (1024 * 1024)} MiB limit"
+                )
+            return None, stream.buffered_bytes
+        looks_like_mqtt = self._mqtt_raw_active and self._looks_like_mqtt_prefix(combined)
+        if looks_like_mqtt:
+            decoded_messages, remaining = _decode_mqtt_messages(
+                combined, packet["direction"]
+            )
+            if decoded_messages:
+                stream.buffer = remaining
+                if not has_gap:
+                    stream.segments.clear()
+                for message in decoded_messages:
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            message[field] = packet[field]
+                first = decoded_messages[0]
+                if len(decoded_messages) > 1:
+                    first["_coalesced_packets"] = decoded_messages[1:]
                 return first, len(combined) - len(remaining)
             stream.buffer = combined
             if not has_gap:
@@ -3137,6 +3760,26 @@ class EmulatorSession:
                 "masked",
                 "mask",
                 "payload",
+                "protocol_name",
+                "protocol_version",
+                "client_id",
+                "clean_session",
+                "keep_alive",
+                "username",
+                "password",
+                "will_topic",
+                "will_message",
+                "will_qos",
+                "will_retain",
+                "packet_id",
+                "qos",
+                "dup",
+                "retain",
+                "topic",
+                "return_code",
+                "return_code_list",
+                "session_present",
+                "topic_list",
                 "timestamp",
                 "seq",
                 "ack",
@@ -3203,6 +3846,73 @@ class EmulatorSession:
                             },
                             index,
                         )
+                continue
+
+            if protocol == "mqtt":
+                self._activate_packet_connection(session, packet, entry["events"])
+                if session.eval_tcl("set ::itest::semantic::mqtt_enabled") == "0":
+                    entry["ignored"] = "MQTT processing is disabled"
+                    continue
+                session.eval_tcl("::itest::semantic::mqtt_prepare_message")
+                side = "client" if direction == "client_to_server" else "server"
+                ingress_event = (
+                    "MQTT_CLIENT_INGRESS" if side == "client" else "MQTT_SERVER_INGRESS"
+                )
+                data_event = (
+                    "MQTT_CLIENT_DATA" if side == "client" else "MQTT_SERVER_DATA"
+                )
+                ingress_result = self._fire_event_on_worker(
+                    session, ingress_event, self._packet_event_state(packet)
+                )
+                entry["events"].append(ingress_result)
+                flags = _split_tcl_list(
+                    session.eval_tcl("::itest::semantic::mqtt_flags_snapshot")
+                )
+                if len(flags) % 2:
+                    raise EmulatorInputError("invalid MQTT message state")
+                message_state = dict(zip(flags[::2], flags[1::2]))
+                if message_state.get("dropped") == "1":
+                    entry["dropped"] = True
+                    entry["drop_reason"] = "message"
+                else:
+                    collection = _split_tcl_list(
+                        session.eval_tcl("::itest::semantic::mqtt_collection_snapshot")
+                    )
+                    if len(collection) % 2:
+                        raise EmulatorInputError("invalid MQTT collection state")
+                    collection_state = dict(zip(collection[::2], collection[1::2]))
+                    if packet.get("type") == "PUBLISH" and collection_state.get(
+                        "requested", "0"
+                    ) == "1":
+                        try:
+                            requested_length = int(collection_state.get("length", "0"))
+                        except (TypeError, ValueError):
+                            raise EmulatorInputError("invalid MQTT collection length") from None
+                        payload_bytes = packet.get("_mqtt_payload")
+                        if not isinstance(payload_bytes, (bytes, bytearray)):
+                            payload_bytes = packet.get("payload", "").encode("utf-8")
+                        payload_bytes = bytes(payload_bytes)
+                        if requested_length == 0 or len(payload_bytes) >= requested_length:
+                            collected = payload_bytes if requested_length == 0 else payload_bytes[:requested_length]
+                            data_packet = dict(packet)
+                            data_packet["_mqtt_payload"] = collected
+                            data_packet["payload"] = _decode_wire_text(collected)
+                            session.eval_tcl(
+                                "set ::itest::semantic::mqtt_collection_requested 0"
+                            )
+                            data_result = self._fire_event_on_worker(
+                                session, data_event, self._packet_event_state(data_packet)
+                            )
+                            entry["events"].append(data_result)
+                            data_flags = _split_tcl_list(
+                                session.eval_tcl("::itest::semantic::mqtt_flags_snapshot")
+                            )
+                            data_state = dict(zip(data_flags[::2], data_flags[1::2]))
+                            if data_state.get("dropped") == "1":
+                                entry["dropped"] = True
+                                entry["drop_reason"] = "message"
+                if message_state.get("disconnect") == "1":
+                    entry["disconnect_requested"] = True
                 continue
 
             if protocol == "websocket":
@@ -3420,6 +4130,14 @@ class EmulatorSession:
                             self._tcp_buffers[side] = retained + remainder
                 if flags.intersection({"FIN", "RST"}):
                     finish_http(at_index=index)
+                    if self._mqtt_raw_active and direction == "client_to_server":
+                        entry["events"].append(
+                            self._fire_event_on_worker(
+                                session,
+                                "MQTT_CLIENT_SHUTDOWN",
+                                self._packet_event_state(packet),
+                            )
+                        )
                     event_name = "CLIENT_CLOSED" if direction == "client_to_server" else "SERVER_CLOSED"
                     entry["events"].append(
                         self._fire_event_on_worker(
