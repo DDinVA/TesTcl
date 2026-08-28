@@ -2050,6 +2050,33 @@ namespace eval ::itest::semantic {
         return [string range $source $start [expr {$end - 1}]]
     }
 
+    proc decode_uri_command {args} {
+        if {[llength $args] != 1} { error "decode_uri requires one value" }
+        return [_uri_decode_value [lindex $args 0]]
+    }
+
+    proc domain_command {args} {
+        if {[llength $args] != 2} { error "domain requires a name and count" }
+        set source [lindex $args 0]
+        set count [lindex $args 1]
+        if {![string is integer -strict $count] || $count < 1} {
+            error "domain count must be a positive integer"
+        }
+        set labels [split $source "."]
+        set start [expr {[llength $labels] - $count}]
+        if {$start < 0} { set start 0 }
+        return [join [lrange $labels $start end] "."]
+    }
+
+    proc crc32_command {args} {
+        if {[llength $args] != 1} { error "crc32 requires one value" }
+        if {[catch {zlib crc32 [lindex $args 0]} value]} { return "" }
+        if {$value > 0x7fffffff} {
+            return [expr {$value - 0x100000000}]
+        }
+        return $value
+    }
+
     proc b64encode_command {args} {
         if {[llength $args] != 1} { error "b64encode requires one value" }
         return [binary encode base64 [lindex $args 0]]
@@ -2147,6 +2174,9 @@ foreach {original replacement} {
     active_nodes active_nodes_command
     b64decode b64decode_command
     b64encode b64encode_command
+    crc32 crc32_command
+    decode_uri decode_uri_command
+    domain domain_command
     findclass findclass_command
     findstr findstr_command
     getfield getfield_command

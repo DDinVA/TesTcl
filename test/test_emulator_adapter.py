@@ -213,6 +213,7 @@ when HTTP_REQUEST {
     log local0. "findclass=[findclass /api routes] matchclass=[matchclass /api equals routes]"
     log local0. "active=[active_members -list api_pool] all=[members -list api_pool] nodes=[nodes -list api_pool]"
     log local0. "substr=[substr prefix:/api?x=1 7 ?]"
+    log local0. "uri=[decode_uri /api%2Fv1] domain=[domain www.sub.example.co.uk 2] crc=[crc32 abc] signed=[crc32 0]"
     log local0. "b64=[b64decode [b64encode hello]]"
 }
 """,
@@ -228,6 +229,7 @@ when HTTP_REQUEST {
         self.assertTrue(any("all={10.0.0.10 80} {10.0.0.11 80}" in entry for entry in logs))
         self.assertTrue(any("nodes=10.0.0.10 10.0.0.11" in entry for entry in logs))
         self.assertTrue(any("substr=/api" in entry for entry in logs))
+        self.assertTrue(any("uri=/api/v1" in entry and "domain=co.uk" in entry and "crc=891568578" in entry and "signed=-186917087" in entry for entry in logs))
         self.assertTrue(any("b64=hello" in entry for entry in logs))
 
     def test_conformance_reports_catalog_and_packet_adapter_coverage(self) -> None:
