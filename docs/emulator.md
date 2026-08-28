@@ -289,7 +289,10 @@ HTTP data events are only produced by the high-level request flow after
 requested byte threshold is available. `HTTP::release` is modeled in the data
 events: it clears the active collection window and is reported as
 `http_release: true` in the transaction result. Explicit event injection
-remains available through the event API for lower-level tests.
+remains available through the event API for lower-level tests. The
+`HTTP_REQUEST_RELEASE` and `HTTP_RESPONSE_RELEASE` events follow their
+respective data events, and body commands such as `HTTP::payload` and
+`HTTP::collect` are rejected in those release contexts.
 
 Raw packet replay also preserves interim HTTP responses: a `100 Continue`
 frame fires `HTTP_RESPONSE_CONTINUE` without completing the pending request,

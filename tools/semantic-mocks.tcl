@@ -2520,6 +2520,24 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc http_collect_command {args} {
+        if {$::itest::current_event in {
+            HTTP_REQUEST_RELEASE HTTP_RESPONSE_RELEASE HTTP_RESPONSE_CONTINUE
+        }} {
+            error "HTTP::collect is not valid in $::itest::current_event"
+        }
+        return [eval [linsert $args 0 ::itest::cmd::_testcl_http_collect_orig]]
+    }
+
+    proc http_payload_command {args} {
+        if {$::itest::current_event in {
+            HTTP_REQUEST_RELEASE HTTP_RESPONSE_RELEASE HTTP_RESPONSE_CONTINUE
+        }} {
+            error "HTTP::payload is not valid in $::itest::current_event"
+        }
+        return [eval [linsert $args 0 ::itest::cmd::_testcl_http_payload_semantic_orig]]
+    }
+
     proc crc32_command {args} {
         if {[llength $args] != 1} { error "crc32 requires one value" }
         if {[catch {zlib crc32 [lindex $args 0]} value]} { return "" }
@@ -2666,6 +2684,18 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_cookie] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::http_cookie ::itest::cmd::_testcl_http_cookie_orig
     proc ::itest::cmd::http_cookie {args} {
         return [eval [linsert $args 0 ::itest::semantic::cookie_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::http_collect] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::http_collect ::itest::cmd::_testcl_http_collect_orig
+    proc ::itest::cmd::http_collect {args} {
+        return [eval [linsert $args 0 ::itest::semantic::http_collect_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::http_payload] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::http_payload ::itest::cmd::_testcl_http_payload_semantic_orig
+    proc ::itest::cmd::http_payload {args} {
+        return [eval [linsert $args 0 ::itest::semantic::http_payload_command]]
     }
 }
 if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&

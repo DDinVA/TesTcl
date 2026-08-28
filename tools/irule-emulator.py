@@ -215,6 +215,8 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTTP::redirect",
     "HTTP::has_responded",
     "HTTP::release",
+    "HTTP::collect",
+    "HTTP::payload",
     "HTTP::close",
     "HTTP::retry",
     "HTTP::is_keepalive",

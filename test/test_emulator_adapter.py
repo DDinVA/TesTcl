@@ -133,7 +133,7 @@ class EmulatorAdapterTests(unittest.TestCase):
         usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
         self.assertIn("HTTP::payload", usage)
         self.assertIn("HTTP::respond", usage)
-        self.assertEqual(usage["HTTP::payload"]["runtime_status"], "handwritten-mock")
+        self.assertEqual(usage["HTTP::payload"]["runtime_status"], "semantic-mock")
         self.assertEqual(result["fidelity"]["warnings"], [])
 
     def test_http_data_events_require_collection_and_honor_length(self) -> None:
@@ -183,6 +183,37 @@ when HTTP_REQUEST_DATA { log local0. "should-not-fire" }
             tcl_lsp_root=self.tcl_lsp_root,
         )
         self.assertNotIn("HTTP_REQUEST_DATA", short["results"][0]["events_fired"])
+
+    def test_http_release_events_follow_data_and_reject_body_commands(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST { HTTP::collect 1 }
+when HTTP_REQUEST_DATA { HTTP::release }
+when HTTP_REQUEST_RELEASE {
+    set payload_rc [catch { HTTP::payload }]
+    set collect_rc [catch { HTTP::collect 1 }]
+    log local0. "request-release payload=$payload_rc collect=$collect_rc"
+}
+when HTTP_RESPONSE { HTTP::collect 1 }
+when HTTP_RESPONSE_DATA { HTTP::release }
+when HTTP_RESPONSE_RELEASE {
+    set payload_rc [catch { HTTP::payload }]
+    set collect_rc [catch { HTTP::collect 1 }]
+    log local0. "response-release payload=$payload_rc collect=$collect_rc"
+}
+""",
+                "request": {"body": "abc", "response_body": "ok"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        events = result["results"][0]["events_fired"]
+        self.assertLess(events.index("HTTP_REQUEST_DATA"), events.index("HTTP_REQUEST_RELEASE"))
+        self.assertLess(events.index("HTTP_RESPONSE_DATA"), events.index("HTTP_RESPONSE_RELEASE"))
+        logs = result["results"][0]["logs"]
+        self.assertTrue(any("request-release payload=1 collect=1" in entry for entry in logs))
+        self.assertTrue(any("response-release payload=1 collect=1" in entry for entry in logs))
 
     def test_capabilities_are_complete_and_chunked(self) -> None:
         result = self.adapter._build_capabilities(self.adapter._find_tcl_lsp_root(self.tcl_lsp_root), 0, 7)
