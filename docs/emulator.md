@@ -210,7 +210,10 @@ The adapter can emit the entire `tcl-lsp` F5 iRules registry in bounded
 chunks. The catalog currently reports command names, subcommands, protocol
 requirements, and whether the runtime has a handwritten mock, an adapter-owned
 semantic mock, a generated stub, or no handler. It also includes event
-lifecycle metadata and profile metadata.
+lifecycle metadata and profile metadata. Each command and event also has a
+`target_status`; the pinned upstream registry is intentionally broader than
+17.5, so entries introduced after TMOS 17.5 remain visible for catalog
+completeness but are marked `introduced-after-tmos-17.5`.
 
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
@@ -220,9 +223,12 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 Use the returned `chunk.has_more` and advance `offset` by `chunk.count` until
 all commands are consumed. This is a registry/capability view, not a claim
 that generated stubs reproduce production TMM semantics; the distinction is
-explicit in `runtime_status`. The same distinction is included in each
-simulation/session `fidelity.warnings` report, so callers can fail closed or
-ask for a higher-fidelity test when needed.
+explicit in `runtime_status`. The conformance report separately exposes the
+17.5-compatible count and the post-target entries. Scenarios using a known
+post-17.5 command or event are rejected rather than executed against a stub.
+The same distinction is included in each simulation/session
+`fidelity.warnings` report, so callers can fail closed or ask for a
+higher-fidelity test when needed.
 
 ## Structured packet traces
 

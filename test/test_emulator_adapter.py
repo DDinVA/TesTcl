@@ -225,6 +225,15 @@ when HTTP_RESPONSE_RELEASE {
         self.assertTrue(result["chunk"]["has_more"])
         self.assertEqual(len(result["commands"]), 7)
         self.assertEqual(result["commands"][0]["name"], "AAA::acct_result")
+        catalog = result["commands"] + self.adapter._build_capabilities(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root), 7, 1000
+        )["commands"]
+        json_entry = next(entry for entry in catalog if entry["name"] == "JSON::parse")
+        self.assertEqual(json_entry["target_status"], "introduced-after-tmos-17.5")
+        self.assertEqual(
+            result["summary"]["target_status_counts"]["introduced-after-tmos-17.5"],
+            10,
+        )
 
         final = self.adapter._build_capabilities(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root), 5000, 7
@@ -320,7 +329,19 @@ when HTTP_REQUEST {
 
         self.assertEqual(report["profile"], "tmos-17.5")
         self.assertGreaterEqual(report["commands"]["catalog_count"], 1400)
+        self.assertEqual(report["commands"]["post_target_count"], 10)
+        self.assertEqual(
+            report["commands"]["target_catalog_count"],
+            report["commands"]["catalog_count"] - 10,
+        )
+        self.assertIn("JSON::parse", report["commands"]["post_target_commands"])
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
+        self.assertEqual(report["events"]["post_target_count"], 7)
+        self.assertEqual(
+            report["events"]["target_catalog_count"],
+            report["events"]["catalog_count"] - 7,
+        )
+        self.assertIn("JSON_REQUEST", report["events"]["post_target_events"])
         self.assertIn("HTTP_REQUEST", {
             entry["name"] for entry in report["events"]["packet_adapter_events"]
         })
@@ -354,6 +375,19 @@ when HTTP_REQUEST {
         self.assertGreater(
             report["events"]["catalog_count"], report["events"]["packet_adapter_count"]
         )
+
+    def test_post_tmos_17_5_features_are_reported_and_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "introduced after TMOS 17.5"
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": 'when HTTP_REQUEST { JSON::parse "{}" }',
+                    "request": {"uri": "/"},
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_fidelity_analysis_warns_for_stub_and_profile_gated_usage(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)

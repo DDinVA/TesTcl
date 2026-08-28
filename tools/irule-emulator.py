@@ -33,6 +33,35 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 
 TMOS_VERSION = "17.5"
+# The pinned tcl-lsp registry is intentionally broader than one BIG-IP
+# release. These entries are documented by F5 as introduced in 21.0, so they
+# remain visible in the complete catalog but must not be presented as 17.5
+# runtime capabilities.
+TMOS_17_5_POST_TARGET_COMMANDS = frozenset(
+    {
+        "JSON::array",
+        "JSON::create",
+        "JSON::get",
+        "JSON::object",
+        "JSON::parse",
+        "JSON::render",
+        "JSON::root",
+        "JSON::set",
+        "JSON::type",
+        "SSE::field",
+    }
+)
+TMOS_17_5_POST_TARGET_EVENTS = frozenset(
+    {
+        "JSON_REQUEST",
+        "JSON_REQUEST_ERROR",
+        "JSON_REQUEST_MISSING",
+        "JSON_RESPONSE",
+        "JSON_RESPONSE_ERROR",
+        "JSON_RESPONSE_MISSING",
+        "SSE_RESPONSE",
+    }
+)
 DEFAULT_PROFILES = ["TCP", "HTTP"]
 LB_FAILURE_CAUSES = frozenset(
     {"no_member", "unreachable", "queue_limit", "connection_timeout"}
@@ -267,6 +296,12 @@ def _mock_proc_name(command: str) -> str:
     return "cmd_{}".format(command.replace("-", "_").replace(".", "_"))
 
 
+def _target_status(name: str, post_target_names: frozenset[str]) -> str:
+    if name in post_target_names:
+        return "introduced-after-tmos-17.5"
+    return "available-in-tmos-17.5"
+
+
 SEMANTIC_MOCK_COMMANDS = {
     "HSL::open",
     "HSL::send",
@@ -456,6 +491,10 @@ def _build_capabilities(root: Path, offset: int, limit: int) -> dict[str, Any]:
         "generated-stub": 0,
         "no-runtime-handler": 0,
     }
+    target_status_counts = {
+        "available-in-tmos-17.5": 0,
+        "introduced-after-tmos-17.5": 0,
+    }
     for name in command_names:
         spec = REGISTRY.get_any(name)
         if spec is None:  # pragma: no cover - registry contract guard
@@ -463,6 +502,8 @@ def _build_capabilities(root: Path, offset: int, limit: int) -> dict[str, Any]:
         proc_name = _mock_proc_name(name)
         runtime_status = _capability_status(proc_name, handwritten, generated)
         status_counts[runtime_status] += 1
+        target_status = _target_status(name, TMOS_17_5_POST_TARGET_COMMANDS)
+        target_status_counts[target_status] += 1
         requirement = spec.event_requires
         commands.append(
             {
@@ -472,6 +513,7 @@ def _build_capabilities(root: Path, offset: int, limit: int) -> dict[str, Any]:
                 "pure": bool(spec.pure),
                 "unsafe": bool(spec.unsafe),
                 "runtime_status": runtime_status,
+                "target_status": target_status,
                 "event_requirements": {
                     "profiles": sorted(requirement.profiles) if requirement else [],
                     "also_in": sorted(requirement.also_in) if requirement else [],
@@ -494,6 +536,7 @@ def _build_capabilities(root: Path, offset: int, limit: int) -> dict[str, Any]:
         events.append(
             {
                 "name": name,
+                "target_status": _target_status(name, TMOS_17_5_POST_TARGET_EVENTS),
                 "multiplicity": NAMESPACE_REGISTRY.event_multiplicity(name),
                 "client_side": bool(props.client_side),
                 "server_side": bool(props.server_side),
@@ -533,6 +576,7 @@ def _build_capabilities(root: Path, offset: int, limit: int) -> dict[str, Any]:
             "event_count": len(events),
             "profile_count": len(profiles),
             "runtime_status_counts": status_counts,
+            "target_status_counts": target_status_counts,
         },
         "chunk": {
             "offset": offset,
@@ -564,7 +608,17 @@ def _build_conformance(root: Path) -> dict[str, Any]:
     for status in status_map.values():
         command_counts[status] = command_counts.get(status, 0) + 1
     event_names = sorted(NAMESPACE_REGISTRY.all_event_names())
-    supported_events = [name for name in event_names if name in PACKET_EVENT_ADAPTERS]
+    post_target_commands = sorted(
+        name for name in status_map if name in TMOS_17_5_POST_TARGET_COMMANDS
+    )
+    post_target_events = sorted(
+        name for name in event_names if name in TMOS_17_5_POST_TARGET_EVENTS
+    )
+    supported_events = [
+        name
+        for name in event_names
+        if name in PACKET_EVENT_ADAPTERS and name not in TMOS_17_5_POST_TARGET_EVENTS
+    ]
     return {
         "status": "ok",
         "schema_version": 1,
@@ -576,6 +630,9 @@ def _build_conformance(root: Path) -> dict[str, Any]:
         },
         "commands": {
             "catalog_count": len(status_map),
+            "target_catalog_count": len(status_map) - len(post_target_commands),
+            "post_target_count": len(post_target_commands),
+            "post_target_commands": post_target_commands,
             "runtime_status_counts": command_counts,
             "runtime_status_meaning": {
                 "handwritten-mock": "implemented behavioral mock in the loaded Tcl framework",
@@ -586,6 +643,9 @@ def _build_conformance(root: Path) -> dict[str, Any]:
         },
         "events": {
             "catalog_count": len(event_names),
+            "target_catalog_count": len(event_names) - len(post_target_events),
+            "post_target_count": len(post_target_events),
+            "post_target_events": post_target_events,
             "packet_adapter_count": len(supported_events),
             "packet_adapter_events": [
                 {"name": name, "adapter": PACKET_EVENT_ADAPTERS[name]}
@@ -687,14 +747,26 @@ def _analyze_rule_capabilities(
             status = status_map.get(name)
             if status is None:
                 status = "unknown-command" if spec is None else "no-runtime-handler"
+            target_status = _target_status(name, TMOS_17_5_POST_TARGET_COMMANDS)
             row = {
                 "name": name,
                 "occurrences": usage[name]["occurrences"],
                 "events": sorted(usage[name]["events"]),
                 "runtime_status": status,
+                "target_status": target_status,
             }
             command_rows.append(row)
-            if status in {"generated-stub", "no-runtime-handler"} and spec is not None:
+            if target_status == "introduced-after-tmos-17.5":
+                warnings.append(
+                    {
+                        "code": "version-incompatible",
+                        "severity": "error",
+                        "command": name,
+                        "target_status": target_status,
+                        "message": f"{name} was introduced after TMOS 17.5",
+                    }
+                )
+            elif status in {"generated-stub", "no-runtime-handler"} and spec is not None:
                 if _is_f5_runtime_command(name, spec):
                     warnings.append(
                         {
@@ -721,6 +793,16 @@ def _analyze_rule_capabilities(
         attached_profiles = {profile.upper() for profile in profiles}
         for event_name in sorted(event_names):
             props = NAMESPACE_REGISTRY.get_props(event_name)
+            if event_name in TMOS_17_5_POST_TARGET_EVENTS:
+                warnings.append(
+                    {
+                        "code": "version-incompatible",
+                        "severity": "error",
+                        "event": event_name,
+                        "target_status": "introduced-after-tmos-17.5",
+                        "message": f"{event_name} was introduced after TMOS 17.5",
+                    }
+                )
             required = set(props.implied_profiles) if props is not None else set()
             if required and not required.intersection(attached_profiles):
                 warnings.append(
@@ -1160,6 +1242,8 @@ def _load_event_profiles(root: Path) -> dict[str, set[str]]:
         raise EmulatorInputError(f"could not load tcl-lsp event registry: {exc}") from exc
     event_profiles: dict[str, set[str]] = {}
     for name in NAMESPACE_REGISTRY.all_event_names():
+        if name in TMOS_17_5_POST_TARGET_EVENTS:
+            continue
         props = NAMESPACE_REGISTRY.get_props(name)
         event_profiles[name] = set(props.implied_profiles) if props is not None else set()
     return event_profiles
@@ -3209,6 +3293,22 @@ class EmulatorSession:
         self._pools = pools
         self._datagroups = datagroups
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
+        incompatible = [
+            warning
+            for warning in self._fidelity.get("warnings", [])
+            if warning.get("code") == "version-incompatible"
+        ]
+        if incompatible:
+            names = sorted(
+                {
+                    str(item.get("command") or item.get("event"))
+                    for item in incompatible
+                }
+            )
+            raise EmulatorInputError(
+                "scenario uses iRule features introduced after TMOS 17.5: "
+                + ", ".join(names)
+            )
         self._event_profiles = _load_event_profiles(root)
         self._tasks: queue.Queue[Any] = queue.Queue()
         self._started = threading.Event()

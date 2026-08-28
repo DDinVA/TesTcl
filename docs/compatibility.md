@@ -32,3 +32,9 @@ TCP, TLS, HTTP, UDP/DNS, SIP over TCP or UDP, and raw IPv4 transport records. Fr
 packets and pcapng file ingestion remain outside the current boundary. Classic
 PCAP ingestion is supported, and TCP stream reassembly includes bounded gap,
 overlap, and retransmission de-duplication handling.
+
+The upstream registry is broader than the target release. Capability entries
+carry `target_status`, and the conformance response reports both the full
+registry count and the count available in TMOS 17.5. Known 21.0-only JSON and
+SSE commands/events are retained for catalog visibility but are marked
+`introduced-after-tmos-17.5` and rejected by the emulator.
