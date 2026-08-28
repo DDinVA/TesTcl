@@ -22,6 +22,33 @@ namespace eval ::itest::semantic {
     variable http_release_requested 0
     variable http_close_requested 0
     variable http_request_number 0
+    variable ws_enabled 1
+    variable ws_request_seen 0
+    variable ws_upgrade_seen 0
+    variable ws_collection_requested 0
+    variable ws_collection_length 0
+    variable ws_release_requested 0
+    variable ws_frame_dropped 0
+    variable ws_message_dropped 0
+    variable ws_disconnect_requested 0
+    variable ws_disconnect_code ""
+    variable ws_disconnect_reason ""
+    variable ws_masking "remask"
+
+    namespace eval ::state::websocket {
+        variable request_headers {}
+        variable response_headers {}
+        variable method ""
+        variable uri ""
+        variable host ""
+        variable status ""
+        variable frame_type ""
+        variable eom 1
+        variable orig_masked 0
+        variable mask ""
+        variable payload ""
+        variable payload_length 0
+    }
 
     proc _profile_enabled {name} {
         set wanted [string toupper $name]
@@ -110,6 +137,298 @@ namespace eval ::itest::semantic {
     proc http_release_snapshot {} {
         variable http_release_requested
         return [list requested $http_release_requested]
+    }
+
+    proc ws_reset_connection {} {
+        variable ws_enabled
+        variable ws_request_seen
+        variable ws_upgrade_seen
+        variable ws_collection_requested
+        variable ws_collection_length
+        variable ws_release_requested
+        variable ws_frame_dropped
+        variable ws_message_dropped
+        variable ws_disconnect_requested
+        variable ws_disconnect_code
+        variable ws_disconnect_reason
+        variable ws_masking
+        set ws_enabled 1
+        set ws_request_seen 0
+        set ws_upgrade_seen 0
+        set ws_collection_requested 0
+        set ws_collection_length 0
+        set ws_release_requested 0
+        set ws_frame_dropped 0
+        set ws_message_dropped 0
+        set ws_disconnect_requested 0
+        set ws_disconnect_code ""
+        set ws_disconnect_reason ""
+        set ws_masking remask
+        namespace eval ::state::websocket {
+            variable request_headers {}
+            variable response_headers {}
+            variable method ""
+            variable uri ""
+            variable host ""
+            variable status ""
+            variable frame_type ""
+            variable eom 1
+            variable orig_masked 0
+            variable mask ""
+            variable payload ""
+            variable payload_length 0
+        }
+    }
+
+    proc ws_collection_snapshot {} {
+        variable ws_collection_requested
+        variable ws_collection_length
+        variable ws_release_requested
+        return [list requested $ws_collection_requested length $ws_collection_length released $ws_release_requested]
+    }
+
+    proc ws_prepare_frame {} {
+        variable ws_frame_dropped
+        variable ws_disconnect_requested
+        variable ws_disconnect_code
+        variable ws_disconnect_reason
+        set ws_frame_dropped 0
+        set ws_disconnect_requested 0
+        set ws_disconnect_code ""
+        set ws_disconnect_reason ""
+    }
+
+    proc ws_finish_frame {eom} {
+        variable ws_message_dropped
+        if {$eom && $ws_message_dropped} {
+            set ws_message_dropped 0
+        }
+    }
+
+    proc _ws_require_event {allowed command_name} {
+        if {$::itest::current_event ni $allowed} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc _ws_header_get {headers_var name} {
+        if {![info exists $headers_var]} {
+            return ""
+        }
+        set wanted [string tolower $name]
+        set raw [set $headers_var]
+        # The adapter stores the already-quoted Tcl list as a single safe
+        # scalar. Unwrap that one layer without evaluating caller-provided
+        # content as a script.
+        if {[llength $raw] == 1} {
+            set candidate [lindex $raw 0]
+            if {[llength $candidate] > 0 && [llength $candidate] % 2 == 0} {
+                set raw $candidate
+            }
+        }
+        foreach {header_name header_value} $raw {
+            if {[string tolower $header_name] eq $wanted} {
+                return $header_value
+            }
+        }
+        return ""
+    }
+
+    proc ws_request_command {args} {
+        _ws_require_event {WS_REQUEST} WS::request
+        if {[llength $args] != 1} {
+            error "WS::request requires one selector"
+        }
+        switch -exact -- [lindex $args 0] {
+            protocol { return [_ws_header_get ::state::websocket::request_headers Sec-WebSocket-Protocol] }
+            extension { return [_ws_header_get ::state::websocket::request_headers Sec-WebSocket-Extensions] }
+            version { return [_ws_header_get ::state::websocket::request_headers Sec-WebSocket-Version] }
+            key { return [_ws_header_get ::state::websocket::request_headers Sec-WebSocket-Key] }
+            default { error "WS::request selector must be protocol, extension, version, or key" }
+        }
+    }
+
+    proc ws_response_command {args} {
+        _ws_require_event {WS_RESPONSE} WS::response
+        if {[llength $args] != 1} {
+            error "WS::response requires one selector"
+        }
+        switch -exact -- [lindex $args 0] {
+            protocol { return [_ws_header_get ::state::websocket::response_headers Sec-WebSocket-Protocol] }
+            extension { return [_ws_header_get ::state::websocket::response_headers Sec-WebSocket-Extensions] }
+            version { return [_ws_header_get ::state::websocket::response_headers Sec-WebSocket-Version] }
+            key { return [_ws_header_get ::state::websocket::response_headers Sec-WebSocket-Accept] }
+            valid {
+                set status [expr {[info exists ::state::websocket::status] ? $::state::websocket::status : 0}]
+                set accept [_ws_header_get ::state::websocket::response_headers Sec-WebSocket-Accept]
+                set upgrade [_ws_header_get ::state::websocket::response_headers Upgrade]
+                set connection [_ws_header_get ::state::websocket::response_headers Connection]
+                set request_seen [expr {[info exists ::itest::semantic::ws_request_seen] ? $::itest::semantic::ws_request_seen : 0}]
+                set upgrade_ok 0
+                foreach token [split $upgrade ,] {
+                    if {[string tolower [string trim $token]] eq "websocket"} {
+                        set upgrade_ok 1
+                    }
+                }
+                set connection_ok 0
+                foreach token [split $connection ,] {
+                    if {[string tolower [string trim $token]] eq "upgrade"} {
+                        set connection_ok 1
+                    }
+                }
+                return [expr {$status == 101 && $request_seen && $accept ne "" && $upgrade_ok && $connection_ok}]
+            }
+            default { error "WS::response selector must be protocol, extension, version, key, or valid" }
+        }
+    }
+
+    proc ws_enabled_command {args} {
+        variable ws_enabled
+        _ws_require_event {WS_REQUEST WS_RESPONSE HTTP_REQUEST HTTP_RESPONSE} WS::enabled
+        if {[llength $args] == 0} {
+            return $ws_enabled
+        }
+        if {[llength $args] != 1 || [string tolower [lindex $args 0]] ni {false 0}} {
+            error "WS::enabled accepts only false"
+        }
+        set ws_enabled 0
+        ::itest::log_decision ws enabled false
+        return $ws_enabled
+    }
+
+    proc ws_masking_command {args} {
+        variable ws_masking
+        _ws_require_event {WS_REQUEST WS_RESPONSE} WS::masking
+        if {[llength $args] != 1 || [lindex $args 0] ni {preserve remask}} {
+            error "WS::masking accepts preserve or remask"
+        }
+        set ws_masking [lindex $args 0]
+        ::itest::log_decision ws masking $ws_masking
+        return ""
+    }
+
+    proc ws_collect_command {args} {
+        variable ws_collection_requested
+        variable ws_collection_length
+        _ws_require_event {WS_CLIENT_FRAME WS_SERVER_FRAME WS_CLIENT_DATA WS_SERVER_DATA} WS::collect
+        if {[llength $args] < 1 || [llength $args] > 2 || [lindex $args 0] ne "frame"} {
+            error "WS::collect syntax is WS::collect frame ?length?"
+        }
+        set length 0
+        if {[llength $args] == 2} {
+            set length [lindex $args 1]
+            if {![string is integer -strict $length] || $length < 1} {
+                error "WS::collect length must be a positive integer"
+            }
+        }
+        set ws_collection_requested 1
+        set ws_collection_length $length
+        ::itest::log_decision ws collect [list frame $length]
+        return ""
+    }
+
+    proc ws_payload_command {args} {
+        _ws_require_event {WS_CLIENT_DATA WS_SERVER_DATA} WS::payload
+        set payload $::state::websocket::payload
+        set payload_bytes [::itest::cmd::_payload_bytes $payload]
+        if {[llength $args] == 0} {
+            return $payload
+        }
+        if {[llength $args] == 1 && [lindex $args 0] eq "length"} {
+            return [::itest::cmd::_payload_bytelength $payload]
+        }
+        if {[llength $args] == 1 || [llength $args] == 2} {
+            foreach value $args {
+                if {![string is integer -strict $value] || $value < 0} {
+                    error "WS::payload offsets and lengths must be non-negative integers"
+                }
+            }
+            set offset [lindex $args 0]
+            set length [expr {[llength $args] == 1 ? $offset : [lindex $args 1]}]
+            if {[llength $args] == 1} { set offset 0 }
+            if {$length == 0} {
+                return [::itest::cmd::_payload_bytes ""]
+            }
+            return [string range $payload_bytes $offset [expr {$offset + $length - 1}]]
+        }
+        if {[llength $args] == 4 && [lindex $args 0] eq "replace"} {
+            set offset [lindex $args 1]
+            set length [lindex $args 2]
+            if {![string is integer -strict $offset] || $offset < 0 ||
+                ![string is integer -strict $length] || $length < 0} {
+                error "WS::payload replace offsets and lengths must be non-negative integers"
+            }
+            set replacement [lindex $args 3]
+            set ::state::websocket::payload [::itest::cmd::_payload_splice $payload $offset $length $replacement]
+            set ::state::websocket::payload_length [::itest::cmd::_payload_bytelength $::state::websocket::payload]
+            return ""
+        }
+        error "unsupported WS::payload syntax"
+    }
+
+    proc ws_release_command {args} {
+        variable ws_collection_requested
+        variable ws_collection_length
+        variable ws_release_requested
+        _ws_require_event {WS_CLIENT_DATA WS_SERVER_DATA} WS::release
+        if {[llength $args] != 0} {
+            error "WS::release takes no arguments"
+        }
+        set ws_collection_requested 0
+        set ws_collection_length 0
+        set ws_release_requested 1
+        ::itest::log_decision ws release
+        return ""
+    }
+
+    proc ws_frame_command {args} {
+        variable ws_frame_dropped
+        _ws_require_event {WS_CLIENT_FRAME WS_SERVER_FRAME} WS::frame
+        if {[llength $args] != 1} {
+            error "WS::frame requires one selector in this emulator slice"
+        }
+        switch -exact -- [lindex $args 0] {
+            eom { return $::state::websocket::eom }
+            orig_masked { return $::state::websocket::orig_masked }
+            type { return $::state::websocket::frame_type }
+            mask { return $::state::websocket::mask }
+            drop {
+                set ws_frame_dropped 1
+                ::itest::log_decision ws frame drop
+                return ""
+            }
+            default { error "unsupported WS::frame selector" }
+        }
+    }
+
+    proc ws_message_command {args} {
+        variable ws_message_dropped
+        _ws_require_event {WS_CLIENT_FRAME WS_SERVER_FRAME WS_CLIENT_DATA WS_SERVER_DATA} WS::message
+        if {[llength $args] != 1 || [lindex $args 0] ne "drop"} {
+            error "WS::message syntax is WS::message drop"
+        }
+        set ws_message_dropped 1
+        ::itest::log_decision ws message drop
+        return ""
+    }
+
+    proc ws_disconnect_command {args} {
+        variable ws_disconnect_requested
+        variable ws_disconnect_code
+        variable ws_disconnect_reason
+        _ws_require_event {WS_CLIENT_FRAME_DONE WS_SERVER_FRAME_DONE} WS::disconnect
+        if {[llength $args] < 1 || [llength $args] > 2} {
+            error "WS::disconnect requires a code and optional reason"
+        }
+        set code [lindex $args 0]
+        if {![string is integer -strict $code] || $code < 1000 || $code > 4999} {
+            error "WS::disconnect code must be between 1000 and 4999"
+        }
+        set ws_disconnect_requested 1
+        set ws_disconnect_code $code
+        set ws_disconnect_reason [expr {[llength $args] == 2 ? [lindex $args 1] : ""}]
+        ::itest::log_decision ws disconnect [list $code $ws_disconnect_reason]
+        return ""
     }
 
     proc lb_snapshot {} {
@@ -2741,6 +3060,25 @@ foreach {original replacement} {
     tcp_payload tcp_payload_command
     tcp_release tcp_release_command
     tcp_respond tcp_respond_command
+} {
+    if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
+        ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
+        proc ::itest::cmd::$original {args} [format {
+            return [eval [linsert $args 0 ::itest::semantic::%s]]
+        } $replacement]
+    }
+}
+foreach {original replacement} {
+    ws_collect ws_collect_command
+    ws_disconnect ws_disconnect_command
+    ws_enabled ws_enabled_command
+    ws_frame ws_frame_command
+    ws_masking ws_masking_command
+    ws_message ws_message_command
+    ws_payload ws_payload_command
+    ws_release ws_release_command
+    ws_request ws_request_command
+    ws_response ws_response_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
         ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig

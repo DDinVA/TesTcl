@@ -340,6 +340,17 @@ when HTTP_REQUEST {
             packet_adapters["HTTP_RESPONSE_RELEASE"],
             "HTTP response transaction release phase",
         )
+        for event_name in (
+            "WS_REQUEST",
+            "WS_RESPONSE",
+            "WS_CLIENT_FRAME",
+            "WS_SERVER_FRAME",
+            "WS_CLIENT_FRAME_DONE",
+            "WS_SERVER_FRAME_DONE",
+            "WS_CLIENT_DATA",
+            "WS_SERVER_DATA",
+        ):
+            self.assertIn(event_name, packet_adapters)
         self.assertGreater(
             report["events"]["catalog_count"], report["events"]["packet_adapter_count"]
         )
@@ -1260,6 +1271,331 @@ when SERVER_DATA {
                 }
             ],
         )
+
+    def test_packet_trace_drives_websocket_events_and_byte_payload_mutations(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "WS"],
+                "irule": """
+when WS_REQUEST {
+    log local0. "request=[WS::request key]"
+}
+when WS_RESPONSE {
+    log local0. "response=[WS::response key] valid=[WS::response valid]"
+}
+when WS_CLIENT_FRAME {
+    log local0. "frame=[WS::frame type] eom=[WS::frame eom] masked=[WS::frame orig_masked]"
+    WS::collect frame
+}
+when WS_CLIENT_DATA {
+    binary scan [WS::payload 2] H* first
+    WS::payload replace 1 2 X
+    binary scan [WS::payload] H* replaced
+    log local0. "data-length=[WS::payload length] first=$first replaced=$replaced"
+    WS::release
+}
+when WS_CLIENT_FRAME_DONE { log local0. client-done }
+when WS_SERVER_FRAME { WS::collect frame 3 }
+when WS_SERVER_DATA {
+    log local0. "server-data=[WS::payload]"
+    WS::release
+}
+when WS_SERVER_FRAME_DONE { log local0. server-done }
+""",
+                "packets": [
+                    {
+                        "protocol": "websocket",
+                        "type": "request",
+                        "direction": "client_to_server",
+                        "method": "GET",
+                        "uri": "/socket",
+                        "host": "example.com",
+                        "headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "keep-alive, Upgrade",
+                            "Sec-WebSocket-Key": "abc",
+                            "Sec-WebSocket-Version": "13",
+                        },
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "response",
+                        "direction": "server_to_client",
+                        "response_headers": {
+                            "Upgrade": "WebSocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Accept": "xyz",
+                        },
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "frame",
+                        "direction": "client_to_server",
+                        "frame_type": "text",
+                        "fin": True,
+                        "masked": True,
+                        "mask": "01020304",
+                        "payload": "Józ",
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "frame",
+                        "direction": "server_to_client",
+                        "frame_type": "text",
+                        "fin": True,
+                        "masked": False,
+                        "payload": "world",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        events = [
+            event["event"]
+            for packet in result["trace"]
+            for event in packet["events"]
+        ]
+        self.assertEqual(
+            events,
+            [
+                "RULE_INIT",
+                "CLIENT_ACCEPTED",
+                "WS_REQUEST",
+                "WS_RESPONSE",
+                "WS_CLIENT_FRAME",
+                "WS_CLIENT_DATA",
+                "WS_CLIENT_FRAME_DONE",
+                "WS_SERVER_FRAME",
+                "WS_SERVER_DATA",
+                "WS_SERVER_FRAME_DONE",
+            ],
+        )
+        request_event = next(
+            event for event in result["trace"][0]["events"] if event["event"] == "WS_REQUEST"
+        )
+        response_event = next(
+            event for event in result["trace"][1]["events"] if event["event"] == "WS_RESPONSE"
+        )
+        client_data_event = next(
+            event for event in result["trace"][2]["events"] if event["event"] == "WS_CLIENT_DATA"
+        )
+        server_data_event = next(
+            event for event in result["trace"][3]["events"] if event["event"] == "WS_SERVER_DATA"
+        )
+        self.assertTrue(
+            any("request=abc" in entry for entry in request_event["logs"])
+        )
+        self.assertTrue(
+            any(
+                "response=xyz valid=1" in entry
+                for entry in response_event["logs"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "data-length=3 first=4ac3 replaced=4a587a" in entry
+                for entry in client_data_event["logs"]
+            )
+        )
+        self.assertTrue(
+            any("server-data=world" in entry for entry in server_data_event["logs"])
+        )
+        self.assertEqual(result["trace"][2]["payload"], "Józ")
+
+    def test_websocket_processing_honors_collection_thresholds_and_drops(self) -> None:
+        threshold = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "WS"],
+                "irule": (
+                    "when WS_CLIENT_FRAME { WS::collect frame 4 } "
+                    "when WS_CLIENT_DATA { log local0. unexpected }"
+                ),
+                "packets": [
+                    {
+                        "protocol": "websocket",
+                        "type": "request",
+                        "direction": "client_to_server",
+                        "headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Key": "abc",
+                        },
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "response",
+                        "direction": "server_to_client",
+                        "status": 101,
+                        "response_headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Accept": "xyz",
+                        },
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "frame",
+                        "direction": "client_to_server",
+                        "frame_type": "text",
+                        "payload": "abc",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        threshold_events = [
+            event["event"]
+            for event in threshold["trace"][2]["events"]
+        ]
+        self.assertEqual(threshold_events, ["WS_CLIENT_FRAME", "WS_CLIENT_FRAME_DONE"])
+        self.assertNotIn("unexpected", str(threshold["trace"][2]))
+
+        dropped = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "WS"],
+                "irule": (
+                    "when WS_CLIENT_FRAME { "
+                    "if {[WS::frame type] eq \"text\"} { WS::collect frame; WS::message drop }"
+                    " } "
+                    "when WS_CLIENT_DATA { log local0. unexpected }"
+                ),
+                "packets": [
+                    {
+                        "protocol": "websocket",
+                        "type": "request",
+                        "direction": "client_to_server",
+                        "headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Key": "abc",
+                        },
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "response",
+                        "direction": "server_to_client",
+                        "status": 101,
+                        "response_headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Accept": "xyz",
+                        },
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "frame",
+                        "direction": "client_to_server",
+                        "frame_type": "text",
+                        "fin": False,
+                        "payload": "abc",
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "frame",
+                        "direction": "client_to_server",
+                        "frame_type": "continuation",
+                        "fin": True,
+                        "payload": "def",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(dropped["trace"][2]["dropped"])
+        self.assertEqual(dropped["trace"][2]["drop_reason"], "message")
+        self.assertEqual(
+            [event["event"] for event in dropped["trace"][2]["events"]],
+            ["WS_CLIENT_FRAME", "WS_CLIENT_FRAME_DONE"],
+        )
+        self.assertTrue(dropped["trace"][3]["dropped"])
+        self.assertEqual(dropped["trace"][3]["drop_reason"], "message")
+        self.assertEqual(
+            [event["event"] for event in dropped["trace"][3]["events"]],
+            ["WS_CLIENT_FRAME", "WS_CLIENT_FRAME_DONE"],
+        )
+        self.assertNotIn("WS_CLIENT_DATA", str(dropped["trace"][2]))
+        self.assertNotIn("WS_CLIENT_DATA", str(dropped["trace"][3]))
+
+    def test_websocket_disabled_processing_and_invalid_upgrade_are_ignored(self) -> None:
+        disabled = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "WS"],
+                "irule": (
+                    "when WS_REQUEST { WS::enabled false } "
+                    "when WS_RESPONSE { log local0. unexpected }"
+                ),
+                "packets": [
+                    {
+                        "protocol": "websocket",
+                        "type": "request",
+                        "direction": "client_to_server",
+                        "headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Key": "abc",
+                        },
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "response",
+                        "direction": "server_to_client",
+                        "status": 101,
+                        "response_headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Accept": "xyz",
+                        },
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertIn(
+            "WS_REQUEST",
+            [event["event"] for event in disabled["trace"][0]["events"]],
+        )
+        self.assertEqual(disabled["trace"][1]["ignored"], "WebSocket processing is disabled")
+        self.assertNotIn("unexpected", str(disabled["trace"][1]))
+
+        invalid = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "WS"],
+                "irule": "when WS_REQUEST { log local0. unexpected }",
+                "packets": [
+                    {
+                        "protocol": "websocket",
+                        "type": "request",
+                        "direction": "client_to_server",
+                        "headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                        },
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(invalid["trace"][0]["ignored"], "WebSocket upgrade headers are incomplete")
+        self.assertNotIn("unexpected", str(invalid["trace"][0]))
+
+        with self.assertRaises(self.adapter.EmulatorInputError):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP", "WS"],
+                    "irule": "when WS_CLIENT_FRAME { log local0. frame }",
+                    "packets": [
+                        {
+                            "protocol": "websocket",
+                            "type": "frame",
+                            "direction": "client_to_server",
+                            "frame_type": "text",
+                            "fin": {"unexpected": "object"},
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_packet_trace_gates_tcp_data_until_collection_length_and_skip_are_met(self) -> None:
         result = self.adapter.run_scenario(

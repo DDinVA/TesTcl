@@ -136,12 +136,27 @@ EVENT_STATE_FIELDS = {
         "additional",
         "response_sent",
     },
+    "websocket": {
+        "request_headers",
+        "response_headers",
+        "method",
+        "uri",
+        "host",
+        "status",
+        "frame_type",
+        "eom",
+        "orig_masked",
+        "mask",
+        "payload",
+        "payload_length",
+    },
 }
 EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
     "tls_client": "::state::tls::client",
     "tls_server": "::state::tls::server",
     "dns": "::state::dns",
+    "websocket": "::state::websocket",
 }
 
 
@@ -223,6 +238,16 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTTP::is_redirect",
     "HTTP::request_num",
     "HTTP::cookie",
+    "WS::collect",
+    "WS::disconnect",
+    "WS::enabled",
+    "WS::frame",
+    "WS::masking",
+    "WS::message",
+    "WS::payload",
+    "WS::release",
+    "WS::request",
+    "WS::response",
     "HTTP::username",
     "IP::addr",
     "IP::version",
@@ -1085,7 +1110,7 @@ TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "wire"}
+PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -1148,6 +1173,19 @@ PACKET_PROTOCOL_FIELDS = {
         "additional",
         "response_sent",
     },
+    "websocket": {
+        "type",
+        "method",
+        "uri",
+        "host",
+        "headers",
+        "status",
+        "response_headers",
+        "frame_type",
+        "fin",
+        "masked",
+        "mask",
+    },
 }
 PACKET_EVENT_ADAPTERS = {
     "RULE_INIT": "trace initialization",
@@ -1171,6 +1209,14 @@ PACKET_EVENT_ADAPTERS = {
     "HTTP_RESPONSE_RELEASE": "HTTP response transaction release phase",
     "DNS_REQUEST": "DNS request packet",
     "DNS_RESPONSE": "DNS response packet",
+    "WS_REQUEST": "WebSocket upgrade request",
+    "WS_RESPONSE": "WebSocket upgrade response",
+    "WS_CLIENT_FRAME": "WebSocket client frame start",
+    "WS_SERVER_FRAME": "WebSocket server frame start",
+    "WS_CLIENT_FRAME_DONE": "WebSocket client frame end",
+    "WS_SERVER_FRAME_DONE": "WebSocket server frame end",
+    "WS_CLIENT_DATA": "collected WebSocket client frame data",
+    "WS_SERVER_DATA": "collected WebSocket server frame data",
 }
 
 
@@ -1726,6 +1772,54 @@ def _packet_scalar(value: Any, field: str) -> str:
     raise EmulatorInputError(f"packet field {field} must be a scalar or JSON value")
 
 
+def _packet_bool(value: Any, field: str) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int) and value in {0, 1}:
+        return str(value)
+    if isinstance(value, str) and value.lower() in {"0", "1", "false", "true"}:
+        return "1" if value.lower() in {"1", "true"} else "0"
+    raise EmulatorInputError(f"{field} must be a boolean or 0/1")
+
+
+WEBSOCKET_FRAME_TYPES = frozenset(
+    {"continuation", "text", "binary", "close", "ping", "pong"}
+)
+
+
+def _websocket_header_value(headers: Any, name: str) -> str:
+    if not isinstance(headers, dict):
+        return ""
+    wanted = name.lower()
+    for header_name, header_value in headers.items():
+        if header_name.lower() == wanted:
+            return header_value
+    return ""
+
+
+def _websocket_header_has_token(headers: Any, name: str, token: str) -> bool:
+    value = _websocket_header_value(headers, name)
+    return any(part.strip().lower() == token.lower() for part in value.split(","))
+
+
+def _websocket_request_is_upgrade(packet: dict[str, Any]) -> bool:
+    headers = packet.get("headers", {})
+    return (
+        _websocket_header_has_token(headers, "upgrade", "websocket")
+        and _websocket_header_has_token(headers, "connection", "upgrade")
+        and bool(_websocket_header_value(headers, "sec-websocket-key"))
+    )
+
+
+def _websocket_response_is_upgrade(packet: dict[str, Any]) -> bool:
+    headers = packet.get("response_headers", {})
+    return (
+        _websocket_header_has_token(headers, "upgrade", "websocket")
+        and _websocket_header_has_token(headers, "connection", "upgrade")
+        and bool(_websocket_header_value(headers, "sec-websocket-accept"))
+    )
+
+
 def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or not raw:
         raise EmulatorInputError("packets must be a non-empty array")
@@ -1825,19 +1919,27 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = value
             elif field in {"body", "response_body", "method", "uri", "host"}:
                 normalised[field] = _require_string(packet[field], f"packet {index} {field}")
+            elif field in {"fin", "masked"}:
+                normalised[field] = _packet_bool(packet[field], f"packet {index} {field}")
             elif field == "type":
                 packet_type = _require_string(packet[field], f"packet {index} type").lower()
-                if packet_type not in {
-                    "client_hello",
-                    "client_cert",
-                    "handshake",
-                    "client_data",
-                    "server_hello",
-                    "server_cert",
-                    "server_handshake",
-                    "server_data",
-                }:
-                    raise EmulatorInputError(f"unsupported TLS packet type: {packet_type}")
+                if protocol == "tls":
+                    if packet_type not in {
+                        "client_hello",
+                        "client_cert",
+                        "handshake",
+                        "client_data",
+                        "server_hello",
+                        "server_cert",
+                        "server_handshake",
+                        "server_data",
+                    }:
+                        raise EmulatorInputError(f"unsupported TLS packet type: {packet_type}")
+                elif protocol == "websocket":
+                    if packet_type not in {"request", "response", "frame"}:
+                        raise EmulatorInputError(
+                            f"unsupported WebSocket packet type: {packet_type}"
+                        )
                 normalised[field] = packet_type
             else:
                 normalised[field] = _packet_scalar(packet[field], f"packet {index} {field}")
@@ -1867,6 +1969,54 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 raise EmulatorInputError(f"packet {index} HTTP status must be an integer") from exc
             if not 100 <= status <= 999:
                 raise EmulatorInputError(f"packet {index} HTTP status must be between 100 and 999")
+        if protocol == "websocket":
+            packet_type = normalised.get("type")
+            if packet_type is None:
+                raise EmulatorInputError(f"packet {index} WebSocket packets require type")
+            if packet_type == "request":
+                if direction != "client_to_server":
+                    raise EmulatorInputError(
+                        f"packet {index} WebSocket requests must be client_to_server"
+                    )
+                if "headers" not in normalised:
+                    raise EmulatorInputError(
+                        f"packet {index} WebSocket requests require headers"
+                    )
+            elif packet_type == "response":
+                if direction != "server_to_client":
+                    raise EmulatorInputError(
+                        f"packet {index} WebSocket responses must be server_to_client"
+                    )
+                if "response_headers" not in normalised:
+                    raise EmulatorInputError(
+                        f"packet {index} WebSocket responses require response_headers"
+                    )
+                try:
+                    status = int(normalised.get("status", "101"))
+                except (TypeError, ValueError) as exc:
+                    raise EmulatorInputError(
+                        f"packet {index} WebSocket response status must be an integer"
+                    ) from exc
+                if not 100 <= status <= 999:
+                    raise EmulatorInputError(
+                        f"packet {index} WebSocket response status must be between 100 and 999"
+                    )
+                normalised.setdefault("status", "101")
+            else:
+                if "frame_type" not in normalised:
+                    raise EmulatorInputError(
+                        f"packet {index} WebSocket frames require frame_type"
+                    )
+                frame_type = normalised["frame_type"].lower()
+                if frame_type not in WEBSOCKET_FRAME_TYPES:
+                    raise EmulatorInputError(
+                        f"unsupported WebSocket frame type: {frame_type}"
+                    )
+                normalised["frame_type"] = frame_type
+                if "fin" not in normalised:
+                    normalised["fin"] = "1"
+                if "masked" not in normalised:
+                    normalised["masked"] = "1" if direction == "client_to_server" else "0"
         packets.append(normalised)
     return packets
 
@@ -2232,7 +2382,17 @@ class EmulatorSession:
         for layer, values in state.items():
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                session.eval_tcl(f"set {namespace}::{field} {_tcl_quote(value)}")
+                if layer == "websocket" and field == "payload":
+                    # Structured packet payloads are JSON text at the API
+                    # boundary, but WS::payload offsets are wire-byte based.
+                    # Install UTF-8 bytes as a Tcl byte array so the
+                    # tcl-lsp payload helpers preserve those offsets.
+                    payload_hex = value.encode("utf-8").hex()
+                    session.eval_tcl(
+                        f"set {namespace}::{field} [binary format H* {_tcl_quote(payload_hex)}]"
+                    )
+                else:
+                    session.eval_tcl(f"set {namespace}::{field} {_tcl_quote(value)}")
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
         event_result = session.fire_event(event_name)
         fired_events = _split_tcl_list(session.eval_tcl("::itest::get_fired_events"))
@@ -2289,7 +2449,7 @@ class EmulatorSession:
         if "port" in destination:
             connection[f"{destination_prefix}_port"] = str(destination["port"])
         protocol = packet["protocol"]
-        if protocol in {"tcp", "tls", "http"}:
+        if protocol in {"tcp", "tls", "http", "websocket"}:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol in {"udp", "dns"}:
             connection.update({"protocol": "17", "transport": "udp"})
@@ -2336,6 +2496,40 @@ class EmulatorSession:
                     dns_state[field] = _packet_scalar(packet[field], field)
             if dns_state:
                 state["dns"] = dns_state
+        elif protocol == "websocket":
+            websocket_state: dict[str, str] = {}
+            packet_type = packet.get("type")
+            if packet_type == "request":
+                headers = packet.get("headers", {})
+                websocket_state["request_headers"] = _tcl_list(
+                    [item for pair in headers.items() for item in pair]
+                )
+                websocket_state["method"] = packet.get("method", "GET")
+                websocket_state["uri"] = packet.get("uri", "/")
+                websocket_state["host"] = packet.get(
+                    "host", _websocket_header_value(headers, "Host")
+                )
+            elif packet_type == "response":
+                headers = packet.get("response_headers", {})
+                websocket_state["response_headers"] = _tcl_list(
+                    [item for pair in headers.items() for item in pair]
+                )
+                if "status" in packet:
+                    websocket_state["status"] = packet["status"]
+            elif packet_type == "frame":
+                payload = packet.get("payload", "")
+                websocket_state.update(
+                    {
+                        "frame_type": packet["frame_type"],
+                        "eom": packet.get("fin", "1"),
+                        "orig_masked": packet.get("masked", "0"),
+                        "mask": packet.get("mask", ""),
+                        "payload": payload,
+                        "payload_length": str(len(payload.encode("utf-8"))),
+                    }
+                )
+            if websocket_state:
+                state["websocket"] = websocket_state
         return state
 
     @staticmethod
@@ -2400,7 +2594,7 @@ class EmulatorSession:
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
-        if packet["protocol"] not in {"tcp", "tls", "http"}:
+        if packet["protocol"] not in {"tcp", "tls", "http", "websocket"}:
             return
         source = packet["source"]
         destination = packet["destination"]
@@ -2420,9 +2614,10 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http", "websocket"}:
             return
         self._configure_packet_connection(session, packet)
+        session.eval_tcl("::itest::semantic::ws_reset_connection")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
         events.append(
             self._fire_event_on_worker(
@@ -2716,10 +2911,17 @@ class EmulatorSession:
                 "type",
                 "method",
                 "uri",
+                "headers",
                 "status",
+                "response_headers",
                 "sni",
                 "qname",
                 "qtype",
+                "frame_type",
+                "fin",
+                "masked",
+                "mask",
+                "payload",
                 "timestamp",
                 "seq",
                 "ack",
@@ -2786,6 +2988,99 @@ class EmulatorSession:
                             },
                             index,
                         )
+                continue
+
+            if protocol == "websocket":
+                self._activate_packet_connection(session, packet, entry["events"])
+                packet_type = packet["type"]
+                if packet_type == "request":
+                    if not _websocket_request_is_upgrade(packet):
+                        entry["ignored"] = "WebSocket upgrade headers are incomplete"
+                    elif session.eval_tcl("set ::itest::semantic::ws_enabled") == "0":
+                        entry["ignored"] = "WebSocket processing is disabled"
+                    else:
+                        request_event = self._fire_event_on_worker(
+                            session, "WS_REQUEST", self._packet_event_state(packet)
+                        )
+                        entry["events"].append(request_event)
+                        if request_event.get("reason") != "profile_gate":
+                            session.eval_tcl("set ::itest::semantic::ws_request_seen 1")
+                elif packet_type == "response":
+                    if not _websocket_response_is_upgrade(packet):
+                        entry["ignored"] = "WebSocket upgrade headers are incomplete"
+                    elif session.eval_tcl("set ::itest::semantic::ws_enabled") == "0":
+                        entry["ignored"] = "WebSocket processing is disabled"
+                    else:
+                        response_event = self._fire_event_on_worker(
+                            session, "WS_RESPONSE", self._packet_event_state(packet)
+                        )
+                        entry["events"].append(response_event)
+                        status = int(packet.get("status", 101))
+                        if response_event.get("reason") != "profile_gate" and status == 101 and session.eval_tcl(
+                            "set ::itest::semantic::ws_request_seen"
+                        ) == "1":
+                            session.eval_tcl("set ::itest::semantic::ws_upgrade_seen 1")
+                elif session.eval_tcl("set ::itest::semantic::ws_enabled") == "0":
+                    entry["ignored"] = "WebSocket processing is disabled"
+                elif session.eval_tcl("set ::itest::semantic::ws_upgrade_seen") != "1":
+                    entry["ignored"] = "WebSocket handshake is incomplete"
+                else:
+                    side = "client" if direction == "client_to_server" else "server"
+                    frame_event = (
+                        "WS_CLIENT_FRAME" if side == "client" else "WS_SERVER_FRAME"
+                    )
+                    data_event = "WS_CLIENT_DATA" if side == "client" else "WS_SERVER_DATA"
+                    done_event = (
+                        "WS_CLIENT_FRAME_DONE" if side == "client" else "WS_SERVER_FRAME_DONE"
+                    )
+                    frame_state = self._packet_event_state(packet)
+                    session.eval_tcl("::itest::semantic::ws_prepare_frame")
+                    entry["events"].append(
+                        self._fire_event_on_worker(session, frame_event, frame_state)
+                    )
+                    frame_dropped = session.eval_tcl(
+                        "set ::itest::semantic::ws_frame_dropped"
+                    ) == "1"
+                    message_dropped = session.eval_tcl(
+                        "set ::itest::semantic::ws_message_dropped"
+                    ) == "1"
+                    if frame_dropped or message_dropped:
+                        entry["dropped"] = True
+                        entry["drop_reason"] = (
+                            "frame" if frame_dropped else "message"
+                        )
+                    else:
+                        collection = _split_tcl_list(
+                            session.eval_tcl("::itest::semantic::ws_collection_snapshot")
+                        )
+                        if len(collection) % 2:
+                            raise EmulatorInputError("invalid WebSocket collection state")
+                        collection_state = dict(zip(collection[::2], collection[1::2]))
+                        data_event_fired = False
+                        if collection_state.get("requested", "0") == "1":
+                            try:
+                                requested_length = int(collection_state.get("length", "0"))
+                            except (TypeError, ValueError):
+                                raise EmulatorInputError(
+                                    "invalid WebSocket collection length"
+                                ) from None
+                            payload_length = len(packet.get("payload", "").encode("utf-8"))
+                            if requested_length == 0 or payload_length >= requested_length:
+                                entry["events"].append(
+                                    self._fire_event_on_worker(session, data_event, frame_state)
+                                )
+                                data_event_fired = True
+                        if data_event_fired and session.eval_tcl(
+                            "set ::itest::semantic::ws_message_dropped"
+                        ) == "1":
+                            entry["dropped"] = True
+                            entry["drop_reason"] = "message"
+                    entry["events"].append(
+                        self._fire_event_on_worker(session, done_event, frame_state)
+                    )
+                    session.eval_tcl(
+                        f"::itest::semantic::ws_finish_frame {_tcl_quote(packet.get('fin', '1'))}"
+                    )
                 continue
 
             if protocol in {"tcp", "tls"}:

@@ -229,9 +229,13 @@ ask for a higher-fidelity test when needed.
 One-shot scenarios may use `packets` instead of `request`/`requests`. A trace
 is a bounded sequence of structured packet records. TCP SYN/FIN/RST, TCP
 payloads, TLS handshake/data records, HTTP
-request/response pairs, and DNS request/response messages are translated into
-the same Tcl events and state layers used by the HTTP API. Generic UDP payloads
-are reported as unmapped because there is no protocol-specific event to infer.
+request/response pairs, WebSocket upgrade/frame packets, and DNS
+request/response messages are translated into the same Tcl events and state
+layers used by the HTTP API. Generic UDP payloads are reported as unmapped
+because there is no protocol-specific event to infer. WebSocket support is a
+structured packet adapter: it models the HTTP upgrade and the eight WebSocket
+frame/data events, but it does not yet decode raw WebSocket frames from a wire
+capture.
 For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
 performs bounded sequence-aware TCP application reassembly across records and
@@ -298,6 +302,22 @@ Raw packet replay also preserves interim HTTP responses: a `100 Continue`
 frame fires `HTTP_RESPONSE_CONTINUE` without completing the pending request,
 so a later final response supplies the transaction result. Other non-final
 1xx frames remain interim in the packet trace.
+
+WebSocket packets use `protocol: "websocket"`. Upgrade requests require
+`type: "request"`, `direction: "client_to_server"`, and `headers`; upgrade
+responses use `type: "response"`, `direction: "server_to_client"`, and
+`response_headers`. Frame packets use `type: "frame"`, `frame_type` (`text`,
+`binary`, `continuation`, `close`, `ping`, or `pong`), optional `fin`, `masked`,
+and `mask`, plus an optional text `payload`. A valid request followed by a 101
+response enables `WS_REQUEST`/`WS_RESPONSE`; subsequent frames drive
+`WS_CLIENT_FRAME` or `WS_SERVER_FRAME`, optional collected data events, and the
+corresponding frame-done event. `WS::payload` offsets and lengths are modeled
+as wire-byte counts, including UTF-8 payloads. Incomplete upgrades, disabled
+WebSocket processing, and frames before a completed handshake are reported as
+ignored trace entries. `WS::frame drop` and `WS::message drop` suppress the
+corresponding collected data event and mark the packet as dropped. `WS::release`
+clears the collection window. `WS::disconnect` records its close code and
+reason as a decision; it does not yet synthesize a raw WebSocket close frame.
 
 For a classic PCAP file, keep the iRule scenario in a JSON file and replay it
 through the CLI:
