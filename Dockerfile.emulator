@@ -3,9 +3,16 @@
 # The tcl-lsp checkout is an external AGPL-3.0-or-later dependency.  It is
 # pinned for reproducible builds and remains present in the image as source.
 
+FROM ghcr.io/astral-sh/uv:0.12.6 AS uv
+
 FROM python:3.13-slim-bookworm
 
 ARG TCL_LSP_COMMIT=cad24955f16953c2443902efd83d9f7f95d9b648
+
+COPY --from=uv /uv /usr/local/bin/uv
+
+RUN uv venv --python /usr/local/bin/python /opt/venv \
+    && rm /usr/local/bin/uv
 
 RUN apt-get update \
     && apt-get install --no-install-recommends --yes ca-certificates git tcl tk \
@@ -21,6 +28,7 @@ COPY THIRD_PARTY.md /opt/testcl/THIRD_PARTY.md
 
 ENV TCL_LSP_ROOT=/opt/tcl-lsp \
     TCL_LSP_COMMIT=${TCL_LSP_COMMIT} \
+    PATH=/opt/venv/bin:${PATH} \
     PYTHONUNBUFFERED=1
 
 WORKDIR /work

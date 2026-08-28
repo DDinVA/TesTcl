@@ -120,7 +120,7 @@ put an authenticated proxy in front of any non-local deployment.
 ```sh
 SESSION=$(curl -sS -X POST -H 'Content-Type: application/json' \
   --data '{"irule":"when HTTP_REQUEST { pool api_pool }", "pools":{"api_pool":["10.0.0.1:80"]}}' \
-  http://127.0.0.1:8080/v1/sessions | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')
+  http://127.0.0.1:8080/v1/sessions | .venv/bin/python -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')
 curl -sS -X POST -H 'Content-Type: application/json' \
   --data '{"uri":"/health"}' \
   "http://127.0.0.1:8080/v1/sessions/${SESSION}/requests"
@@ -160,7 +160,7 @@ driven without a packet generator:
 ```sh
 DNS_SESSION=$(curl -sS -X POST -H 'Content-Type: application/json' \
   --data '{"profiles":["UDP","DNS"],"irule":"when DNS_REQUEST { log local0. dns-request }"}' \
-  http://127.0.0.1:8080/v1/sessions | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')
+  http://127.0.0.1:8080/v1/sessions | .venv/bin/python -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')
 curl -sS -X POST -H 'Content-Type: application/json' \
   --data '{"event":"DNS_REQUEST","state":{"dns":{"qname":"example.com","qtype":"A"}}}' \
   "http://127.0.0.1:8080/v1/sessions/${DNS_SESSION}/events"
@@ -322,7 +322,8 @@ structured DNS/TLS event injection, catalog conformance reporting, an MCP
 facade over the same JSON contract, and an adapter-owned semantic overlay for
 selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, table, TCP, and
 HTTP cookie commands, plus common global string, base64, data-group, and pool
-health and pool inventory functions, URI decoding, dotted-domain extraction, and CRC32.
+health and pool inventory functions, URI decoding, dotted-domain extraction, CRC32,
+and binary-compatible MD5/SHA1/SHA256/SHA384/SHA512 digests.
 The semantic overlay also models data-group `class`
 matching, lookup, enumeration, connection-scoped search iterators, and
 request/response cookie mutations. TCP payload access is directional for

@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
 import ipaddress
 import json
 import math
@@ -248,11 +249,16 @@ SEMANTIC_MOCK_COMMANDS = {
     "findstr",
     "getfield",
     "matchclass",
+    "md5",
     "members",
     "nodes",
     "peer",
     "clientside",
     "serverside",
+    "sha1",
+    "sha256",
+    "sha384",
+    "sha512",
     "substr",
     "URI::basename",
     "URI::compare",
@@ -738,10 +744,39 @@ def _install_runtime_shims(session: Any) -> None:
         }
         """
     )
+    _install_python_digest_helper(session)
     semantic_path = Path(__file__).with_name("semantic-mocks.tcl")
     if not semantic_path.exists():
         raise EmulatorInputError(f"missing adapter semantic mock file: {semantic_path}")
     session.eval_tcl(f"::tmm::_orig_source {_tcl_quote(str(semantic_path))}")
+
+
+def _install_python_digest_helper(session: Any) -> None:
+    """Expose stdlib hashlib to semantic Tcl commands as base64 bytes.
+
+    The pinned tcl-lsp bridge uses an in-process tkinter Tcl interpreter for
+    this emulator. Returning base64 avoids embedded-NUL issues while allowing
+    the Tcl wrapper to restore the raw digest bytes expected by iRules.
+    """
+    inner = getattr(session, "_session", None)
+    inprocess = getattr(inner, "_inprocess", None)
+    interpreter = getattr(inprocess, "_interp", None)
+    if interpreter is None or not hasattr(interpreter, "createcommand"):
+        raise EmulatorInputError("binary digest support requires the in-process Tcl backend")
+
+    algorithms = {"md5", "sha1", "sha256", "sha384", "sha512"}
+
+    def digest_callback(*args: str) -> str:
+        if len(args) != 2 or args[0] not in algorithms:
+            raise ValueError("digest helper requires a supported algorithm and one value")
+        raw_value = base64.b64decode(args[1].encode("ascii"), validate=True)
+        digest = hashlib.new(args[0], raw_value).digest()
+        return base64.b64encode(digest).decode("ascii")
+
+    interpreter.createcommand("::itest::semantic::py_digest", digest_callback)
+    # Keep a strong reference on the session for bridge implementations that
+    # do not retain Python callbacks independently of tkinter's command table.
+    setattr(session, "_testcl_digest_callback", digest_callback)
 
 
 def _normalise_pools(raw: Any) -> dict[str, list[str]]:

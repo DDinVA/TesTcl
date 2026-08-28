@@ -214,6 +214,9 @@ when HTTP_REQUEST {
     log local0. "active=[active_members -list api_pool] all=[members -list api_pool] nodes=[nodes -list api_pool]"
     log local0. "substr=[substr prefix:/api?x=1 7 ?]"
     log local0. "uri=[decode_uri /api%2Fv1] domain=[domain www.sub.example.co.uk 2] crc=[crc32 abc] signed=[crc32 0]"
+    log local0. "md5=[binary encode hex [md5 abc]] sha1=[binary encode hex [sha1 abc]] sha256=[binary encode hex [sha256 abc]]"
+    log local0. "sha384=[binary encode hex [sha384 abc]] sha512=[binary encode hex [sha512 abc]]"
+    log local0. "binary-md5=[binary encode hex [md5 [binary format H* 00616263ff]]]"
     log local0. "b64=[b64decode [b64encode hello]]"
 }
 """,
@@ -231,6 +234,9 @@ when HTTP_REQUEST {
         self.assertTrue(any("nodes=10.0.0.10 10.0.0.11" in entry for entry in logs))
         self.assertTrue(any("substr=/api" in entry for entry in logs))
         self.assertTrue(any("uri=/api/v1" in entry and "domain=co.uk" in entry and "crc=891568578" in entry and "signed=-186917087" in entry for entry in logs))
+        self.assertTrue(any("md5=900150983cd24fb0d6963f7d28e17f72" in entry and "sha1=a9993e364706816aba3e25717850c26c9cd0d89d" in entry and "sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" in entry for entry in logs))
+        self.assertTrue(any("sha384=cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7" in entry and "sha512=ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f" in entry for entry in logs))
+        self.assertTrue(any("binary-md5=9fd6d2a57559960e059c385892142915" in entry for entry in logs))
         self.assertTrue(any("b64=hello" in entry for entry in logs))
 
     def test_conformance_reports_catalog_and_packet_adapter_coverage(self) -> None:

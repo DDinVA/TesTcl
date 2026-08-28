@@ -2079,6 +2079,19 @@ namespace eval ::itest::semantic {
         return $value
     }
 
+    proc _digest_command {algorithm args} {
+        if {[llength $args] != 1} { error "$algorithm requires one value" }
+        set value [binary encode base64 [lindex $args 0]]
+        set encoded [::itest::semantic::py_digest $algorithm $value]
+        return [binary decode base64 $encoded]
+    }
+
+    proc md5_command {args} { return [_digest_command md5 {*}$args] }
+    proc sha1_command {args} { return [_digest_command sha1 {*}$args] }
+    proc sha256_command {args} { return [_digest_command sha256 {*}$args] }
+    proc sha384_command {args} { return [_digest_command sha384 {*}$args] }
+    proc sha512_command {args} { return [_digest_command sha512 {*}$args] }
+
     proc b64encode_command {args} {
         if {[llength $args] != 1} { error "b64encode requires one value" }
         return [binary encode base64 [lindex $args 0]]
@@ -2183,11 +2196,16 @@ foreach {original replacement} {
     findstr findstr_command
     getfield getfield_command
     matchclass matchclass_command
+    md5 md5_command
     members members_command
     nodes nodes_command
     peer peer_command
     clientside clientside_command
     serverside serverside_command
+    sha1 sha1_command
+    sha256 sha256_command
+    sha384 sha384_command
+    sha512 sha512_command
     substr substr_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::cmd_$original] ne ""} {
