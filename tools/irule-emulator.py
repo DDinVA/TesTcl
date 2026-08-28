@@ -236,6 +236,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "TCP::payload",
     "TCP::release",
     "TCP::respond",
+    "peer",
+    "clientside",
+    "serverside",
     "URI::basename",
     "URI::compare",
     "URI::decode",
@@ -1850,6 +1853,7 @@ class EmulatorSession:
         event_name: str,
         state: dict[str, dict[str, str]],
     ) -> dict[str, Any]:
+        session.eval_tcl("::itest::semantic::tcp_clear_event_state")
         required_profiles = self._event_profiles.get(event_name, set())
         attached_profiles = {profile.upper() for profile in self._profiles}
         if required_profiles and not required_profiles.intersection(attached_profiles):
@@ -1869,7 +1873,7 @@ class EmulatorSession:
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
         event_result = session.fire_event(event_name)
         fired_events = _split_tcl_list(session.eval_tcl("::itest::get_fired_events"))
-        return {
+        result = {
             "event": event_name,
             "fired": bool(event_result.fired),
             "reason": event_result.reason,
@@ -1890,6 +1894,10 @@ class EmulatorSession:
                 for entry in session.get_logs()
             ],
         }
+        emissions = self._tcp_response_emissions(session)
+        if emissions:
+            result["emissions"] = emissions
+        return result
 
     def fire_event(self, event: Any, state: Any = None) -> dict[str, Any]:
         event_name, normalised_state = _normalise_event(event, state)
@@ -1983,6 +1991,40 @@ class EmulatorSession:
         }
         events = client_events if packet["direction"] == "client_to_server" else server_events
         return events[packet["type"]]
+
+    @staticmethod
+    def _tcp_response_emissions(session: Any) -> list[dict[str, Any]]:
+        emissions: list[dict[str, Any]] = []
+        raw_responses = _split_tcl_list(
+            session.eval_tcl("::itest::semantic::tcp_response_snapshot")
+        )
+        for raw_response in raw_responses:
+            parts = _split_tcl_list(raw_response)
+            if len(parts) != 6:
+                raise EmulatorInputError("invalid TCP response state")
+            values = {
+                parts[index]: parts[index + 1]
+                for index in range(0, len(parts), 2)
+            }
+            side = values.get("side")
+            if side not in {"client", "server"}:
+                raise EmulatorInputError("invalid TCP response side")
+            try:
+                byte_length = int(values["byte_length"])
+            except (KeyError, TypeError, ValueError):
+                raise EmulatorInputError("invalid TCP response byte length") from None
+            emissions.append(
+                {
+                    "protocol": "tcp",
+                    "side": side,
+                    "direction": (
+                        "server_to_client" if side == "client" else "client_to_server"
+                    ),
+                    "payload": values.get("payload", ""),
+                    "byte_length": byte_length,
+                }
+            )
+        return emissions
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
@@ -2378,7 +2420,7 @@ class EmulatorSession:
                     collection = _split_tcl_list(
                         session.eval_tcl(f"::itest::semantic::tcp_collection_request {side}")
                     )
-                    if len(collection) != 4:
+                    if len(collection) != 6:
                         entry["ignored"] = "tcp payload not collected"
                     else:
                         try:
@@ -2391,13 +2433,17 @@ class EmulatorSession:
                         self._tcp_buffers[side] += packet["payload"]
                         skip = collection_values.get("skip", 0)
                         length = collection_values.get("length", 0)
+                        every_packet = collection_values.get("every_packet", 0) == 1
                         required = skip + length
                         if len(self._tcp_buffers[side]) < required:
                             entry["buffered"] = True
                             entry["buffered_bytes"] = len(self._tcp_buffers[side])
                         else:
                             event_start = skip
-                            event_end = event_start + length if length else None
+                            # The no-argument form has no fixed length: the
+                            # current packet buffer is the complete event
+                            # payload and is consumed before the next packet.
+                            event_end = event_start + length if length else len(self._tcp_buffers[side])
                             event_payload = self._tcp_buffers[side][event_start:event_end]
                             remainder = self._tcp_buffers[side][event_end:]
                             event_packet = dict(packet)
@@ -2408,10 +2454,10 @@ class EmulatorSession:
                             # F5 collection is consumed when the data event is
                             # released. Clear it before dispatch so a rule can
                             # explicitly re-arm TCP::collect from the event.
-                            session.eval_tcl(
-                                f"::itest::semantic::tcp_clear_collection {side}"
-                            )
-                            session.eval_tcl("::itest::semantic::tcp_clear_event_state")
+                            if not every_packet:
+                                session.eval_tcl(
+                                    f"::itest::semantic::tcp_clear_collection {side}"
+                                )
                             event_result = self._fire_event_on_worker(
                                 session, event_name, self._packet_event_state(event_packet)
                             )
@@ -2437,6 +2483,17 @@ class EmulatorSession:
                     self._close_packet_connection(session)
 
         finish_http()
+        emitted = []
+        for packet_entry in trace:
+            for event in packet_entry.get("events", []):
+                for emission in event.get("emissions", []):
+                    emitted.append(
+                        {
+                            **emission,
+                            "packet_index": packet_entry["index"],
+                            "event": event["event"],
+                        }
+                    )
         return {
             "status": "ok",
             "schema_version": 1,
@@ -2444,6 +2501,7 @@ class EmulatorSession:
             "tmos_version": TMOS_VERSION,
             "packets_processed": len(packets),
             "trace": trace,
+            "emitted": emitted,
             "results": http_results,
         }
 

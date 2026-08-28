@@ -705,6 +705,20 @@ when SERVER_DATA {
             any("server=server-data length=11" in entry for entry in server_event["logs"])
         )
         self.assertIn("tcp respond", str(server_event["decisions"]))
+        self.assertEqual(
+            result["emitted"],
+            [
+                {
+                    "protocol": "tcp",
+                    "side": "server",
+                    "direction": "client_to_server",
+                    "payload": "reply",
+                    "byte_length": 5,
+                    "packet_index": 2,
+                    "event": "SERVER_DATA",
+                }
+            ],
+        )
 
     def test_packet_trace_gates_tcp_data_until_collection_length_and_skip_are_met(self) -> None:
         result = self.adapter.run_scenario(
@@ -845,6 +859,94 @@ when CLIENT_DATA { log local0. "collected=[TCP::payload]" }
         data_event = second["trace"][0]["events"][0]
         self.assertEqual(data_event["event"], "CLIENT_DATA")
         self.assertTrue(any("collected=abc" in entry for entry in data_event["logs"]))
+
+    def test_tcp_collect_without_length_fires_for_each_received_packet(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED { TCP::collect }
+when CLIENT_DATA { log local0. "collected=[TCP::payload]" }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "flags": ["SYN"],
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "payload": "one",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "payload": "two",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        first_event = result["trace"][1]["events"][0]
+        second_event = result["trace"][2]["events"][0]
+        self.assertTrue(any("collected=one" in entry for entry in first_event["logs"]))
+        self.assertTrue(any("collected=two" in entry for entry in second_event["logs"]))
+
+    def test_peer_switches_tcp_context_and_emits_to_the_opposite_side(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    TCP::collect
+    peer { TCP::collect 4 }
+}
+when CLIENT_DATA { peer { TCP::respond peer-reply } }
+when SERVER_DATA { log local0. "server=[TCP::payload]" }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "flags": ["SYN"],
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "payload": "client-data",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "payload": "pong",
+                        "source": {"address": "192.0.2.10", "port": 443},
+                        "destination": {"address": "10.0.0.5", "port": 51000},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        client_event = result["trace"][1]["events"][0]
+        server_event = result["trace"][2]["events"][1]
+        self.assertEqual(client_event["event"], "CLIENT_DATA")
+        self.assertEqual(server_event["event"], "SERVER_DATA")
+        self.assertTrue(any("server=pong" in entry for entry in server_event["logs"]))
+        self.assertEqual(result["emitted"][0]["side"], "server")
+        self.assertEqual(result["emitted"][0]["direction"], "client_to_server")
+        self.assertEqual(result["emitted"][0]["payload"], "peer-reply")
 
     def test_raw_ipv4_tcp_packets_decode_into_http_transaction(self) -> None:
         request_payload = b"GET /health HTTP/1.1\r\nHost: api.example.com\r\n\r\n"

@@ -545,12 +545,56 @@ namespace eval ::itest::semantic {
     }
 
     proc _tcp_side {} {
+        if {[info exists ::itest::semantic::peer_side]} {
+            return $::itest::semantic::peer_side
+        }
         if {$::itest::current_event in {
-            SERVER_DATA SERVER_CONNECTED SERVER_CLOSED SERVER_INIT SERVERSSL_DATA
+            SERVER_DATA SERVER_CONNECTED SERVER_CLOSED SERVER_INIT
+            SERVERSSL_DATA SERVERSSL_HANDSHAKE SERVERSSL_SERVERCERT
+            SERVERSSL_SERVERHELLO HTTP_RESPONSE HTTP_RESPONSE_DATA
+            HTTP_RESPONSE_RELEASE
         }} {
             return server
         }
         return client
+    }
+
+    proc _run_on_side {side script} {
+        if {$side ni {client server}} {
+            error "connection side must be client or server"
+        }
+        set had_previous [info exists ::itest::semantic::peer_side]
+        if {$had_previous} {
+            set previous $::itest::semantic::peer_side
+        }
+        set ::itest::semantic::peer_side $side
+        set rc [catch {uplevel 2 $script} result options]
+        if {$had_previous} {
+            set ::itest::semantic::peer_side $previous
+        } else {
+            unset ::itest::semantic::peer_side
+        }
+        if {$rc} {
+            return -options $options $result
+        }
+        return $result
+    }
+
+    proc peer_command {args} {
+        if {[llength $args] != 1} { error "peer requires a script" }
+        set current [_tcp_side]
+        set target [expr {$current eq "client" ? "server" : "client"}]
+        return [_run_on_side $target [lindex $args 0]]
+    }
+
+    proc clientside_command {args} {
+        if {[llength $args] != 1} { error "clientside requires a script" }
+        return [_run_on_side client [lindex $args 0]]
+    }
+
+    proc serverside_command {args} {
+        if {[llength $args] != 1} { error "serverside requires a script" }
+        return [_run_on_side server [lindex $args 0]]
     }
 
     proc _tcp_payload_var {} {
@@ -567,15 +611,22 @@ namespace eval ::itest::semantic {
         }
         set length 0
         set skip 0
+        set every_packet 1
         if {[llength $args] > 0} { set length [lindex $args 0] }
         if {[llength $args] > 1} { set skip [lindex $args 1] }
-        foreach {label value} [list length $length skip $skip] {
-            if {![string is integer -strict $value] || $value < 0} {
-                error "TCP::collect $label must be a non-negative integer"
+        if {[llength $args] > 0} {
+            set every_packet 0
+            if {![string is integer -strict $length] || $length <= 0} {
+                error "TCP::collect length must be a positive integer"
             }
         }
-        set ::state::vars::connection_vars([_tcp_collect_key]) [list length $length skip $skip]
-        ::itest::log_decision tcp collect [list [_tcp_side] $length $skip]
+        if {![string is integer -strict $skip] || $skip < 0} {
+            error "TCP::collect skip must be a non-negative integer"
+        }
+        set ::state::vars::connection_vars([_tcp_collect_key]) \
+            [list length $length skip $skip every_packet $every_packet]
+        ::itest::log_decision tcp collect \
+            [list [_tcp_side] $length $skip $every_packet]
         return ""
     }
 
@@ -599,6 +650,7 @@ namespace eval ::itest::semantic {
 
     proc tcp_clear_event_state {} {
         unset -nocomplain ::state::vars::connection_vars(__testcl_tcp_released)
+        unset -nocomplain ::state::vars::connection_vars(__testcl_tcp_responses)
     }
 
     proc tcp_event_released {} {
@@ -606,6 +658,13 @@ namespace eval ::itest::semantic {
             return 1
         }
         return 0
+    }
+
+    proc tcp_response_snapshot {} {
+        if {[info exists ::state::vars::connection_vars(__testcl_tcp_responses)]} {
+            return $::state::vars::connection_vars(__testcl_tcp_responses)
+        }
+        return ""
     }
 
     proc tcp_payload_command {args} {
@@ -672,7 +731,8 @@ namespace eval ::itest::semantic {
     proc tcp_respond_command {args} {
         if {[llength $args] != 1} { error "TCP::respond requires a payload" }
         set response [lindex $args 0]
-        set ::state::vars::connection_vars(__testcl_tcp_response) $response
+        lappend ::state::vars::connection_vars(__testcl_tcp_responses) \
+            [list side [_tcp_side] payload $response byte_length [string bytelength $response]]
         ::itest::log_decision tcp respond [list [_tcp_side] $response]
         return ""
     }
@@ -1799,6 +1859,18 @@ foreach {original replacement} {
         } $replacement]
     }
 }
+foreach {original replacement} {
+    peer peer_command
+    clientside clientside_command
+    serverside serverside_command
+} {
+    if {[::tmm::_orig_info commands ::itest::cmd::cmd_$original] ne ""} {
+        ::tmm::_orig_rename ::itest::cmd::cmd_$original ::itest::cmd::_testcl_${original}_orig
+        proc ::itest::cmd::cmd_$original {args} [format {
+            return [eval [linsert $args 0 ::itest::semantic::%s]]
+        } $replacement]
+    }
+}
 
 # Override only the catalogued generated stubs implemented above. The mapping
 # stays in the upstream dispatcher, so Tcl command resolution and profiling
@@ -1817,6 +1889,9 @@ foreach {name proc_name} {
     TCP::payload ::itest::cmd::tcp_payload
     TCP::release ::itest::cmd::tcp_release
     TCP::respond ::itest::cmd::tcp_respond
+    peer ::itest::cmd::cmd_peer
+    clientside ::itest::cmd::cmd_clientside
+    serverside ::itest::cmd::cmd_serverside
     IP::addr ::itest::semantic::ip_addr
     IP::version ::itest::semantic::ip_version
     PROFILE::clientssl ::itest::semantic::profile_clientssl

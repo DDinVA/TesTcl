@@ -256,7 +256,10 @@ pcapng and IPv4 fragment handling remain outside this slice.
 ```
 
 The response includes a per-packet `trace`, translated event results, and
-HTTP transaction results. Persistent sessions accept the same packet array at
+HTTP transaction results. TCP responses emitted by `TCP::respond` are exposed
+both on the event as `emissions` and in the top-level `emitted` array, with
+their modeled egress direction and byte length. Persistent sessions accept the
+same packet array at
 `POST /v1/sessions/{session_id}/packets`, or through the MCP
 `irule_session_trace` tool.
 
@@ -311,14 +314,16 @@ The current slice supports HTTP/TCP request simulation, structured packet
 traces, classic PCAP replay, sequence-aware persistent connection sessions,
 structured DNS/TLS event injection, catalog conformance reporting, an MCP
 facade over the same JSON contract, and an adapter-owned semantic overlay for
-selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, table, and
+selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, table, TCP, and
 HTTP cookie commands. The semantic overlay also models data-group `class`
 matching, lookup, enumeration, connection-scoped search iterators, and
 request/response cookie mutations. TCP payload access is directional for
 client/server data events and supports byte-length, replacement, collection,
 offset, release, and response bookkeeping. `TCP::collect` gates data events
-until the requested length and skip window is available, consumes one
-collection window, and preserves partial buffers across calls on a persistent
-session. The
+until the requested length and skip window is available; the no-argument form
+continues to fire for each received packet, while explicit lengths consume one
+collection window. Partial buffers are preserved across calls on a persistent
+session. `peer`, `clientside`, and `serverside` execute nested command blocks
+under the corresponding connection context. The
 emulator profile remains fixed at
 `tmos-17.5`.
