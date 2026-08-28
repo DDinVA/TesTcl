@@ -311,8 +311,9 @@ The current slice supports HTTP/TCP request simulation, structured packet
 traces, classic PCAP replay, sequence-aware persistent connection sessions,
 structured DNS/TLS event injection, catalog conformance reporting, an MCP
 facade over the same JSON contract, and an adapter-owned semantic overlay for
-selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, and table commands. The
-semantic overlay also models data-group `class` matching, lookup, enumeration,
-and connection-scoped search iterators. The
+selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, table, and
+HTTP cookie commands. The semantic overlay also models data-group `class`
+matching, lookup, enumeration, connection-scoped search iterators, and
+request/response cookie mutations. The
 emulator profile remains fixed at
 `tmos-17.5`.

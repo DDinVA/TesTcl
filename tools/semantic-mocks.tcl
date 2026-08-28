@@ -544,6 +544,164 @@ namespace eval ::itest::semantic {
         return up
     }
 
+    proc _cookie_in_response {} {
+        return [expr {$::itest::current_event in {
+            HTTP_RESPONSE HTTP_RESPONSE_DATA HTTP_RESPONSE_RELEASE
+        }}]
+    }
+
+    proc _cookie_header_values {} {
+        if {[_cookie_in_response]} {
+            return [::state::http::response::header values "set-cookie"]
+        }
+        set header [::state::http::request::header get "cookie"]
+        if {$header eq ""} { return [list] }
+        return [list $header]
+    }
+
+    proc _cookie_records {} {
+        set records [dict create]
+        foreach header [_cookie_header_values] {
+            set pair [string trim [lindex [split $header ";"] 0]]
+            set equals [string first "=" $pair]
+            if {$equals < 1} { continue }
+            set name [string trim [string range $pair 0 [expr {$equals - 1}]]]
+            set value [string trim [string range $pair [expr {$equals + 1}] end]]
+            dict set records $name $value
+        }
+        return $records
+    }
+
+    proc _cookie_write_request {records} {
+        set pairs [list]
+        foreach name [dict keys $records] {
+            lappend pairs "$name=[dict get $records $name]"
+        }
+        if {[llength $pairs] == 0} {
+            ::state::http::request::header remove "cookie"
+        } else {
+            ::state::http::request::header set "cookie" [join $pairs "; "]
+        }
+    }
+
+    proc _cookie_response_insert {name value attributes} {
+        set header "$name=$value"
+        foreach {attribute attribute_value} $attributes {
+            if {$attribute_value eq ""} {
+                append header "; $attribute"
+            } else {
+                append header "; $attribute=$attribute_value"
+            }
+        }
+        ::state::http::response::header insert "set-cookie" $header
+    }
+
+    proc _cookie_attribute_pairs {args} {
+        set attributes [list]
+        set index 0
+        while {$index < [llength $args]} {
+            set attribute [string tolower [lindex $args $index]]
+            incr index
+            set value ""
+            if {$index < [llength $args] &&
+                [string tolower [lindex $args $index]] ni {
+                    path domain secure httponly maxage expires version comment commenturl ports
+                }} {
+                set value [lindex $args $index]
+                incr index
+            }
+            switch -exact -- $attribute {
+                path { lappend attributes Path $value }
+                domain { lappend attributes Domain $value }
+                secure { lappend attributes Secure "" }
+                httponly { lappend attributes HttpOnly "" }
+                maxage { lappend attributes Max-Age $value }
+                expires { lappend attributes Expires $value }
+                version { lappend attributes Version $value }
+                comment { lappend attributes Comment $value }
+                commenturl { lappend attributes CommentURL $value }
+                ports { lappend attributes Port $value }
+                default { error "unsupported HTTP::cookie attribute \"$attribute\"" }
+            }
+        }
+        return $attributes
+    }
+
+    proc cookie_command {args} {
+        if {[llength $args] == 0} {
+            error "HTTP::cookie requires a subcommand"
+        }
+        set subcmd [string tolower [lindex $args 0]]
+        set rest [lrange $args 1 end]
+        set records [_cookie_records]
+        switch -exact -- $subcmd {
+            value {
+                if {[llength $rest] < 1 || [llength $rest] > 2} {
+                    error "HTTP::cookie value requires a name and optional value"
+                }
+                set name [lindex $rest 0]
+                if {[llength $rest] == 1} {
+                    if {[dict exists $records $name]} { return [dict get $records $name] }
+                    return ""
+                }
+                set value [lindex $rest 1]
+                if {[_cookie_in_response]} {
+                    _cookie_response_insert $name $value [list]
+                } else {
+                    dict set records $name $value
+                    _cookie_write_request $records
+                }
+                ::itest::log_decision http cookie_value_set [list $name $value]
+                return ""
+            }
+            names { return [dict keys $records] }
+            count { return [dict size $records] }
+            exists {
+                if {[llength $rest] != 1} { error "HTTP::cookie exists requires a name" }
+                return [dict exists $records [lindex $rest 0]]
+            }
+            insert {
+                set name_index [lsearch -exact $rest name]
+                set value_index [lsearch -exact $rest value]
+                if {$name_index < 0 || $value_index < 0 ||
+                    $name_index + 1 >= [llength $rest] ||
+                    $value_index + 1 >= [llength $rest]} {
+                    error "HTTP::cookie insert requires name and value pairs"
+                }
+                set name [lindex $rest [expr {$name_index + 1}]]
+                set value [lindex $rest [expr {$value_index + 1}]]
+                set attributes [list]
+                if {$value_index + 2 < [llength $rest]} {
+                    set attributes [_cookie_attribute_pairs \
+                        {*}[lrange $rest [expr {$value_index + 2}] end]]
+                }
+                if {[_cookie_in_response]} {
+                    _cookie_response_insert $name $value $attributes
+                } else {
+                    dict set records $name $value
+                    _cookie_write_request $records
+                }
+                ::itest::log_decision http cookie_insert [list $name $value]
+                return ""
+            }
+            remove {
+                if {[llength $rest] != 1} { error "HTTP::cookie remove requires a name" }
+                set name [lindex $rest 0]
+                if {[_cookie_in_response]} {
+                    _cookie_response_insert $name "" [list Max-Age 0]
+                } elseif {[dict exists $records $name]} {
+                    dict unset records $name
+                    _cookie_write_request $records
+                }
+                ::itest::log_decision http cookie_remove $name
+                return ""
+            }
+            default {
+                return [eval [linsert $args 0 ::itest::cmd::_testcl_http_cookie_orig]]
+            }
+        }
+    }
+
     proc _class_parse_options {args} {
         set options [dict create \
             all 0 \
@@ -1489,6 +1647,12 @@ if {[::tmm::_orig_info commands ::itest::cmd::cmd_class] ne ""} {
         return [eval [linsert $args 0 ::itest::semantic::class_command]]
     }
 }
+if {[::tmm::_orig_info commands ::itest::cmd::http_cookie] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::http_cookie ::itest::cmd::_testcl_http_cookie_orig
+    proc ::itest::cmd::http_cookie {args} {
+        return [eval [linsert $args 0 ::itest::semantic::cookie_command]]
+    }
+}
 
 # Override only the catalogued generated stubs implemented above. The mapping
 # stays in the upstream dispatcher, so Tcl command resolution and profiling
@@ -1501,6 +1665,7 @@ foreach {name proc_name} {
     HTTP::reject_reason ::itest::semantic::http_reject_reason
     HTTP::response ::itest::semantic::http_response
     HTTP::username ::itest::semantic::http_username
+    HTTP::cookie ::itest::cmd::http_cookie
     IP::addr ::itest::semantic::ip_addr
     IP::version ::itest::semantic::ip_version
     PROFILE::clientssl ::itest::semantic::profile_clientssl

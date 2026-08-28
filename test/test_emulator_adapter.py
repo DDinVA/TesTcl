@@ -493,6 +493,45 @@ when HTTP_REQUEST {
             {"semantic-mock"},
         )
 
+    def test_semantic_overlay_models_request_and_response_cookie_mutations(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    HTTP::header insert X-Session [HTTP::cookie value session]
+    HTTP::cookie insert name request_seen value yes
+    HTTP::cookie remove obsolete
+}
+when HTTP_RESPONSE {
+    HTTP::cookie insert name issued value abc path /
+    HTTP::cookie remove expired
+}
+""",
+                "request": {
+                    "uri": "/cookie",
+                    "headers": {"Cookie": "session=abc; obsolete=gone"},
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        request_result = result["results"][0]
+        self.assertEqual(request_result["request"]["headers"]["x-session"], "abc")
+        self.assertEqual(
+            request_result["request"]["headers"]["cookie"],
+            "session=abc; request_seen=yes",
+        )
+        self.assertEqual(
+            request_result["response"]["headers"]["set-cookie"],
+            ["issued=abc; Path=/", "expired=; Max-Age=0"],
+        )
+        self.assertEqual(
+            {entry["runtime_status"] for entry in result["fidelity"]["commands"]
+             if entry["name"] == "HTTP::cookie"},
+            {"semantic-mock"},
+        )
+
     def test_semantic_overlay_handles_zero_stats_and_malformed_uri_octets(self) -> None:
         result = self.adapter.run_scenario(
             {

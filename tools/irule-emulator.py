@@ -205,6 +205,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTTP::password",
     "HTTP::reject_reason",
     "HTTP::response",
+    "HTTP::cookie",
     "HTTP::username",
     "IP::addr",
     "IP::version",
