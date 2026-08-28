@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "timestamp": "2026-08-28T20:03:29Z",
+  "timestamp": "2026-08-28T20:22:46Z",
   "context": "default",
   "phase": null,
   "phase_name": null,
@@ -27,29 +27,44 @@
       "name": "Build stateful HTTP, TCP, TLS, DNS, load-balancing, persistence, cookie, table, and packet replay semantics",
       "status": "done",
       "commit": "e068c7c"
+    },
+    {
+      "id": 4,
+      "name": "Expand high-value HTTP semantics within the pinned 17.5 scope",
+      "status": "done",
+      "commit": "43fa454",
+      "progress": "Added HTTP::redirect/HTTP::has_responded commitment, HTTP release semantics, HTTP_REQUEST_RELEASE/HTTP_RESPONSE_RELEASE context restrictions, exact HTTP stream framing, and raw HTTP_RESPONSE_CONTINUE handling."
     }
   ],
   "remaining_tasks": [
     {
-      "id": 4,
-      "name": "Expand the semantic 17.5 command queue beyond the current high-value overlay",
-      "status": "in_progress",
-      "progress": "The next selected slice is HTTP::redirect and HTTP::has_responded, followed by richer HTTP transaction and event sequencing."
-    },
-    {
       "id": 5,
-      "name": "Increase event and protocol adapter coverage toward a lightweight vLab-like emulator",
-      "status": "not_started"
+      "name": "Reconcile and expand event/protocol adapters toward a lightweight vLab-like emulator",
+      "status": "in_progress",
+      "progress": "The runtime fires HTTP_RESPONSE_CONTINUE from raw 100 Continue responses and fires HTTP_REQUEST_RELEASE/HTTP_RESPONSE_RELEASE in the HTTP transaction lifecycle. The static PACKET_EVENT_ADAPTERS report still advertises 18 events and should be reconciled with these newer paths before adding broader protocol families."
     },
     {
       "id": 6,
       "name": "Package, document, and verify the portable container/API/MCP workflow for users",
-      "status": "in_progress"
+      "status": "in_progress",
+      "progress": "The image is pinned to Python 3.13.15, uv 0.12.6, Tcl-LSP commit cad24955f16953c2443902efd83d9f7f95d9b648, and the loopback-bound API/MCP workflow is documented."
+    },
+    {
+      "id": 7,
+      "name": "Expand semantic 17.5 command coverage beyond the current high-value overlay",
+      "status": "not_started",
+      "progress": "Use conformance and real rule corpus usage to prioritize the next commands; generated stubs remain recognition-only."
     }
   ],
   "blockers": [],
   "async_jobs": [],
-  "human_actions_pending": [],
+  "human_actions_pending": [
+    {
+      "action": "Decide when to create the requested fork and whether/when to publish a branch or pull request.",
+      "context": "All repository work remains local; no GitHub fork, push, or PR has been performed.",
+      "blocking": false
+    }
+  ],
   "decisions": [
     {
       "decision": "Scope the emulator to TMOS 17.5 only.",
@@ -73,7 +88,7 @@
     },
     {
       "decision": "Treat generated command stubs as recognition coverage, not behavioral emulation.",
-      "rationale": "The conformance report must distinguish 1,292 generated stubs and 55 missing handlers from the 91 semantic and 61 handwritten implementations.",
+      "rationale": "The conformance report distinguishes 1,292 generated stubs and 55 missing handlers from 96 semantic and 56 handwritten implementations.",
       "phase": null
     },
     {
@@ -83,6 +98,6 @@
     }
   ],
   "uncommitted_files": [],
-  "next_action": "Resume by checking git status, then implement and test HTTP::redirect plus HTTP::has_responded in the semantic overlay and adapter. Use the repo .venv Python 3.13 environment for host checks and rebuild/run testcl-irule-emulator:17.5 for integration checks.",
-  "context_notes": "The latest committed slice e068c7c added exact HTTP Content-Length framing, chunked bodies with trailers, partial-body buffering, no-body response handling for 1xx/204/304, and ordered coalesced-message emission. The worktree was clean when paused. The current container conformance snapshot reports 1,499 commands, 176 events, and 18 packet adapters. The project is materially functional but not a true vLab: 1,292 catalog commands remain generated stubs, 55 have no runtime handler, 158 events are not packet-adapted, and many protocol families still need semantic state. Do not claim broad completion. No fork or push has been performed."
+  "next_action": "Resume by checking the static PACKET_EVENT_ADAPTERS map and conformance test, then reconcile HTTP_RESPONSE_CONTINUE plus HTTP_REQUEST_RELEASE/HTTP_RESPONSE_RELEASE with the reported packet-adapter coverage. Keep the scope pinned to TMOS 17.5 and verify through uv/Python 3.13, legacy Tcl tests, and the container.",
+  "context_notes": "The project is materially functional but is not a true vLab. The current conformance snapshot is 1,499 catalog commands: 56 handwritten mocks, 96 semantic mocks, 1,292 generated stubs, and 55 commands without runtime handlers; 176 catalogued events; 18 currently reported packet adapters. The HTTP transaction path now models request/response data events, release events, interim 100 Continue responses, redirect commitment, exact Content-Length/chunked framing, partial bodies, no-body statuses, and coalesced messages. A documentation statement in docs/compatibility.md still says out-of-order/retransmission handling is outside the boundary even though the packet reassembler now handles bounded gaps, overlap, and retransmission de-duplication; correct that in a future documentation pass."
 }
