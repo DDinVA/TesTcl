@@ -1551,6 +1551,135 @@ when CLIENT_DATA { TCP::close; TCP::close }
             [event["event"] for event in result["trace"][2]["events"]],
         )
 
+    def test_http_stream_decoder_honors_chunked_and_content_length_framing(self) -> None:
+        request_one = b"GET /chunked HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+        request_two = b"GET /length HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+        response_one = (
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+            b"4\r\npong\r\n0\r\nX-Trace: one\r\n\r\n"
+        )
+        response_two = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        response_two_split = len(response_two) // 2
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { pool api_pool }",
+                "pools": {"api_pool": ["10.0.0.10:80"]},
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x02, sequence=1000
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                            request_one, sequence=1001
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "192.0.2.10", "10.0.0.5", 443, 51000, 0x18,
+                            response_one, sequence=5000
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                            request_two, sequence=1001 + len(request_one)
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "192.0.2.10", "10.0.0.5", 443, 51000, 0x18,
+                            response_two[:response_two_split], sequence=5000 + len(response_one)
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "192.0.2.10", "10.0.0.5", 443, 51000, 0x18,
+                            response_two[response_two_split:],
+                            sequence=5000 + len(response_one) + response_two_split
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual(result["results"][0]["response"]["body"], "pong")
+        self.assertEqual(result["results"][1]["response"]["body"], "ok")
+        self.assertTrue(result["trace"][4]["buffered"])
+
+    def test_http_stream_decoder_does_not_wait_for_no_body_status(self) -> None:
+        decoded = self.adapter._decode_http_payload(
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 999\r\n\r\n",
+            "server_to_client",
+        )
+        self.assertIsNotNone(decoded)
+        assert decoded is not None
+        message, consumed = decoded
+        self.assertEqual(message["status"], 204)
+        self.assertEqual(message["response_body"], "")
+        self.assertEqual(consumed, len(b"HTTP/1.1 204 No Content\r\nContent-Length: 999\r\n\r\n"))
+
+    def test_http_stream_decoder_emits_coalesced_messages(self) -> None:
+        request = b"GET /health HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+        responses = (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+            b"HTTP/1.1 204 No Content\r\n\r\n"
+        )
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { pool api_pool }",
+                "pools": {"api_pool": ["10.0.0.10:80"]},
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x02, sequence=1000
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                            request, sequence=1001
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "192.0.2.10", "10.0.0.5", 443, 51000, 0x18,
+                            responses, sequence=5000
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["response"]["body"], "ok")
+        self.assertEqual([entry["protocol"] for entry in result["trace"]], ["tcp", "http", "http", "http"])
+        self.assertEqual(result["trace"][3]["status"], 204)
+        self.assertEqual(result["trace"][3]["ignored"], "HTTP response has no pending HTTP request")
+
     def test_raw_ipv4_udp_dns_packet_decodes_query_state(self) -> None:
         dns_payload = (
             struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)

@@ -106,7 +106,11 @@ trace. `direction` defaults to `client_to_server`; `auto` requires both
 endpoint addresses and skips packets that do not match either direction. The
 capture is bounded to 16 MiB, 1,000 records, and 2 MiB per packet. pcapng and
 IPv4 fragments are not supported yet. TCP sequence numbers are honored for
-bounded out-of-order reassembly and retransmission de-duplication.
+bounded out-of-order reassembly and retransmission de-duplication. HTTP
+request and response payloads honor `Content-Length` and chunked transfer
+framing, including partial bodies split across TCP packets and response
+trailers. Coalesced messages are emitted in order, while an incomplete next
+message remains buffered in the connection stream.
 
 For connection-aware testing, use the persistent session endpoints:
 `POST /v1/sessions` creates a session from an iRule, profiles, pools, and data

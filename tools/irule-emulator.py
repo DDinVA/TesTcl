@@ -1191,17 +1191,75 @@ def _decode_wire_text(payload: bytes) -> str:
     return payload.decode("utf-8", errors="replace").replace("\x00", "\ufffd")
 
 
-def _decode_http_payload(payload: bytes, direction: str) -> dict[str, Any] | None:
-    text = payload.decode("iso-8859-1", errors="replace").replace("\x00", "\ufffd")
-    separator = text.find("\r\n\r\n")
+def _http_header_value(headers: dict[str, str], name: str) -> str:
+    wanted = name.lower()
+    for header_name, value in headers.items():
+        if header_name.lower() == wanted:
+            return value
+    return ""
+
+
+def _decode_chunked_body(payload: bytes, body_start: int) -> tuple[bytes, int] | None:
+    """Decode one bounded HTTP/1.x chunked body and return bytes consumed."""
+    position = body_start
+    body = bytearray()
+    while True:
+        line_end = payload.find(b"\r\n", position)
+        line_width = 2
+        if line_end < 0:
+            line_end = payload.find(b"\n", position)
+            line_width = 1
+        if line_end < 0:
+            return None
+        size_text = payload[position:line_end].split(b";", 1)[0].strip()
+        if not size_text:
+            return None
+        try:
+            chunk_size = int(size_text, 16)
+        except ValueError:
+            return None
+        if chunk_size < 0:
+            return None
+        position = line_end + line_width
+        if chunk_size == 0:
+            # The zero chunk is followed by optional trailer fields and a
+            # final empty line. Do not expose trailers as response payload.
+            while True:
+                trailer_end = payload.find(b"\r\n", position)
+                trailer_width = 2
+                if trailer_end < 0:
+                    trailer_end = payload.find(b"\n", position)
+                    trailer_width = 1
+                if trailer_end < 0:
+                    return None
+                if trailer_end == position:
+                    return bytes(body), trailer_end + trailer_width
+                if b":" not in payload[position:trailer_end]:
+                    return None
+                position = trailer_end + trailer_width
+        if len(payload) < position + chunk_size:
+            return None
+        body.extend(payload[position : position + chunk_size])
+        position += chunk_size
+        if payload[position : position + 2] == b"\r\n":
+            position += 2
+        elif payload[position : position + 1] == b"\n":
+            position += 1
+        else:
+            return None
+
+
+def _decode_http_payload(
+    payload: bytes, direction: str
+) -> tuple[dict[str, Any], int] | None:
+    separator = payload.find(b"\r\n\r\n")
     separator_length = 4
     if separator < 0:
-        separator = text.find("\n\n")
+        separator = payload.find(b"\n\n")
         separator_length = 2
     if separator < 0:
         return None
-    header_text = text[:separator]
-    body = text[separator + separator_length :]
+    header_text = payload[:separator].decode("iso-8859-1", errors="replace")
     lines = header_text.splitlines()
     if not lines:
         return None
@@ -1211,6 +1269,40 @@ def _decode_http_payload(payload: bytes, direction: str) -> dict[str, Any] | Non
             continue
         name, value = line.split(":", 1)
         headers[name.strip()] = value.strip()
+    body_start = separator + separator_length
+    response_status: int | None = None
+    if direction == "server_to_client":
+        response_match = re.match(r"^HTTP/\S+\s+(\d{3})(?:\s+.*)?$", lines[0])
+        if response_match is None:
+            return None
+        response_status = int(response_match.group(1))
+        if (response_status < 200 and response_status != 101) or response_status in {204, 304}:
+            return {
+                "protocol": "http",
+                "direction": direction,
+                "status": response_status,
+                "response_headers": headers,
+                "response_body": "",
+            }, body_start
+    body_bytes = payload[body_start:]
+    consumed = len(payload)
+    transfer_encoding = _http_header_value(headers, "transfer-encoding").lower()
+    content_length = _http_header_value(headers, "content-length")
+    if "chunked" in [token.strip() for token in transfer_encoding.split(",")]:
+        decoded_body = _decode_chunked_body(payload, body_start)
+        if decoded_body is None:
+            return None
+        body_bytes, consumed = decoded_body
+    elif content_length:
+        if not content_length.isdigit():
+            return None
+        body_length = int(content_length, 10)
+        consumed = body_start + body_length
+        if len(payload) < consumed:
+            return None
+        body_bytes = payload[body_start:consumed]
+
+    body = body_bytes.decode("iso-8859-1", errors="replace").replace("\x00", "\ufffd")
     if direction == "client_to_server":
         match = re.match(r"^([A-Za-z]+)\s+(\S+)\s+HTTP/", lines[0])
         if match is None:
@@ -1222,17 +1314,15 @@ def _decode_http_payload(payload: bytes, direction: str) -> dict[str, Any] | Non
             "uri": match.group(2),
             "headers": headers,
             "body": body,
-        }
-    match = re.match(r"^HTTP/\S+\s+(\d{3})(?:\s+.*)?$", lines[0])
-    if match is None:
-        return None
+        }, consumed
+    assert response_status is not None
     return {
         "protocol": "http",
         "direction": direction,
-        "status": int(match.group(1)),
+        "status": response_status,
         "response_headers": headers,
         "response_body": body,
-    }
+    }, consumed
 
 
 def _decode_tls_payload(payload: bytes, direction: str) -> dict[str, Any] | None:
@@ -2503,14 +2593,28 @@ class EmulatorSession:
                 merged.pop("_wire_payload", None)
                 return merged, len(combined)
         elif looks_like_http:
-            decoded = _decode_http_payload(combined, packet["direction"])
-            if decoded is not None:
-                stream.buffer = b""
-                stream.segments.clear()
+            decoded_packets: list[dict[str, Any]] = []
+            remaining = combined
+            consumed_total = 0
+            while self._looks_like_http_prefix(remaining):
+                decoded_result = _decode_http_payload(remaining, packet["direction"])
+                if decoded_result is None:
+                    break
+                decoded, consumed = decoded_result
+                if consumed <= 0 or consumed > len(remaining):
+                    raise EmulatorInputError("HTTP decoder returned an invalid frame length")
                 merged = dict(packet)
                 merged.update(decoded)
                 merged.pop("_wire_payload", None)
-                return merged, len(combined)
+                decoded_packets.append(merged)
+                remaining = remaining[consumed:]
+                consumed_total += consumed
+            if decoded_packets:
+                stream.buffer = remaining
+                first = decoded_packets[0]
+                if len(decoded_packets) > 1:
+                    first["_coalesced_packets"] = decoded_packets[1:]
+                return first, consumed_total
         if looks_like_tls or looks_like_http or has_gap:
             if stream.buffered_bytes > STREAM_MAX_BYTES:
                 self._packet_streams.pop(key, None)
@@ -2544,9 +2648,19 @@ class EmulatorSession:
             http_results.append(result)
             pending_http = None
 
-        for index, packet in enumerate(packets):
-            original_packet = packet
+        packet_queue = list(enumerate(packets))
+        queue_index = 0
+        while queue_index < len(packet_queue):
+            index, original_packet = packet_queue[queue_index]
+            queue_index += 1
+            packet = original_packet
             packet, buffered_bytes = self._reassemble_packet(packet, index)
+            if packet is not None:
+                coalesced_packets = packet.pop("_coalesced_packets", [])
+                if coalesced_packets:
+                    packet_queue[queue_index:queue_index] = [
+                        (index, coalesced) for coalesced in coalesced_packets
+                    ]
             if packet is None:
                 buffered_entry: dict[str, Any] = {
                     "index": index,
