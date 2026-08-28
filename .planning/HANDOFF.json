@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "timestamp": "2026-08-28T20:22:46Z",
+  "timestamp": "2026-08-28T20:44:36Z",
   "context": "default",
   "phase": null,
   "phase_name": null,
@@ -41,7 +41,7 @@
       "id": 5,
       "name": "Reconcile and expand event/protocol adapters toward a lightweight vLab-like emulator",
       "status": "in_progress",
-      "progress": "The runtime fires HTTP_RESPONSE_CONTINUE from raw 100 Continue responses and fires HTTP_REQUEST_RELEASE/HTTP_RESPONSE_RELEASE in the HTTP transaction lifecycle. The static PACKET_EVENT_ADAPTERS report still advertises 18 events and should be reconciled with these newer paths before adding broader protocol families."
+      "progress": "Reconciled HTTP_RESPONSE_CONTINUE plus HTTP_REQUEST_RELEASE/HTTP_RESPONSE_RELEASE into the static PACKET_EVENT_ADAPTERS map and regression coverage. The next protocol slice is a structured WebSocket handshake/frame adapter; its implementation is currently uncommitted and needs tests, documentation, byte-accurate payload handling, and a final review."
     },
     {
       "id": 6,
@@ -97,7 +97,16 @@
       "phase": null
     }
   ],
-  "uncommitted_files": [],
-  "next_action": "Resume by checking the static PACKET_EVENT_ADAPTERS map and conformance test, then reconcile HTTP_RESPONSE_CONTINUE plus HTTP_REQUEST_RELEASE/HTTP_RESPONSE_RELEASE with the reported packet-adapter coverage. Keep the scope pinned to TMOS 17.5 and verify through uv/Python 3.13, legacy Tcl tests, and the container.",
-  "context_notes": "The project is materially functional but is not a true vLab. The current conformance snapshot is 1,499 catalog commands: 56 handwritten mocks, 96 semantic mocks, 1,292 generated stubs, and 55 commands without runtime handlers; 176 catalogued events; 18 currently reported packet adapters. The HTTP transaction path now models request/response data events, release events, interim 100 Continue responses, redirect commitment, exact Content-Length/chunked framing, partial bodies, no-body statuses, and coalesced messages. A documentation statement in docs/compatibility.md still says out-of-order/retransmission handling is outside the boundary even though the packet reassembler now handles bounded gaps, overlap, and retransmission de-duplication; correct that in a future documentation pass."
+  "uncommitted_files": [
+    {
+      "path": "tools/irule-emulator.py",
+      "changes": "Adds structured WebSocket packet normalization, upgrade gating, connection/event state, and WS event dispatch."
+    },
+    {
+      "path": "tools/semantic-mocks.tcl",
+      "changes": "Adds adapter-owned WebSocket command/event semantics for WS::request/response/enabled/collect/payload/release/frame/message/masking/disconnect."
+    }
+  ],
+  "next_action": "Resume by fixing WS::payload to use byte-accurate Tcl-LSP payload helpers, then add the eight WebSocket packet-event adapter map entries, regression tests, and emulator documentation. Run the full uv/Python 3.13, Tcl, container, and self-review gates before committing the WebSocket slice.",
+  "context_notes": "The project is materially functional but is not a true vLab. The latest committed conformance snapshot is 1,499 catalog commands: 56 handwritten mocks, 96 semantic mocks, 1,292 generated stubs, and 55 commands without runtime handlers; 176 catalogued events; 21 reported packet adapters after the HTTP reconciliation. The committed HTTP transaction path models request/response data events, release events, interim 100 Continue responses, redirect commitment, exact Content-Length/chunked framing, partial bodies, no-body statuses, and coalesced messages. The uncommitted WebSocket slice has passed a focused structured smoke scenario, but it is not complete: WS::payload offsets/replacements are character-based rather than byte-accurate, frame/message drops are not yet reflected in packet results, WS::response valid needs stricter upgrade validation, and no raw WebSocket wire decoder or emitted close-frame model exists. Classic PCAP remains supported; WebSocket currently uses structured packets only. No fork, push, or PR has been performed."
 }
