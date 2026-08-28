@@ -196,7 +196,47 @@ def _mock_proc_name(command: str) -> str:
     return "cmd_{}".format(command.replace("-", "_").replace(".", "_"))
 
 
+SEMANTIC_MOCK_COMMANDS = {
+    "HSL::open",
+    "HSL::send",
+    "HTTP::passthrough_reason",
+    "HTTP::password",
+    "HTTP::reject_reason",
+    "HTTP::response",
+    "HTTP::username",
+    "IP::addr",
+    "IP::version",
+    "LB::down",
+    "LB::up",
+    "PROFILE::clientssl",
+    "PROFILE::exists",
+    "PROFILE::fastL4",
+    "PROFILE::fasthttp",
+    "PROFILE::http",
+    "PROFILE::serverssl",
+    "PROFILE::tcp",
+    "PROFILE::udp",
+    "STATS::get",
+    "STATS::incr",
+    "STATS::set",
+    "STATS::setmax",
+    "STATS::setmin",
+    "URI::basename",
+    "URI::decode",
+    "URI::encode",
+    "URI::encode_component",
+    "URI::host",
+    "URI::path",
+    "URI::port",
+    "URI::protocol",
+    "URI::query",
+}
+SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
+
+
 def _capability_status(proc_name: str, handwritten: set[str], generated: set[str]) -> str:
+    if proc_name in SEMANTIC_MOCK_PROC_NAMES:
+        return "semantic-mock"
     if proc_name in handwritten:
         return "handwritten-mock"
     if proc_name in generated:
@@ -226,7 +266,12 @@ def _build_capabilities(root: Path, offset: int, limit: int) -> dict[str, Any]:
     generated = _proc_names(tcl_dir / "_mock_stubs.tcl")
 
     commands: list[dict[str, Any]] = []
-    status_counts = {"handwritten-mock": 0, "generated-stub": 0, "no-runtime-handler": 0}
+    status_counts = {
+        "handwritten-mock": 0,
+        "semantic-mock": 0,
+        "generated-stub": 0,
+        "no-runtime-handler": 0,
+    }
     for name in command_names:
         spec = REGISTRY.get_any(name)
         if spec is None:  # pragma: no cover - registry contract guard
@@ -326,7 +371,12 @@ def _build_conformance(root: Path) -> dict[str, Any]:
     except ImportError as exc:  # pragma: no cover - depends on external checkout
         raise EmulatorInputError(f"could not load tcl-lsp event registry: {exc}") from exc
 
-    command_counts = {"handwritten-mock": 0, "generated-stub": 0, "no-runtime-handler": 0}
+    command_counts = {
+        "handwritten-mock": 0,
+        "semantic-mock": 0,
+        "generated-stub": 0,
+        "no-runtime-handler": 0,
+    }
     for status in status_map.values():
         command_counts[status] = command_counts.get(status, 0) + 1
     event_names = sorted(NAMESPACE_REGISTRY.all_event_names())
@@ -345,6 +395,7 @@ def _build_conformance(root: Path) -> dict[str, Any]:
             "runtime_status_counts": command_counts,
             "runtime_status_meaning": {
                 "handwritten-mock": "implemented behavioral mock in the loaded Tcl framework",
+                "semantic-mock": "implemented behavioral mock in the TesTcl adapter overlay",
                 "generated-stub": "recognized command with generated placeholder behavior",
                 "no-runtime-handler": "catalogued command without a matching runtime proc",
             },
@@ -569,6 +620,25 @@ def _header_dict(raw: Any) -> dict[str, Any]:
     return headers
 
 
+def _semantic_snapshot(session: Any) -> dict[str, Any]:
+    stats_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::stats_snapshot"))
+    stats = {
+        name: value
+        for name, value in zip(stats_parts[::2], stats_parts[1::2])
+    }
+    hsl_messages: list[dict[str, str]] = []
+    for raw_message in _split_tcl_list(session.eval_tcl("::itest::semantic::hsl_snapshot")):
+        parts = _split_tcl_list(raw_message)
+        if len(parts) >= 2:
+            hsl_messages.append({"handle": parts[0], "message": parts[1]})
+    lb_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::lb_snapshot"))
+    lb_status = {
+        target: status
+        for target, status in zip(lb_parts[::2], lb_parts[1::2])
+    }
+    return {"stats": stats, "hsl_messages": hsl_messages, "lb_status": lb_status}
+
+
 def _install_runtime_shims(session: Any) -> None:
     """Correct small upstream mock gaps at the adapter boundary.
 
@@ -618,6 +688,10 @@ def _install_runtime_shims(session: Any) -> None:
         }
         """
     )
+    semantic_path = Path(__file__).with_name("semantic-mocks.tcl")
+    if not semantic_path.exists():
+        raise EmulatorInputError(f"missing adapter semantic mock file: {semantic_path}")
+    session.eval_tcl(f"::tmm::_orig_source {_tcl_quote(str(semantic_path))}")
 
 
 def _normalise_pools(raw: Any) -> dict[str, list[str]]:
@@ -819,6 +893,8 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
 PACKET_MAX_COUNT = 1000
 STREAM_MAX_BYTES = 2 * 1024 * 1024
 MAX_PACKET_STREAMS = 128
+TCP_SEQUENCE_MODULUS = 2**32
+TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
 PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "wire"}
@@ -835,6 +911,8 @@ PACKET_COMMON_FIELDS = {
     "dst_addr",
     "dst_port",
     "timestamp",
+    "seq",
+    "ack",
 }
 PACKET_PROTOCOL_FIELDS = {
     "tcp": set(),
@@ -903,6 +981,19 @@ PACKET_EVENT_ADAPTERS = {
     "DNS_REQUEST": "DNS request packet",
     "DNS_RESPONSE": "DNS response packet",
 }
+
+
+class _TcpStream:
+    """Bounded per-direction TCP state using unwrapped sequence coordinates."""
+
+    def __init__(self) -> None:
+        self.expected_seq: int | None = None
+        self.segments: dict[int, bytes] = {}
+        self.buffer = b""
+
+    @property
+    def buffered_bytes(self) -> int:
+        return len(self.buffer) + sum(len(segment) for segment in self.segments.values())
 
 
 def _packet_direction(value: Any) -> str:
@@ -1097,7 +1188,7 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
     fragment_field = int.from_bytes(raw[6:8], "big")
     if fragment_field & 0x3FFF:
         raise EmulatorInputError(
-            f"wire packet {index} is fragmented; reassembly is not supported yet"
+            f"wire packet {index} is fragmented; IPv4 fragment reassembly is not supported"
         )
     source_address = str(ipaddress.ip_address(raw[12:16]))
     destination_address = str(ipaddress.ip_address(raw[16:20]))
@@ -1120,6 +1211,8 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
             "protocol": "tcp",
             "direction": direction,
             "flags": flag_names,
+            "seq": int.from_bytes(payload[4:8], "big"),
+            "ack": int.from_bytes(payload[8:12], "big"),
             "source": {"address": source_address, "port": int.from_bytes(payload[0:2], "big")},
             "destination": {"address": destination_address, "port": int.from_bytes(payload[2:4], "big")},
         }
@@ -1429,6 +1522,15 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             normalised["flags"] = [flag.upper() for flag in flags]
         if "payload" in packet:
             normalised["payload"] = _require_string(packet["payload"], f"packet {index} payload")
+        for field in ("seq", "ack"):
+            if field not in packet:
+                continue
+            value = packet[field]
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < TCP_SEQUENCE_MODULUS:
+                raise EmulatorInputError(
+                    f"packet {index} {field} must be an integer from 0 to {TCP_SEQUENCE_MODULUS - 1}"
+                )
+            normalised[field] = value
 
         for field in PACKET_PROTOCOL_FIELDS[protocol]:
             if field not in packet:
@@ -1542,6 +1644,7 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
     fired_events = _split_tcl_list(session.eval_tcl("::itest::get_fired_events"))
     decisions = session.get_decisions()
     logs = session.get_logs()
+    semantic = _semantic_snapshot(session)
     lb_state = session.get_state("lb")
     connection_state = session.get_state("connection")
     response_status = int(response_state.get("status", "200"))
@@ -1556,6 +1659,7 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
         "events_fired": fired_events,
         "decisions": [entry if not isinstance(entry, tuple) else list(entry) for entry in decisions],
         "logs": [entry if not isinstance(entry, tuple) else list(entry) for entry in logs],
+        "semantic": semantic,
         "request": {
             "method": request_state.get("method", ""),
             "uri": request_state.get("uri", ""),
@@ -1590,6 +1694,7 @@ class EmulatorSession:
         allow_irule_file: bool,
         allow_requests: bool,
         allow_packets: bool = False,
+        backend: str = "inprocess",
     ) -> None:
         source, profiles, pools, datagroups = _normalise_scenario_config(
             scenario,
@@ -1599,6 +1704,7 @@ class EmulatorSession:
             require_http=False,
         )
         self._root = root
+        self._backend = backend
         self._source = source
         self._profiles = profiles
         self._pools = pools
@@ -1618,7 +1724,7 @@ class EmulatorSession:
         self._registered_events: list[str] = []
         self._request_count = 0
         self._connection_open = False
-        self._packet_streams: dict[tuple[Any, ...], bytes] = {}
+        self._packet_streams: dict[tuple[Any, ...], _TcpStream] = {}
         self._thread.start()
         self._started.wait()
         if self._startup_error is not None:
@@ -1641,7 +1747,7 @@ class EmulatorSession:
             backend_session = session_class(
                 profiles=self._profiles,
                 tmos_version=TMOS_VERSION,
-                backend="inprocess",
+                backend=self._backend,
             )
             with backend_session as session:
                 _install_runtime_shims(session)
@@ -1899,10 +2005,94 @@ class EmulatorSession:
             destination.get("port", 0),
         )
 
+    @staticmethod
+    def _unwrap_tcp_sequence(sequence: int, reference: int) -> int:
+        """Map a 32-bit wire sequence number near an unwrapped reference."""
+        delta = (sequence - (reference % TCP_SEQUENCE_MODULUS)) % TCP_SEQUENCE_MODULUS
+        if delta >= TCP_SEQUENCE_HALF_RANGE:
+            delta -= TCP_SEQUENCE_MODULUS
+        return reference + delta
+
+    def _tcp_stream(self, key: tuple[Any, ...]) -> _TcpStream:
+        stream = self._packet_streams.get(key)
+        if stream is not None:
+            return stream
+        if len(self._packet_streams) >= MAX_PACKET_STREAMS:
+            raise EmulatorInputError(
+                f"packet stream table exceeds the {MAX_PACKET_STREAMS} stream limit"
+            )
+        stream = _TcpStream()
+        self._packet_streams[key] = stream
+        return stream
+
+    @staticmethod
+    def _tcp_add_segment(stream: _TcpStream, start: int, payload: bytes) -> int:
+        """Add only previously unseen bytes, preserving the first copy received."""
+        if not payload:
+            return 0
+        end = start + len(payload)
+        uncovered: list[tuple[int, int]] = []
+        cursor = start
+        for existing_start, existing_payload in sorted(stream.segments.items()):
+            existing_end = existing_start + len(existing_payload)
+            if existing_end <= cursor:
+                continue
+            if existing_start >= end:
+                break
+            if existing_start > cursor:
+                uncovered.append((cursor, min(existing_start, end)))
+            cursor = max(cursor, existing_end)
+            if cursor >= end:
+                break
+        if cursor < end:
+            uncovered.append((cursor, end))
+        added = 0
+        for piece_start, piece_end in uncovered:
+            offset = piece_start - start
+            piece = payload[offset : offset + piece_end - piece_start]
+            stream.segments[piece_start] = piece
+            added += len(piece)
+        return added
+
+    @staticmethod
+    def _tcp_drain(stream: _TcpStream) -> bytes:
+        """Move every segment contiguous with expected_seq into the message buffer."""
+        if stream.expected_seq is None:
+            return stream.buffer
+        while stream.segments:
+            candidate: tuple[int, bytes] | None = None
+            for start, payload in sorted(stream.segments.items()):
+                if start <= stream.expected_seq < start + len(payload):
+                    candidate = (start, payload)
+                    break
+                if start > stream.expected_seq:
+                    break
+            if candidate is None:
+                break
+            start, payload = candidate
+            del stream.segments[start]
+            offset = stream.expected_seq - start
+            stream.buffer += payload[offset:]
+            stream.expected_seq += len(payload) - offset
+        return stream.buffer
+
+    @staticmethod
+    def _looks_like_http_prefix(payload: bytes) -> bool:
+        if payload.startswith(b"HTTP/"):
+            return True
+        methods = (b"GET", b"POST", b"PUT", b"PATCH", b"DELETE", b"HEAD", b"OPTIONS", b"CONNECT", b"TRACE")
+        return any(method.startswith(payload) or payload.startswith(method + b" ") for method in methods)
+
     def _reassemble_packet(
         self, packet: dict[str, Any], packet_index: int
     ) -> tuple[dict[str, Any] | None, int]:
-        """Join application payloads until a complete HTTP/TLS message is visible."""
+        """Join application payloads until a complete HTTP/TLS message is visible.
+
+        Raw TCP packets carry sequence numbers, so gaps are held, overlaps are
+        de-duplicated, and retransmissions do not fire application events twice.
+        Structured packets without sequence numbers retain the original append-
+        in-arrival-order behavior.
+        """
         if packet["protocol"] == "udp" and packet.get("_wire_payload"):
             decoded_dns = _decode_dns_payload(
                 packet["_wire_payload"], packet["direction"], packet_index
@@ -1918,18 +2108,59 @@ class EmulatorSession:
         raw_payload = packet.get("_wire_payload")
         if raw_payload is None and "payload" in packet:
             raw_payload = packet["payload"].encode("utf-8")
+        sequence = packet.get("seq")
+        flags = set(packet.get("flags", []))
+        key = self._packet_stream_key(packet)
+        if sequence is not None and "SYN" in flags:
+            stream = self._tcp_stream(key)
+            stream.expected_seq = sequence + 1
+            stream.segments.clear()
+            stream.buffer = b""
         if not raw_payload:
             return packet, 0
-        key = self._packet_stream_key(packet)
-        combined = self._packet_streams.get(key, b"") + raw_payload
+
+        stream = self._tcp_stream(key)
+        if sequence is None:
+            stream.buffer += raw_payload
+            combined = stream.buffer
+            has_gap = False
+        else:
+            if stream.expected_seq is None:
+                stream.expected_seq = sequence
+            payload_sequence = sequence + 1 if "SYN" in flags else sequence
+            absolute_sequence = self._unwrap_tcp_sequence(
+                payload_sequence, stream.expected_seq
+            )
+            if absolute_sequence < stream.expected_seq:
+                trim = stream.expected_seq - absolute_sequence
+                if trim >= len(raw_payload):
+                    retransmission = dict(packet)
+                    retransmission["_retransmission"] = True
+                    return retransmission, 0
+                raw_payload = raw_payload[trim:]
+                absolute_sequence = stream.expected_seq
+            added = self._tcp_add_segment(stream, absolute_sequence, raw_payload)
+            if stream.buffered_bytes > STREAM_MAX_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"packet stream exceeds the {STREAM_MAX_BYTES // (1024 * 1024)} MiB limit"
+                )
+            if added == 0:
+                retransmission = dict(packet)
+                retransmission["_retransmission"] = True
+                return retransmission, 0
+            combined = self._tcp_drain(stream)
+            has_gap = bool(stream.segments)
+
+        if not combined and has_gap:
+            return None, stream.buffered_bytes
         looks_like_tls = bool(combined) and combined[0] in {20, 21, 22, 23}
-        looks_like_http = bool(
-            re.match(rb"^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|CONNECT|TRACE)\s", combined)
-        ) or combined.startswith(b"HTTP/")
+        looks_like_http = self._looks_like_http_prefix(combined)
         if looks_like_tls:
             decoded = _decode_tls_payload(combined, packet["direction"])
             if decoded is not None:
-                self._packet_streams.pop(key, None)
+                stream.buffer = b""
+                stream.segments.clear()
                 merged = dict(packet)
                 merged.update(decoded)
                 merged.pop("_wire_payload", None)
@@ -1937,24 +2168,21 @@ class EmulatorSession:
         elif looks_like_http:
             decoded = _decode_http_payload(combined, packet["direction"])
             if decoded is not None:
-                self._packet_streams.pop(key, None)
+                stream.buffer = b""
+                stream.segments.clear()
                 merged = dict(packet)
                 merged.update(decoded)
                 merged.pop("_wire_payload", None)
                 return merged, len(combined)
-        if looks_like_tls or looks_like_http:
-            if len(combined) > STREAM_MAX_BYTES:
+        if looks_like_tls or looks_like_http or has_gap:
+            if stream.buffered_bytes > STREAM_MAX_BYTES:
                 self._packet_streams.pop(key, None)
                 raise EmulatorInputError(
                     f"packet stream exceeds the {STREAM_MAX_BYTES // (1024 * 1024)} MiB limit"
                 )
-            if key not in self._packet_streams and len(self._packet_streams) >= MAX_PACKET_STREAMS:
-                raise EmulatorInputError(
-                    f"packet stream table exceeds the {MAX_PACKET_STREAMS} stream limit"
-                )
-            self._packet_streams[key] = combined
-            return None, len(combined)
-        self._packet_streams.pop(key, None)
+            return None, stream.buffered_bytes
+        stream.buffer = b""
+        stream.segments.clear()
         return packet, len(combined)
 
     def _run_packet_trace_on_worker(
@@ -2019,10 +2247,17 @@ class EmulatorSession:
                 "qname",
                 "qtype",
                 "timestamp",
+                "seq",
+                "ack",
             ):
                 if field in packet:
                     entry[field] = packet[field]
             trace.append(entry)
+            retransmission = bool(packet.pop("_retransmission", False))
+            if retransmission:
+                entry["ignored"] = "tcp retransmission"
+                packet.pop("payload", None)
+                packet.pop("_wire_payload", None)
             protocol = packet["protocol"]
             direction = packet["direction"]
             if protocol == "http":
@@ -2170,12 +2405,14 @@ class SessionManager:
         *,
         max_sessions: int = DEFAULT_MAX_SESSIONS,
         idle_timeout: float = DEFAULT_SESSION_IDLE_SECONDS,
+        backend: str = "inprocess",
     ) -> None:
         if max_sessions < 1:
             raise ValueError("max_sessions must be positive")
         if idle_timeout <= 0:
             raise ValueError("idle_timeout must be positive")
         self._root = root
+        self._backend = backend
         self._max_sessions = max_sessions
         self._idle_timeout = idle_timeout
         self._sessions: dict[str, _SessionRecord] = {}
@@ -2202,6 +2439,7 @@ class SessionManager:
                 scenario,
                 allow_irule_file=False,
                 allow_requests=False,
+                backend=self._backend,
             )
             session_id = "ses_" + secrets.token_urlsafe(18)
             while session_id in self._sessions:
@@ -2733,7 +2971,8 @@ def run_scenario(
 ) -> dict[str, Any]:
     if backend != "inprocess":
         raise EmulatorInputError(
-            "the tmos-17.5 adapter currently requires the in-process Tcl backend"
+            "the tmos-17.5 adapter requires the in-process Tcl backend; "
+            "use the repo uv environment with Tcl/Tk support"
         )
     root = _find_tcl_lsp_root(tcl_lsp_root)
     if isinstance(scenario, dict) and "packets" in scenario:
@@ -2752,6 +2991,7 @@ def run_scenario(
             allow_irule_file=True,
             allow_requests=False,
             allow_packets=True,
+            backend=backend,
         )
         try:
             packet_result = session.run_packet_trace(scenario["packets"])
@@ -2779,6 +3019,7 @@ def run_scenario(
         scenario,
         allow_irule_file=True,
         allow_requests=True,
+        backend=backend,
     )
     try:
         results = [session.run_request(request) for request in requests]
@@ -3200,7 +3441,7 @@ def main(argv: list[str] | None = None) -> int:
         "--backend",
         choices=("inprocess",),
         default="inprocess",
-        help="tcl-lsp bridge backend (inprocess is currently required)",
+        help="tcl-lsp bridge backend (in-process Tcl/Tk is required)",
     )
     args = parser.parse_args(argv)
 

@@ -3,18 +3,19 @@
 # The tcl-lsp checkout is an external AGPL-3.0-or-later dependency.  It is
 # pinned for reproducible builds and remains present in the image as source.
 
-FROM debian:bookworm-slim
+FROM python:3.13-slim-bookworm
 
 ARG TCL_LSP_COMMIT=cad24955f16953c2443902efd83d9f7f95d9b648
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes ca-certificates git python3 python3-tk tcl \
+    && apt-get install --no-install-recommends --yes ca-certificates git tcl tk \
     && git clone https://github.com/bitwisecook/tcl-lsp.git /opt/tcl-lsp \
     && git -C /opt/tcl-lsp checkout --detach "${TCL_LSP_COMMIT}" \
     && apt-get purge --auto-remove --yes git git-man \
     && rm -rf /var/lib/apt/lists/* /opt/tcl-lsp/.git
 
 COPY tools/irule-emulator.py /opt/testcl/tools/irule-emulator.py
+COPY tools/semantic-mocks.tcl /opt/testcl/tools/semantic-mocks.tcl
 COPY LICENSE /opt/testcl/LICENSE
 COPY THIRD_PARTY.md /opt/testcl/THIRD_PARTY.md
 
@@ -24,4 +25,4 @@ ENV TCL_LSP_ROOT=/opt/tcl-lsp \
 
 WORKDIR /work
 EXPOSE 8080
-ENTRYPOINT ["python3", "/opt/testcl/tools/irule-emulator.py"]
+ENTRYPOINT ["python", "/opt/testcl/tools/irule-emulator.py"]

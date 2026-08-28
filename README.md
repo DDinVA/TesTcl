@@ -17,6 +17,8 @@ are used when configuring [F5 BIG-IP](http://www.f5.com/products/big-ip/) device
 For a containerized behavioral emulator backed by the reusable iRule framework
 in `tcl-lsp`, see [docs/emulator.md](docs/emulator.md). The emulator is pinned
 to BIG-IP/TMOS 17.5 and is separate from the original Tcl unit-test API.
+Local emulator commands use the repo-local uv environment; initialize it with
+`uv venv --python 3.13 .venv`.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:

@@ -27,10 +27,19 @@ FIXTURE_PATH = ROOT / "test" / "fixtures" / "emulator_http.json"
 
 def _raw_ipv4_tcp_hex(
     source: str, destination: str, source_port: int, destination_port: int,
-    flags: int, payload: bytes = b"",
+    flags: int, payload: bytes = b"", *, sequence: int = 0, acknowledgment: int = 0,
 ) -> str:
     tcp = struct.pack(
-        "!HHLLBBHHH", source_port, destination_port, 0, 0, 5 << 4, flags, 65535, 0, 0
+        "!HHLLBBHHH",
+        source_port,
+        destination_port,
+        sequence,
+        acknowledgment,
+        5 << 4,
+        flags,
+        65535,
+        0,
+        0,
     )
     total_length = 20 + len(tcp) + len(payload)
     ip = struct.pack(
@@ -164,15 +173,131 @@ class EmulatorAdapterTests(unittest.TestCase):
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         report = self.adapter._analyze_rule_capabilities(
             root,
-            "when HTTP_REQUEST { HSL::open -proto TCP }\n"
+            "when HTTP_REQUEST { ASM::status }\n"
             "when CLIENTSSL_HANDSHAKE { log local0. tls }",
             ["TCP", "HTTP"],
         )
         usage = {entry["name"]: entry for entry in report["commands"]}
-        self.assertEqual(usage["HSL::open"]["runtime_status"], "generated-stub")
+        self.assertEqual(usage["ASM::status"]["runtime_status"], "generated-stub")
         warning_codes = {warning["code"] for warning in report["warnings"]}
         self.assertIn("runtime-fidelity", warning_codes)
         self.assertIn("profile-gated-event", warning_codes)
+
+    def test_semantic_overlay_implements_profiles_auth_uri_stats_and_hsl(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["10.0.0.10:80"]},
+                "irule": (
+                    "when HTTP_REQUEST { "
+                    "if {[PROFILE::exists HTTP]} { pool api_pool }\n"
+                    "set user [HTTP::username]\n"
+                    "set encoded [URI::encode_component [HTTP::uri]]\n"
+                    "if {[IP::addr [IP::client_addr] equals 10.0.0.1]} { "
+                    "HTTP::header insert X-Address matched }\n"
+                    "STATS::incr app requests\n"
+                    "STATS::setmax app peak 5\n"
+                    "STATS::setmin app floor 5\n"
+                    "set h [HSL::open -proto TCP]\n"
+                    "HSL::send $h \"$user|$encoded\""
+                    "}"
+                ),
+                "requests": [
+                    {
+                        "uri": "/a b?x=1",
+                        "headers": {"Authorization": "Basic YWxpY2U6c2VjcmV0"},
+                    },
+                    {"uri": "/second"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        first, second = result["results"]
+        self.assertEqual(first["pool"], "api_pool")
+        self.assertEqual(first["request"]["headers"]["x-address"], "matched")
+        self.assertEqual(first["semantic"]["stats"], {
+            "app|requests": "1",
+            "app|peak": "5",
+            "app|floor": "5",
+        })
+        self.assertEqual(second["semantic"]["stats"]["app|requests"], "2")
+        self.assertEqual(second["semantic"]["stats"]["app|peak"], "5")
+        self.assertEqual(second["semantic"]["stats"]["app|floor"], "5")
+        self.assertEqual(first["semantic"]["hsl_messages"], [
+            {"handle": "hsl1", "message": "alice|%2Fa%20b%3Fx%3D1"}
+        ])
+        self.assertEqual(first["semantic"]["lb_status"], {})
+        self.assertEqual(len(second["semantic"]["hsl_messages"]), 2)
+        self.assertEqual(
+            {entry["name"]: entry["runtime_status"] for entry in result["fidelity"]["commands"]
+             if entry["name"].startswith(("HSL::", "HTTP::username", "LB::", "PROFILE::", "STATS::", "URI::", "IP::addr"))},
+            {
+                "HSL::open": "semantic-mock",
+                "HSL::send": "semantic-mock",
+                "HTTP::username": "semantic-mock",
+                "PROFILE::exists": "semantic-mock",
+                "STATS::incr": "semantic-mock",
+                "STATS::setmax": "semantic-mock",
+                "STATS::setmin": "semantic-mock",
+                "URI::encode_component": "semantic-mock",
+                "IP::addr": "semantic-mock",
+            },
+        )
+
+    def test_semantic_overlay_tracks_lb_node_and_pool_state(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["192.0.2.10:443"]},
+                "irule": """
+when HTTP_REQUEST {
+    pool api_pool
+    LB::down node 192.0.2.10 443
+    LB::up pool api_pool
+}
+""",
+                "request": {"uri": "/health"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            result["results"][0]["semantic"]["lb_status"],
+            {"192.0.2.10:443": "down", "pool:api_pool": "up"},
+        )
+        self.assertEqual(
+            {
+                entry["name"]: entry["runtime_status"]
+                for entry in result["fidelity"]["commands"]
+                if entry["name"].startswith("LB::")
+            },
+            {
+                "LB::down": "semantic-mock",
+                "LB::up": "semantic-mock",
+            },
+        )
+
+    def test_semantic_overlay_handles_zero_stats_and_malformed_uri_octets(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    set decoded [URI::decode %FF]
+    STATS::set app floor 0
+    STATS::setmin app floor 5
+    STATS::set app ceiling 0
+    STATS::setmax app ceiling -1
+}
+""",
+                "request": {"uri": "/health"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            result["results"][0]["semantic"]["stats"],
+            {"app|floor": "0", "app|ceiling": "0"},
+        )
 
     def test_packet_trace_drives_transport_tls_and_http_events(self) -> None:
         scenario = {
@@ -259,7 +384,7 @@ class EmulatorAdapterTests(unittest.TestCase):
                     "protocol": "wire",
                     "direction": "client_to_server",
                     "raw_hex": _raw_ipv4_tcp_hex(
-                        "10.0.0.5", "192.0.2.10", 51000, 443, 0x02
+                        "10.0.0.5", "192.0.2.10", 51000, 443, 0x02, sequence=1000
                     ),
                 },
                 {
@@ -268,6 +393,7 @@ class EmulatorAdapterTests(unittest.TestCase):
                     "raw_hex": _raw_ipv4_tcp_hex(
                         "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
                         tls_payload[: len(tls_payload) // 2],
+                        sequence=1001,
                     ),
                 },
                 {
@@ -276,6 +402,7 @@ class EmulatorAdapterTests(unittest.TestCase):
                     "raw_hex": _raw_ipv4_tcp_hex(
                         "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
                         tls_payload[len(tls_payload) // 2 :],
+                        sequence=1001 + len(tls_payload) // 2,
                     ),
                 },
                 {
@@ -284,6 +411,7 @@ class EmulatorAdapterTests(unittest.TestCase):
                     "raw_hex": _raw_ipv4_tcp_hex(
                         "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
                         request_payload[:20],
+                        sequence=1001 + len(tls_payload),
                     ),
                 },
                 {
@@ -292,13 +420,15 @@ class EmulatorAdapterTests(unittest.TestCase):
                     "raw_hex": _raw_ipv4_tcp_hex(
                         "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
                         request_payload[20:],
+                        sequence=1001 + len(tls_payload) + 20,
                     ),
                 },
                 {
                     "protocol": "wire",
                     "direction": "server_to_client",
                     "raw_hex": _raw_ipv4_tcp_hex(
-                        "192.0.2.10", "10.0.0.5", 443, 51000, 0x18, response_payload
+                        "192.0.2.10", "10.0.0.5", 443, 51000, 0x18, response_payload,
+                        sequence=5000,
                     ),
                 },
             ],
@@ -351,6 +481,106 @@ class EmulatorAdapterTests(unittest.TestCase):
         self.assertEqual(event["state"]["dns"]["qname"], "example.com")
         self.assertEqual(event["state"]["dns"]["qtype"], "A")
 
+    def test_sequence_aware_reassembly_handles_out_of_order_and_retransmission(self) -> None:
+        request_payload = b"GET /ordered HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+        first = request_payload[:20]
+        second = request_payload[20:]
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["10.0.0.10:80"]},
+                "irule": "when HTTP_REQUEST { pool api_pool }",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x02, sequence=1000
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                            second, sequence=1021
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                            first, sequence=1001
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                            second, sequence=1021
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "192.0.2.10", "10.0.0.5", 443, 51000, 0x18,
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", sequence=5000
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertTrue(result["trace"][1]["buffered"])
+        self.assertEqual(result["trace"][2]["protocol"], "http")
+        self.assertEqual(result["trace"][3]["ignored"], "tcp retransmission")
+        self.assertEqual(result["results"][0]["request"]["uri"], "/ordered")
+        self.assertEqual(result["results"][0]["response"]["status"], 200)
+
+    def test_golden_capture_fixture_replays_to_expected_http_result(self) -> None:
+        fixture = json.loads(
+            (ROOT / "test" / "fixtures" / "pcap_golden.json").read_text(encoding="utf-8")
+        )
+        records = []
+        for record in fixture["records"]:
+            if record["direction"] == "client_to_server":
+                source, destination = "10.0.0.5", "192.0.2.10"
+                source_port, destination_port = 51000, 443
+            else:
+                source, destination = "192.0.2.10", "10.0.0.5"
+                source_port, destination_port = 443, 51000
+            raw_hex = _raw_ipv4_tcp_hex(
+                source,
+                destination,
+                source_port,
+                destination_port,
+                record["flags"],
+                record["payload"].encode("ascii"),
+                sequence=record["sequence"],
+            )
+            records.append(
+                (record["seconds"], record["fraction"], _ethernet_ipv4(raw_hex))
+            )
+        result = self.adapter.run_pcap_scenario(
+            fixture["scenario"],
+            _pcap_bytes(records),
+            tcl_lsp_root=self.tcl_lsp_root,
+            direction=fixture["direction"],
+            client_addr=fixture["client_addr"],
+            server_addr=fixture["server_addr"],
+        )
+        expected = fixture["expected"]
+        self.assertEqual(result["packets_processed"], expected["packets_processed"])
+        self.assertEqual(result["results"][0]["request"]["uri"], expected["request_uri"])
+        self.assertEqual(result["results"][0]["response"]["status"], expected["response_status"])
+        self.assertEqual(result["results"][0]["response"]["body"], expected["response_body"])
+        self.assertEqual(result["trace"][expected["retransmission_trace_index"]]["ignored"], "tcp retransmission")
+        self.assertEqual(result["trace"][0]["timestamp"], expected["timestamp"] - 0.4)
+
     def test_new_syn_closes_previous_pending_http_transaction_first(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -393,20 +623,21 @@ class EmulatorAdapterTests(unittest.TestCase):
         request_payload = b"GET /health HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
         response_payload = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
         request_hex = _raw_ipv4_tcp_hex(
-            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18, request_payload[:20]
+            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18, request_payload[:20], sequence=1001
         )
         request_tail_hex = _raw_ipv4_tcp_hex(
-            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18, request_payload[20:]
+            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18, request_payload[20:], sequence=1021
         )
         capture = _pcap_bytes(
             [
                 (1, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
-                    "10.0.0.5", "192.0.2.10", 51000, 443, 0x02
+                    "10.0.0.5", "192.0.2.10", 51000, 443, 0x02, sequence=1000
                 ))),
                 (1, 500_000, _ethernet_ipv4(request_hex)),
                 (1, 600_000, _ethernet_ipv4(request_tail_hex)),
                 (2, 125_000, _ethernet_ipv4(_raw_ipv4_tcp_hex(
-                    "192.0.2.10", "10.0.0.5", 443, 51000, 0x18, response_payload
+                    "192.0.2.10", "10.0.0.5", 443, 51000, 0x18, response_payload,
+                    sequence=2000,
                 ))),
             ]
         )

@@ -13,9 +13,11 @@ detail.
 
 ## Run locally
 
-Point the adapter at a checkout of `tcl-lsp`:
+Create the repo-local uv environment once, then point the adapter at a checkout
+of `tcl-lsp`:
 
 ```sh
+uv venv --python 3.13 .venv
 export TCL_LSP_ROOT=/path/to/tcl-lsp
 ./scripts/emulate-irule.sh <<'JSON'
 {
@@ -42,6 +44,10 @@ and any events reported by the upstream framework. It also includes a
 `fidelity` report showing statically detected command/event usage and warnings
 when a recognized command is backed by a generated stub, has no runtime
 handler, or is gated by the attached profiles.
+The adapter-owned semantic-mock status identifies commands with behavior
+implemented against the scenario state. Semantic state is returned under
+`result.semantic`, including STATS counters, captured HSL messages, and
+LB node/pool status changes.
 
 ## HTTP API
 
@@ -88,9 +94,9 @@ The endpoint accepts classic PCAP with Ethernet (including VLAN tags) or raw
 IPv4 link layers, and preserves each record timestamp in the returned packet
 trace. `direction` defaults to `client_to_server`; `auto` requires both
 endpoint addresses and skips packets that do not match either direction. The
-capture is bounded to 16 MiB, 1,000 records, and 2 MiB per packet. pcapng,
-IPv4 fragments, retransmission-aware sequencing, and out-of-order TCP
-reassembly are intentionally rejected or unsupported.
+capture is bounded to 16 MiB, 1,000 records, and 2 MiB per packet. pcapng and
+IPv4 fragments are not supported yet. TCP sequence numbers are honored for
+bounded out-of-order reassembly and retransmission de-duplication.
 
 For connection-aware testing, use the persistent session endpoints:
 `POST /v1/sessions` creates a session from an iRule, profiles, pools, and data
@@ -176,8 +182,9 @@ example:
 
 The adapter can emit the entire `tcl-lsp` F5 iRules registry in bounded
 chunks. The catalog currently reports command names, subcommands, protocol
-requirements, and whether the runtime has a handwritten mock, generated stub,
-or no handler. It also includes event lifecycle metadata and profile metadata.
+requirements, and whether the runtime has a handwritten mock, an adapter-owned
+semantic mock, a generated stub, or no handler. It also includes event
+lifecycle metadata and profile metadata.
 
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
@@ -201,10 +208,10 @@ the same Tcl events and state layers used by the HTTP API. Generic UDP payloads
 are reported as unmapped because there is no protocol-specific event to infer.
 For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
-performs bounded TCP application reassembly across records and persistent
-session calls. Classic PCAP file/HTTP/MCP ingestion is supported separately;
-pcapng, retransmission, and out-of-order stream handling remain outside this
-slice.
+performs bounded sequence-aware TCP application reassembly across records and
+persistent session calls, including out-of-order segments and duplicate
+retransmissions. Classic PCAP file/HTTP/MCP ingestion is supported separately;
+pcapng and IPv4 fragment handling remain outside this slice.
 
 ```json
 {
@@ -278,7 +285,7 @@ docker run --rm -i testcl-irule-emulator:17.5 <<'JSON'
 JSON
 ```
 
-The image uses Python only as the bridge and `python3-tk` for the required
+The image uses Python 3.13 only as the bridge and `tk` for the required
 in-process Tcl interpreter; it does not install the full language-server
 dependency set.
 The upstream dependency is AGPL-3.0-or-later. See [`THIRD_PARTY.md`](../THIRD_PARTY.md)
@@ -295,8 +302,9 @@ docker run --rm --publish 8080:8080 testcl-irule-emulator:17.5 \
 ## Current boundary
 
 The current slice supports HTTP/TCP request simulation, structured packet
-traces, classic PCAP replay, persistent connection sessions, structured DNS/TLS
-event injection, catalog conformance reporting, and an MCP facade over the same
-JSON contract. The next slice should add semantic command mocks for the
-highest-value uncovered catalog entries. The emulator profile remains fixed at
+traces, classic PCAP replay, sequence-aware persistent connection sessions,
+structured DNS/TLS event injection, catalog conformance reporting, an MCP
+facade over the same JSON contract, and an adapter-owned semantic overlay for
+selected HSL, HTTP, IP, LB, PROFILE, STATS, and URI commands. The emulator
+profile remains fixed at
 `tmos-17.5`.
