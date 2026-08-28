@@ -361,6 +361,26 @@ when HTTP_REQUEST {
             {"app|floor": "0", "app|ceiling": "0"},
         )
 
+    def test_semantic_overlay_compares_and_escapes_uris(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    HTTP::header insert X-Compare [URI::compare http://Example.com/a HTTP://example.com:80/a]
+    HTTP::header insert X-Escape [URI::escape {a b/c}]
+    HTTP::header insert X-Profiles [PROFILE::list http]
+}
+""",
+                "request": {"uri": "/health"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        headers = result["results"][0]["request"]["headers"]
+        self.assertEqual(headers["x-compare"], "1")
+        self.assertEqual(headers["x-escape"], "a%20b/c")
+        self.assertEqual(headers["x-profiles"], "HTTP")
+
     def test_packet_trace_drives_transport_tls_and_http_events(self) -> None:
         scenario = {
             "profiles": ["TCP", "CLIENTSSL", "HTTP"],
@@ -542,6 +562,38 @@ when HTTP_REQUEST {
         self.assertTrue(event["fired"])
         self.assertEqual(event["state"]["dns"]["qname"], "example.com")
         self.assertEqual(event["state"]["dns"]["qtype"], "A")
+
+    def test_semantic_overlay_reads_dns_question_state(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP", "DNS"],
+                "irule": """
+when DNS_REQUEST {
+    log local0. "[DNS::question name] [DNS::question type] [DNS::origin]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "dns",
+                        "direction": "client_to_server",
+                        "qname": "example.com",
+                        "qtype": "AAAA",
+                        "qclass": "IN",
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = result["trace"][0]["events"][0]
+        self.assertIn("example.com AAAA client", event["logs"][0])
+        self.assertEqual(
+            {entry["name"]: entry["runtime_status"] for entry in result["fidelity"]["commands"]
+             if entry["name"].startswith("DNS::")},
+            {
+                "DNS::origin": "semantic-mock",
+                "DNS::question": "semantic-mock",
+            },
+        )
 
     def test_sequence_aware_reassembly_handles_out_of_order_and_retransmission(self) -> None:
         request_payload = b"GET /ordered HTTP/1.1\r\nHost: api.example.com\r\n\r\n"

@@ -222,6 +222,22 @@ namespace eval ::itest::semantic {
     proc profile_tcp {args} { return [_profile_enabled TCP] }
     proc profile_udp {args} { return [_profile_enabled UDP] }
 
+    proc profile_list {args} {
+        if {[llength $args] != 1} {
+            error "PROFILE::list requires a profile class"
+        }
+        set requested [string toupper [lindex $args 0]]
+        set result [list]
+        foreach profile $::orch::config(profiles) {
+            set profile_upper [string toupper $profile]
+            if {$requested eq "ALL" || $requested eq "ANY" ||
+                $requested eq $profile_upper} {
+                lappend result $profile
+            }
+        }
+        return $result
+    }
+
     proc stats_set {args} {
         if {[llength $args] < 3} {
             error "STATS::set requires profile, counter, and value"
@@ -580,6 +596,70 @@ namespace eval ::itest::semantic {
         if {[llength $args] != 1} { error "URI::decode requires one value" }
         return [_uri_decode_value [lindex $args 0]]
     }
+
+    proc _uri_canonical {uri} {
+        set parts [_uri_parts $uri]
+        set scheme [string tolower [dict get $parts scheme]]
+        set host [string tolower [dict get $parts host]]
+        set port [dict get $parts port]
+        if {($scheme eq "http" && $port eq "80") ||
+            ($scheme eq "https" && $port eq "443")} {
+            set port ""
+        }
+        set path [dict get $parts path]
+        if {$path eq ""} {
+            set path "/"
+        }
+        return [list \
+            scheme $scheme \
+            host $host \
+            port $port \
+            path $path \
+            query [dict get $parts query]]
+    }
+
+    proc uri_compare {args} {
+        if {[llength $args] != 2} {
+            error "URI::compare requires two URI strings"
+        }
+        return [expr {[_uri_canonical [lindex $args 0]] eq
+                     [_uri_canonical [lindex $args 1]]}]
+    }
+
+    proc uri_escape {args} {
+        if {[llength $args] != 1} { error "URI::escape requires one value" }
+        return [_uri_encode_value [lindex $args 0] 0]
+    }
+
+    proc dns_question {args} {
+        if {[llength $args] == 1} {
+            switch -exact -- [string tolower [lindex $args 0]] {
+                name { return $::state::dns::qname }
+                type { return $::state::dns::qtype }
+                default { error "DNS::question supports name and type" }
+            }
+        }
+        if {[llength $args] == 2} {
+            set field [string tolower [lindex $args 0]]
+            switch -exact -- $field {
+                name { set ::state::dns::qname [lindex $args 1] }
+                type { set ::state::dns::qtype [lindex $args 1] }
+                default { error "DNS::question supports name and type" }
+            }
+            return [lindex $args 1]
+        }
+        error "DNS::question requires name or type, with an optional value"
+    }
+
+    proc dns_origin {args} {
+        if {[llength $args] != 0} {
+            error "DNS::origin takes no arguments"
+        }
+        if {$::itest::current_event eq "DNS_RESPONSE"} {
+            return server
+        }
+        return client
+    }
 }
 
 # Preserve the upstream pool behavior and replace only its member choice.
@@ -608,6 +688,7 @@ foreach {name proc_name} {
     PROFILE::fastL4 ::itest::semantic::profile_fastL4
     PROFILE::fasthttp ::itest::semantic::profile_fasthttp
     PROFILE::http ::itest::semantic::profile_http
+    PROFILE::list ::itest::semantic::profile_list
     PROFILE::serverssl ::itest::semantic::profile_serverssl
     PROFILE::tcp ::itest::semantic::profile_tcp
     PROFILE::udp ::itest::semantic::profile_udp
@@ -625,11 +706,15 @@ foreach {name proc_name} {
     URI::decode ::itest::semantic::uri_decode
     URI::encode ::itest::semantic::uri_encode
     URI::encode_component ::itest::semantic::uri_encode_component
+    URI::escape ::itest::semantic::uri_escape
     URI::host ::itest::semantic::uri_host
     URI::path ::itest::semantic::uri_path
     URI::port ::itest::semantic::uri_port
     URI::protocol ::itest::semantic::uri_protocol
     URI::query ::itest::semantic::uri_query
+    URI::compare ::itest::semantic::uri_compare
+    DNS::origin ::itest::semantic::dns_origin
+    DNS::question ::itest::semantic::dns_question
 } {
     ::itest::register_command $name $proc_name
 }
