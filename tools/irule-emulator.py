@@ -213,6 +213,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "LB::reselect",
     "LB::status",
     "LB::up",
+    "class",
     "PROFILE::clientssl",
     "PROFILE::exists",
     "PROFILE::fastL4",

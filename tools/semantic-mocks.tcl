@@ -544,6 +544,287 @@ namespace eval ::itest::semantic {
         return up
     }
 
+    proc _class_parse_options {args} {
+        set options [dict create \
+            all 0 \
+            value 0 \
+            name 0 \
+            index 0 \
+            element 0 \
+            nocase 0 \
+            list 0]
+        set positional [list]
+        set stop_options 0
+        foreach arg $args {
+            if {!$stop_options && $arg eq "--"} {
+                set stop_options 1
+                continue
+            }
+            if {!$stop_options && [string match -* $arg]} {
+                switch -exact -- $arg {
+                    -all { dict set options all 1 }
+                    -value { dict set options value 1 }
+                    -name { dict set options name 1 }
+                    -index { dict set options index 1 }
+                    -element { dict set options element 1 }
+                    -nocase { dict set options nocase 1 }
+                    -list { dict set options list 1 }
+                    default { error "unsupported class option \"$arg\"" }
+                }
+            } else {
+                lappend positional $arg
+            }
+        }
+        if {[dict get $options value] && [dict get $options name]} {
+            error "class -value and -name are mutually exclusive"
+        }
+        return [list $options $positional]
+    }
+
+    proc _class_group {name} {
+        if {![info exists ::state::datagroup::groups($name)]} {
+            error "class \"$name\" not found"
+        }
+        set group $::state::datagroup::groups($name)
+        return [list [lindex $group 1] [lindex $group 3]]
+    }
+
+    proc _class_equal {left right nocase} {
+        if {$nocase} {
+            return [expr {[string tolower $left] eq [string tolower $right]}]
+        }
+        return [expr {$left eq $right}]
+    }
+
+    proc _class_compare {left operator right nocase} {
+        set op [string tolower $operator]
+        if {$nocase} {
+            set left [string tolower $left]
+            set right [string tolower $right]
+        }
+        switch -exact -- $op {
+            equals - eq { return [expr {$left eq $right}] }
+            contains { return [expr {[string first $right $left] >= 0}] }
+            starts_with { return [expr {[string first $right $left] == 0}] }
+            ends_with {
+                return [expr {[string last $right $left] ==
+                    ([string length $left] - [string length $right])}]
+            }
+            matches_glob { return [string match $right $left] }
+            matches_regex {
+                if {$nocase} { return [regexp -nocase -- $right $left] }
+                return [regexp -- $right $left]
+            }
+            default { error "unsupported class operator \"$operator\"" }
+        }
+    }
+
+    proc _class_matching_records {type records item operator nocase check_value} {
+        set matches [list]
+        set index 0
+        foreach {name value} $records {
+            set candidate [expr {$check_value ? $value : $name}]
+            if {[_class_compare $item $operator $candidate $nocase]} {
+                lappend matches [list $index $name $value]
+            }
+            incr index
+        }
+        return $matches
+    }
+
+    proc _class_result {matches options} {
+        if {[llength $matches] == 0} {
+            if {[dict get $options all] || [dict get $options list] ||
+                [dict get $options value] || [dict get $options name] ||
+                [dict get $options index] || [dict get $options element]} {
+                return [list]
+            }
+            return 0
+        }
+        set output [list]
+        foreach match $matches {
+            lassign $match index name value
+            if {[dict get $options value]} {
+                lappend output $value
+            } elseif {[dict get $options index]} {
+                lappend output $index
+            } elseif {[dict get $options element]} {
+                lappend output [list $name $value]
+            } elseif {[dict get $options name]} {
+                lappend output $name
+            } else {
+                return 1
+            }
+        }
+        if {[dict get $options all] || [dict get $options list]} {
+            return $output
+        }
+        return [lindex $output 0]
+    }
+
+    proc _class_search_state {} {
+        if {![info exists ::state::vars::connection_vars(__testcl_class_searches)]} {
+            set ::state::vars::connection_vars(__testcl_class_searches) [dict create \
+                next_id 0 searches [dict create]]
+        }
+        return $::state::vars::connection_vars(__testcl_class_searches)
+    }
+
+    proc class_command {args} {
+        if {[llength $args] == 0} {
+            error "class requires a subcommand"
+        }
+        set subcmd [string tolower [lindex $args 0]]
+        lassign [_class_parse_options {*}[lrange $args 1 end]] options positional
+        switch -exact -- $subcmd {
+            match - search {
+                if {[llength $positional] != 3} {
+                    error "class $subcmd requires item, operator, and class"
+                }
+                if {$subcmd eq "match"} {
+                    set item [lindex $positional 0]
+                    set operator [lindex $positional 1]
+                    set class_name [lindex $positional 2]
+                } else {
+                    set class_name [lindex $positional 0]
+                    set operator [lindex $positional 1]
+                    set item [lindex $positional 2]
+                }
+                lassign [_class_group $class_name] type records
+                set check_value [dict get $options value]
+                set matches [_class_matching_records $type $records $item $operator \
+                    [dict get $options nocase] $check_value]
+                return [_class_result $matches $options]
+            }
+            lookup {
+                if {[llength $positional] != 2} {
+                    error "class lookup requires a name and class"
+                }
+                lassign [_class_group [lindex $positional 1]] type records
+                foreach {name value} $records {
+                    if {[_class_equal $name [lindex $positional 0] [dict get $options nocase]]} {
+                        return $value
+                    }
+                }
+                return ""
+            }
+            element {
+                if {[llength $positional] != 2} {
+                    error "class element requires an index and class"
+                }
+                set index [lindex $positional 0]
+                if {![string is integer -strict $index] || $index < 0} {
+                    error "class element index must be a non-negative integer"
+                }
+                lassign [_class_group [lindex $positional 1]] type records
+                set entries [list]
+                foreach {name value} $records {
+                    lappend entries [list $name $value]
+                }
+                if {$index >= [llength $entries]} { return "" }
+                lassign [lindex $entries $index] name value
+                if {[dict get $options value]} { return $value }
+                if {[dict get $options name]} { return $name }
+                return [list $name $value]
+            }
+            type {
+                if {[llength $positional] != 1} { error "class type requires a class" }
+                lassign [_class_group [lindex $positional 0]] type ignored
+                return $type
+            }
+            exists {
+                if {[llength $positional] != 1} { error "class exists requires a class" }
+                return [expr {[info exists ::state::datagroup::groups([lindex $positional 0])]}]
+            }
+            size {
+                if {[llength $positional] != 1} { error "class size requires a class" }
+                lassign [_class_group [lindex $positional 0]] type records
+                return [expr {[llength $records] / 2}]
+            }
+            names - get {
+                if {[llength $positional] < 1 || [llength $positional] > 2} {
+                    error "class $subcmd requires a class and optional pattern"
+                }
+                set class_name [lindex $positional 0]
+                lassign [_class_group $class_name] type records
+                set pattern "*"
+                if {[llength $positional] == 2} { set pattern [lindex $positional 1] }
+                set result [list]
+                foreach {name value} $records {
+                    set match_name $name
+                    set match_pattern $pattern
+                    if {[dict get $options nocase]} {
+                        set match_name [string tolower $match_name]
+                        set match_pattern [string tolower $match_pattern]
+                    }
+                    if {[string match $match_pattern $match_name]} {
+                        if {$subcmd eq "names"} {
+                            lappend result $name
+                        } else {
+                            lappend result $name $value
+                        }
+                    }
+                }
+                if {[dict get $options list] || $subcmd eq "get"} { return $result }
+                return $result
+            }
+            startsearch {
+                if {[llength $positional] != 1} { error "class startsearch requires a class" }
+                set class_name [lindex $positional 0]
+                lassign [_class_group $class_name] type records
+                set state [_class_search_state]
+                set next_id [expr {[dict get $state next_id] + 1}]
+                set search_id "search$next_id"
+                set searches [dict get $state searches]
+                dict set searches $search_id [list class $class_name names \
+                    [::state::datagroup::names $class_name] index 0]
+                dict set state next_id $next_id
+                dict set state searches $searches
+                set ::state::vars::connection_vars(__testcl_class_searches) $state
+                return $search_id
+            }
+            nextelement {
+                if {[llength $positional] != 1} { error "class nextelement requires a search id" }
+                set state [_class_search_state]
+                set searches [dict get $state searches]
+                set search_id [lindex $positional 0]
+                if {![dict exists $searches $search_id]} { error "invalid class search id" }
+                set search [dict get $searches $search_id]
+                set names [dict get $search names]
+                set index [dict get $search index]
+                if {$index >= [llength $names]} { return "" }
+                set name [lindex $names $index]
+                dict set search index [expr {$index + 1}]
+                dict set searches $search_id $search
+                dict set state searches $searches
+                set ::state::vars::connection_vars(__testcl_class_searches) $state
+                if {[dict get $options value]} {
+                    return [::state::datagroup::lookup [dict get $search class] $name]
+                }
+                return $name
+            }
+            anymore {
+                if {[llength $positional] != 1} { error "class anymore requires a search id" }
+                set state [_class_search_state]
+                set searches [dict get $state searches]
+                set search_id [lindex $positional 0]
+                if {![dict exists $searches $search_id]} { return 0 }
+                set search [dict get $searches $search_id]
+                return [expr {[dict get $search index] < [llength [dict get $search names]]}]
+            }
+            donesearch {
+                if {[llength $positional] != 1} { error "class donesearch requires a search id" }
+                set state [_class_search_state]
+                set searches [dict get $state searches]
+                dict unset searches [lindex $positional 0]
+                dict set state searches $searches
+                set ::state::vars::connection_vars(__testcl_class_searches) $state
+                return ""
+            }
+            default { error "unsupported class subcommand \"$subcmd\"" }
+        }
+    }
+
     proc _table_parse_options {args} {
         set options [dict create \
             subtable "" \
@@ -1202,6 +1483,12 @@ if {[::tmm::_orig_info commands ::itest::cmd::cmd_table] ne ""} {
         return [eval [linsert $args 0 ::itest::semantic::table_command]]
     }
 }
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_class] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_class ::itest::cmd::_testcl_class_orig
+    proc ::itest::cmd::cmd_class {args} {
+        return [eval [linsert $args 0 ::itest::semantic::class_command]]
+    }
+}
 
 # Override only the catalogued generated stubs implemented above. The mapping
 # stays in the upstream dispatcher, so Tcl command resolution and profiling
@@ -1250,6 +1537,7 @@ foreach {name proc_name} {
     URI::compare ::itest::semantic::uri_compare
     DNS::origin ::itest::semantic::dns_origin
     DNS::question ::itest::semantic::dns_question
+    class ::itest::cmd::cmd_class
 } {
     ::itest::register_command $name $proc_name
 }

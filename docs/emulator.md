@@ -312,5 +312,7 @@ traces, classic PCAP replay, sequence-aware persistent connection sessions,
 structured DNS/TLS event injection, catalog conformance reporting, an MCP
 facade over the same JSON contract, and an adapter-owned semantic overlay for
 selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, and table commands. The
+semantic overlay also models data-group `class` matching, lookup, enumeration,
+and connection-scoped search iterators. The
 emulator profile remains fixed at
 `tmos-17.5`.

@@ -445,6 +445,54 @@ when HTTP_REQUEST {
             {"visits", "message", "added"},
         )
 
+    def test_semantic_overlay_models_class_data_groups_and_iterators(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "datagroups": {
+                    "allowed_paths": {
+                        "type": "string",
+                        "records": {"/health": "allow", "/api": "allow"},
+                    },
+                    "route_map": {
+                        "type": "string",
+                        "records": {"admin": "pool_admin", "public": "pool_public"},
+                    },
+                },
+                "irule": """
+when HTTP_REQUEST {
+    HTTP::header insert X-Match [class match -- [HTTP::path] starts_with allowed_paths]
+    HTTP::header insert X-Lookup [class lookup admin route_map]
+    HTTP::header insert X-Type [class type route_map]
+    HTTP::header insert X-Size [class size route_map]
+    HTTP::header insert X-Element [class element -value 0 route_map]
+    HTTP::header insert X-Names [class names -nocase route_map A*]
+    set search [class startsearch route_map]
+    set first [class nextelement $search]
+    set has_more [class anymore $search]
+    class donesearch $search
+    HTTP::header insert X-Search "$first:$has_more"
+}
+""",
+                "request": {"uri": "/healthz"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        request = result["results"][0]["request"]
+        self.assertEqual(request["headers"]["x-match"], "1")
+        self.assertEqual(request["headers"]["x-lookup"], "pool_admin")
+        self.assertEqual(request["headers"]["x-type"], "string")
+        self.assertEqual(request["headers"]["x-size"], "2")
+        self.assertEqual(request["headers"]["x-element"], "pool_admin")
+        self.assertEqual(request["headers"]["x-names"], "admin")
+        self.assertEqual(request["headers"]["x-search"], "admin:1")
+        self.assertEqual(
+            {entry["runtime_status"] for entry in result["fidelity"]["commands"]
+             if entry["name"] == "class"},
+            {"semantic-mock"},
+        )
+
     def test_semantic_overlay_handles_zero_stats_and_malformed_uri_octets(self) -> None:
         result = self.adapter.run_scenario(
             {
