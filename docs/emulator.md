@@ -234,8 +234,9 @@ request/response messages are translated into the same Tcl events and state
 layers used by the HTTP API. Generic UDP payloads are reported as unmapped
 because there is no protocol-specific event to infer. WebSocket support is a
 structured packet adapter: it models the HTTP upgrade and the eight WebSocket
-frame/data events, but it does not yet decode raw WebSocket frames from a wire
-capture.
+frame/data events, and the raw TCP/PCAP path decodes RFC 6455 frames after a
+successful upgrade. Compressed frames using unsupported RSV extensions are
+rejected; pcapng and IPv4 fragment handling remain outside this slice.
 For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
 performs bounded sequence-aware TCP application reassembly across records and
@@ -314,7 +315,9 @@ response enables `WS_REQUEST`/`WS_RESPONSE`; subsequent frames drive
 corresponding frame-done event. `WS::payload` offsets and lengths are modeled
 as wire-byte counts, including UTF-8 payloads. Incomplete upgrades, disabled
 WebSocket processing, and frames before a completed handshake are reported as
-ignored trace entries. `WS::frame drop` and `WS::message drop` suppress the
+ignored trace entries. Raw TCP frames are reassembled across packets, including
+partial frames, coalesced frames, client masking, and fragmented messages.
+`WS::frame drop` and `WS::message drop` suppress the
 corresponding collected data event and mark the packet as dropped. `WS::release`
 clears the collection window. `WS::disconnect` records its close code and
 reason as a decision; it does not yet synthesize a raw WebSocket close frame.

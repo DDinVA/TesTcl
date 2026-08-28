@@ -1105,6 +1105,7 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
 
 PACKET_MAX_COUNT = 1000
 STREAM_MAX_BYTES = 2 * 1024 * 1024
+WEBSOCKET_MAX_FRAME_BYTES = STREAM_MAX_BYTES
 MAX_PACKET_STREAMS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
@@ -1340,7 +1341,7 @@ def _decode_http_payload(
         if response_match is None:
             return None
         response_status = int(response_match.group(1))
-        if (response_status < 200 and response_status != 101) or response_status in {204, 304}:
+        if response_status < 200 or response_status in {204, 304}:
             return {
                 "protocol": "http",
                 "direction": direction,
@@ -1820,6 +1821,103 @@ def _websocket_response_is_upgrade(packet: dict[str, Any]) -> bool:
     )
 
 
+WEBSOCKET_OPCODE_NAMES = {
+    0x0: "continuation",
+    0x1: "text",
+    0x2: "binary",
+    0x8: "close",
+    0x9: "ping",
+    0xA: "pong",
+}
+
+
+def _decode_websocket_frame(
+    payload: bytes, direction: str
+) -> tuple[dict[str, Any], int] | None:
+    """Decode one RFC 6455 frame, preserving the unmasked wire payload."""
+    if len(payload) < 2:
+        return None
+    first, second = payload[0], payload[1]
+    opcode = first & 0x0F
+    frame_type = WEBSOCKET_OPCODE_NAMES.get(opcode)
+    if frame_type is None:
+        raise EmulatorInputError(f"unsupported WebSocket opcode 0x{opcode:x}")
+    if first & 0x70:
+        raise EmulatorInputError("WebSocket RSV bits require an unsupported extension")
+
+    masked = bool(second & 0x80)
+    length_code = second & 0x7F
+    position = 2
+    if length_code < 126:
+        payload_length = length_code
+    elif length_code == 126:
+        if len(payload) < position + 2:
+            return None
+        payload_length = int.from_bytes(payload[position : position + 2], "big")
+        position += 2
+    else:
+        if len(payload) < position + 8:
+            return None
+        payload_length = int.from_bytes(payload[position : position + 8], "big")
+        position += 8
+        if payload_length > 0x7FFF_FFFF_FFFF_FFFF:
+            raise EmulatorInputError("WebSocket payload length has its reserved high bit set")
+    if payload_length > WEBSOCKET_MAX_FRAME_BYTES:
+        raise EmulatorInputError(
+            f"WebSocket frame exceeds the {WEBSOCKET_MAX_FRAME_BYTES // (1024 * 1024)} MiB limit"
+        )
+
+    mask = b""
+    if masked:
+        if len(payload) < position + 4:
+            return None
+        mask = payload[position : position + 4]
+        position += 4
+    frame_end = position + payload_length
+    if len(payload) < frame_end:
+        return None
+    frame_payload = payload[position:frame_end]
+    if masked:
+        frame_payload = bytes(
+            value ^ mask[index % 4] for index, value in enumerate(frame_payload)
+        )
+    return (
+        {
+            "protocol": "websocket",
+            "type": "frame",
+            "direction": direction,
+            "frame_type": frame_type,
+            "fin": "1" if first & 0x80 else "0",
+            "masked": "1" if masked else "0",
+            "mask": mask.hex(),
+            "payload": _decode_wire_text(frame_payload),
+            "_wire_payload": frame_payload,
+        },
+        frame_end,
+    )
+
+
+def _decode_websocket_frames(
+    payload: bytes, direction: str
+) -> tuple[list[dict[str, Any]], bytes]:
+    frames: list[dict[str, Any]] = []
+    position = 0
+    while position < len(payload):
+        decoded = _decode_websocket_frame(payload[position:], direction)
+        if decoded is None:
+            break
+        frame, consumed = decoded
+        if consumed <= 0:
+            raise EmulatorInputError("WebSocket decoder returned an invalid frame length")
+        frames.append(frame)
+        if len(frames) > PACKET_MAX_COUNT:
+            raise EmulatorInputError(
+                f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} WebSocket frames"
+            )
+        position += consumed
+    return frames, payload[position:]
+
+
 def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or not raw:
         raise EmulatorInputError("packets must be a non-empty array")
@@ -2181,6 +2279,7 @@ class EmulatorSession:
         self._server_connection_open = False
         self._tcp_buffers = {"client": "", "server": ""}
         self._packet_streams: dict[tuple[Any, ...], _TcpStream] = {}
+        self._websocket_raw_active = False
         self._thread.start()
         self._started.wait()
         if self._startup_error is not None:
@@ -2387,7 +2486,10 @@ class EmulatorSession:
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
                     # tcl-lsp payload helpers preserve those offsets.
-                    payload_hex = value.encode("utf-8").hex()
+                    if isinstance(value, (bytes, bytearray)):
+                        payload_hex = bytes(value).hex()
+                    else:
+                        payload_hex = str(value).encode("utf-8").hex()
                     session.eval_tcl(
                         f"set {namespace}::{field} [binary format H* {_tcl_quote(payload_hex)}]"
                     )
@@ -2515,17 +2617,20 @@ class EmulatorSession:
                     [item for pair in headers.items() for item in pair]
                 )
                 if "status" in packet:
-                    websocket_state["status"] = packet["status"]
+                    websocket_state["status"] = str(packet["status"])
             elif packet_type == "frame":
                 payload = packet.get("payload", "")
+                wire_payload = packet.get("_wire_payload")
+                if not isinstance(wire_payload, (bytes, bytearray)):
+                    wire_payload = payload.encode("utf-8")
                 websocket_state.update(
                     {
                         "frame_type": packet["frame_type"],
                         "eom": packet.get("fin", "1"),
                         "orig_masked": packet.get("masked", "0"),
                         "mask": packet.get("mask", ""),
-                        "payload": payload,
-                        "payload_length": str(len(payload.encode("utf-8"))),
+                        "payload": bytes(wire_payload),
+                        "payload_length": str(len(wire_payload)),
                     }
                 )
             if websocket_state:
@@ -2635,6 +2740,7 @@ class EmulatorSession:
         session.eval_tcl("::state::reset_connection_state")
         self._packet_streams.clear()
         self._tcp_buffers = {"client": "", "server": ""}
+        self._websocket_raw_active = False
         self._connection_open = False
         self._server_connection_open = False
 
@@ -2799,6 +2905,31 @@ class EmulatorSession:
 
         if not combined and has_gap:
             return None, stream.buffered_bytes
+        if self._websocket_raw_active:
+            decoded_frames, remaining = _decode_websocket_frames(
+                combined, packet["direction"]
+            )
+            if decoded_frames:
+                stream.buffer = remaining
+                if not has_gap:
+                    stream.segments.clear()
+                for frame in decoded_frames:
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            frame[field] = packet[field]
+                first = decoded_frames[0]
+                if len(decoded_frames) > 1:
+                    first["_coalesced_packets"] = decoded_frames[1:]
+                return first, len(combined) - len(remaining)
+            stream.buffer = combined
+            if not has_gap:
+                stream.segments.clear()
+            if stream.buffered_bytes > STREAM_MAX_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"packet stream exceeds the {STREAM_MAX_BYTES // (1024 * 1024)} MiB limit"
+                )
+            return None, stream.buffered_bytes
         looks_like_tls = bool(combined) and combined[0] in {20, 21, 22, 23}
         looks_like_http = self._looks_like_http_prefix(combined)
         if looks_like_tls:
@@ -2830,8 +2961,26 @@ class EmulatorSession:
             if decoded_packets:
                 stream.buffer = remaining
                 first = decoded_packets[0]
+                if (
+                    first.get("protocol") == "http"
+                    and first.get("status") == 101
+                    and _websocket_response_is_upgrade(first)
+                    and remaining
+                ):
+                    websocket_frames, websocket_remaining = _decode_websocket_frames(
+                        remaining, packet["direction"]
+                    )
+                    if websocket_frames:
+                        stream.buffer = websocket_remaining
+                        for frame in websocket_frames:
+                            for field in ("source", "destination", "timestamp"):
+                                if field in packet:
+                                    frame[field] = packet[field]
+                        first["_coalesced_packets"] = websocket_frames
+                if stream.buffer != remaining:
+                    remaining = stream.buffer
                 if len(decoded_packets) > 1:
-                    first["_coalesced_packets"] = decoded_packets[1:]
+                    first.setdefault("_coalesced_packets", []).extend(decoded_packets[1:])
                 return first, consumed_total
         if looks_like_tls or looks_like_http or has_gap:
             if stream.buffered_bytes > STREAM_MAX_BYTES:
@@ -2898,6 +3047,21 @@ class EmulatorSession:
                         buffered_entry[field] = original_packet[field]
                 trace.append(buffered_entry)
                 continue
+            if packet["protocol"] == "http":
+                if (
+                    packet["direction"] == "client_to_server"
+                    and _websocket_request_is_upgrade(packet)
+                ):
+                    packet = dict(packet)
+                    packet["protocol"] = "websocket"
+                    packet["type"] = "request"
+                elif (
+                    packet["direction"] == "server_to_client"
+                    and _websocket_response_is_upgrade(packet)
+                ):
+                    packet = dict(packet)
+                    packet["protocol"] = "websocket"
+                    packet["type"] = "response"
             entry: dict[str, Any] = {
                 "index": index,
                 "protocol": packet["protocol"],
@@ -3020,6 +3184,7 @@ class EmulatorSession:
                             "set ::itest::semantic::ws_request_seen"
                         ) == "1":
                             session.eval_tcl("set ::itest::semantic::ws_upgrade_seen 1")
+                            self._websocket_raw_active = True
                 elif session.eval_tcl("set ::itest::semantic::ws_enabled") == "0":
                     entry["ignored"] = "WebSocket processing is disabled"
                 elif session.eval_tcl("set ::itest::semantic::ws_upgrade_seen") != "1":
@@ -3064,7 +3229,11 @@ class EmulatorSession:
                                 raise EmulatorInputError(
                                     "invalid WebSocket collection length"
                                 ) from None
-                            payload_length = len(packet.get("payload", "").encode("utf-8"))
+                            wire_payload = packet.get("_wire_payload")
+                            if isinstance(wire_payload, (bytes, bytearray)):
+                                payload_length = len(wire_payload)
+                            else:
+                                payload_length = len(packet.get("payload", "").encode("utf-8"))
                             if requested_length == 0 or payload_length >= requested_length:
                                 entry["events"].append(
                                     self._fire_event_on_worker(session, data_event, frame_state)

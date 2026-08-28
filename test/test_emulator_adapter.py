@@ -2001,6 +2001,123 @@ when CLIENT_DATA { TCP::close; TCP::close }
             [event["event"] for event in result["trace"][2]["events"]],
         )
 
+    def test_raw_ipv4_tcp_websocket_upgrade_and_frames_decode(self) -> None:
+        request = (
+            b"GET /socket HTTP/1.1\r\nHost: api.example.com\r\n"
+            b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            b"Sec-WebSocket-Key: abc\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )
+        response = (
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+            b"Connection: Upgrade\r\nSec-WebSocket-Accept: xyz\r\n\r\n"
+        )
+        mask = bytes.fromhex("01020304")
+        client_payload = b"hello"
+        client_frame = (
+            b"\x81" + bytes([0x80 | len(client_payload)]) + mask
+            + bytes(value ^ mask[index % 4] for index, value in enumerate(client_payload))
+        )
+        server_payload = b"world"
+        server_frame = b"\x81" + bytes([len(server_payload)]) + server_payload
+        response += server_frame
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "WS"],
+                "irule": """
+when WS_REQUEST { log local0. "raw-request=[WS::request key]" }
+when WS_RESPONSE { log local0. "raw-response=[WS::response valid]" }
+when WS_CLIENT_FRAME { WS::collect frame }
+when WS_CLIENT_DATA { log local0. "raw-client=[WS::payload]" }
+when WS_SERVER_FRAME { WS::collect frame }
+when WS_SERVER_DATA { log local0. "raw-server=[WS::payload]" }
+""",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x02, sequence=1000
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                            request, sequence=1001
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "192.0.2.10", "10.0.0.5", 443, 51000, 0x18,
+                            response, sequence=5000
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                            client_frame, sequence=1001 + len(request)
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(
+            [entry["protocol"] for entry in result["trace"]],
+            ["tcp", "websocket", "websocket", "websocket", "websocket"],
+        )
+        self.assertEqual(
+            [
+                event["event"]
+                for packet in result["trace"]
+                for event in packet["events"]
+                if event["event"].startswith("WS_")
+            ],
+            [
+                "WS_REQUEST",
+                "WS_RESPONSE",
+                "WS_SERVER_FRAME",
+                "WS_SERVER_DATA",
+                "WS_SERVER_FRAME_DONE",
+                "WS_CLIENT_FRAME",
+                "WS_CLIENT_DATA",
+                "WS_CLIENT_FRAME_DONE",
+            ],
+        )
+        self.assertEqual(result["trace"][4]["payload"], "hello")
+        self.assertEqual(result["trace"][4]["masked"], "1")
+        self.assertTrue(
+            any("raw-client=hello" in entry for entry in result["trace"][4]["events"][1]["logs"])
+        )
+        self.assertTrue(
+            any("raw-server=world" in entry for entry in result["trace"][3]["events"][1]["logs"])
+        )
+
+    def test_websocket_frame_decoder_handles_partial_and_extended_lengths(self) -> None:
+        payload = b"a" * 126
+        frame = b"\x82\x7e\x00\x7e" + payload
+        partial_frames, partial_remaining = self.adapter._decode_websocket_frames(
+            frame[:5], "server_to_client"
+        )
+        self.assertEqual(partial_frames, [])
+        self.assertEqual(partial_remaining, frame[:5])
+
+        frames, remaining = self.adapter._decode_websocket_frames(
+            partial_remaining + frame[5:], "server_to_client"
+        )
+        self.assertEqual(remaining, b"")
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0]["frame_type"], "binary")
+        self.assertEqual(frames[0]["masked"], "0")
+        self.assertEqual(frames[0]["_wire_payload"], payload)
+        self.assertEqual(len(frames[0]["payload"]), 126)
+
     def test_http_stream_decoder_honors_chunked_and_content_length_framing(self) -> None:
         request_one = b"GET /chunked HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
         request_two = b"GET /length HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
