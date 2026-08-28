@@ -313,6 +313,162 @@ def _build_capabilities(root: Path, offset: int, limit: int) -> dict[str, Any]:
     }
 
 
+def _runtime_status_map(root: Path) -> tuple[Any, dict[str, str]]:
+    """Return the tcl-lsp registry and runtime status for each command."""
+    _load_session_class(root)
+    try:
+        from compiler.registry import REGISTRY
+    except ImportError as exc:  # pragma: no cover - depends on external checkout
+        raise EmulatorInputError(f"could not load tcl-lsp command registry: {exc}") from exc
+    tcl_dir = root / "tooling" / "irule_test" / "tcl"
+    handwritten = _proc_names(tcl_dir / "command_mocks.tcl")
+    generated = _proc_names(tcl_dir / "_mock_stubs.tcl")
+    status_map: dict[str, str] = {}
+    for name in REGISTRY.command_names(dialect="f5-irules"):
+        status_map[name] = _capability_status(_mock_proc_name(name), handwritten, generated)
+    return REGISTRY, status_map
+
+
+def _is_f5_runtime_command(name: str, spec: Any) -> bool:
+    """Avoid warning on ordinary Tcl control commands in a rule."""
+    return "::" in name or bool(getattr(spec, "event_requires", None))
+
+
+def _analyze_rule_capabilities(
+    root: Path,
+    source: str,
+    profiles: list[str],
+) -> dict[str, Any]:
+    """Statically map used commands/events to catalog runtime support."""
+    try:
+        _load_session_class(root)
+        from compiler.irules_flow import _find_when_bodies
+        from compiler.parsing.command_segmenter import segment_commands
+        from compiler.parsing.token_scanning import scan_command_substitutions
+        from compiler.registry.namespace_registry import NAMESPACE_REGISTRY
+        from compiler.registry.runtime import body_arg_indices
+        from shared.tokens import TokenType
+
+        registry, status_map = _runtime_status_map(root)
+        usage: dict[str, dict[str, Any]] = {}
+        event_names: set[str] = set()
+        visited_scripts: set[tuple[str, str]] = set()
+
+        def visit(script: str, event_name: str) -> None:
+            visit_key = (event_name, script)
+            if visit_key in visited_scripts:
+                return
+            visited_scripts.add(visit_key)
+            commands = segment_commands(
+                script,
+                registry_snapshot=registry,
+                recovery=False,
+            )
+            for command in commands:
+                name = command.name
+                if not name:
+                    continue
+                entry = usage.setdefault(
+                    name,
+                    {"name": name, "occurrences": 0, "events": set()},
+                )
+                entry["occurrences"] += 1
+                entry["events"].add(event_name)
+
+                body_indices = body_arg_indices(name, command.args)
+                if name == "when" and command.texts:
+                    body_indices = [len(command.args) - 1]
+                for index in body_indices:
+                    text_index = index + 1
+                    if 0 <= text_index < len(command.texts):
+                        visit(command.texts[text_index], event_name)
+                for token in command.all_tokens:
+                    if token.type is TokenType.CMD:
+                        visit(token.text, event_name)
+                    elif token.type is TokenType.STR:
+                        for nested in scan_command_substitutions(token.text):
+                            visit(nested.text, event_name)
+
+        for event_name, _priority, body, _body_token, _event_token in _find_when_bodies(source):
+            event_names.add(event_name)
+            visit(body, event_name)
+
+        warnings: list[dict[str, Any]] = []
+        command_rows: list[dict[str, Any]] = []
+        for name in sorted(usage):
+            spec = registry.get_any(name)
+            status = status_map.get(name)
+            if status is None:
+                status = "unknown-command" if spec is None else "no-runtime-handler"
+            row = {
+                "name": name,
+                "occurrences": usage[name]["occurrences"],
+                "events": sorted(usage[name]["events"]),
+                "runtime_status": status,
+            }
+            command_rows.append(row)
+            if status in {"generated-stub", "no-runtime-handler"} and spec is not None:
+                if _is_f5_runtime_command(name, spec):
+                    warnings.append(
+                        {
+                            "code": "runtime-fidelity",
+                            "severity": "warning",
+                            "command": name,
+                            "runtime_status": status,
+                            "message": (
+                                f"{name} is recognized by the 17.5 catalog but uses a "
+                                f"{status.replace('-', ' ')} at runtime"
+                            ),
+                        }
+                    )
+            elif status == "unknown-command":
+                warnings.append(
+                    {
+                        "code": "unknown-command",
+                        "severity": "warning",
+                        "command": name,
+                        "message": f"{name} is not present in the pinned 17.5 catalog",
+                    }
+                )
+
+        attached_profiles = {profile.upper() for profile in profiles}
+        for event_name in sorted(event_names):
+            props = NAMESPACE_REGISTRY.get_props(event_name)
+            required = set(props.implied_profiles) if props is not None else set()
+            if required and not required.intersection(attached_profiles):
+                warnings.append(
+                    {
+                        "code": "profile-gated-event",
+                        "severity": "warning",
+                        "event": event_name,
+                        "required_profiles": sorted(required),
+                        "message": (
+                            f"{event_name} is registered but the attached profiles do not "
+                            "include a profile that enables it"
+                        ),
+                    }
+                )
+        return {
+            "analysis": "static-tcl-lsp",
+            "commands": command_rows,
+            "events": sorted(event_names),
+            "warnings": warnings,
+        }
+    except Exception as exc:  # pragma: no cover - parser version compatibility guard
+        return {
+            "analysis": "unavailable",
+            "commands": [],
+            "events": [],
+            "warnings": [
+                {
+                    "code": "analysis-unavailable",
+                    "severity": "warning",
+                    "message": f"could not statically analyze rule usage: {exc}",
+                }
+            ],
+        }
+
+
 def _require_string(value: Any, field: str) -> str:
     if not isinstance(value, str):
         raise EmulatorInputError(f"{field} must be a string")
@@ -718,6 +874,7 @@ class EmulatorSession:
         self._profiles = profiles
         self._pools = pools
         self._datagroups = datagroups
+        self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         self._event_profiles = _load_event_profiles(root)
         self._tasks: queue.Queue[Any] = queue.Queue()
         self._started = threading.Event()
@@ -742,6 +899,10 @@ class EmulatorSession:
     @property
     def registered_events(self) -> list[str]:
         return list(self._registered_events)
+
+    @property
+    def fidelity(self) -> dict[str, Any]:
+        return self._fidelity
 
     def _worker_main(self) -> None:
         session_class: Any = None
@@ -877,6 +1038,7 @@ class EmulatorSession:
                 "tmos_version": TMOS_VERSION,
                 "session_id": session_id,
                 "registered_events": self.registered_events,
+                "fidelity": self.fidelity,
                 "request_count": self._request_count,
                 "connection_open": self._connection_open,
             }
@@ -1032,6 +1194,7 @@ def run_scenario(
         "profile": "tmos-17.5",
         "tmos_version": TMOS_VERSION,
         "registered_events": registered_events,
+        "fidelity": session.fidelity,
         "results": results,
     }
 
@@ -1149,6 +1312,9 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                             "profile": "tmos-17.5",
                             "tmos_version": TMOS_VERSION,
                             "session_id": parts[2],
+                            "fidelity": session_manager.execute(
+                                parts[2], lambda session: session.fidelity
+                            ),
                             "result": result,
                         }
                     except (
@@ -1177,6 +1343,9 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                             "profile": "tmos-17.5",
                             "tmos_version": TMOS_VERSION,
                             "session_id": parts[2],
+                            "fidelity": session_manager.execute(
+                                parts[2], lambda session: session.fidelity
+                            ),
                             "request_number": metadata["request_count"],
                             "result": result,
                         }

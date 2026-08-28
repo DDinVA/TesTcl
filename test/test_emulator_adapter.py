@@ -50,6 +50,12 @@ class EmulatorAdapterTests(unittest.TestCase):
         self.assertEqual(second["response"]["status"], 403)
         self.assertEqual(second["response"]["reason"], "Forbidden")
         self.assertEqual(second["response"]["body"], "denied")
+        self.assertEqual(result["fidelity"]["analysis"], "static-tcl-lsp")
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        self.assertIn("HTTP::payload", usage)
+        self.assertIn("HTTP::respond", usage)
+        self.assertEqual(usage["HTTP::payload"]["runtime_status"], "handwritten-mock")
+        self.assertEqual(result["fidelity"]["warnings"], [])
 
     def test_capabilities_are_complete_and_chunked(self) -> None:
         result = self.adapter._build_capabilities(self.adapter._find_tcl_lsp_root(self.tcl_lsp_root), 0, 7)
@@ -68,6 +74,20 @@ class EmulatorAdapterTests(unittest.TestCase):
         self.assertEqual(final["chunk"]["count"], 0)
         self.assertFalse(final["chunk"]["has_more"])
         self.assertEqual(final["commands"], [])
+
+    def test_fidelity_analysis_warns_for_stub_and_profile_gated_usage(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        report = self.adapter._analyze_rule_capabilities(
+            root,
+            "when HTTP_REQUEST { HSL::open -proto TCP }\n"
+            "when CLIENTSSL_HANDSHAKE { log local0. tls }",
+            ["TCP", "HTTP"],
+        )
+        usage = {entry["name"]: entry for entry in report["commands"]}
+        self.assertEqual(usage["HSL::open"]["runtime_status"], "generated-stub")
+        warning_codes = {warning["code"] for warning in report["warnings"]}
+        self.assertIn("runtime-fidelity", warning_codes)
+        self.assertIn("profile-gated-event", warning_codes)
 
     def test_input_contract_rejects_wrong_profile_and_unknown_fields(self) -> None:
         base = {"irule": "when HTTP_REQUEST { pool api_pool }"}

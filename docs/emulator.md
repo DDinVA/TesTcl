@@ -38,7 +38,10 @@ place of `irule` for local files.
 The response contains `schema_version`, the fixed `tmos-17.5` `profile`,
 `registered_events`, and one result per request. Each result includes the
 selected pool/node, response commitment, connection state, decisions, logs,
-and any events reported by the upstream framework.
+and any events reported by the upstream framework. It also includes a
+`fidelity` report showing statically detected command/event usage and warnings
+when a recognized command is backed by a generated stub, has no runtime
+handler, or is gated by the attached profiles.
 
 ## HTTP API
 
@@ -129,7 +132,9 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 Use the returned `chunk.has_more` and advance `offset` by `chunk.count` until
 all commands are consumed. This is a registry/capability view, not a claim
 that generated stubs reproduce production TMM semantics; the distinction is
-explicit in `runtime_status`.
+explicit in `runtime_status`. The same distinction is included in each
+simulation/session `fidelity.warnings` report, so callers can fail closed or
+ask for a higher-fidelity test when needed.
 
 ## Container
 
@@ -158,8 +163,7 @@ docker run --rm --publish 8080:8080 testcl-irule-emulator:17.5 \
 
 ## Current boundary
 
-The current slice is focused on HTTP/TCP request simulation with persistent
-connection sessions. The next slices should add UDP/DNS and TLS scenario
-inputs, richer protocol state, capability-aware execution warnings, and an MCP
-facade over the same JSON contract. The emulator profile remains fixed at
-`tmos-17.5`.
+The current slice supports HTTP/TCP request simulation, persistent connection
+sessions, and structured DNS/TLS event injection. The next slices should add
+packet-level protocol state and an MCP facade over the same JSON contract. The
+emulator profile remains fixed at `tmos-17.5`.
