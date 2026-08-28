@@ -214,6 +214,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTTP::request",
     "HTTP::redirect",
     "HTTP::has_responded",
+    "HTTP::release",
     "HTTP::close",
     "HTTP::retry",
     "HTTP::is_keepalive",
@@ -923,6 +924,16 @@ def _http_retry_snapshot(session: Any) -> dict[str, str]:
     snapshot = dict(zip(parts[::2], parts[1::2]))
     if set(snapshot) - {"requested", "request", "reset"}:
         raise EmulatorInputError("invalid HTTP retry fields")
+    return snapshot
+
+
+def _http_release_snapshot(session: Any) -> dict[str, str]:
+    parts = _split_tcl_list(session.eval_tcl("::itest::semantic::http_release_snapshot"))
+    if len(parts) % 2:
+        raise EmulatorInputError("invalid HTTP release state")
+    snapshot = dict(zip(parts[::2], parts[1::2]))
+    if set(snapshot) - {"requested"}:
+        raise EmulatorInputError("invalid HTTP release fields")
     return snapshot
 
 
@@ -1912,6 +1923,7 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
     semantic = _semantic_snapshot(session)
     lb_failure = _lb_failure_snapshot(session)
     http_retry = _http_retry_snapshot(session)
+    http_release = _http_release_snapshot(session)
     http_close_requested = session.eval_tcl(
         "set ::itest::semantic::http_close_requested"
     )
@@ -1957,6 +1969,8 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
             "request": http_retry.get("request", ""),
             "reset": http_retry.get("reset", "0") == "1",
         }
+    if http_release.get("requested", "0") == "1":
+        result["http_release"] = True
     if str(http_close_requested) == "1":
         result["http_close"] = True
     return result
@@ -2104,6 +2118,7 @@ class EmulatorSession:
                     f"::itest::semantic::prepare_lb_failure {_tcl_quote(attempt_failure)}"
                 )
                 session.eval_tcl("::itest::semantic::prepare_http_retry")
+                session.eval_tcl("::itest::semantic::prepare_http_release")
                 session.eval_tcl("::itest::semantic::prepare_http_close")
                 session.eval_tcl("set ::itest::semantic::automatic_http_flow 1")
                 try:
@@ -2150,6 +2165,7 @@ class EmulatorSession:
             )
             session.eval_tcl("::itest::semantic::clear_lb_failure")
             session.eval_tcl("::itest::semantic::prepare_http_retry")
+            session.eval_tcl("::itest::semantic::prepare_http_release")
             session.eval_tcl("::itest::semantic::prepare_http_close")
         if http_close_requested:
             events_before_close = _split_tcl_list(

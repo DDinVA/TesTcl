@@ -153,9 +153,9 @@ class EmulatorAdapterTests(unittest.TestCase):
                 "profiles": ["TCP", "HTTP"],
                 "irule": """
 when HTTP_REQUEST { HTTP::collect 3 }
-when HTTP_REQUEST_DATA { log local0. "collected=[HTTP::payload]" }
+when HTTP_REQUEST_DATA { log local0. "collected=[HTTP::payload]"; HTTP::release }
 when HTTP_RESPONSE { HTTP::collect 2 }
-when HTTP_RESPONSE_DATA { log local0. "response=[HTTP::payload]" }
+when HTTP_RESPONSE_DATA { log local0. "response=[HTTP::payload]"; HTTP::release }
 """,
                 "requests": [{"body": "abc", "response_body": "ok"}],
             },
@@ -165,6 +165,11 @@ when HTTP_RESPONSE_DATA { log local0. "response=[HTTP::payload]" }
         self.assertTrue(any("collected=abc" in entry for entry in collected["results"][0]["logs"]))
         self.assertIn("HTTP_RESPONSE_DATA", collected["results"][0]["events_fired"])
         self.assertTrue(any("response=ok" in entry for entry in collected["results"][0]["logs"]))
+        self.assertTrue(collected["results"][0]["http_release"])
+        self.assertGreaterEqual(
+            sum(1 for entry in collected["results"][0]["decisions"] if "release" in str(entry)),
+            2,
+        )
 
         short = self.adapter.run_scenario(
             {

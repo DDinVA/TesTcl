@@ -286,8 +286,10 @@ same packet array at
 
 HTTP data events are only produced by the high-level request flow after
 `HTTP::collect` has armed the corresponding request or response body and the
-requested byte threshold is available. Explicit event injection remains
-available through the event API for lower-level tests.
+requested byte threshold is available. `HTTP::release` is modeled in the data
+events: it clears the active collection window and is reported as
+`http_release: true` in the transaction result. Explicit event injection
+remains available through the event API for lower-level tests.
 
 For a classic PCAP file, keep the iRule scenario in a JSON file and replay it
 through the CLI:

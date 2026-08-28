@@ -19,6 +19,7 @@ namespace eval ::itest::semantic {
     variable http_retry_requested 0
     variable http_retry_request ""
     variable http_retry_reset 0
+    variable http_release_requested 0
     variable http_close_requested 0
     variable http_request_number 0
 
@@ -94,11 +95,21 @@ namespace eval ::itest::semantic {
         set http_close_requested 0
     }
 
+    proc prepare_http_release {} {
+        variable http_release_requested
+        set http_release_requested 0
+    }
+
     proc http_retry_snapshot {} {
         variable http_retry_requested
         variable http_retry_request
         variable http_retry_reset
         return [list requested $http_retry_requested request $http_retry_request reset $http_retry_reset]
+    }
+
+    proc http_release_snapshot {} {
+        variable http_release_requested
+        return [list requested $http_release_requested]
     }
 
     proc lb_snapshot {} {
@@ -2489,6 +2500,26 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc http_release_command {args} {
+        if {[llength $args] != 0} {
+            error "HTTP::release takes no arguments"
+        }
+        if {$::itest::current_event ni {HTTP_REQUEST_DATA HTTP_RESPONSE_DATA}} {
+            error "HTTP::release is valid only during HTTP_REQUEST_DATA or HTTP_RESPONSE_DATA"
+        }
+        variable http_release_requested
+        set http_release_requested 1
+        if {$::itest::current_event eq "HTTP_REQUEST_DATA"} {
+            set ::state::http::collect_request 0
+            set ::state::http::collect_request_length 0
+        } else {
+            set ::state::http::collect_response 0
+            set ::state::http::collect_response_length 0
+        }
+        ::itest::log_decision http release
+        return ""
+    }
+
     proc crc32_command {args} {
         if {[llength $args] != 1} { error "crc32 requires one value" }
         if {[catch {zlib crc32 [lindex $args 0]} value]} { return "" }
@@ -2593,6 +2624,7 @@ foreach {original replacement} {
     http_request_num http_request_num_command
     http_has_responded http_has_responded_command
     http_redirect http_redirect_command
+    http_release http_release_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
         ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
