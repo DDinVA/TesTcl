@@ -54,10 +54,48 @@ curl -X POST -H 'Content-Type: application/json' \
 ```
 
 The service exposes `GET /healthz`, `GET /v1/capabilities`, and
-`POST /v1/simulations`. It binds to `127.0.0.1` by default, caps simulation
-request bodies at 2 MiB, and does not expose arbitrary Tcl evaluation.
+`POST /v1/simulations`. It also supports persistent sessions through
+`POST /v1/sessions`, `GET /v1/sessions/{session_id}`,
+`POST /v1/sessions/{session_id}/requests`, and
+`DELETE /v1/sessions/{session_id}`. It binds to `127.0.0.1` by default, caps
+JSON request bodies at 2 MiB, and does not expose arbitrary Tcl evaluation.
 The HTTP API accepts inline `irule` text only; use the CLI's `irule_file` field
 when a rule must be loaded from a local file.
+
+For connection-aware testing, use the persistent session endpoints:
+`POST /v1/sessions` creates a session from an iRule, profiles, pools, and data
+groups; `POST /v1/sessions/{session_id}/requests` runs one request on that
+session; `GET /v1/sessions/{session_id}` returns lifecycle metadata; and
+`POST /v1/sessions/{session_id}/events` injects a catalogued event with
+structured protocol state; `DELETE /v1/sessions/{session_id}` closes it. The
+Tcl interpreter is kept on a dedicated worker thread per session, so HTTP
+handler threads can safely make successive calls. Sessions expire after 30
+minutes of inactivity and the default service permits 32 concurrent sessions.
+The service has no authentication layer; keep the default loopback binding or
+put an authenticated proxy in front of any non-local deployment.
+
+```sh
+SESSION=$(curl -sS -X POST -H 'Content-Type: application/json' \
+  --data '{"irule":"when HTTP_REQUEST { pool api_pool }", "pools":{"api_pool":["10.0.0.1:80"]}}' \
+  http://127.0.0.1:8080/v1/sessions | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')
+curl -sS -X POST -H 'Content-Type: application/json' \
+  --data '{"uri":"/health"}' \
+  "http://127.0.0.1:8080/v1/sessions/${SESSION}/requests"
+curl -sS -X DELETE "http://127.0.0.1:8080/v1/sessions/${SESSION}"
+```
+
+Event sessions can use non-HTTP profiles. For example, a DNS request can be
+driven without a packet generator:
+
+```sh
+DNS_SESSION=$(curl -sS -X POST -H 'Content-Type: application/json' \
+  --data '{"profiles":["UDP","DNS"],"irule":"when DNS_REQUEST { log local0. dns-request }"}' \
+  http://127.0.0.1:8080/v1/sessions | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')
+curl -sS -X POST -H 'Content-Type: application/json' \
+  --data '{"event":"DNS_REQUEST","state":{"dns":{"qname":"example.com","qtype":"A"}}}' \
+  "http://127.0.0.1:8080/v1/sessions/${DNS_SESSION}/events"
+curl -sS -X DELETE "http://127.0.0.1:8080/v1/sessions/${DNS_SESSION}"
+```
 
 Requests may include a string `body`, plus `response_headers` and
 `response_body` to model the upstream response. The returned result includes
@@ -120,7 +158,8 @@ docker run --rm --publish 8080:8080 testcl-irule-emulator:17.5 \
 
 ## Current boundary
 
-The first slice is intentionally focused on HTTP/TCP request simulation. The
-next slices should add UDP/DNS and TLS scenario inputs, richer protocol state,
-and an HTTP or MCP facade with persistent session objects over the same JSON
-contract. The emulator profile remains fixed at `tmos-17.5`.
+The current slice is focused on HTTP/TCP request simulation with persistent
+connection sessions. The next slices should add UDP/DNS and TLS scenario
+inputs, richer protocol state, capability-aware execution warnings, and an MCP
+facade over the same JSON contract. The emulator profile remains fixed at
+`tmos-17.5`.

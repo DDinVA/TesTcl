@@ -14,12 +14,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import re
+import secrets
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 TMOS_VERSION = "17.5"
@@ -47,6 +51,87 @@ HTTP_REASON_PHRASES = {
     502: "Bad Gateway",
     503: "Service Unavailable",
     504: "Gateway Timeout",
+}
+DEFAULT_MAX_SESSIONS = 32
+DEFAULT_SESSION_IDLE_SECONDS = 1800
+EVENT_STATE_FIELDS = {
+    "connection": {
+        "client_addr",
+        "client_port",
+        "server_addr",
+        "server_port",
+        "local_addr",
+        "local_port",
+        "remote_addr",
+        "remote_port",
+        "vip_addr",
+        "vip_port",
+        "protocol",
+        "transport",
+        "mss",
+        "ttl",
+        "tos",
+        "bandwidth",
+        "rtt",
+        "idle_timeout",
+        "client_payload",
+        "server_payload",
+        "state",
+    },
+    "tls_client": {
+        "sni",
+        "cipher_name",
+        "cipher_bits",
+        "cipher_version",
+        "cert_subject",
+        "cert_issuer",
+        "cert_serial",
+        "cert_hash",
+        "cert_count",
+        "extensions",
+        "alpn",
+        "handshake_done",
+        "session_id",
+    },
+    "tls_server": {
+        "sni",
+        "cipher_name",
+        "cipher_bits",
+        "cipher_version",
+        "cert_subject",
+        "cert_issuer",
+        "cert_serial",
+        "cert_hash",
+        "cert_count",
+        "extensions",
+        "alpn",
+        "handshake_done",
+        "session_id",
+    },
+    "dns": {
+        "qname",
+        "qtype",
+        "qclass",
+        "rcode",
+        "opcode",
+        "id",
+        "aa",
+        "tc",
+        "rd",
+        "ra",
+        "cd",
+        "ad",
+        "answers",
+        "authority",
+        "additional",
+        "response_sent",
+    },
+}
+EVENT_STATE_NAMESPACES = {
+    "connection": "::state::connection",
+    "tls_client": "::state::tls::client",
+    "tls_server": "::state::tls::server",
+    "dns": "::state::dns",
 }
 
 
@@ -365,6 +450,8 @@ def _normalise_datagroups(raw: Any) -> list[tuple[str, dict[str, str], str]]:
 
 
 def _normalise_requests(scenario: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(scenario, dict):
+        raise EmulatorInputError("scenario must be a JSON object")
     requests = scenario.get("requests")
     if requests is None:
         requests = [scenario.get("request", {})]
@@ -420,6 +507,102 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
                 raise EmulatorInputError(f"{field} must be an object of strings")
             kwargs[field] = headers_value
     return kwargs
+
+
+def _validate_request_flags(request: dict[str, Any]) -> None:
+    for flag in ("close_before", "close_after", "new_connection"):
+        if flag in request and not isinstance(request[flag], bool):
+            raise EmulatorInputError(f"request field {flag} must be a boolean")
+
+
+def _normalise_scenario_config(
+    scenario: Any,
+    *,
+    allow_irule_file: bool,
+    allow_requests: bool,
+    require_http: bool,
+) -> tuple[str, list[str], dict[str, list[str]], list[tuple[str, dict[str, str], str]]]:
+    if not isinstance(scenario, dict):
+        raise EmulatorInputError("scenario must be a JSON object")
+
+    allowed_fields = {"tmos_version", "irule", "irule_file", "profiles", "pools", "datagroups"}
+    if allow_requests:
+        allowed_fields.update(("request", "requests"))
+    unknown_fields = sorted(set(scenario) - allowed_fields)
+    if unknown_fields:
+        raise EmulatorInputError(f"unsupported scenario field(s): {', '.join(unknown_fields)}")
+    if scenario.get("tmos_version", TMOS_VERSION) != TMOS_VERSION:
+        raise EmulatorInputError("only the tmos-17.5 emulator profile is supported")
+
+    source = scenario.get("irule")
+    irule_file = scenario.get("irule_file")
+    if source is not None and irule_file is not None:
+        raise EmulatorInputError("provide only one of irule and irule_file")
+    if irule_file is not None:
+        if not allow_irule_file:
+            raise EmulatorInputError("this API accepts inline irule only")
+        rule_path = Path(_require_string(irule_file, "irule_file")).expanduser()
+        try:
+            source = rule_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise EmulatorInputError(f"could not read irule_file {rule_path}: {exc}") from exc
+    if not isinstance(source, str) or not source.strip():
+        raise EmulatorInputError("scenario requires a non-empty irule or irule_file")
+
+    profiles = scenario.get("profiles", DEFAULT_PROFILES)
+    if not isinstance(profiles, list) or not profiles or not all(
+        isinstance(profile, str) and profile for profile in profiles
+    ):
+        raise EmulatorInputError("profiles must be a non-empty array of strings")
+    if require_http and "HTTP" not in profiles:
+        raise EmulatorInputError("the first emulator slice requires the HTTP profile")
+
+    return source, profiles, _normalise_pools(scenario.get("pools")), _normalise_datagroups(
+        scenario.get("datagroups")
+    )
+
+
+def _load_event_profiles(root: Path) -> dict[str, set[str]]:
+    _load_session_class(root)
+    try:
+        from compiler.registry.namespace_registry import NAMESPACE_REGISTRY
+    except ImportError as exc:  # pragma: no cover - depends on external checkout
+        raise EmulatorInputError(f"could not load tcl-lsp event registry: {exc}") from exc
+    event_profiles: dict[str, set[str]] = {}
+    for name in NAMESPACE_REGISTRY.all_event_names():
+        props = NAMESPACE_REGISTRY.get_props(name)
+        event_profiles[name] = set(props.implied_profiles) if props is not None else set()
+    return event_profiles
+
+
+def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, str]]]:
+    event_name = _require_string(event, "event")
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", event_name):
+        raise EmulatorInputError("event must be an uppercase iRule event name")
+    if state is None:
+        return event_name, {}
+    if not isinstance(state, dict):
+        raise EmulatorInputError("event state must be an object mapping layers to fields")
+    normalised: dict[str, dict[str, str]] = {}
+    for layer, values in state.items():
+        if layer not in EVENT_STATE_FIELDS:
+            raise EmulatorInputError(f"unsupported event state layer: {layer}")
+        if not isinstance(values, dict):
+            raise EmulatorInputError(f"event state layer {layer!r} must be an object")
+        layer_values: dict[str, str] = {}
+        for field, value in values.items():
+            if field not in EVENT_STATE_FIELDS[layer]:
+                raise EmulatorInputError(f"unsupported {layer} state field: {field}")
+            if isinstance(value, bool):
+                layer_values[field] = "1" if value else "0"
+            elif isinstance(value, (str, int, float)):
+                layer_values[field] = str(value)
+            else:
+                raise EmulatorInputError(
+                    f"event state value {layer}.{field} must be a string or number"
+                )
+        normalised[layer] = layer_values
+    return event_name, normalised
 
 
 def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -508,29 +691,304 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
     }
 
 
-def _result_json(result: Any) -> dict[str, Any]:
-    def event_json(event: Any) -> dict[str, Any]:
+class EmulatorSession:
+    """Own one Tcl interpreter on a dedicated thread.
+
+    tkinter Tcl interpreters are thread-affine. A worker thread keeps a
+    persistent session safe when successive HTTP requests are handled by
+    different ``ThreadingHTTPServer`` workers.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        scenario: dict[str, Any],
+        *,
+        allow_irule_file: bool,
+        allow_requests: bool,
+    ) -> None:
+        source, profiles, pools, datagroups = _normalise_scenario_config(
+            scenario,
+            allow_irule_file=allow_irule_file,
+            allow_requests=allow_requests,
+            require_http=False,
+        )
+        self._root = root
+        self._source = source
+        self._profiles = profiles
+        self._pools = pools
+        self._datagroups = datagroups
+        self._event_profiles = _load_event_profiles(root)
+        self._tasks: queue.Queue[Any] = queue.Queue()
+        self._started = threading.Event()
+        self._startup_error: BaseException | None = None
+        self._call_lock = threading.RLock()
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._worker_main,
+            name="testcl-irule-session",
+            daemon=True,
+        )
+        self._registered_events: list[str] = []
+        self._request_count = 0
+        self._connection_open = False
+        self._thread.start()
+        self._started.wait()
+        if self._startup_error is not None:
+            error = self._startup_error
+            self.close()
+            raise EmulatorInputError(f"could not start emulator session: {error}") from error
+
+    @property
+    def registered_events(self) -> list[str]:
+        return list(self._registered_events)
+
+    def _worker_main(self) -> None:
+        session_class: Any = None
+        try:
+            session_class = _load_session_class(self._root)
+            backend_session = session_class(
+                profiles=self._profiles,
+                tmos_version=TMOS_VERSION,
+                backend="inprocess",
+            )
+            with backend_session as session:
+                _install_runtime_shims(session)
+                self._registered_events = session.load_irule(self._source)
+                for name, members in self._pools.items():
+                    session.add_pool(name, members)
+                for name, records, dg_type in self._datagroups:
+                    session.add_datagroup(name, records, dg_type)
+                self._started.set()
+                while True:
+                    task = self._tasks.get()
+                    if task is None:
+                        break
+                    function, completed, result = task
+                    try:
+                        result["value"] = function(session)
+                    except BaseException as exc:  # propagate Tcl errors to the caller
+                        result["error"] = exc
+                    finally:
+                        completed.set()
+        except BaseException as exc:
+            self._startup_error = exc
+            self._started.set()
+
+    def _call(self, function: Any) -> Any:
+        with self._call_lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
+            if not self._thread.is_alive():
+                raise EmulatorInputError("emulator session worker stopped")
+            completed = threading.Event()
+            result: dict[str, Any] = {}
+            self._tasks.put((function, completed, result))
+            completed.wait()
+            if "error" in result:
+                error = result["error"]
+                raise error
+            return result.get("value")
+
+    def _run_request_on_worker(self, session: Any, request: dict[str, Any]) -> dict[str, Any]:
+        _validate_request_flags(request)
+        if request.get("close_before") or request.get("new_connection"):
+            if self._connection_open:
+                session.close_connection()
+            self._connection_open = False
+        kwargs = _request_kwargs(request)
+        fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
+        if self._connection_open and not request.get("new_connection"):
+            result = _run_request_with_state(session, "run_next_request", kwargs)
+        else:
+            result = _run_request_with_state(session, "run_http_request", kwargs)
+        result["events_fired"] = result["events_fired"][fired_before:]
+        self._connection_open = True
+        self._request_count += 1
+        if request.get("close_after"):
+            session.close_connection()
+            self._connection_open = False
+        return result
+
+    def run_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        return self._call(lambda session: self._run_request_on_worker(session, request))
+
+    def _fire_event_on_worker(
+        self,
+        session: Any,
+        event_name: str,
+        state: dict[str, dict[str, str]],
+    ) -> dict[str, Any]:
+        required_profiles = self._event_profiles.get(event_name, set())
+        attached_profiles = {profile.upper() for profile in self._profiles}
+        if required_profiles and not required_profiles.intersection(attached_profiles):
+            return {
+                "event": event_name,
+                "fired": False,
+                "reason": "profile_gate",
+                "events_fired": [],
+                "state": {},
+                "decisions": [],
+                "logs": [],
+            }
+        for layer, values in state.items():
+            namespace = EVENT_STATE_NAMESPACES[layer]
+            for field, value in values.items():
+                session.eval_tcl(f"set {namespace}::{field} {_tcl_quote(value)}")
+        fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
+        event_result = session.fire_event(event_name)
+        fired_events = _split_tcl_list(session.eval_tcl("::itest::get_fired_events"))
         return {
-            "event": event.event,
-            "fired": bool(event.fired),
-            "handlers": event.handlers,
-            "reason": event.reason,
+            "event": event_name,
+            "fired": bool(event_result.fired),
+            "reason": event_result.reason,
+            "events_fired": fired_events[fired_before:],
+            "state": {
+                layer: {
+                    field: session.eval_tcl(f"set {EVENT_STATE_NAMESPACES[layer]}::{field}")
+                    for field in EVENT_STATE_FIELDS[layer]
+                }
+                for layer in state
+            },
+            "decisions": [
+                entry if not isinstance(entry, tuple) else list(entry)
+                for entry in session.get_decisions()
+            ],
+            "logs": [
+                entry if not isinstance(entry, tuple) else list(entry)
+                for entry in session.get_logs()
+            ],
         }
 
-    def entry_json(entry: Any) -> Any:
-        if isinstance(entry, (list, tuple)):
-            return list(entry)
-        return entry
+    def fire_event(self, event: Any, state: Any = None) -> dict[str, Any]:
+        event_name, normalised_state = _normalise_event(event, state)
+        if event_name not in self._event_profiles:
+            raise EmulatorInputError(f"unknown iRule event: {event_name}")
+        return self._call(
+            lambda session: self._fire_event_on_worker(session, event_name, normalised_state)
+        )
 
-    return {
-        "pool": result.pool_selected,
-        "node": result.node_selected,
-        "response_committed": bool(result.http_response_committed),
-        "connection_state": result.connection_state,
-        "events_fired": [event_json(event) for event in result.events_fired],
-        "decisions": [entry_json(decision) for decision in result.decisions],
-        "logs": [entry_json(log_entry) for log_entry in result.logs],
-    }
+    def metadata(self, session_id: str) -> dict[str, Any]:
+        def read_metadata(session: Any) -> dict[str, Any]:
+            return {
+                "status": "ok",
+                "schema_version": 1,
+                "profile": "tmos-17.5",
+                "tmos_version": TMOS_VERSION,
+                "session_id": session_id,
+                "registered_events": self.registered_events,
+                "request_count": self._request_count,
+                "connection_open": self._connection_open,
+            }
+
+        return self._call(read_metadata)
+
+    def close(self) -> None:
+        with self._call_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._thread.is_alive():
+                self._tasks.put(None)
+        self._thread.join(timeout=5)
+
+
+class EmulatorNotFoundError(KeyError):
+    """Raised when a persistent session ID is unknown or expired."""
+
+
+class EmulatorResourceError(RuntimeError):
+    """Raised when the service has reached its session capacity."""
+
+
+class _SessionRecord:
+    def __init__(self, session: EmulatorSession, last_used: float) -> None:
+        self.session = session
+        self.last_used = last_used
+        self.active_operations = 0
+
+
+class SessionManager:
+    """Bounded, idle-expiring registry of persistent emulator sessions."""
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        max_sessions: int = DEFAULT_MAX_SESSIONS,
+        idle_timeout: float = DEFAULT_SESSION_IDLE_SECONDS,
+    ) -> None:
+        if max_sessions < 1:
+            raise ValueError("max_sessions must be positive")
+        if idle_timeout <= 0:
+            raise ValueError("idle_timeout must be positive")
+        self._root = root
+        self._max_sessions = max_sessions
+        self._idle_timeout = idle_timeout
+        self._sessions: dict[str, _SessionRecord] = {}
+        self._lock = threading.RLock()
+
+    def _reap(self) -> None:
+        expired: list[EmulatorSession] = []
+        now = time.monotonic()
+        with self._lock:
+            for session_id, record in list(self._sessions.items()):
+                if record.active_operations == 0 and now - record.last_used > self._idle_timeout:
+                    del self._sessions[session_id]
+                    expired.append(record.session)
+        for session in expired:
+            session.close()
+
+    def create(self, scenario: dict[str, Any]) -> str:
+        self._reap()
+        with self._lock:
+            if len(self._sessions) >= self._max_sessions:
+                raise EmulatorResourceError("maximum emulator session count reached")
+            session = EmulatorSession(
+                self._root,
+                scenario,
+                allow_irule_file=False,
+                allow_requests=False,
+            )
+            session_id = "ses_" + secrets.token_urlsafe(18)
+            while session_id in self._sessions:
+                session_id = "ses_" + secrets.token_urlsafe(18)
+            self._sessions[session_id] = _SessionRecord(session, time.monotonic())
+            return session_id
+
+    def execute(self, session_id: str, function: Any) -> Any:
+        self._reap()
+        with self._lock:
+            record = self._sessions.get(session_id)
+            if record is None:
+                raise EmulatorNotFoundError(f"unknown or expired session {session_id}")
+            record.active_operations += 1
+            record.last_used = time.monotonic()
+        try:
+            return function(record.session)
+        finally:
+            with self._lock:
+                current = self._sessions.get(session_id)
+                if current is record:
+                    current.active_operations -= 1
+                    current.last_used = time.monotonic()
+
+    def metadata(self, session_id: str) -> dict[str, Any]:
+        return self.execute(session_id, lambda session: session.metadata(session_id))
+
+    def close(self, session_id: str) -> None:
+        with self._lock:
+            entry = self._sessions.pop(session_id, None)
+        if entry is None:
+            raise EmulatorNotFoundError(f"unknown or expired session {session_id}")
+        entry.session.close()
+
+    def close_all(self) -> None:
+        with self._lock:
+            sessions = [record.session for record in self._sessions.values()]
+            self._sessions.clear()
+        for session in sessions:
+            session.close()
 
 
 def run_scenario(
@@ -539,88 +997,34 @@ def run_scenario(
     tcl_lsp_root: str | None = None,
     backend: str = "inprocess",
 ) -> dict[str, Any]:
-    if not isinstance(scenario, dict):
-        raise EmulatorInputError("scenario must be a JSON object")
-    allowed_fields = {
-        "tmos_version",
-        "irule",
-        "irule_file",
-        "profiles",
-        "pools",
-        "datagroups",
-        "request",
-        "requests",
-    }
-    unknown_fields = sorted(set(scenario) - allowed_fields)
-    if unknown_fields:
-        raise EmulatorInputError(f"unsupported scenario field(s): {', '.join(unknown_fields)}")
-    if scenario.get("tmos_version", TMOS_VERSION) != TMOS_VERSION:
-        raise EmulatorInputError("only the tmos-17.5 emulator profile is supported")
     if backend != "inprocess":
         raise EmulatorInputError(
             "the tmos-17.5 adapter currently requires the in-process Tcl backend"
         )
-
-    source = scenario.get("irule")
-    if source is not None and scenario.get("irule_file") is not None:
-        raise EmulatorInputError("provide only one of irule and irule_file")
-    if source is None and scenario.get("irule_file") is not None:
-        rule_path = Path(_require_string(scenario["irule_file"], "irule_file")).expanduser()
-        try:
-            source = rule_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise EmulatorInputError(f"could not read irule_file {rule_path}: {exc}") from exc
-    if not isinstance(source, str) or not source.strip():
-        raise EmulatorInputError("scenario requires a non-empty irule or irule_file")
-
-    profiles = scenario.get("profiles", DEFAULT_PROFILES)
-    if not isinstance(profiles, list) or not profiles or not all(
-        isinstance(profile, str) and profile for profile in profiles
-    ):
-        raise EmulatorInputError("profiles must be a non-empty array of strings")
-    if "HTTP" not in profiles:
-        raise EmulatorInputError("the first emulator slice requires the HTTP profile")
-
-    session_class = _load_session_class(_find_tcl_lsp_root(tcl_lsp_root))
-    pools = _normalise_pools(scenario.get("pools"))
-    datagroups = _normalise_datagroups(scenario.get("datagroups"))
+    root = _find_tcl_lsp_root(tcl_lsp_root)
     requests = _normalise_requests(scenario)
+    _normalise_scenario_config(
+        scenario,
+        allow_irule_file=True,
+        allow_requests=True,
+        require_http=True,
+    )
 
+    session = EmulatorSession(
+        root,
+        scenario,
+        allow_irule_file=True,
+        allow_requests=True,
+    )
     try:
-        with session_class(profiles=profiles, tmos_version=TMOS_VERSION, backend=backend) as session:
-            _install_runtime_shims(session)
-            registered_events = session.load_irule(source)
-            for name, members in pools.items():
-                session.add_pool(name, members)
-            for name, records, dg_type in datagroups:
-                session.add_datagroup(name, records, dg_type)
-
-            results: list[dict[str, Any]] = []
-            connection_open = False
-            for request in requests:
-                for flag in ("close_before", "close_after", "new_connection"):
-                    if flag in request and not isinstance(request[flag], bool):
-                        raise EmulatorInputError(f"request field {flag} must be a boolean")
-                if request.get("close_before") or request.get("new_connection"):
-                    if connection_open:
-                        session.close_connection()
-                    connection_open = False
-                kwargs = _request_kwargs(request)
-                fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
-                if connection_open and not request.get("new_connection"):
-                    result = _run_request_with_state(session, "run_next_request", kwargs)
-                else:
-                    result = _run_request_with_state(session, "run_http_request", kwargs)
-                result["events_fired"] = result["events_fired"][fired_before:]
-                results.append(result)
-                connection_open = True
-                if request.get("close_after"):
-                    session.close_connection()
-                    connection_open = False
+        results = [session.run_request(request) for request in requests]
     except EmulatorInputError:
         raise
     except Exception as exc:
         raise EmulatorInputError(f"emulator execution failed: {exc}") from exc
+    finally:
+        registered_events = session.registered_events
+        session.close()
 
     return {
         "status": "ok",
@@ -642,12 +1046,37 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[s
     handler.wfile.write(body)
 
 
-def _http_handler(root: Path) -> type[BaseHTTPRequestHandler]:
+def _api_error_status(error: Exception) -> int:
+    if isinstance(error, EmulatorNotFoundError):
+        return 404
+    if isinstance(error, EmulatorResourceError):
+        return 429
+    return 400
+
+
+def _http_handler(root: Path, manager: SessionManager | None = None) -> type[BaseHTTPRequestHandler]:
+    session_manager = manager if manager is not None else SessionManager(root)
+
     class EmulatorHandler(BaseHTTPRequestHandler):
         server_version = "testcl-irule-emulator/1"
 
         def log_message(self, format: str, *args: Any) -> None:
             print(f"{self.address_string()} - {format % args}", file=sys.stderr)
+
+        def _read_json(self) -> Any:
+            length_header = self.headers.get("Content-Length")
+            try:
+                length = int(length_header) if length_header is not None else -1
+            except ValueError:
+                length = -1
+            if length < 0:
+                raise EmulatorInputError("request requires a valid Content-Length")
+            if length > 2 * 1024 * 1024:
+                raise EmulatorResourceError("request body exceeds the 2 MiB limit")
+            return json.loads(self.rfile.read(length))
+
+        def _error(self, error: Exception) -> None:
+            _json_response(self, _api_error_status(error), {"status": "error", "error": str(error)})
 
         def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             parsed = urlparse(self.path)
@@ -665,32 +1094,141 @@ def _http_handler(root: Path) -> type[BaseHTTPRequestHandler]:
                     return
                 _json_response(self, 200, payload)
                 return
+            parts = [unquote(part) for part in parsed.path.split("/") if part]
+            if len(parts) == 3 and parts[:2] == ["v1", "sessions"]:
+                try:
+                    payload = session_manager.metadata(parts[2])
+                except (EmulatorNotFoundError, EmulatorInputError) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
             _json_response(self, 404, {"status": "error", "error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             parsed = urlparse(self.path)
             if parsed.path != "/v1/simulations":
-                _json_response(self, 404, {"status": "error", "error": "not found"})
-                return
-            length_header = self.headers.get("Content-Length")
+                parts = [unquote(part) for part in parsed.path.split("/") if part]
+                if len(parts) == 2 and parts == ["v1", "sessions"]:
+                    session_id: str | None = None
+                    try:
+                        scenario = self._read_json()
+                        session_id = session_manager.create(scenario)
+                        payload = session_manager.metadata(session_id)
+                    except (json.JSONDecodeError, EmulatorInputError, EmulatorResourceError, OSError) as exc:
+                        if session_id is not None:
+                            try:
+                                session_manager.close(session_id)
+                            except EmulatorNotFoundError:
+                                pass
+                        self._error(exc)
+                        return
+                    _json_response(self, 201, payload)
+                    return
+                if len(parts) == 4 and parts[:2] == ["v1", "sessions"] and parts[3] == "events":
+                    try:
+                        event_request = self._read_json()
+                        if not isinstance(event_request, dict):
+                            raise EmulatorInputError("session event must be a JSON object")
+                        if "event" not in event_request:
+                            raise EmulatorInputError("session event requires an event field")
+                        unknown = sorted(set(event_request) - {"event", "state"})
+                        if unknown:
+                            raise EmulatorInputError(
+                                f"unsupported session event field(s): {', '.join(unknown)}"
+                            )
+                        result = session_manager.execute(
+                            parts[2],
+                            lambda session: session.fire_event(
+                                event_request["event"], event_request.get("state")
+                            ),
+                        )
+                        payload = {
+                            "status": "ok",
+                            "schema_version": 1,
+                            "profile": "tmos-17.5",
+                            "tmos_version": TMOS_VERSION,
+                            "session_id": parts[2],
+                            "result": result,
+                        }
+                    except (
+                        json.JSONDecodeError,
+                        EmulatorInputError,
+                        EmulatorNotFoundError,
+                        EmulatorResourceError,
+                        OSError,
+                    ) as exc:
+                        self._error(exc)
+                        return
+                    _json_response(self, 200, payload)
+                    return
+                if len(parts) == 4 and parts[:2] == ["v1", "sessions"] and parts[3] == "requests":
+                    try:
+                        request = self._read_json()
+                        if not isinstance(request, dict):
+                            raise EmulatorInputError("session request must be a JSON object")
+                        result = session_manager.execute(
+                            parts[2], lambda session: session.run_request(request)
+                        )
+                        metadata = session_manager.metadata(parts[2])
+                        payload = {
+                            "status": "ok",
+                            "schema_version": 1,
+                            "profile": "tmos-17.5",
+                            "tmos_version": TMOS_VERSION,
+                            "session_id": parts[2],
+                            "request_number": metadata["request_count"],
+                            "result": result,
+                        }
+                    except (
+                        json.JSONDecodeError,
+                        EmulatorInputError,
+                        EmulatorNotFoundError,
+                        EmulatorResourceError,
+                        OSError,
+                    ) as exc:
+                        self._error(exc)
+                        return
+                    _json_response(self, 200, payload)
+                    return
+                if parsed.path != "/v1/simulations":
+                    _json_response(self, 404, {"status": "error", "error": "not found"})
+                    return
             try:
-                length = int(length_header) if length_header is not None else -1
-            except ValueError:
-                length = -1
-            if length < 0 or length > 2 * 1024 * 1024:
-                _json_response(self, 413, {"status": "error", "error": "request body too large or missing"})
-                return
-            try:
-                scenario = json.loads(self.rfile.read(length))
+                scenario = self._read_json()
                 if isinstance(scenario, dict) and "irule_file" in scenario:
                     raise EmulatorInputError(
                         "HTTP API accepts inline irule only; use the CLI for irule_file"
                     )
                 payload = run_scenario(scenario, tcl_lsp_root=str(root))
-            except (json.JSONDecodeError, EmulatorInputError, OSError) as exc:
-                _json_response(self, 400, {"status": "error", "error": str(exc)})
+            except (json.JSONDecodeError, EmulatorInputError, EmulatorResourceError, OSError) as exc:
+                self._error(exc)
                 return
             _json_response(self, 200, payload)
+
+        def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            parsed = urlparse(self.path)
+            parts = [unquote(part) for part in parsed.path.split("/") if part]
+            if len(parts) != 3 or parts[:2] != ["v1", "sessions"]:
+                _json_response(self, 404, {"status": "error", "error": "not found"})
+                return
+            try:
+                session_manager.close(parts[2])
+            except EmulatorNotFoundError as exc:
+                self._error(exc)
+                return
+            _json_response(
+                self,
+                200,
+                {
+                    "status": "ok",
+                    "schema_version": 1,
+                    "profile": "tmos-17.5",
+                    "tmos_version": TMOS_VERSION,
+                    "session_id": parts[2],
+                    "closed": True,
+                },
+            )
 
     return EmulatorHandler
 
@@ -698,7 +1236,8 @@ def _http_handler(root: Path) -> type[BaseHTTPRequestHandler]:
 def serve(root: Path, host: str, port: int) -> None:
     if not 1 <= port <= 65535:
         raise EmulatorInputError("port must be between 1 and 65535")
-    server = ThreadingHTTPServer((host, port), _http_handler(root))
+    session_manager = SessionManager(root)
+    server = ThreadingHTTPServer((host, port), _http_handler(root, session_manager))
     print(f"testcl emulator listening on http://{host}:{port}", file=sys.stderr)
     try:
         server.serve_forever()
@@ -706,6 +1245,7 @@ def serve(root: Path, host: str, port: int) -> None:
         pass
     finally:
         server.server_close()
+        session_manager.close_all()
 
 
 def main(argv: list[str] | None = None) -> int:
