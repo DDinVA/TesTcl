@@ -16,6 +16,9 @@ namespace eval ::itest::semantic {
     variable lb_failure_pending 0
     variable lb_failure_cause ""
     variable lb_failure_fired 0
+    variable http_retry_requested 0
+    variable http_retry_request ""
+    variable http_retry_reset 0
 
     proc _profile_enabled {name} {
         set wanted [string toupper $name]
@@ -73,6 +76,22 @@ namespace eval ::itest::semantic {
             set selected $::state::lb::selected
         }
         return [list cause $lb_failure_cause fired $lb_failure_fired selected $selected]
+    }
+
+    proc prepare_http_retry {} {
+        variable http_retry_requested
+        variable http_retry_request
+        variable http_retry_reset
+        set http_retry_requested 0
+        set http_retry_request ""
+        set http_retry_reset 0
+    }
+
+    proc http_retry_snapshot {} {
+        variable http_retry_requested
+        variable http_retry_request
+        variable http_retry_reset
+        return [list requested $http_retry_requested request $http_retry_request reset $http_retry_reset]
     }
 
     proc lb_snapshot {} {
@@ -496,7 +515,7 @@ namespace eval ::itest::semantic {
         return up
     }
 
-    proc _select_available_member {pool_name} {
+    proc _select_available_member {pool_name {exclude_member ""}} {
         set ::state::lb::selected 0
         if {![info exists ::state::lb::pools($pool_name)]} {
             return 0
@@ -504,6 +523,9 @@ namespace eval ::itest::semantic {
         set pool_info $::state::lb::pools($pool_name)
         set members [lindex $pool_info 1]
         foreach member $members {
+            if {$exclude_member ne "" && $member eq $exclude_member} {
+                continue
+            }
             if {[_member_status $pool_name $member] in {down disabled}} {
                 continue
             }
@@ -545,8 +567,36 @@ namespace eval ::itest::semantic {
     }
 
     proc lb_reselect {args} {
-        if {$::state::lb::pool ne ""} {
-            _select_available_member $::state::lb::pool
+        set pool_name $::state::lb::pool
+        set explicit_pool 0
+        set index 0
+        while {$index < [llength $args]} {
+            set option [lindex $args $index]
+            if {$option eq "pool" && $index + 1 < [llength $args]} {
+                incr index
+                set pool_name [lindex $args $index]
+                set explicit_pool 1
+            } else {
+                error "LB::reselect supports pool <name>"
+            }
+            incr index
+        }
+        set previous_pool $::state::lb::pool
+        set previous_member $::state::lb::pool_member
+        set exclude_member ""
+        if {$explicit_pool && $previous_pool eq $pool_name} {
+            set exclude_member $previous_member
+        }
+        if {$pool_name ne ""} {
+            set ::state::lb::pool $pool_name
+            if {![_select_available_member $pool_name $exclude_member]} {
+                variable lb_failure_pending
+                variable lb_failure_cause
+                set lb_failure_pending 1
+                if {$lb_failure_cause eq ""} {
+                    set lb_failure_cause no_member
+                }
+            }
         }
         ::itest::log_decision lb reselect $args
         return ""
@@ -2191,6 +2241,32 @@ namespace eval ::itest::semantic {
     proc server_addr_command {args} { return [_connection_value server_addr {*}$args] }
     proc server_port_command {args} { return [_connection_value server_port {*}$args] }
 
+    proc http_retry_command {args} {
+        if {$::itest::current_event ni {HTTP_RESPONSE HTTP_RESPONSE_DATA}} {
+            error "HTTP::retry is valid only during HTTP_RESPONSE or HTTP_RESPONSE_DATA"
+        }
+        if {[llength $args] > 2} {
+            error "HTTP::retry accepts an optional -reset and request"
+        }
+        set reset 0
+        if {[llength $args] > 0 && [lindex $args 0] eq "-reset"} {
+            set reset 1
+            set args [lrange $args 1 end]
+        }
+        if {[llength $args] > 1} {
+            error "HTTP::retry accepts one request"
+        }
+        set request ""
+        if {[llength $args] == 1} {
+            set request [lindex $args 0]
+        }
+        set ::itest::semantic::http_retry_requested 1
+        set ::itest::semantic::http_retry_request $request
+        set ::itest::semantic::http_retry_reset $reset
+        ::itest::log_decision http retry [list $reset $request]
+        return ""
+    }
+
     proc crc32_command {args} {
         if {[llength $args] != 1} { error "crc32 requires one value" }
         if {[catch {zlib crc32 [lindex $args 0]} value]} { return "" }
@@ -2263,6 +2339,12 @@ if {[::tmm::_orig_info commands ::itest::cmd::cmd_event] ne ""} {
             return ""
         }
         return [eval [linsert $args 0 ::itest::cmd::_testcl_event_orig]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::http_retry] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::http_retry ::itest::cmd::_testcl_http_retry_orig
+    proc ::itest::cmd::http_retry {args} {
+        return [eval [linsert $args 0 ::itest::semantic::http_retry_command]]
     }
 }
 if {[::tmm::_orig_info commands ::itest::cmd::http_cookie] ne ""} {

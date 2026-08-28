@@ -505,6 +505,76 @@ when LB_FAILED { log local0. "automatic=[event info]" }
         )
         self.assertTrue(any("automatic=no_member" in entry for entry in request_result["logs"]))
 
+    def test_http_retry_replays_request_and_reselects_next_member(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {
+                    "api_pool": ["192.0.2.10:443", "192.0.2.11:443"],
+                },
+                "irule": """
+when CLIENT_ACCEPTED { set ::retried 0 }
+when HTTP_REQUEST { pool api_pool }
+when LB_SELECTED {
+    if {$::retried} { LB::reselect pool api_pool }
+}
+when HTTP_RESPONSE {
+    if {[HTTP::status] == 503 && !$::retried} {
+        set ::retried 1
+        HTTP::retry "GET /retry HTTP/1.1\r\nHost: retry.example.com\r\nX-Retry: yes\r\n\r\n"
+    }
+}
+""",
+                "requests": [
+                    {
+                        "uri": "/initial",
+                        "host": "initial.example.com",
+                        "response_status": 503,
+                        "response_body": "temporary failure",
+                    },
+                    {
+                        "uri": "/after-retry",
+                        "host": "initial.example.com",
+                        "response_status": 200,
+                        "response_body": "ok",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_result, next_result = result["results"]
+        self.assertEqual(request_result["retry"], {"attempts": 1, "exhausted": False})
+        self.assertEqual(request_result["node"], "192.0.2.11")
+        self.assertEqual(request_result["request"]["uri"], "/retry")
+        self.assertEqual(request_result["request"]["host"], "retry.example.com")
+        self.assertEqual(request_result["request"]["headers"]["x-retry"], "yes")
+        self.assertEqual(request_result["events_fired"].count("HTTP_REQUEST"), 2)
+        self.assertEqual(request_result["events_fired"].count("HTTP_RESPONSE"), 2)
+        self.assertTrue(any("http retry" in str(entry) for entry in request_result["decisions"]))
+        self.assertNotIn("retry", next_result)
+        self.assertEqual(next_result["request"]["uri"], "/after-retry")
+
+    def test_http_retry_has_bounded_attempts(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["192.0.2.10:443"]},
+                "irule": """
+when HTTP_REQUEST { pool api_pool }
+when HTTP_RESPONSE { HTTP::retry }
+""",
+                "request": {
+                    "uri": "/always-retry",
+                    "response_status": 503,
+                    "response_body": "temporary failure",
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_result = result["results"][0]
+        self.assertEqual(request_result["retry"], {"attempts": 8, "exhausted": True})
+        self.assertEqual(request_result["events_fired"].count("HTTP_RESPONSE"), 9)
+
     def test_semantic_overlay_preserves_lb_select_pool_integration(self) -> None:
         result = self.adapter.run_scenario(
             {

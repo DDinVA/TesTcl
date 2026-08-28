@@ -63,6 +63,7 @@ HTTP_REASON_PHRASES = {
 }
 DEFAULT_MAX_SESSIONS = 32
 DEFAULT_SESSION_IDLE_SECONDS = 1800
+MAX_HTTP_RETRIES = 8
 EVENT_STATE_FIELDS = {
     "connection": {
         "client_addr",
@@ -210,6 +211,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTTP::password",
     "HTTP::reject_reason",
     "HTTP::response",
+    "HTTP::retry",
     "HTTP::cookie",
     "HTTP::username",
     "IP::addr",
@@ -904,6 +906,56 @@ def _lb_failure_snapshot(session: Any) -> dict[str, str]:
     if set(snapshot) - {"cause", "fired", "selected"}:
         raise EmulatorInputError("invalid load-balancer failure fields")
     return snapshot
+
+
+def _http_retry_snapshot(session: Any) -> dict[str, str]:
+    parts = _split_tcl_list(session.eval_tcl("::itest::semantic::http_retry_snapshot"))
+    if len(parts) % 2:
+        raise EmulatorInputError("invalid HTTP retry state")
+    snapshot = dict(zip(parts[::2], parts[1::2]))
+    if set(snapshot) - {"requested", "request", "reset"}:
+        raise EmulatorInputError("invalid HTTP retry fields")
+    return snapshot
+
+
+def _parse_http_retry_request(raw_request: str) -> dict[str, Any]:
+    """Parse the bounded HTTP request form accepted by HTTP::retry."""
+    if not raw_request:
+        return {}
+    if raw_request.startswith("/"):
+        return {"uri": raw_request}
+    lines = raw_request.split("\r\n")
+    if len(lines) == 1:
+        lines = raw_request.splitlines()
+    if not lines:
+        raise EmulatorInputError("HTTP::retry request is empty")
+    request_line = lines[0].split()
+    if len(request_line) < 2:
+        raise EmulatorInputError("HTTP::retry request needs a method and URI")
+    retry_request: dict[str, Any] = {
+        "method": request_line[0],
+        "uri": request_line[1],
+    }
+    header_end = len(lines)
+    for index, line in enumerate(lines[1:], start=1):
+        if line == "":
+            header_end = index
+            break
+    headers: dict[str, str] = {}
+    for line in lines[1:header_end]:
+        name, separator, value = line.partition(":")
+        if not separator or not name.strip():
+            raise EmulatorInputError("HTTP::retry request contains a malformed header")
+        headers[name.strip()] = value.lstrip()
+    if headers:
+        retry_request["headers"] = headers
+        for name, value in headers.items():
+            if name.lower() == "host":
+                retry_request["host"] = value
+                break
+    if header_end < len(lines) - 1:
+        retry_request["body"] = "\r\n".join(lines[header_end + 1:])
+    return retry_request
 
 
 def _validate_request_flags(request: dict[str, Any]) -> None:
@@ -1761,6 +1813,7 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
     logs = session.get_logs()
     semantic = _semantic_snapshot(session)
     lb_failure = _lb_failure_snapshot(session)
+    http_retry = _http_retry_snapshot(session)
     lb_state = session.get_state("lb")
     connection_state = session.get_state("connection")
     response_status = int(response_state.get("status", "200"))
@@ -1797,6 +1850,11 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
             "cause": lb_failure["cause"],
             "fired": lb_failure.get("fired", "0") == "1",
             "selected": lb_failure.get("selected", "0") == "1",
+        }
+    if http_retry.get("requested", "0") == "1":
+        result["http_retry"] = {
+            "request": http_retry.get("request", ""),
+            "reset": http_retry.get("reset", "0") == "1",
         }
     return result
 
@@ -1921,21 +1979,71 @@ class EmulatorSession:
         kwargs = _request_kwargs(request)
         lb_failure = kwargs.pop("lb_failure", "")
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
-        session.eval_tcl(
-            f"::itest::semantic::prepare_lb_failure {_tcl_quote(lb_failure)}"
-        )
-        session.eval_tcl("set ::itest::semantic::automatic_http_flow 1")
+        original_kwargs = dict(kwargs)
+        retry_count = 0
+        retry_exhausted = False
+        decision_history: list[Any] = []
+        log_history: list[Any] = []
+        result: dict[str, Any]
         try:
-            if self._connection_open and not request.get("new_connection"):
-                result = _run_request_with_state(session, "run_next_request", kwargs)
-            else:
-                result = _run_request_with_state(session, "run_http_request", kwargs)
+            while True:
+                attempt_failure = lb_failure if retry_count == 0 else ""
+                session.eval_tcl(
+                    f"::itest::semantic::prepare_lb_failure {_tcl_quote(attempt_failure)}"
+                )
+                session.eval_tcl("::itest::semantic::prepare_http_retry")
+                session.eval_tcl("set ::itest::semantic::automatic_http_flow 1")
+                try:
+                    use_existing_connection = self._connection_open and (
+                        retry_count > 0 or not request.get("new_connection")
+                    )
+                    if use_existing_connection:
+                        result = _run_request_with_state(
+                            session, "run_next_request", kwargs
+                        )
+                    else:
+                        result = _run_request_with_state(
+                            session, "run_http_request", kwargs
+                        )
+                finally:
+                    session.eval_tcl(
+                        "unset -nocomplain ::itest::semantic::automatic_http_flow"
+                    )
+
+                decision_history.extend(result.get("decisions", []))
+                log_history.extend(result.get("logs", []))
+                retry = result.pop("http_retry", None)
+                self._connection_open = True
+                if not retry:
+                    break
+                if retry_count >= MAX_HTTP_RETRIES:
+                    retry_exhausted = True
+                    break
+                retry_count += 1
+                retry_kwargs = _parse_http_retry_request(retry["request"])
+                for field in (
+                    "response_status",
+                    "response_headers",
+                    "response_body",
+                ):
+                    if field in original_kwargs:
+                        retry_kwargs.setdefault(field, original_kwargs[field])
+                kwargs = retry_kwargs
         finally:
-            session.eval_tcl("unset -nocomplain ::itest::semantic::automatic_http_flow")
+            session.eval_tcl(
+                "unset -nocomplain ::itest::semantic::automatic_http_flow"
+            )
             session.eval_tcl("::itest::semantic::clear_lb_failure")
+            session.eval_tcl("::itest::semantic::prepare_http_retry")
+        result["decisions"] = decision_history
+        result["logs"] = log_history
         result["events_fired"] = result["events_fired"][fired_before:]
-        self._connection_open = True
         self._request_count += 1
+        if retry_count:
+            result["retry"] = {
+                "attempts": retry_count,
+                "exhausted": retry_exhausted,
+            }
         if request.get("close_after"):
             session.close_connection()
             self._connection_open = False

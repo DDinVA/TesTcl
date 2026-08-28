@@ -178,6 +178,12 @@ Requests may include a string `body`, plus `response_headers` and
 serverside flow and fires `LB_FAILED`, allowing the rule to inspect
 `event info` and recover with a fallback pool or `LB::reselect`. A configured
 pool with no available members automatically produces the `no_member` cause.
+When `HTTP::retry` is called from `HTTP_RESPONSE` or `HTTP_RESPONSE_DATA`, the
+adapter replays the transaction on the persistent session. An empty argument
+replays the original request; a URI or well-formed raw HTTP request can replace
+the method, URI, headers, host, and body. Retries are bounded to eight replay
+attempts and are reported in the result as `retry.attempts` and
+`retry.exhausted`.
 The returned result includes the final request/response headers and bodies
 after the iRule runs. For
 example:
@@ -344,5 +350,8 @@ continues to fire for each received packet until `TCP::release`, while explicit
 lengths consume one collection window. Partial buffers are preserved across
 calls on a persistent session. `peer`, `clientside`, and `serverside` execute
 nested command blocks under the corresponding connection context. The
+`HTTP::retry` overlay preserves the final request/response state while exposing
+the replay count and exhaustion status; transport-level socket reset behavior
+from `HTTP::retry -reset` is not separately simulated yet. The
 emulator profile remains fixed at
 `tmos-17.5`.
