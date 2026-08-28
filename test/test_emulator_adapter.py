@@ -339,6 +339,55 @@ when HTTP_REQUEST {
         self.assertEqual(result["results"][0]["pool"], "api_pool")
         self.assertEqual(result["results"][0]["node"], "192.0.2.10")
 
+    def test_semantic_overlay_persists_and_restores_member_across_requests(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["192.0.2.10:443", "192.0.2.11:443"]},
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/seed"} {
+        pool api_pool
+        persist add uie client-key 60 api_pool 192.0.2.10:443
+    } elseif {[HTTP::uri] eq "/restore"} {
+        set member [LB::persist client-key]
+        HTTP::header insert X-Persisted $member
+        HTTP::header insert X-Lookup-Node [persist lookup uie client-key node]
+        HTTP::header insert X-Lookup-Pool [persist lookup uie client-key pool]
+    } elseif {[HTTP::uri] eq "/delete"} {
+        persist delete uie client-key
+    } else {
+        HTTP::header insert X-Persisted [LB::persist client-key]
+    }
+}
+""",
+                "requests": [
+                    {"uri": "/seed"},
+                    {"uri": "/restore"},
+                    {"uri": "/delete"},
+                    {"uri": "/missing"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        seeded, restored, deleted, missing = result["results"]
+        self.assertEqual(seeded["node"], "192.0.2.10")
+        self.assertEqual(restored["node"], "192.0.2.10")
+        self.assertEqual(restored["request"]["headers"]["x-persisted"], "192.0.2.10:443")
+        self.assertEqual(restored["request"]["headers"]["x-lookup-node"], "192.0.2.10")
+        self.assertEqual(restored["request"]["headers"]["x-lookup-pool"], "api_pool")
+        self.assertEqual(deleted["node"], "")
+        self.assertEqual(missing["request"]["headers"]["x-persisted"], "")
+        self.assertEqual(
+            {
+                entry["name"]: entry["runtime_status"]
+                for entry in result["fidelity"]["commands"]
+                if entry["name"] in {"LB::persist", "persist"}
+            },
+            {"LB::persist": "semantic-mock", "persist": "semantic-mock"},
+        )
+
     def test_semantic_overlay_handles_zero_stats_and_malformed_uri_octets(self) -> None:
         result = self.adapter.run_scenario(
             {

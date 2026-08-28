@@ -544,6 +544,215 @@ namespace eval ::itest::semantic {
         return up
     }
 
+    proc _persist_key {kind key} {
+        return "[string tolower $kind]|$key"
+    }
+
+    proc _persist_member_fields {member fallback_port} {
+        set colonpos [string last ":" $member]
+        if {$colonpos < 0} {
+            return [list $member $fallback_port]
+        }
+        return [list \
+            [string range $member 0 [expr {$colonpos - 1}]] \
+            [string range $member [expr {$colonpos + 1}] end]]
+    }
+
+    proc _persist_record {pool member timeout} {
+        set node $::state::lb::node_addr
+        set port $::state::lb::node_port
+        if {$member ne ""} {
+            lassign [_persist_member_fields $member $port] node port
+        }
+        return [list \
+            pool $pool \
+            node $node \
+            port $port \
+            member $member \
+            timeout $timeout \
+            created [clock seconds]]
+    }
+
+    proc _persist_lookup {kind key} {
+        set stored [::state::persist::lookup_entry [_persist_key $kind $key]]
+        if {$stored eq ""} {
+            return [list]
+        }
+        if {[dict exists $stored timeout] && [dict exists $stored created] &&
+            [dict get $stored timeout] > 0 &&
+            [clock seconds] >= ([dict get $stored created] + [dict get $stored timeout])} {
+            _persist_delete $kind $key
+            return [list]
+        }
+        return $stored
+    }
+
+    proc _persist_delete {kind key} {
+        set entries $::state::persist::entries
+        set entry_key [_persist_key $kind $key]
+        if {[dict exists $entries $entry_key]} {
+            dict unset entries $entry_key
+            set ::state::persist::entries $entries
+        }
+    }
+
+    proc _persist_command {args} {
+        set subcmd [string tolower [lindex $args 0]]
+        switch -exact -- $subcmd {
+            add {
+                if {[llength $args] < 3} {
+                    error "persist add requires a type and key"
+                }
+                set kind [lindex $args 1]
+                set key [lindex $args 2]
+                set kind [string tolower $kind]
+                if {$key eq ""} {
+                    error "persist add requires a non-empty key"
+                }
+                if {$kind ne "uie"} {
+                    error "persist add currently supports uie records only"
+                }
+                set extra [lrange $args 3 end]
+                set timeout 0
+                set pool $::state::lb::pool
+                set member $::state::lb::pool_member
+                if {[llength $extra] > 0} {
+                    set timeout [lindex $extra 0]
+                    if {![string is integer -strict $timeout] || $timeout < 0} {
+                        error "persist add timeout must be a non-negative integer"
+                    }
+                }
+                if {[llength $extra] > 1} {
+                    set pool [lindex $extra 1]
+                }
+                if {[llength $extra] > 2} {
+                    set member [lindex $extra 2]
+                }
+                if {[llength $extra] > 3} {
+                    error "persist add accepts timeout, pool, and node only"
+                }
+                if {[llength $extra] > 2} {
+                    set member [lindex $extra 2]
+                } elseif {$member eq "" && $::state::lb::node_addr ne ""} {
+                    set member "$::state::lb::node_addr:$::state::lb::node_port"
+                }
+                if {$member eq ""} {
+                    error "persist add requires a selected pool member or node"
+                }
+                ::state::persist::add [_persist_key $kind $key] [_persist_record $pool $member $timeout]
+                ::itest::log_decision persist add [list $kind $key $timeout $pool $member]
+                return ""
+            }
+            lookup {
+                if {[llength $args] < 3 || [llength $args] > 4} {
+                    error "persist lookup requires a type and key"
+                }
+                set record [_persist_lookup [lindex $args 1] [lindex $args 2]]
+                if {[llength $args] < 4} {
+                    if {[llength $record] == 0} { return "" }
+                    return [dict get $record member]
+                }
+                set selector [string tolower [lindex $args 3]]
+                if {[llength $record] == 0} { return "" }
+                switch -exact -- $selector {
+                    all { return $record }
+                    node { return [dict get $record node] }
+                    port { return [dict get $record port] }
+                    pool { return [dict get $record pool] }
+                    default { error "unsupported persist lookup selector \"$selector\"" }
+                }
+            }
+            delete {
+                if {[llength $args] != 3} {
+                    error "persist delete requires a type and key"
+                }
+                _persist_delete [lindex $args 1] [lindex $args 2]
+                ::itest::log_decision persist delete [lrange $args 1 2]
+                return ""
+            }
+            default {
+                if {$subcmd eq "cookie"} {
+                    set ::state::persist::mode cookie
+                    set rest [lrange $args 1 end]
+                    set cookie_mode [string tolower [lindex $rest 0]]
+                    switch -exact -- $cookie_mode {
+                        insert - rewrite {
+                            if {[llength $rest] > 3} {
+                                error "persist cookie $cookie_mode accepts a name and expiration"
+                            }
+                            if {[llength $rest] > 1} {
+                                set ::state::persist::cookie_name [lindex $rest 1]
+                            }
+                        }
+                        passive {
+                            if {[llength $rest] > 2} {
+                                error "persist cookie passive accepts a name"
+                            }
+                            if {[llength $rest] > 1} {
+                                set ::state::persist::cookie_name [lindex $rest 1]
+                            }
+                        }
+                        hash {
+                            if {[llength $rest] < 2 || [llength $rest] > 5} {
+                                error "persist cookie hash requires a name and optional hash parameters"
+                            }
+                            set ::state::persist::cookie_name [lindex $rest 1]
+                        }
+                        default {
+                            if {[llength $rest] > 1} {
+                                error "persist cookie accepts one cookie name or a cookie mode"
+                            }
+                            if {[llength $rest] == 1 && $cookie_mode ne ""} {
+                                set ::state::persist::cookie_name $cookie_mode
+                            }
+                        }
+                    }
+                    ::itest::log_decision persist mode $args
+                    return ""
+                }
+                return [eval [linsert $args 0 ::itest::cmd::_testcl_persist_orig]]
+            }
+        }
+    }
+
+    proc lb_persist {args} {
+        if {[llength $args] > 1} {
+            error "LB::persist accepts one key or cookie selector"
+        }
+        if {[llength $args] == 0} {
+            return $::state::lb::pool_member
+        }
+        set key [lindex $args 0]
+        set kind uie
+        if {[string tolower $key] eq "cookie"} {
+            set key [::itest::cmd::http_cookie value $::state::persist::cookie_name]
+            set kind cookie
+        }
+        set record [_persist_lookup $kind $key]
+        if {[llength $record] == 0} {
+            ::itest::log_decision lb persist_miss $key
+            return ""
+        }
+        set member [dict get $record member]
+        if {$member eq ""} {
+            ::itest::log_decision lb persist_miss $key
+            return ""
+        }
+        if {[_member_status [dict get $record pool] $member] in {down disabled}} {
+            ::itest::log_decision lb persist_unavailable [list $key $member]
+            return ""
+        }
+        if {[dict get $record pool] ne ""} {
+            set ::state::lb::pool [dict get $record pool]
+        }
+        set ::state::lb::pool_member $member
+        set ::state::lb::node_addr [dict get $record node]
+        set ::state::lb::node_port [dict get $record port]
+        set ::state::lb::selected 1
+        ::itest::log_decision lb persist_hit $key
+        return $member
+    }
+
     proc lb_down {args} { return [_lb_set_status down {*}$args] }
     proc lb_up {args} { return [_lb_set_status up {*}$args] }
 
@@ -669,6 +878,12 @@ if {[::tmm::_orig_info commands ::itest::cmd::cmd_pool] ne ""} {
         return [eval [linsert $args 0 ::itest::semantic::pool_status_aware]]
     }
 }
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_persist] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_persist ::itest::cmd::_testcl_persist_orig
+    proc ::itest::cmd::cmd_persist {args} {
+        return [eval [linsert $args 0 ::itest::semantic::_persist_command]]
+    }
+}
 
 # Override only the catalogued generated stubs implemented above. The mapping
 # stays in the upstream dispatcher, so Tcl command resolution and profiling
@@ -698,6 +913,7 @@ foreach {name proc_name} {
     STATS::setmax ::itest::semantic::stats_setmax
     STATS::setmin ::itest::semantic::stats_setmin
     LB::down ::itest::semantic::lb_down
+    LB::persist ::itest::semantic::lb_persist
     LB::reselect ::itest::semantic::lb_reselect
     LB::status ::itest::semantic::lb_status
     LB::up ::itest::semantic::lb_up

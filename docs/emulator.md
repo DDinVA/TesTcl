@@ -47,7 +47,11 @@ handler, or is gated by the attached profiles.
 The adapter-owned semantic-mock status identifies commands with behavior
 implemented against the scenario state. Semantic state is returned under
 `result.semantic`, including STATS counters, captured HSL messages, and
-LB node/pool status changes.
+LB node/pool status changes. Persistence records created with `persist add`
+remain available across requests on the same connection/session; `persist
+lookup`, `persist delete`, and `LB::persist` can inspect, remove, and restore
+those records. Positive persistence timeouts expire records using the
+emulator clock, while timeout `0` means no expiry.
 
 ## HTTP API
 
@@ -305,6 +309,6 @@ The current slice supports HTTP/TCP request simulation, structured packet
 traces, classic PCAP replay, sequence-aware persistent connection sessions,
 structured DNS/TLS event injection, catalog conformance reporting, an MCP
 facade over the same JSON contract, and an adapter-owned semantic overlay for
-selected HSL, HTTP, IP, LB, PROFILE, STATS, and URI commands. The emulator
-profile remains fixed at
+selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, and persistence commands. The
+emulator profile remains fixed at
 `tmos-17.5`.
