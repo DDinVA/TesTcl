@@ -2520,6 +2520,7 @@ class EmulatorSession:
             ],
         }
         emissions = self._tcp_emissions(session)
+        emissions.extend(self._websocket_disconnect_emissions(session, event_name))
         if emissions:
             result["emissions"] = emissions
         return result
@@ -2695,6 +2696,56 @@ class EmulatorSession:
                 "payload": values.get("payload", ""),
                 "byte_length": byte_length,
             })
+        return emissions
+
+    @staticmethod
+    def _websocket_disconnect_emissions(
+        session: Any, event_name: str
+    ) -> list[dict[str, Any]]:
+        if event_name not in {"WS_CLIENT_FRAME_DONE", "WS_SERVER_FRAME_DONE"}:
+            return []
+        raw = _split_tcl_list(
+            session.eval_tcl("::itest::semantic::ws_take_disconnect_snapshot")
+        )
+        if len(raw) % 2:
+            raise EmulatorInputError("invalid WebSocket disconnect state")
+        values = dict(zip(raw[::2], raw[1::2]))
+        if values.get("requested") != "1":
+            return []
+        try:
+            code = int(values["code"])
+        except (KeyError, TypeError, ValueError):
+            raise EmulatorInputError("invalid WebSocket disconnect code") from None
+        reason = values.get("reason", "")
+        try:
+            reason_bytes = reason.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise EmulatorInputError("WebSocket close reason must be valid UTF-8") from exc
+        close_payload = code.to_bytes(2, "big") + reason_bytes
+        if len(close_payload) > 125:
+            raise EmulatorInputError("WebSocket close payload exceeds the control-frame limit")
+        emissions: list[dict[str, Any]] = []
+        for target_side, direction in (
+            ("client", "server_to_client"),
+            ("server", "client_to_server"),
+        ):
+            emissions.append(
+                {
+                    "protocol": "websocket",
+                    "type": "frame",
+                    "frame_type": "close",
+                    "side": target_side,
+                    "direction": direction,
+                    "fin": "1",
+                    "masked": "1" if direction == "client_to_server" else "0",
+                    "mask": "",
+                    "close_code": code,
+                    "close_reason": reason,
+                    "payload_hex": close_payload.hex(),
+                    "byte_length": len(close_payload),
+                    "control": "CLOSE",
+                }
+            )
         return emissions
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
@@ -3222,7 +3273,11 @@ class EmulatorSession:
                             raise EmulatorInputError("invalid WebSocket collection state")
                         collection_state = dict(zip(collection[::2], collection[1::2]))
                         data_event_fired = False
-                        if collection_state.get("requested", "0") == "1":
+                        if (
+                            collection_state.get("requested", "0") == "1"
+                            and packet.get("frame_type")
+                            in {"text", "binary", "continuation"}
+                        ):
                             try:
                                 requested_length = int(collection_state.get("length", "0"))
                             except (TypeError, ValueError):
@@ -3231,12 +3286,20 @@ class EmulatorSession:
                                 ) from None
                             wire_payload = packet.get("_wire_payload")
                             if isinstance(wire_payload, (bytes, bytearray)):
-                                payload_length = len(wire_payload)
+                                frame_payload = bytes(wire_payload)
                             else:
-                                payload_length = len(packet.get("payload", "").encode("utf-8"))
-                            if requested_length == 0 or payload_length >= requested_length:
+                                frame_payload = packet.get("payload", "").encode("utf-8")
+                            if requested_length == 0 or len(frame_payload) >= requested_length:
+                                data_state = {
+                                    layer: dict(values)
+                                    for layer, values in frame_state.items()
+                                }
+                                data_state.setdefault("websocket", {})["payload"] = frame_payload
+                                data_state["websocket"]["payload_length"] = str(
+                                    len(frame_payload)
+                                )
                                 entry["events"].append(
-                                    self._fire_event_on_worker(session, data_event, frame_state)
+                                    self._fire_event_on_worker(session, data_event, data_state)
                                 )
                                 data_event_fired = True
                         if data_event_fired and session.eval_tcl(

@@ -319,8 +319,13 @@ ignored trace entries. Raw TCP frames are reassembled across packets, including
 partial frames, coalesced frames, client masking, and fragmented messages.
 `WS::frame drop` and `WS::message drop` suppress the
 corresponding collected data event and mark the packet as dropped. `WS::release`
-clears the collection window. `WS::disconnect` records its close code and
-reason as a decision; it does not yet synthesize a raw WebSocket close frame.
+clears the collection window; incoming frame payloads are bounded by the same
+2 MiB stream limit as TCP reassembly. Control frames are not added to a data
+collection window.
+`WS::disconnect` records its close code and reason as a decision and emits a
+modeled CLOSE frame result for both endpoints with the RFC 6455 close payload
+bytes in `payload_hex`. The result is intentionally an egress model rather than
+a claim that the adapter is a complete TMM connection teardown.
 
 For a classic PCAP file, keep the iRule scenario in a JSON file and replay it
 through the CLI:

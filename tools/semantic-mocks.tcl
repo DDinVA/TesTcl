@@ -187,12 +187,32 @@ namespace eval ::itest::semantic {
         return [list requested $ws_collection_requested length $ws_collection_length released $ws_release_requested]
     }
 
+    proc ws_disconnect_snapshot {} {
+        variable ws_disconnect_requested
+        variable ws_disconnect_code
+        variable ws_disconnect_reason
+        return [list requested $ws_disconnect_requested code $ws_disconnect_code reason $ws_disconnect_reason]
+    }
+
+    proc ws_take_disconnect_snapshot {} {
+        variable ws_disconnect_requested
+        variable ws_disconnect_code
+        variable ws_disconnect_reason
+        set snapshot [list requested $ws_disconnect_requested code $ws_disconnect_code reason $ws_disconnect_reason]
+        set ws_disconnect_requested 0
+        set ws_disconnect_code ""
+        set ws_disconnect_reason ""
+        return $snapshot
+    }
+
     proc ws_prepare_frame {} {
         variable ws_frame_dropped
+        variable ws_release_requested
         variable ws_disconnect_requested
         variable ws_disconnect_code
         variable ws_disconnect_reason
         set ws_frame_dropped 0
+        set ws_release_requested 0
         set ws_disconnect_requested 0
         set ws_disconnect_code ""
         set ws_disconnect_reason ""
@@ -427,6 +447,9 @@ namespace eval ::itest::semantic {
         set ws_disconnect_requested 1
         set ws_disconnect_code $code
         set ws_disconnect_reason [expr {[llength $args] == 2 ? [lindex $args 1] : ""}]
+        if {[string bytelength $ws_disconnect_reason] > 123} {
+            error "WS::disconnect reason must be at most 123 bytes"
+        }
         ::itest::log_decision ws disconnect [list $code $ws_disconnect_reason]
         return ""
     }

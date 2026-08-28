@@ -1517,6 +1517,221 @@ when WS_SERVER_FRAME_DONE { log local0. server-done }
         self.assertNotIn("WS_CLIENT_DATA", str(dropped["trace"][2]))
         self.assertNotIn("WS_CLIENT_DATA", str(dropped["trace"][3]))
 
+    def test_websocket_collection_uses_frame_payload_and_release_rearms(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "WS"],
+                "irule": """
+when WS_CLIENT_FRAME { WS::collect frame 4 }
+when WS_CLIENT_DATA {
+    log local0. "collected=[WS::payload] length=[WS::payload length]"
+    WS::release
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "websocket",
+                        "type": "request",
+                        "direction": "client_to_server",
+                        "headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Key": "abc",
+                        },
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "response",
+                        "direction": "server_to_client",
+                        "status": 101,
+                        "response_headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Accept": "xyz",
+                        },
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "frame",
+                        "direction": "client_to_server",
+                        "frame_type": "text",
+                        "fin": False,
+                        "payload": "ab",
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "frame",
+                        "direction": "client_to_server",
+                        "frame_type": "continuation",
+                        "fin": True,
+                        "payload": "cdef",
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "frame",
+                        "direction": "client_to_server",
+                        "frame_type": "text",
+                        "fin": True,
+                        "payload": "wxyz",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first_data = result["trace"][2]["events"]
+        second_data = result["trace"][3]["events"]
+        self.assertEqual(
+            [event["event"] for event in first_data],
+            ["WS_CLIENT_FRAME", "WS_CLIENT_FRAME_DONE"],
+        )
+        self.assertEqual(
+            [event["event"] for event in second_data],
+            ["WS_CLIENT_FRAME", "WS_CLIENT_DATA", "WS_CLIENT_FRAME_DONE"],
+        )
+        self.assertIn("collected=cdef length=4", str(second_data[1]["logs"]))
+        self.assertEqual(
+            [event["event"] for event in result["trace"][4]["events"]],
+            ["WS_CLIENT_FRAME", "WS_CLIENT_DATA", "WS_CLIENT_FRAME_DONE"],
+        )
+        self.assertIn(
+            "collected=wxyz length=4",
+            str(result["trace"][4]["events"][1]["logs"]),
+        )
+
+    def test_websocket_disconnect_emits_bounded_close_result(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "WS"],
+                "irule": 'when WS_CLIENT_FRAME_DONE { WS::disconnect 1008 "policy" }',
+                "packets": [
+                    {
+                        "protocol": "websocket",
+                        "type": "request",
+                        "direction": "client_to_server",
+                        "headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Key": "abc",
+                        },
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "response",
+                        "direction": "server_to_client",
+                        "status": 101,
+                        "response_headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Accept": "xyz",
+                        },
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "frame",
+                        "direction": "client_to_server",
+                        "frame_type": "text",
+                        "payload": "hello",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        close_event = result["trace"][2]["events"][-1]
+        self.assertEqual(close_event["event"], "WS_CLIENT_FRAME_DONE")
+        self.assertEqual(
+            close_event["emissions"],
+            [
+                {
+                    "protocol": "websocket",
+                    "type": "frame",
+                    "frame_type": "close",
+                    "side": "client",
+                    "direction": "server_to_client",
+                    "fin": "1",
+                    "masked": "0",
+                    "mask": "",
+                    "close_code": 1008,
+                    "close_reason": "policy",
+                    "payload_hex": "03f0706f6c696379",
+                    "byte_length": 8,
+                    "control": "CLOSE",
+                },
+                {
+                    "protocol": "websocket",
+                    "type": "frame",
+                    "frame_type": "close",
+                    "side": "server",
+                    "direction": "client_to_server",
+                    "fin": "1",
+                    "masked": "1",
+                    "mask": "",
+                    "close_code": 1008,
+                    "close_reason": "policy",
+                    "payload_hex": "03f0706f6c696379",
+                    "byte_length": 8,
+                    "control": "CLOSE",
+                },
+            ],
+        )
+        self.assertEqual(
+            result["emitted"],
+            [
+                {
+                    **emission,
+                    "packet_index": 2,
+                    "event": "WS_CLIENT_FRAME_DONE",
+                }
+                for emission in close_event["emissions"]
+            ],
+        )
+
+    def test_websocket_control_frames_do_not_enter_data_collection(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "WS"],
+                "irule": (
+                    "when WS_CLIENT_FRAME { WS::collect frame } "
+                    "when WS_CLIENT_DATA { log local0. unexpected }"
+                ),
+                "packets": [
+                    {
+                        "protocol": "websocket",
+                        "type": "request",
+                        "direction": "client_to_server",
+                        "headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Key": "abc",
+                        },
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "response",
+                        "direction": "server_to_client",
+                        "status": 101,
+                        "response_headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Accept": "xyz",
+                        },
+                    },
+                    {
+                        "protocol": "websocket",
+                        "type": "frame",
+                        "direction": "client_to_server",
+                        "frame_type": "ping",
+                        "payload": "keepalive",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            [event["event"] for event in result["trace"][2]["events"]],
+            ["WS_CLIENT_FRAME", "WS_CLIENT_FRAME_DONE"],
+        )
+        self.assertNotIn("unexpected", str(result["trace"][2]))
+
     def test_websocket_disabled_processing_and_invalid_upgrade_are_ignored(self) -> None:
         disabled = self.adapter.run_scenario(
             {
