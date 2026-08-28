@@ -56,10 +56,11 @@ curl -X POST -H 'Content-Type: application/json' \
   http://127.0.0.1:8080/v1/simulations
 ```
 
-The service exposes `GET /healthz`, `GET /v1/capabilities`, and
-`POST /v1/simulations`. It also supports persistent sessions through
+The service exposes `GET /healthz`, `GET /v1/capabilities`,
+`GET /v1/conformance`, and `POST /v1/simulations`. It also supports persistent sessions through
 `POST /v1/sessions`, `GET /v1/sessions/{session_id}`,
-`POST /v1/sessions/{session_id}/requests`, and
+`POST /v1/sessions/{session_id}/requests`,
+`POST /v1/sessions/{session_id}/packets`, and
 `DELETE /v1/sessions/{session_id}`. It binds to `127.0.0.1` by default, caps
 JSON request bodies at 2 MiB, and does not expose arbitrary Tcl evaluation.
 The HTTP API accepts inline `irule` text only; use the CLI's `irule_file` field
@@ -70,7 +71,8 @@ For connection-aware testing, use the persistent session endpoints:
 groups; `POST /v1/sessions/{session_id}/requests` runs one request on that
 session; `GET /v1/sessions/{session_id}` returns lifecycle metadata; and
 `POST /v1/sessions/{session_id}/events` injects a catalogued event with
-structured protocol state; `DELETE /v1/sessions/{session_id}` closes it. The
+structured protocol state. `POST /v1/sessions/{session_id}/packets` replays a
+structured packet trace; `DELETE /v1/sessions/{session_id}` closes it. The
 Tcl interpreter is kept on a dedicated worker thread per session, so HTTP
 handler threads can safely make successive calls. Sessions expire after 30
 minutes of inactivity and the default service permits 32 concurrent sessions.
@@ -103,8 +105,10 @@ clients can discover these tools with `tools/list`:
 
 - `irule_simulate` runs a bounded one-shot scenario.
 - `irule_capabilities` returns a chunk of the complete 17.5 catalog.
+- `irule_conformance` reports static catalog/runtime and packet-adapter coverage.
 - `irule_session_create`, `irule_session_inspect`, `irule_session_request`,
-  `irule_session_event`, and `irule_session_close` manage persistent sessions.
+  `irule_session_trace`, `irule_session_event`, and `irule_session_close` manage
+  persistent sessions.
 
 Tool failures are returned as MCP tool results with `isError: true`; malformed
 JSON-RPC requests and unknown methods use protocol-level errors. The facade
@@ -159,6 +163,68 @@ explicit in `runtime_status`. The same distinction is included in each
 simulation/session `fidelity.warnings` report, so callers can fail closed or
 ask for a higher-fidelity test when needed.
 
+## Structured packet traces
+
+One-shot scenarios may use `packets` instead of `request`/`requests`. A trace
+is a bounded sequence of structured packet records; it is not a raw pcap
+decoder yet. TCP SYN/FIN/RST, TCP payloads, TLS handshake/data records, HTTP
+request/response pairs, and DNS request/response messages are translated into
+the same Tcl events and state layers used by the HTTP API. Generic UDP payloads
+are reported as unmapped because there is no protocol-specific event to infer.
+For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
+packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
+supports one packet at a time, so TCP/TLS application reassembly remains a
+future slice.
+
+```json
+{
+  "profiles": ["TCP", "CLIENTSSL", "HTTP"],
+  "irule": "when HTTP_REQUEST { pool api_pool }",
+  "pools": {"api_pool": ["10.0.0.1:80"]},
+  "packets": [
+    {
+      "protocol": "tcp",
+      "direction": "client_to_server",
+      "flags": ["SYN"],
+      "source": {"address": "10.0.0.5", "port": 51000},
+      "destination": {"address": "192.0.2.10", "port": 443}
+    },
+    {
+      "protocol": "tls",
+      "type": "client_hello",
+      "direction": "client_to_server",
+      "sni": "api.example.com"
+    },
+    {
+      "protocol": "http",
+      "direction": "client_to_server",
+      "method": "GET",
+      "uri": "/health",
+      "host": "api.example.com"
+    },
+    {
+      "protocol": "http",
+      "direction": "server_to_client",
+      "status": 200,
+      "response_body": "ok"
+    }
+  ]
+}
+```
+
+The response includes a per-packet `trace`, translated event results, and
+HTTP transaction results. Persistent sessions accept the same packet array at
+`POST /v1/sessions/{session_id}/packets`, or through the MCP
+`irule_session_trace` tool.
+
+Use the static conformance report to see what the pinned 17.5 registry knows
+about and which events currently have packet adapters:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh --conformance
+curl http://127.0.0.1:8080/v1/conformance
+```
+
 ## Container
 
 Build and run the pinned 17.5 image:
@@ -186,8 +252,9 @@ docker run --rm --publish 8080:8080 testcl-irule-emulator:17.5 \
 
 ## Current boundary
 
-The current slice supports HTTP/TCP request simulation, persistent connection
-sessions, structured DNS/TLS event injection, and an MCP facade over the same
-JSON contract. The next slice should add packet-level protocol state and
-catalog-driven conformance fixtures. The emulator profile remains fixed at
-`tmos-17.5`.
+The current slice supports HTTP/TCP request simulation, structured packet
+traces, persistent connection sessions, structured DNS/TLS event injection,
+catalog conformance reporting, and an MCP facade over the same JSON contract.
+The next slice should add raw pcap/byte decoding and semantic command mocks for
+the highest-value uncovered catalog entries. The emulator profile remains
+fixed at `tmos-17.5`.

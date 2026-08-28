@@ -12,6 +12,7 @@ Input is one JSON scenario object.  See docs/emulator.md for the schema.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import math
 import os
@@ -311,6 +312,53 @@ def _build_capabilities(root: Path, offset: int, limit: int) -> dict[str, Any]:
         "commands": commands[start:end],
         "events": events,
         "profiles": profiles,
+    }
+
+
+def _build_conformance(root: Path) -> dict[str, Any]:
+    """Report static catalog coverage without pretending stubs are semantics."""
+    registry, status_map = _runtime_status_map(root)
+    try:
+        from compiler.registry.namespace_registry import NAMESPACE_REGISTRY
+    except ImportError as exc:  # pragma: no cover - depends on external checkout
+        raise EmulatorInputError(f"could not load tcl-lsp event registry: {exc}") from exc
+
+    command_counts = {"handwritten-mock": 0, "generated-stub": 0, "no-runtime-handler": 0}
+    for status in status_map.values():
+        command_counts[status] = command_counts.get(status, 0) + 1
+    event_names = sorted(NAMESPACE_REGISTRY.all_event_names())
+    supported_events = [name for name in event_names if name in PACKET_EVENT_ADAPTERS]
+    return {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "source": {
+            "name": "tcl-lsp f5-irules registry",
+            "commit": os.environ.get("TCL_LSP_COMMIT", "unknown"),
+        },
+        "commands": {
+            "catalog_count": len(status_map),
+            "runtime_status_counts": command_counts,
+            "runtime_status_meaning": {
+                "handwritten-mock": "implemented behavioral mock in the loaded Tcl framework",
+                "generated-stub": "recognized command with generated placeholder behavior",
+                "no-runtime-handler": "catalogued command without a matching runtime proc",
+            },
+        },
+        "events": {
+            "catalog_count": len(event_names),
+            "packet_adapter_count": len(supported_events),
+            "packet_adapter_events": [
+                {"name": name, "adapter": PACKET_EVENT_ADAPTERS[name]}
+                for name in supported_events
+            ],
+            "unmapped_events": [name for name in event_names if name not in PACKET_EVENT_ADAPTERS],
+        },
+        "interpretation": (
+            "This is static catalog-to-runtime coverage. It is not a claim that "
+            "generated stubs reproduce BIG-IP TMM semantics."
+        ),
     }
 
 
@@ -677,6 +725,7 @@ def _normalise_scenario_config(
     *,
     allow_irule_file: bool,
     allow_requests: bool,
+    allow_packets: bool = False,
     require_http: bool,
 ) -> tuple[str, list[str], dict[str, list[str]], list[tuple[str, dict[str, str], str]]]:
     if not isinstance(scenario, dict):
@@ -685,6 +734,8 @@ def _normalise_scenario_config(
     allowed_fields = {"tmos_version", "irule", "irule_file", "profiles", "pools", "datagroups"}
     if allow_requests:
         allowed_fields.update(("request", "requests"))
+    if allow_packets:
+        allowed_fields.add("packets")
     unknown_fields = sorted(set(scenario) - allowed_fields)
     if unknown_fields:
         raise EmulatorInputError(f"unsupported scenario field(s): {', '.join(unknown_fields)}")
@@ -760,6 +811,481 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
                 )
         normalised[layer] = layer_values
     return event_name, normalised
+
+
+PACKET_MAX_COUNT = 1000
+PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "wire"}
+PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
+PACKET_COMMON_FIELDS = {
+    "protocol",
+    "direction",
+    "flags",
+    "payload",
+    "source",
+    "destination",
+    "src_addr",
+    "src_port",
+    "dst_addr",
+    "dst_port",
+}
+PACKET_PROTOCOL_FIELDS = {
+    "tcp": set(),
+    "udp": set(),
+    "tls": {
+        "type",
+        "sni",
+        "cipher_name",
+        "cipher_bits",
+        "cipher_version",
+        "cert_subject",
+        "cert_issuer",
+        "cert_serial",
+        "cert_hash",
+        "cert_count",
+        "extensions",
+        "alpn",
+        "session_id",
+    },
+    "http": {
+        "method",
+        "uri",
+        "host",
+        "headers",
+        "body",
+        "status",
+        "response_headers",
+        "response_body",
+    },
+    "dns": {
+        "qname",
+        "qtype",
+        "qclass",
+        "rcode",
+        "opcode",
+        "id",
+        "aa",
+        "tc",
+        "rd",
+        "ra",
+        "cd",
+        "ad",
+        "answers",
+        "authority",
+        "additional",
+        "response_sent",
+    },
+}
+PACKET_EVENT_ADAPTERS = {
+    "RULE_INIT": "trace initialization",
+    "CLIENT_ACCEPTED": "tcp SYN/connection start",
+    "CLIENT_CLOSED": "tcp FIN/RST from client",
+    "SERVER_CLOSED": "tcp FIN/RST from server",
+    "CLIENT_DATA": "tcp client payload",
+    "SERVER_DATA": "tcp server payload",
+    "CLIENTSSL_CLIENTHELLO": "TLS client hello",
+    "CLIENTSSL_CLIENTCERT": "TLS client certificate",
+    "CLIENTSSL_HANDSHAKE": "TLS client handshake",
+    "CLIENTSSL_DATA": "TLS client data",
+    "SERVERSSL_SERVERHELLO": "TLS server hello",
+    "SERVERSSL_SERVERCERT": "TLS server certificate",
+    "SERVERSSL_HANDSHAKE": "TLS server handshake",
+    "SERVERSSL_DATA": "TLS server data",
+    "HTTP_REQUEST": "HTTP request transaction",
+    "HTTP_RESPONSE": "HTTP response transaction",
+    "DNS_REQUEST": "DNS request packet",
+    "DNS_RESPONSE": "DNS response packet",
+}
+
+
+def _packet_direction(value: Any) -> str:
+    direction = _require_string(value, "packet direction").lower()
+    aliases = {
+        "client": "client_to_server",
+        "c2s": "client_to_server",
+        "server": "server_to_client",
+        "s2c": "server_to_client",
+    }
+    direction = aliases.get(direction, direction)
+    if direction not in PACKET_DIRECTIONS:
+        raise EmulatorInputError(
+            "packet direction must be client_to_server or server_to_client"
+        )
+    return direction
+
+
+def _decode_wire_text(payload: bytes) -> str:
+    # Tcl strings cannot contain embedded NUL bytes. Preserve human-readable
+    # captures while replacing binary NULs at the wire-to-Tcl boundary.
+    return payload.decode("utf-8", errors="replace").replace("\x00", "\ufffd")
+
+
+def _decode_http_payload(payload: bytes, direction: str) -> dict[str, Any] | None:
+    text = payload.decode("iso-8859-1", errors="replace").replace("\x00", "\ufffd")
+    separator = text.find("\r\n\r\n")
+    separator_length = 4
+    if separator < 0:
+        separator = text.find("\n\n")
+        separator_length = 2
+    if separator < 0:
+        return None
+    header_text = text[:separator]
+    body = text[separator + separator_length :]
+    lines = header_text.splitlines()
+    if not lines:
+        return None
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if ":" not in line:
+            continue
+        name, value = line.split(":", 1)
+        headers[name.strip()] = value.strip()
+    if direction == "client_to_server":
+        match = re.match(r"^([A-Za-z]+)\s+(\S+)\s+HTTP/", lines[0])
+        if match is None:
+            return None
+        return {
+            "protocol": "http",
+            "direction": direction,
+            "method": match.group(1),
+            "uri": match.group(2),
+            "headers": headers,
+            "body": body,
+        }
+    match = re.match(r"^HTTP/\S+\s+(\d{3})(?:\s+.*)?$", lines[0])
+    if match is None:
+        return None
+    return {
+        "protocol": "http",
+        "direction": direction,
+        "status": int(match.group(1)),
+        "response_headers": headers,
+        "response_body": body,
+    }
+
+
+def _decode_tls_payload(payload: bytes, direction: str) -> dict[str, Any] | None:
+    if len(payload) < 5 or payload[0] not in {20, 21, 22, 23}:
+        return None
+    record_length = int.from_bytes(payload[3:5], "big")
+    record = payload[5 : 5 + record_length]
+    if payload[0] == 23:
+        packet_type = "client_data" if direction == "client_to_server" else "server_data"
+        return {"protocol": "tls", "direction": direction, "type": packet_type}
+    if payload[0] != 22 or len(record) < 4:
+        return None
+    handshake_type = record[0]
+    packet_types = {
+        ("client_to_server", 1): "client_hello",
+        ("server_to_client", 2): "server_hello",
+        ("client_to_server", 11): "client_cert",
+        ("server_to_client", 11): "server_cert",
+    }
+    packet_type = packet_types.get((direction, handshake_type))
+    if packet_type is None:
+        if handshake_type == 20:
+            packet_type = "handshake" if direction == "client_to_server" else "server_handshake"
+        else:
+            return None
+    result: dict[str, Any] = {
+        "protocol": "tls",
+        "direction": direction,
+        "type": packet_type,
+    }
+    if handshake_type == 1 and len(record) >= 4 + 2 + 32 + 1:
+        body = record[4:]
+        cursor = 2 + 32
+        session_length = body[cursor]
+        cursor += 1 + session_length
+        if cursor + 2 <= len(body):
+            cipher_length = int.from_bytes(body[cursor : cursor + 2], "big")
+            cursor += 2 + cipher_length
+        if cursor < len(body):
+            compression_length = body[cursor]
+            cursor += 1 + compression_length
+        if cursor + 2 <= len(body):
+            extensions_length = int.from_bytes(body[cursor : cursor + 2], "big")
+            cursor += 2
+            extensions_end = min(cursor + extensions_length, len(body))
+            while cursor + 4 <= extensions_end:
+                extension_type = int.from_bytes(body[cursor : cursor + 2], "big")
+                extension_length = int.from_bytes(body[cursor + 2 : cursor + 4], "big")
+                cursor += 4
+                extension = body[cursor : cursor + extension_length]
+                cursor += extension_length
+                if extension_type == 0 and len(extension) >= 5:
+                    name_length = int.from_bytes(extension[3:5], "big")
+                    result["sni"] = _decode_wire_text(extension[5 : 5 + name_length])
+                    break
+    return result
+
+
+def _decode_dns_payload(payload: bytes, direction: str, index: int) -> dict[str, Any] | None:
+    if len(payload) < 12:
+        return None
+    flags = int.from_bytes(payload[2:4], "big")
+    qdcount = int.from_bytes(payload[4:6], "big")
+    if qdcount < 1:
+        return None
+    cursor = 12
+    labels: list[str] = []
+    while cursor < len(payload):
+        length = payload[cursor]
+        cursor += 1
+        if length == 0:
+            break
+        if length & 0xC0 or cursor + length > len(payload):
+            raise EmulatorInputError(f"wire packet {index} has an invalid DNS name")
+        labels.append(_decode_wire_text(payload[cursor : cursor + length]))
+        cursor += length
+    if cursor + 4 > len(payload):
+        raise EmulatorInputError(f"wire packet {index} has an incomplete DNS question")
+    qtype = int.from_bytes(payload[cursor : cursor + 2], "big")
+    qclass = int.from_bytes(payload[cursor + 2 : cursor + 4], "big")
+    result: dict[str, Any] = {
+        "protocol": "dns",
+        "direction": "server_to_client" if flags & 0x8000 else direction,
+        "qname": ".".join(labels),
+        "qtype": {1: "A", 28: "AAAA", 5: "CNAME", 15: "MX"}.get(qtype, str(qtype)),
+        "qclass": {1: "IN"}.get(qclass, str(qclass)),
+        "id": int.from_bytes(payload[0:2], "big"),
+        "rcode": flags & 0x000F,
+        "opcode": (flags >> 11) & 0x000F,
+        "aa": bool(flags & 0x0400),
+        "tc": bool(flags & 0x0200),
+        "rd": bool(flags & 0x0100),
+        "ra": bool(flags & 0x0080),
+        "cd": bool(flags & 0x0010),
+        "ad": bool(flags & 0x0020),
+    }
+    return result
+
+
+def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) -> dict[str, Any]:
+    unknown = sorted(set(raw_packet) - {"protocol", "direction", "raw_hex", "network"})
+    if unknown:
+        raise EmulatorInputError(
+            f"unsupported wire packet {index} field(s): {', '.join(unknown)}"
+        )
+    network = _require_string(raw_packet.get("network", "ipv4"), f"wire packet {index} network").lower()
+    if network != "ipv4":
+        raise EmulatorInputError("only raw IPv4 wire packets are currently supported")
+    raw_hex = _require_string(raw_packet.get("raw_hex"), f"wire packet {index} raw_hex")
+    try:
+        raw = bytes.fromhex(raw_hex)
+    except ValueError as exc:
+        raise EmulatorInputError(f"wire packet {index} raw_hex is not valid hexadecimal") from exc
+    if len(raw) < 20 or raw[0] >> 4 != 4:
+        raise EmulatorInputError(f"wire packet {index} must contain an IPv4 packet")
+    header_length = (raw[0] & 0x0F) * 4
+    if header_length < 20 or len(raw) < header_length:
+        raise EmulatorInputError(f"wire packet {index} has an invalid IPv4 header length")
+    total_length = int.from_bytes(raw[2:4], "big")
+    if total_length < header_length or total_length > len(raw):
+        raise EmulatorInputError(f"wire packet {index} has an invalid IPv4 total length")
+    fragment_field = int.from_bytes(raw[6:8], "big")
+    if fragment_field & 0x3FFF:
+        raise EmulatorInputError(
+            f"wire packet {index} is fragmented; reassembly is not supported yet"
+        )
+    source_address = str(ipaddress.ip_address(raw[12:16]))
+    destination_address = str(ipaddress.ip_address(raw[16:20]))
+    ip_protocol = raw[9]
+    payload = raw[header_length:total_length]
+    if ip_protocol == 6:
+        if len(payload) < 20:
+            raise EmulatorInputError(f"wire packet {index} has an incomplete TCP header")
+        tcp_header_length = (payload[12] >> 4) * 4
+        if tcp_header_length < 20 or len(payload) < tcp_header_length:
+            raise EmulatorInputError(f"wire packet {index} has an invalid TCP header length")
+        flags_value = payload[13]
+        flag_names = [
+            name
+            for bit, name in ((0x02, "SYN"), (0x10, "ACK"), (0x01, "FIN"), (0x04, "RST"), (0x08, "PSH"))
+            if flags_value & bit
+        ]
+        tcp_payload = payload[tcp_header_length:]
+        packet: dict[str, Any] = {
+            "protocol": "tcp",
+            "direction": direction,
+            "flags": flag_names,
+            "source": {"address": source_address, "port": int.from_bytes(payload[0:2], "big")},
+            "destination": {"address": destination_address, "port": int.from_bytes(payload[2:4], "big")},
+        }
+        if tcp_payload:
+            packet["payload"] = _decode_wire_text(tcp_payload)
+            packet.update(_decode_tls_payload(tcp_payload, direction) or {})
+            packet.update(_decode_http_payload(tcp_payload, direction) or {})
+        return packet
+    if ip_protocol == 17:
+        if len(payload) < 8:
+            raise EmulatorInputError(f"wire packet {index} has an incomplete UDP header")
+        udp_payload = payload[8:]
+        packet = {
+            "protocol": "udp",
+            "direction": direction,
+            "source": {"address": source_address, "port": int.from_bytes(payload[0:2], "big")},
+            "destination": {"address": destination_address, "port": int.from_bytes(payload[2:4], "big")},
+        }
+        if udp_payload:
+            packet["payload"] = _decode_wire_text(udp_payload)
+            packet.update(_decode_dns_payload(udp_payload, direction, index) or {})
+        return packet
+    raise EmulatorInputError(
+        f"wire packet {index} uses unsupported IPv4 protocol number {ip_protocol}"
+    )
+
+
+def _packet_endpoint(raw: Any, prefix: str, packet_index: int) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError(f"packet {packet_index} {prefix} must be an object")
+    unknown = sorted(set(raw) - {"address", "port"})
+    if unknown:
+        raise EmulatorInputError(
+            f"unsupported packet {prefix} field(s): {', '.join(unknown)}"
+        )
+    result: dict[str, Any] = {}
+    if "address" in raw:
+        result["address"] = _require_string(raw["address"], f"packet {prefix} address")
+    if "port" in raw:
+        port = raw["port"]
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
+            raise EmulatorInputError(f"packet {prefix} port must be an integer from 0 to 65535")
+        result["port"] = port
+    return result
+
+
+def _packet_scalar(value: Any, field: str) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (str, int, float)):
+        return str(value)
+    if isinstance(value, (list, dict)):
+        try:
+            return json.dumps(value, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise EmulatorInputError(f"packet field {field} must be JSON-serialisable") from exc
+    raise EmulatorInputError(f"packet field {field} must be a scalar or JSON value")
+
+
+def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list) or not raw:
+        raise EmulatorInputError("packets must be a non-empty array")
+    if len(raw) > PACKET_MAX_COUNT:
+        raise EmulatorInputError(f"packets cannot contain more than {PACKET_MAX_COUNT} entries")
+
+    packets: list[dict[str, Any]] = []
+    for index, packet in enumerate(raw):
+        if not isinstance(packet, dict):
+            raise EmulatorInputError(f"packet {index} must be an object")
+        protocol = _require_string(packet.get("protocol"), f"packet {index} protocol").lower()
+        if protocol not in PACKET_PROTOCOLS:
+            raise EmulatorInputError(
+                f"packet {index} protocol must be one of: {', '.join(sorted(PACKET_PROTOCOLS))}"
+            )
+        direction = _packet_direction(packet.get("direction", "client_to_server"))
+        if protocol == "wire":
+            packet = _decode_wire_packet(packet, index, direction)
+            protocol = packet["protocol"]
+            direction = packet["direction"]
+        allowed = PACKET_COMMON_FIELDS | PACKET_PROTOCOL_FIELDS[protocol]
+        unknown = sorted(set(packet) - allowed)
+        if unknown:
+            raise EmulatorInputError(
+                f"unsupported packet {index} field(s): {', '.join(unknown)}"
+            )
+
+        normalised: dict[str, Any] = {
+            "protocol": protocol,
+            "direction": direction,
+            "source": _packet_endpoint(packet.get("source"), "source", index),
+            "destination": _packet_endpoint(packet.get("destination"), "destination", index),
+        }
+        for field, endpoint_key in (
+            ("src_addr", "address"),
+            ("src_port", "port"),
+            ("dst_addr", "address"),
+            ("dst_port", "port"),
+        ):
+            if field not in packet:
+                continue
+            if field.endswith("_addr"):
+                value = _require_string(packet[field], f"packet {index} {field}")
+            else:
+                value = packet[field]
+                if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 65535:
+                    raise EmulatorInputError(
+                        f"packet {index} {field} must be an integer from 0 to 65535"
+                    )
+            endpoint = "source" if field.startswith("src_") else "destination"
+            if endpoint_key in normalised[endpoint]:
+                raise EmulatorInputError(
+                    f"packet {index} specifies both {endpoint}.{endpoint_key} and {field}"
+                )
+            normalised[endpoint][endpoint_key] = value
+
+        if "flags" in packet:
+            flags = packet["flags"]
+            if not isinstance(flags, list) or not all(isinstance(flag, str) and flag for flag in flags):
+                raise EmulatorInputError(f"packet {index} flags must be an array of strings")
+            normalised["flags"] = [flag.upper() for flag in flags]
+        if "payload" in packet:
+            normalised["payload"] = _require_string(packet["payload"], f"packet {index} payload")
+
+        for field in PACKET_PROTOCOL_FIELDS[protocol]:
+            if field not in packet:
+                continue
+            if field in {"headers", "response_headers"}:
+                value = packet[field]
+                if not isinstance(value, dict) or not all(
+                    isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+                ):
+                    raise EmulatorInputError(f"packet {index} {field} must be an object of strings")
+                normalised[field] = value
+            elif field in {"body", "response_body", "method", "uri", "host"}:
+                normalised[field] = _require_string(packet[field], f"packet {index} {field}")
+            elif field == "type":
+                packet_type = _require_string(packet[field], f"packet {index} type").lower()
+                if packet_type not in {
+                    "client_hello",
+                    "client_cert",
+                    "handshake",
+                    "client_data",
+                    "server_hello",
+                    "server_cert",
+                    "server_handshake",
+                    "server_data",
+                }:
+                    raise EmulatorInputError(f"unsupported TLS packet type: {packet_type}")
+                normalised[field] = packet_type
+            else:
+                normalised[field] = _packet_scalar(packet[field], f"packet {index} {field}")
+
+        if protocol == "tls" and "type" not in normalised:
+            raise EmulatorInputError(f"packet {index} TLS packets require type")
+        if protocol == "tls":
+            client_types = {"client_hello", "client_cert", "handshake", "client_data"}
+            server_types = {"server_hello", "server_cert", "server_handshake", "server_data"}
+            valid_types = client_types if direction == "client_to_server" else server_types
+            if normalised["type"] not in valid_types:
+                side = "client" if direction == "client_to_server" else "server"
+                raise EmulatorInputError(
+                    f"packet {index} TLS {side} direction cannot carry {normalised['type']}"
+                )
+        if protocol == "http" and direction == "client_to_server" and "status" in normalised:
+            raise EmulatorInputError(f"packet {index} HTTP requests cannot specify status")
+        if protocol == "http" and direction == "server_to_client" and "method" in normalised:
+            raise EmulatorInputError(f"packet {index} HTTP responses cannot specify method")
+        if protocol == "http" and direction == "server_to_client" and "status" in normalised:
+            try:
+                status = int(normalised["status"])
+            except (TypeError, ValueError) as exc:
+                raise EmulatorInputError(f"packet {index} HTTP status must be an integer") from exc
+            if not 100 <= status <= 999:
+                raise EmulatorInputError(f"packet {index} HTTP status must be between 100 and 999")
+        packets.append(normalised)
+    return packets
 
 
 def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -863,11 +1389,13 @@ class EmulatorSession:
         *,
         allow_irule_file: bool,
         allow_requests: bool,
+        allow_packets: bool = False,
     ) -> None:
         source, profiles, pools, datagroups = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
             allow_requests=allow_requests,
+            allow_packets=allow_packets,
             require_http=False,
         )
         self._root = root
@@ -1029,6 +1557,274 @@ class EmulatorSession:
         return self._call(
             lambda session: self._fire_event_on_worker(session, event_name, normalised_state)
         )
+
+    @staticmethod
+    def _packet_connection_state(packet: dict[str, Any]) -> dict[str, str]:
+        connection: dict[str, str] = {}
+        source = packet["source"]
+        destination = packet["destination"]
+        direction = packet["direction"]
+        if direction == "client_to_server":
+            source_prefix, destination_prefix = "client", "local"
+        else:
+            source_prefix, destination_prefix = "server", "remote"
+        if "address" in source:
+            connection[f"{source_prefix}_addr"] = str(source["address"])
+        if "port" in source:
+            connection[f"{source_prefix}_port"] = str(source["port"])
+        if "address" in destination:
+            connection[f"{destination_prefix}_addr"] = str(destination["address"])
+        if "port" in destination:
+            connection[f"{destination_prefix}_port"] = str(destination["port"])
+        protocol = packet["protocol"]
+        if protocol in {"tcp", "tls", "http"}:
+            connection.update({"protocol": "6", "transport": "tcp"})
+        elif protocol in {"udp", "dns"}:
+            connection.update({"protocol": "17", "transport": "udp"})
+        if "payload" in packet:
+            payload_key = "client_payload" if direction == "client_to_server" else "server_payload"
+            connection[payload_key] = packet["payload"]
+        return connection
+
+    @staticmethod
+    def _packet_event_state(packet: dict[str, Any]) -> dict[str, dict[str, str]]:
+        state: dict[str, dict[str, str]] = {}
+        connection = EmulatorSession._packet_connection_state(packet)
+        if connection:
+            state["connection"] = connection
+        protocol = packet["protocol"]
+        direction = packet["direction"]
+        if protocol == "tls":
+            layer = "tls_client" if direction == "client_to_server" else "tls_server"
+            tls_state: dict[str, str] = {}
+            for field in (
+                "sni",
+                "cipher_name",
+                "cipher_bits",
+                "cipher_version",
+                "cert_subject",
+                "cert_issuer",
+                "cert_serial",
+                "cert_hash",
+                "cert_count",
+                "extensions",
+                "alpn",
+                "session_id",
+            ):
+                if field in packet:
+                    tls_state[field] = packet[field]
+            if packet.get("type") in {"handshake", "server_handshake"}:
+                tls_state["handshake_done"] = "1"
+            if tls_state:
+                state[layer] = tls_state
+        elif protocol == "dns":
+            dns_state: dict[str, str] = {}
+            for field in EVENT_STATE_FIELDS["dns"]:
+                if field in packet:
+                    dns_state[field] = packet[field]
+            if dns_state:
+                state["dns"] = dns_state
+        return state
+
+    @staticmethod
+    def _packet_tls_event(packet: dict[str, Any]) -> str:
+        client_events = {
+            "client_hello": "CLIENTSSL_CLIENTHELLO",
+            "client_cert": "CLIENTSSL_CLIENTCERT",
+            "handshake": "CLIENTSSL_HANDSHAKE",
+            "client_data": "CLIENTSSL_DATA",
+        }
+        server_events = {
+            "server_hello": "SERVERSSL_SERVERHELLO",
+            "server_cert": "SERVERSSL_SERVERCERT",
+            "server_handshake": "SERVERSSL_HANDSHAKE",
+            "server_data": "SERVERSSL_DATA",
+        }
+        events = client_events if packet["direction"] == "client_to_server" else server_events
+        return events[packet["type"]]
+
+    def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
+        """Make packet endpoints visible to the upstream HTTP orchestrator."""
+        if packet["protocol"] not in {"tcp", "tls", "http"}:
+            return
+        source = packet["source"]
+        destination = packet["destination"]
+        values: dict[str, Any] = {}
+        if packet["direction"] == "client_to_server":
+            if "address" in source:
+                values["client_addr"] = source["address"]
+            if "port" in source:
+                values["client_port"] = source["port"]
+            if "address" in destination:
+                values["local_addr"] = destination["address"]
+            if "port" in destination:
+                values["local_port"] = destination["port"]
+        for key, value in values.items():
+            session.eval_tcl(f"set ::orch::config({key}) {_tcl_quote(str(value))}")
+
+    def _activate_packet_connection(
+        self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
+    ) -> None:
+        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http"}:
+            return
+        self._configure_packet_connection(session, packet)
+        events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
+        events.append(
+            self._fire_event_on_worker(
+                session, "CLIENT_ACCEPTED", {"connection": self._packet_connection_state(packet)}
+            )
+        )
+        # Direct packet events bypass ::orch::run_http_request, so mark the
+        # orchestrator connection active before a later HTTP packet arrives.
+        session.eval_tcl("set ::orch::_connection_active 1")
+        session.eval_tcl("set ::orch::_init_done 1")
+        self._connection_open = True
+
+    def _close_packet_connection(self, session: Any) -> None:
+        session.eval_tcl("set ::orch::_connection_active 0")
+        session.eval_tcl("::state::reset_connection_state")
+        self._connection_open = False
+
+    def _run_packet_trace_on_worker(
+        self, session: Any, packets: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        trace: list[dict[str, Any]] = []
+        http_results: list[dict[str, Any]] = []
+        pending_http: tuple[dict[str, Any], int] | None = None
+
+        def finish_http(response: dict[str, Any] | None = None, at_index: int | None = None) -> None:
+            nonlocal pending_http
+            if pending_http is None:
+                return
+            request, trace_index = pending_http
+            if response:
+                request.update(response)
+            result = self._run_request_on_worker(session, request)
+            trace[trace_index]["http_result"] = result
+            trace[trace_index]["pending"] = False
+            if at_index is not None:
+                trace[trace_index]["completed_at"] = at_index
+            http_results.append(result)
+            pending_http = None
+
+        for index, packet in enumerate(packets):
+            entry: dict[str, Any] = {
+                "index": index,
+                "protocol": packet["protocol"],
+                "direction": packet["direction"],
+                "events": [],
+            }
+            for field in (
+                "source",
+                "destination",
+                "flags",
+                "type",
+                "method",
+                "uri",
+                "status",
+                "sni",
+                "qname",
+                "qtype",
+            ):
+                if field in packet:
+                    entry[field] = packet[field]
+            trace.append(entry)
+            protocol = packet["protocol"]
+            direction = packet["direction"]
+            if protocol == "http":
+                self._activate_packet_connection(session, packet, entry["events"])
+                if direction == "client_to_server":
+                    finish_http()
+                    request: dict[str, Any] = {
+                        "method": packet.get("method", "GET"),
+                        "uri": packet.get("uri", "/"),
+                    }
+                    for field in ("host", "headers", "body"):
+                        if field in packet:
+                            request[field] = packet[field]
+                    if "payload" in packet and "body" not in request:
+                        request["body"] = packet["payload"]
+                    pending_http = (request, index)
+                    entry["pending"] = True
+                else:
+                    if pending_http is None:
+                        entry["ignored"] = "HTTP response has no pending HTTP request"
+                    else:
+                        response_headers = packet.get("response_headers", packet.get("headers", {}))
+                        response_body = packet.get("response_body", packet.get("payload", ""))
+                        finish_http(
+                            {
+                                "response_status": int(packet.get("status", 200)),
+                                "response_headers": response_headers,
+                                "response_body": response_body,
+                            },
+                            index,
+                        )
+                continue
+
+            if protocol in {"tcp", "tls"}:
+                if protocol == "tcp":
+                    flags = set(packet.get("flags", []))
+                    if "SYN" in flags and "ACK" not in flags and self._connection_open:
+                        finish_http(at_index=index)
+                        entry["events"].append(
+                            self._fire_event_on_worker(
+                                session,
+                                "CLIENT_CLOSED",
+                                {"connection": self._packet_connection_state(packet)},
+                            )
+                        )
+                        self._close_packet_connection(session)
+                self._activate_packet_connection(session, packet, entry["events"])
+            elif protocol == "dns":
+                event_name = "DNS_REQUEST" if direction == "client_to_server" else "DNS_RESPONSE"
+                entry["events"].append(
+                    self._fire_event_on_worker(session, event_name, self._packet_event_state(packet))
+                )
+                continue
+            else:  # Generic UDP has no single catalogued iRule data event.
+                entry["ignored"] = "generic UDP packet has no protocol-specific event adapter"
+                continue
+
+            if protocol == "tls":
+                entry["events"].append(
+                    self._fire_event_on_worker(
+                        session, self._packet_tls_event(packet), self._packet_event_state(packet)
+                    )
+                )
+            else:  # TCP
+                flags = set(packet.get("flags", []))
+                if packet.get("payload"):
+                    event_name = "CLIENT_DATA" if direction == "client_to_server" else "SERVER_DATA"
+                    entry["events"].append(
+                        self._fire_event_on_worker(
+                            session, event_name, self._packet_event_state(packet)
+                        )
+                    )
+                if flags.intersection({"FIN", "RST"}):
+                    finish_http(at_index=index)
+                    event_name = "CLIENT_CLOSED" if direction == "client_to_server" else "SERVER_CLOSED"
+                    entry["events"].append(
+                        self._fire_event_on_worker(
+                            session, event_name, self._packet_event_state(packet)
+                        )
+                    )
+                    self._close_packet_connection(session)
+
+        finish_http()
+        return {
+            "status": "ok",
+            "schema_version": 1,
+            "profile": "tmos-17.5",
+            "tmos_version": TMOS_VERSION,
+            "packets_processed": len(packets),
+            "trace": trace,
+            "results": http_results,
+        }
+
+    def run_packet_trace(self, packets: Any) -> dict[str, Any]:
+        normalised = _normalise_packets(packets)
+        return self._call(lambda session: self._run_packet_trace_on_worker(session, normalised))
 
     def metadata(self, session_id: str) -> dict[str, Any]:
         def read_metadata(session: Any) -> dict[str, Any]:
@@ -1223,6 +2019,12 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_conformance",
+                "title": "Report catalog conformance",
+                "description": "Report static 17.5 catalog coverage for runtime command handlers and packet-to-event adapters.",
+                "inputSchema": _mcp_object_schema({}),
+            },
+            {
                 "name": "irule_session_create",
                 "title": "Create an iRule session",
                 "description": "Create a persistent connection-aware emulator session for repeated requests or protocol events.",
@@ -1248,6 +2050,18 @@ class McpProtocolServer:
                         "request": {"type": "object"},
                     },
                     ["session_id", "request"],
+                ),
+            },
+            {
+                "name": "irule_session_trace",
+                "title": "Replay a packet trace",
+                "description": "Replay a bounded structured TCP, TLS, HTTP, UDP, or DNS packet trace on a persistent emulator session.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "session_id": {"type": "string", "minLength": 1},
+                        "packets": {"type": "array", "minItems": 1, "maxItems": PACKET_MAX_COUNT},
+                    },
+                    ["session_id", "packets"],
                 ),
             },
             {
@@ -1334,6 +2148,11 @@ class McpProtocolServer:
                 raise McpProtocolError(-32602, "capability limit must be an integer")
             return self._tool_success(_build_capabilities(self._root, offset, limit))
 
+        if name == "irule_conformance":
+            if args:
+                raise McpProtocolError(-32602, "irule_conformance accepts no arguments")
+            return self._tool_success(_build_conformance(self._root))
+
         if name == "irule_session_create":
             if set(args) != {"scenario"}:
                 raise McpProtocolError(-32602, "irule_session_create requires only scenario")
@@ -1372,6 +2191,26 @@ class McpProtocolServer:
                     "session_id": session_id,
                     "fidelity": metadata["fidelity"],
                     "request_number": metadata["request_count"],
+                    "result": result,
+                }
+            )
+
+        if name == "irule_session_trace":
+            if set(args) != {"session_id", "packets"} or not isinstance(args["packets"], list):
+                raise McpProtocolError(-32602, "irule_session_trace requires session_id and packets array")
+            result = self._manager.execute(
+                session_id, lambda session: session.run_packet_trace(args["packets"])
+            )
+            metadata = self._manager.metadata(session_id)
+            return self._tool_success(
+                {
+                    "status": "ok",
+                    "schema_version": 1,
+                    "profile": "tmos-17.5",
+                    "tmos_version": TMOS_VERSION,
+                    "session_id": session_id,
+                    "fidelity": metadata["fidelity"],
+                    "request_count": metadata["request_count"],
                     "result": result,
                 }
             )
@@ -1556,6 +2395,37 @@ def run_scenario(
             "the tmos-17.5 adapter currently requires the in-process Tcl backend"
         )
     root = _find_tcl_lsp_root(tcl_lsp_root)
+    if isinstance(scenario, dict) and "packets" in scenario:
+        if "request" in scenario or "requests" in scenario:
+            raise EmulatorInputError("provide packets instead of request or requests")
+        packets = _normalise_packets(scenario["packets"])
+        _normalise_scenario_config(
+            scenario,
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=True,
+            require_http=False,
+        )
+        session = EmulatorSession(
+            root,
+            scenario,
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=True,
+        )
+        try:
+            packet_result = session.run_packet_trace(packets)
+        except EmulatorInputError:
+            raise
+        except Exception as exc:
+            raise EmulatorInputError(f"emulator packet trace failed: {exc}") from exc
+        finally:
+            registered_events = session.registered_events
+            session.close()
+        packet_result["registered_events"] = registered_events
+        packet_result["fidelity"] = session.fidelity
+        return packet_result
+
     requests = _normalise_requests(scenario)
     _normalise_scenario_config(
         scenario,
@@ -1649,6 +2519,14 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                     return
                 _json_response(self, 200, payload)
                 return
+            if parsed.path == "/v1/conformance":
+                try:
+                    payload = _build_conformance(root)
+                except (EmulatorInputError, OSError) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
             parts = [unquote(part) for part in parsed.path.split("/") if part]
             if len(parts) == 3 and parts[:2] == ["v1", "sessions"]:
                 try:
@@ -1707,6 +2585,38 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                             "fidelity": session_manager.execute(
                                 parts[2], lambda session: session.fidelity
                             ),
+                            "result": result,
+                        }
+                    except (
+                        json.JSONDecodeError,
+                        EmulatorInputError,
+                        EmulatorNotFoundError,
+                        EmulatorResourceError,
+                        OSError,
+                    ) as exc:
+                        self._error(exc)
+                        return
+                    _json_response(self, 200, payload)
+                    return
+                if len(parts) == 4 and parts[:2] == ["v1", "sessions"] and parts[3] == "packets":
+                    try:
+                        packet_request = self._read_json()
+                        if not isinstance(packet_request, dict) or set(packet_request) != {"packets"}:
+                            raise EmulatorInputError("session packets request requires only a packets array")
+                        if not isinstance(packet_request["packets"], list):
+                            raise EmulatorInputError("session packets field must be an array")
+                        result = session_manager.execute(
+                            parts[2], lambda session: session.run_packet_trace(packet_request["packets"])
+                        )
+                        metadata = session_manager.metadata(parts[2])
+                        payload = {
+                            "status": "ok",
+                            "schema_version": 1,
+                            "profile": "tmos-17.5",
+                            "tmos_version": TMOS_VERSION,
+                            "session_id": parts[2],
+                            "fidelity": metadata["fidelity"],
+                            "request_count": metadata["request_count"],
                             "result": result,
                         }
                     except (
@@ -1819,6 +2729,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="emit a chunk of the complete tcl-lsp iRule capability catalog",
     )
+    mode.add_argument(
+        "--conformance",
+        action="store_true",
+        help="report static catalog-to-runtime and packet-event adapter coverage",
+    )
     mode.add_argument("--serve", action="store_true", help="serve the HTTP API instead of reading stdin")
     mode.add_argument(
         "--mcp",
@@ -1847,6 +2762,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.capabilities:
             response = _build_capabilities(root, args.offset, args.limit)
+        elif args.conformance:
+            response = _build_conformance(root)
         else:
             if args.scenario == "-":
                 scenario = json.load(sys.stdin)

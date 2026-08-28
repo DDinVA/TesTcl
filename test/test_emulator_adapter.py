@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import ipaddress
 import json
 import os
+import struct
 import threading
 import time
 import unittest
@@ -17,6 +19,52 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ADAPTER_PATH = ROOT / "tools" / "irule-emulator.py"
 FIXTURE_PATH = ROOT / "test" / "fixtures" / "emulator_http.json"
+
+
+def _raw_ipv4_tcp_hex(
+    source: str, destination: str, source_port: int, destination_port: int,
+    flags: int, payload: bytes = b"",
+) -> str:
+    tcp = struct.pack(
+        "!HHLLBBHHH", source_port, destination_port, 0, 0, 5 << 4, flags, 65535, 0, 0
+    )
+    total_length = 20 + len(tcp) + len(payload)
+    ip = struct.pack(
+        "!BBHHHBBH4s4s",
+        0x45, 0, total_length, 0, 0, 64, 6, 0,
+        ipaddress.ip_address(source).packed,
+        ipaddress.ip_address(destination).packed,
+    )
+    return (ip + tcp + payload).hex()
+
+
+def _tls_client_hello_payload(host: str) -> bytes:
+    host_bytes = host.encode("ascii")
+    server_name = b"\x00" + struct.pack("!H", len(host_bytes)) + host_bytes
+    server_names = struct.pack("!H", len(server_name)) + server_name
+    extension = struct.pack("!HH", 0, len(server_names)) + server_names
+    body = (
+        b"\x03\x03" + b"\x00" * 32 + b"\x00"
+        + struct.pack("!H", 2) + b"\x13\x01" + b"\x01\x00"
+        + struct.pack("!H", len(extension)) + extension
+    )
+    handshake = b"\x01" + len(body).to_bytes(3, "big") + body
+    return b"\x16\x03\x03" + struct.pack("!H", len(handshake)) + handshake
+
+
+def _raw_ipv4_udp_hex(
+    source: str, destination: str, source_port: int, destination_port: int,
+    payload: bytes,
+) -> str:
+    udp = struct.pack("!HHHH", source_port, destination_port, 8 + len(payload), 0)
+    total_length = 20 + len(udp) + len(payload)
+    ip = struct.pack(
+        "!BBHHHBBH4s4s",
+        0x45, 0, total_length, 0, 0, 64, 17, 0,
+        ipaddress.ip_address(source).packed,
+        ipaddress.ip_address(destination).packed,
+    )
+    return (ip + udp + payload).hex()
 
 
 def _load_adapter():
@@ -76,6 +124,21 @@ class EmulatorAdapterTests(unittest.TestCase):
         self.assertFalse(final["chunk"]["has_more"])
         self.assertEqual(final["commands"], [])
 
+    def test_conformance_reports_catalog_and_packet_adapter_coverage(self) -> None:
+        report = self.adapter._build_conformance(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        )
+
+        self.assertEqual(report["profile"], "tmos-17.5")
+        self.assertGreaterEqual(report["commands"]["catalog_count"], 1400)
+        self.assertGreaterEqual(report["events"]["catalog_count"], 170)
+        self.assertIn("HTTP_REQUEST", {
+            entry["name"] for entry in report["events"]["packet_adapter_events"]
+        })
+        self.assertGreater(
+            report["events"]["catalog_count"], report["events"]["packet_adapter_count"]
+        )
+
     def test_fidelity_analysis_warns_for_stub_and_profile_gated_usage(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         report = self.adapter._analyze_rule_capabilities(
@@ -89,6 +152,201 @@ class EmulatorAdapterTests(unittest.TestCase):
         warning_codes = {warning["code"] for warning in report["warnings"]}
         self.assertIn("runtime-fidelity", warning_codes)
         self.assertIn("profile-gated-event", warning_codes)
+
+    def test_packet_trace_drives_transport_tls_and_http_events(self) -> None:
+        scenario = {
+            "profiles": ["TCP", "CLIENTSSL", "HTTP"],
+            "pools": {"api_pool": ["10.0.0.10:80"]},
+            "irule": (
+                "when CLIENT_ACCEPTED { log local0. accepted }\n"
+                "when CLIENTSSL_CLIENTHELLO { log local0. hello }\n"
+                "when CLIENTSSL_HANDSHAKE { log local0. handshake }\n"
+                "when HTTP_REQUEST { if {[HTTP::host] eq \"api.example.com\"} { pool api_pool } }\n"
+                "when HTTP_RESPONSE { HTTP::header replace X-Trace packet }\n"
+                "when CLIENT_CLOSED { log local0. closed }"
+            ),
+            "packets": [
+                {
+                    "protocol": "tcp",
+                    "direction": "client_to_server",
+                    "flags": ["SYN"],
+                    "source": {"address": "10.0.0.5", "port": 51000},
+                    "destination": {"address": "192.0.2.10", "port": 443},
+                },
+                {
+                    "protocol": "tls",
+                    "type": "client_hello",
+                    "direction": "client_to_server",
+                    "sni": "api.example.com",
+                },
+                {
+                    "protocol": "tls",
+                    "type": "handshake",
+                    "direction": "client_to_server",
+                    "cipher_version": "TLSv1.3",
+                },
+                {
+                    "protocol": "http",
+                    "direction": "client_to_server",
+                    "method": "GET",
+                    "uri": "/health",
+                    "host": "api.example.com",
+                },
+                {
+                    "protocol": "http",
+                    "direction": "server_to_client",
+                    "status": 200,
+                    "response_body": "ok",
+                },
+                {
+                    "protocol": "tcp",
+                    "direction": "client_to_server",
+                    "flags": ["FIN", "ACK"],
+                },
+            ],
+        }
+        result = self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+        self.assertEqual(result["packets_processed"], 6)
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["pool"], "api_pool")
+        self.assertEqual(result["results"][0]["response"]["body"], "ok")
+        self.assertEqual(result["results"][0]["response"]["headers"]["x-trace"], "packet")
+        events = [
+            event["event"]
+            for packet in result["trace"]
+            for event in packet["events"]
+        ]
+        self.assertIn("CLIENT_ACCEPTED", events)
+        self.assertIn("CLIENTSSL_CLIENTHELLO", events)
+        self.assertIn("CLIENTSSL_HANDSHAKE", events)
+        self.assertIn("CLIENT_CLOSED", events)
+
+    def test_raw_ipv4_tcp_packets_decode_into_http_transaction(self) -> None:
+        request_payload = b"GET /health HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+        response_payload = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        scenario = {
+            "profiles": ["TCP", "CLIENTSSL", "HTTP"],
+            "pools": {"api_pool": ["10.0.0.10:80"]},
+            "irule": (
+                "when CLIENTSSL_CLIENTHELLO { log local0. hello }\n"
+                "when HTTP_REQUEST { pool api_pool }"
+            ),
+            "packets": [
+                {
+                    "protocol": "wire",
+                    "direction": "client_to_server",
+                    "raw_hex": _raw_ipv4_tcp_hex(
+                        "10.0.0.5", "192.0.2.10", 51000, 443, 0x02
+                    ),
+                },
+                {
+                    "protocol": "wire",
+                    "direction": "client_to_server",
+                    "raw_hex": _raw_ipv4_tcp_hex(
+                        "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                        _tls_client_hello_payload("api.example.com"),
+                    ),
+                },
+                {
+                    "protocol": "wire",
+                    "direction": "client_to_server",
+                    "raw_hex": _raw_ipv4_tcp_hex(
+                        "10.0.0.5", "192.0.2.10", 51000, 443, 0x18, request_payload
+                    ),
+                },
+                {
+                    "protocol": "wire",
+                    "direction": "server_to_client",
+                    "raw_hex": _raw_ipv4_tcp_hex(
+                        "192.0.2.10", "10.0.0.5", 443, 51000, 0x18, response_payload
+                    ),
+                },
+            ],
+        }
+        result = self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+        self.assertEqual(result["packets_processed"], 4)
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["request"]["uri"], "/health")
+        self.assertEqual(result["results"][0]["response"]["status"], 200)
+        self.assertEqual(result["results"][0]["response"]["body"], "ok")
+        self.assertEqual(result["trace"][1]["protocol"], "tls")
+        self.assertEqual(result["trace"][2]["protocol"], "http")
+        self.assertEqual(result["trace"][3]["protocol"], "http")
+        self.assertIn(
+            "CLIENTSSL_CLIENTHELLO",
+            [event["event"] for event in result["trace"][1]["events"]],
+        )
+
+    def test_raw_ipv4_udp_dns_packet_decodes_query_state(self) -> None:
+        dns_payload = (
+            struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+            + b"\x07example\x03com\x00"
+            + struct.pack("!HH", 1, 1)
+        )
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP", "DNS"],
+                "irule": "when DNS_REQUEST { log local0. dns-packet }",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_udp_hex(
+                            "10.0.0.5", "192.0.2.53", 53000, 53, dns_payload
+                        ),
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        packet = result["trace"][0]
+        self.assertEqual(packet["protocol"], "dns")
+        event = packet["events"][0]
+        self.assertEqual(event["event"], "DNS_REQUEST")
+        self.assertTrue(event["fired"])
+        self.assertEqual(event["state"]["dns"]["qname"], "example.com")
+        self.assertEqual(event["state"]["dns"]["qtype"], "A")
+
+    def test_new_syn_closes_previous_pending_http_transaction_first(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { pool api_pool }",
+                "pools": {"api_pool": ["10.0.0.10:80"]},
+                "packets": [
+                    {
+                        "protocol": "http",
+                        "direction": "client_to_server",
+                        "uri": "/first",
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "flags": ["SYN"],
+                        "source": {"address": "10.0.0.6", "port": 51001},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["request"]["uri"], "/first")
+        self.assertEqual(result["trace"][0]["completed_at"], 1)
+
+    def test_raw_wire_rejects_fragmented_ipv4_input(self) -> None:
+        raw = bytearray.fromhex(
+            _raw_ipv4_tcp_hex("10.0.0.5", "192.0.2.10", 51000, 443, 0x02)
+        )
+        raw[6:8] = (0x2000).to_bytes(2, "big")  # IPv4 more-fragments flag
+        with self.assertRaises(self.adapter.EmulatorInputError):
+            self.adapter._normalise_packets(
+                [{"protocol": "wire", "direction": "client_to_server", "raw_hex": raw.hex()}]
+            )
 
     def test_input_contract_rejects_wrong_profile_and_unknown_fields(self) -> None:
         base = {"irule": "when HTTP_REQUEST { pool api_pool }"}
@@ -193,6 +451,8 @@ class EmulatorAdapterTests(unittest.TestCase):
         self.assertEqual(responses[2]["result"]["protocolVersion"], "2025-06-18")
         tool_names = {tool["name"] for tool in responses[3]["result"]["tools"]}
         self.assertIn("irule_simulate", tool_names)
+        self.assertIn("irule_conformance", tool_names)
+        self.assertIn("irule_session_trace", tool_names)
         capability_payload = responses[4]["result"]["structuredContent"]
         self.assertEqual(capability_payload["chunk"]["offset"], 1498)
         self.assertLessEqual(capability_payload["chunk"]["count"], 2)
@@ -247,10 +507,33 @@ class EmulatorAdapterTests(unittest.TestCase):
                 }
             )
             self.assertTrue(fired["result"]["structuredContent"]["result"]["fired"])
-            closed = server.handle_message(
+            traced = server.handle_message(
                 {
                     "jsonrpc": "2.0",
                     "id": 4,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_session_trace",
+                        "arguments": {
+                            "session_id": session_id,
+                            "packets": [
+                                {
+                                    "protocol": "dns",
+                                    "direction": "client_to_server",
+                                    "qname": "trace.example.com",
+                                }
+                            ],
+                        },
+                    },
+                }
+            )
+            self.assertTrue(
+                traced["result"]["structuredContent"]["result"]["trace"][0]["events"][0]["fired"]
+            )
+            closed = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 5,
                     "method": "tools/call",
                     "params": {
                         "name": "irule_session_close",
@@ -291,6 +574,11 @@ class EmulatorAdapterTests(unittest.TestCase):
         }
         session_id = ""
         try:
+            status, conformance = request_json("/v1/conformance")
+            self.assertEqual(status, 200)
+            self.assertGreaterEqual(conformance["commands"]["catalog_count"], 1400)
+            self.assertGreater(conformance["events"]["packet_adapter_count"], 0)
+
             status, created = request_json("/v1/sessions", "POST", config)
             session_id = created["session_id"]
             self.assertEqual(status, 201)
@@ -347,6 +635,23 @@ class EmulatorAdapterTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertTrue(event["result"]["fired"])
             self.assertEqual(event["result"]["state"]["dns"]["qname"], "example.com")
+
+            status, packet_trace = request_json(
+                f"/v1/sessions/{dns_session_id}/packets",
+                "POST",
+                {
+                    "packets": [
+                        {
+                            "protocol": "dns",
+                            "direction": "client_to_server",
+                            "qname": "packet.example.com",
+                            "qtype": "A",
+                        }
+                    ]
+                },
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(packet_trace["result"]["trace"][0]["events"][0]["fired"])
             request_json(f"/v1/sessions/{dns_session_id}", "DELETE")
 
             status, tls_session = request_json(
