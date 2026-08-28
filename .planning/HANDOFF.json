@@ -1,0 +1,88 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-08-28T20:03:29Z",
+  "context": "default",
+  "phase": null,
+  "phase_name": null,
+  "phase_dir": ".planning",
+  "plan": null,
+  "task": null,
+  "total_tasks": null,
+  "status": "paused",
+  "completed_tasks": [
+    {
+      "id": 1,
+      "name": "Modernize the legacy TesTcl baseline and pin the BIG-IP 17.5 catalog",
+      "status": "done",
+      "commit": "62a540e"
+    },
+    {
+      "id": 2,
+      "name": "Add catalog capability reporting, bounded chunking, fidelity warnings, and the API/MCP facade",
+      "status": "done",
+      "commit": "992606b"
+    },
+    {
+      "id": 3,
+      "name": "Build stateful HTTP, TCP, TLS, DNS, load-balancing, persistence, cookie, table, and packet replay semantics",
+      "status": "done",
+      "commit": "e068c7c"
+    }
+  ],
+  "remaining_tasks": [
+    {
+      "id": 4,
+      "name": "Expand the semantic 17.5 command queue beyond the current high-value overlay",
+      "status": "in_progress",
+      "progress": "The next selected slice is HTTP::redirect and HTTP::has_responded, followed by richer HTTP transaction and event sequencing."
+    },
+    {
+      "id": 5,
+      "name": "Increase event and protocol adapter coverage toward a lightweight vLab-like emulator",
+      "status": "not_started"
+    },
+    {
+      "id": 6,
+      "name": "Package, document, and verify the portable container/API/MCP workflow for users",
+      "status": "in_progress"
+    }
+  ],
+  "blockers": [],
+  "async_jobs": [],
+  "human_actions_pending": [],
+  "decisions": [
+    {
+      "decision": "Scope the emulator to TMOS 17.5 only.",
+      "rationale": "The user explicitly requested a single pinned version so behavior and catalog inputs remain reproducible.",
+      "phase": null
+    },
+    {
+      "decision": "Use the pinned tcl-lsp checkout at cad24955f16953c2443902efd83d9f7f95d9b648 as the registry and Tcl execution framework.",
+      "rationale": "This reuses the existing parser/runtime and makes the catalog source reproducible without modifying the external checkout.",
+      "phase": null
+    },
+    {
+      "decision": "Keep adapter-owned behavioral semantics in tools/semantic-mocks.tcl and leave upstream tcl-lsp untouched.",
+      "rationale": "The overlay can evolve independently while preserving upstream compatibility and making semantic ownership explicit in conformance output.",
+      "phase": null
+    },
+    {
+      "decision": "Run all Python through the repo-local uv environment or the container uv virtual environment, with Python 3.13 or newer.",
+      "rationale": "System Python execution caused local instability; the host .venv is Python 3.13.9 and the image runtime is Python 3.13.15.",
+      "phase": null
+    },
+    {
+      "decision": "Treat generated command stubs as recognition coverage, not behavioral emulation.",
+      "rationale": "The conformance report must distinguish 1,292 generated stubs and 55 missing handlers from the 91 semantic and 61 handwritten implementations.",
+      "phase": null
+    },
+    {
+      "decision": "Keep the service loopback-bound by default, cap inputs, and do not expose arbitrary Tcl evaluation.",
+      "rationale": "The emulator is intended to be safe and portable for testing rather than a remote code execution surface.",
+      "phase": null
+    }
+  ],
+  "uncommitted_files": [],
+  "next_action": "Resume by checking git status, then implement and test HTTP::redirect plus HTTP::has_responded in the semantic overlay and adapter. Use the repo .venv Python 3.13 environment for host checks and rebuild/run testcl-irule-emulator:17.5 for integration checks.",
+  "context_notes": "The latest committed slice e068c7c added exact HTTP Content-Length framing, chunked bodies with trailers, partial-body buffering, no-body response handling for 1xx/204/304, and ordered coalesced-message emission. The worktree was clean when paused. The current container conformance snapshot reports 1,499 commands, 176 events, and 18 packet adapters. The project is materially functional but not a true vLab: 1,292 catalog commands remain generated stubs, 55 have no runtime handler, 158 events are not packet-adapted, and many protocol families still need semantic state. Do not claim broad completion. No fork or push has been performed."
+}
