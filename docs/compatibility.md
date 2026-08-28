@@ -28,5 +28,6 @@ references rather than maintained as an unqualified list of mocked commands.
 The optional TMOS 17.5 emulator exposes the pinned `tcl-lsp` registry in
 bounded chunks and reports static command-handler and packet-event coverage
 through its conformance endpoint. Structured packet traces currently cover
-TCP, TLS, HTTP, UDP/DNS, and raw IPv4 transport records; fragmented packets
-and cross-packet application reassembly remain outside the current boundary.
+TCP, TLS, HTTP, UDP/DNS, and raw IPv4 transport records. Fragmented IPv4
+packets, pcap/pcapng file ingestion, and retransmission/out-of-order stream
+handling remain outside the current boundary.

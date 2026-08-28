@@ -224,6 +224,7 @@ class EmulatorAdapterTests(unittest.TestCase):
 
     def test_raw_ipv4_tcp_packets_decode_into_http_transaction(self) -> None:
         request_payload = b"GET /health HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+        tls_payload = _tls_client_hello_payload("api.example.com")
         response_payload = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
         scenario = {
             "profiles": ["TCP", "CLIENTSSL", "HTTP"],
@@ -245,14 +246,31 @@ class EmulatorAdapterTests(unittest.TestCase):
                     "direction": "client_to_server",
                     "raw_hex": _raw_ipv4_tcp_hex(
                         "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
-                        _tls_client_hello_payload("api.example.com"),
+                        tls_payload[: len(tls_payload) // 2],
                     ),
                 },
                 {
                     "protocol": "wire",
                     "direction": "client_to_server",
                     "raw_hex": _raw_ipv4_tcp_hex(
-                        "10.0.0.5", "192.0.2.10", 51000, 443, 0x18, request_payload
+                        "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                        tls_payload[len(tls_payload) // 2 :],
+                    ),
+                },
+                {
+                    "protocol": "wire",
+                    "direction": "client_to_server",
+                    "raw_hex": _raw_ipv4_tcp_hex(
+                        "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                        request_payload[:20],
+                    ),
+                },
+                {
+                    "protocol": "wire",
+                    "direction": "client_to_server",
+                    "raw_hex": _raw_ipv4_tcp_hex(
+                        "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                        request_payload[20:],
                     ),
                 },
                 {
@@ -266,17 +284,19 @@ class EmulatorAdapterTests(unittest.TestCase):
         }
         result = self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
 
-        self.assertEqual(result["packets_processed"], 4)
+        self.assertEqual(result["packets_processed"], 6)
         self.assertEqual(len(result["results"]), 1)
         self.assertEqual(result["results"][0]["request"]["uri"], "/health")
         self.assertEqual(result["results"][0]["response"]["status"], 200)
         self.assertEqual(result["results"][0]["response"]["body"], "ok")
-        self.assertEqual(result["trace"][1]["protocol"], "tls")
-        self.assertEqual(result["trace"][2]["protocol"], "http")
-        self.assertEqual(result["trace"][3]["protocol"], "http")
+        self.assertTrue(result["trace"][1]["buffered"])
+        self.assertEqual(result["trace"][2]["protocol"], "tls")
+        self.assertTrue(result["trace"][3]["buffered"])
+        self.assertEqual(result["trace"][4]["protocol"], "http")
+        self.assertEqual(result["trace"][5]["protocol"], "http")
         self.assertIn(
             "CLIENTSSL_CLIENTHELLO",
-            [event["event"] for event in result["trace"][1]["events"]],
+            [event["event"] for event in result["trace"][2]["events"]],
         )
 
     def test_raw_ipv4_udp_dns_packet_decodes_query_state(self) -> None:

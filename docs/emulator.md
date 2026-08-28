@@ -166,15 +166,16 @@ ask for a higher-fidelity test when needed.
 ## Structured packet traces
 
 One-shot scenarios may use `packets` instead of `request`/`requests`. A trace
-is a bounded sequence of structured packet records; it is not a raw pcap
-decoder yet. TCP SYN/FIN/RST, TCP payloads, TLS handshake/data records, HTTP
+is a bounded sequence of structured packet records; it is not a pcap/pcapng
+file reader yet. TCP SYN/FIN/RST, TCP payloads, TLS handshake/data records, HTTP
 request/response pairs, and DNS request/response messages are translated into
 the same Tcl events and state layers used by the HTTP API. Generic UDP payloads
 are reported as unmapped because there is no protocol-specific event to infer.
 For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
-supports one packet at a time, so TCP/TLS application reassembly remains a
-future slice.
+performs bounded TCP application reassembly across records and persistent
+session calls. Pcap/pcapng file ingestion, retransmission, and out-of-order
+stream handling remain future slices.
 
 ```json
 {

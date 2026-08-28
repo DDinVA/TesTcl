@@ -814,6 +814,8 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
 
 
 PACKET_MAX_COUNT = 1000
+STREAM_MAX_BYTES = 2 * 1024 * 1024
+MAX_PACKET_STREAMS = 128
 PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
@@ -967,6 +969,8 @@ def _decode_tls_payload(payload: bytes, direction: str) -> dict[str, Any] | None
     if len(payload) < 5 or payload[0] not in {20, 21, 22, 23}:
         return None
     record_length = int.from_bytes(payload[3:5], "big")
+    if len(payload) < 5 + record_length:
+        return None
     record = payload[5 : 5 + record_length]
     if payload[0] == 23:
         packet_type = "client_data" if direction == "client_to_server" else "server_data"
@@ -1113,8 +1117,7 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
         }
         if tcp_payload:
             packet["payload"] = _decode_wire_text(tcp_payload)
-            packet.update(_decode_tls_payload(tcp_payload, direction) or {})
-            packet.update(_decode_http_payload(tcp_payload, direction) or {})
+            packet["_wire_payload"] = tcp_payload
         return packet
     if ip_protocol == 17:
         if len(payload) < 8:
@@ -1128,7 +1131,7 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
         }
         if udp_payload:
             packet["payload"] = _decode_wire_text(udp_payload)
-            packet.update(_decode_dns_payload(udp_payload, direction, index) or {})
+            packet["_wire_payload"] = udp_payload
         return packet
     raise EmulatorInputError(
         f"wire packet {index} uses unsupported IPv4 protocol number {ip_protocol}"
@@ -1185,10 +1188,12 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 f"packet {index} protocol must be one of: {', '.join(sorted(PACKET_PROTOCOLS))}"
             )
         direction = _packet_direction(packet.get("direction", "client_to_server"))
+        wire_payload: bytes | None = None
         if protocol == "wire":
             packet = _decode_wire_packet(packet, index, direction)
             protocol = packet["protocol"]
             direction = packet["direction"]
+            wire_payload = packet.pop("_wire_payload", None)
         allowed = PACKET_COMMON_FIELDS | PACKET_PROTOCOL_FIELDS[protocol]
         unknown = sorted(set(packet) - allowed)
         if unknown:
@@ -1261,6 +1266,9 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = packet_type
             else:
                 normalised[field] = _packet_scalar(packet[field], f"packet {index} {field}")
+
+        if wire_payload is not None:
+            normalised["_wire_payload"] = wire_payload
 
         if protocol == "tls" and "type" not in normalised:
             raise EmulatorInputError(f"packet {index} TLS packets require type")
@@ -1418,6 +1426,7 @@ class EmulatorSession:
         self._registered_events: list[str] = []
         self._request_count = 0
         self._connection_open = False
+        self._packet_streams: dict[tuple[Any, ...], bytes] = {}
         self._thread.start()
         self._started.wait()
         if self._startup_error is not None:
@@ -1621,7 +1630,7 @@ class EmulatorSession:
             dns_state: dict[str, str] = {}
             for field in EVENT_STATE_FIELDS["dns"]:
                 if field in packet:
-                    dns_state[field] = packet[field]
+                    dns_state[field] = _packet_scalar(packet[field], field)
             if dns_state:
                 state["dns"] = dns_state
         return state
@@ -1683,7 +1692,78 @@ class EmulatorSession:
     def _close_packet_connection(self, session: Any) -> None:
         session.eval_tcl("set ::orch::_connection_active 0")
         session.eval_tcl("::state::reset_connection_state")
+        self._packet_streams.clear()
         self._connection_open = False
+
+    @staticmethod
+    def _packet_stream_key(packet: dict[str, Any]) -> tuple[Any, ...]:
+        source = packet["source"]
+        destination = packet["destination"]
+        return (
+            packet["direction"],
+            source.get("address", ""),
+            source.get("port", 0),
+            destination.get("address", ""),
+            destination.get("port", 0),
+        )
+
+    def _reassemble_packet(
+        self, packet: dict[str, Any], packet_index: int
+    ) -> tuple[dict[str, Any] | None, int]:
+        """Join application payloads until a complete HTTP/TLS message is visible."""
+        if packet["protocol"] == "udp" and packet.get("_wire_payload"):
+            decoded_dns = _decode_dns_payload(
+                packet["_wire_payload"], packet["direction"], packet_index
+            )
+            if decoded_dns is not None:
+                merged = dict(packet)
+                merged.update(decoded_dns)
+                merged.pop("_wire_payload", None)
+                return merged, 0
+            return packet, 0
+        if packet["protocol"] != "tcp":
+            return packet, 0
+        raw_payload = packet.get("_wire_payload")
+        if raw_payload is None and "payload" in packet:
+            raw_payload = packet["payload"].encode("utf-8")
+        if not raw_payload:
+            return packet, 0
+        key = self._packet_stream_key(packet)
+        combined = self._packet_streams.get(key, b"") + raw_payload
+        looks_like_tls = bool(combined) and combined[0] in {20, 21, 22, 23}
+        looks_like_http = bool(
+            re.match(rb"^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|CONNECT|TRACE)\s", combined)
+        ) or combined.startswith(b"HTTP/")
+        if looks_like_tls:
+            decoded = _decode_tls_payload(combined, packet["direction"])
+            if decoded is not None:
+                self._packet_streams.pop(key, None)
+                merged = dict(packet)
+                merged.update(decoded)
+                merged.pop("_wire_payload", None)
+                return merged, len(combined)
+        elif looks_like_http:
+            decoded = _decode_http_payload(combined, packet["direction"])
+            if decoded is not None:
+                self._packet_streams.pop(key, None)
+                merged = dict(packet)
+                merged.update(decoded)
+                merged.pop("_wire_payload", None)
+                return merged, len(combined)
+        if looks_like_tls or looks_like_http:
+            if len(combined) > STREAM_MAX_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"packet stream exceeds the {STREAM_MAX_BYTES // (1024 * 1024)} MiB limit"
+                )
+            if key not in self._packet_streams and len(self._packet_streams) >= MAX_PACKET_STREAMS:
+                raise EmulatorInputError(
+                    f"packet stream table exceeds the {MAX_PACKET_STREAMS} stream limit"
+                )
+            self._packet_streams[key] = combined
+            return None, len(combined)
+        self._packet_streams.pop(key, None)
+        return packet, len(combined)
 
     def _run_packet_trace_on_worker(
         self, session: Any, packets: list[dict[str, Any]]
@@ -1708,6 +1788,20 @@ class EmulatorSession:
             pending_http = None
 
         for index, packet in enumerate(packets):
+            original_packet = packet
+            packet, buffered_bytes = self._reassemble_packet(packet, index)
+            if packet is None:
+                trace.append(
+                    {
+                        "index": index,
+                        "protocol": original_packet["protocol"],
+                        "direction": original_packet["direction"],
+                        "events": [],
+                        "buffered": True,
+                        "buffered_bytes": buffered_bytes,
+                    }
+                )
+                continue
             entry: dict[str, Any] = {
                 "index": index,
                 "protocol": packet["protocol"],
@@ -2398,7 +2492,6 @@ def run_scenario(
     if isinstance(scenario, dict) and "packets" in scenario:
         if "request" in scenario or "requests" in scenario:
             raise EmulatorInputError("provide packets instead of request or requests")
-        packets = _normalise_packets(scenario["packets"])
         _normalise_scenario_config(
             scenario,
             allow_irule_file=True,
@@ -2414,7 +2507,7 @@ def run_scenario(
             allow_packets=True,
         )
         try:
-            packet_result = session.run_packet_trace(packets)
+            packet_result = session.run_packet_trace(scenario["packets"])
         except EmulatorInputError:
             raise
         except Exception as exc:
