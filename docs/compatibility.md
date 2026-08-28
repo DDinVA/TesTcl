@@ -28,7 +28,7 @@ references rather than maintained as an unqualified list of mocked commands.
 The optional TMOS 17.5 emulator exposes the pinned `tcl-lsp` registry in
 bounded chunks and reports static command-handler and packet-event coverage
 through its conformance endpoint. Structured packet traces currently cover
-TCP, TLS, HTTP, UDP/DNS, SIP over TCP or UDP, Diameter over TCP, RADIUS over UDP, Message Routing Framework messages over TCP, and raw IPv4 transport records. Fragmented IPv4
+TCP, TLS, HTTP, UDP/DNS, SIP over TCP or UDP, Diameter over TCP, RADIUS over UDP, GTP over UDP or GTP-Prime over TCP, Message Routing Framework messages over TCP, and raw IPv4 transport records. Fragmented IPv4
 packets and pcapng file ingestion remain outside the current boundary. Classic
 PCAP ingestion is supported, and TCP stream reassembly includes bounded gap,
 overlap, and retransmission de-duplication handling. Diameter validates and
@@ -46,6 +46,14 @@ egress events, bounded payload collection, route state, retries, and the
 `MESSAGE::`, `GENERICMESSAGE::`, and core `MR::` command families. Peer
 connections, production route selection, and timer-driven retries remain
 outside this deterministic model.
+GTP packets expose bounded GTPv1 and GTPv2 header/IE state, G-PDU payloads,
+GTP signaling/G-PDU/Prime ingress and egress events, and the catalogued
+`GTP::` command family. GTP-C and GTP-U use UDP ports 2123 and 2152; GTP-Prime
+uses TCP port 3386 with sequence-aware reassembly. `GTP::tunnel` provides
+deterministic IPv4/IPv6 and TCP/UDP header inspection for G-PDU payloads.
+This is not a complete 3GPP peer, extension-header registry, TEID/session
+manager, or retransmission engine; unsupported protocol details remain visible
+as bounded raw message state rather than being guessed.
 
 The upstream registry is broader than the target release. Capability entries
 carry `target_status`, and the conformance response reports both the full

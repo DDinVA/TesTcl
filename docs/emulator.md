@@ -355,6 +355,50 @@ password hiding, live AAA, or RADIUS retransmission timers. See the F5
 [`RADIUS`](https://clouddocs.f5.com/api/irules/RADIUS.html) and
 [`RADIUS::avp`](https://clouddocs.f5.com/api/irules/RADIUS__avp.html)
 references for the production command/event contract.
+GTP support is pinned to the TMOS 17.5 catalog. Structured `protocol: "gtp"`
+packets model GTPv1 or GTPv2 signaling and G-PDU messages. A GTP packet with
+`type: 255` is treated as a G-PDU and exposes its payload; other messages may
+carry bounded typed IEs using `type`, `instance`, and one of `data`,
+`data_hex`, or `data_base64`. UDP packets on port 2123 or 2152 are decoded as
+GTP-C/GTP-U, while TCP packets on port 3386 are decoded as GTP-Prime after
+sequence-aware reassembly. The adapter emits `GTP_SIGNALLING_INGRESS` or
+`GTP_SIGNALLING_EGRESS`, `GTP_GPDU_INGRESS` or `GTP_GPDU_EGRESS`, and
+`GTP_PRIME_INGRESS` or `GTP_PRIME_EGRESS` according to the message and
+direction.
+
+For structured packets, supplying `payload` or `payload_hex` without `type`
+infers G-PDU (`type: 255`); packets without a payload retain the signaling
+default (`type: 1`).
+
+The semantic overlay implements `GTP::header`, `GTP::ie`, `GTP::length`,
+`GTP::message`, `GTP::payload`, `GTP::discard`, `GTP::respond`,
+`GTP::forward`, `GTP::clone`, `GTP::new`, `GTP::parse`, and `GTP::tunnel`.
+Header and G-PDU payload mutations rebuild the modeled wire message. The
+`GTP::tunnel` accessors return the inner IP version/protocol, addresses, and
+TCP/UDP ports when the payload is a complete IPv4/IPv6 datagram. Message
+objects, GTP extension-header registries, 3GPP IE value decoding, tunnel
+session state, live peer connections, and timer-driven retransmission are
+outside this deterministic boundary.
+
+```json
+{
+  "profiles": ["GTP"],
+  "irule": "when GTP_SIGNALLING_INGRESS { if {[GTP::ie exists cause:0]} { GTP::header sequence set 12 } }",
+  "packets": [{
+    "protocol": "gtp",
+    "version": 2,
+    "type": 32,
+    "teid": 305419896,
+    "sequence": 7,
+    "ies": [{"type": 2, "instance": 0, "data_hex": "01"}]
+  }]
+}
+```
+
+See the F5 [`GTP::header`](https://clouddocs.f5.com/api/irules/GTP__header.html),
+[`GTP::ie`](https://clouddocs.f5.com/api/irules/GTP__ie.html), and
+[`GTP::tunnel`](https://clouddocs.f5.com/api/irules/GTP__tunnel.html)
+references for the production command/event contract.
 For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
 performs bounded sequence-aware TCP application reassembly across records and

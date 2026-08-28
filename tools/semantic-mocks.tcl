@@ -187,6 +187,24 @@ namespace eval ::itest::semantic {
         variable response ""
     }
 
+    namespace eval ::state::gtp {
+        variable version 2
+        variable type 1
+        variable teid 0
+        variable sequence 0
+        variable npdu 0
+        variable length 0
+        variable ies {}
+        variable payload ""
+        variable payload_length 0
+        variable message ""
+        variable message_length 0
+        variable message_hex ""
+        variable payload_hex ""
+        variable discarded false
+        variable responded false
+    }
+
     proc _profile_enabled {name} {
         set wanted [string toupper $name]
         foreach profile $::orch::config(profiles) {
@@ -2570,6 +2588,335 @@ namespace eval ::itest::semantic {
             }
             lookup { return $::state::mr::route }
             default { error "unsupported GENERICMESSAGE::route operation" }
+        }
+    }
+
+    proc _gtp_require_event {command_name} {
+        if {$::itest::current_event ni {
+            CLIENT_ACCEPTED CLIENT_CLOSED CLIENT_DATA SERVER_CLOSED SERVER_CONNECTED SERVER_DATA
+            GTP_GPDU_INGRESS GTP_GPDU_EGRESS GTP_PRIME_INGRESS GTP_PRIME_EGRESS
+            GTP_SIGNALLING_INGRESS GTP_SIGNALLING_EGRESS
+        }} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc gtp_clear_message {} {
+        foreach {name value} {
+            version 2 type 1 teid 0 sequence 0 npdu 0 length 0 ies {}
+            payload "" payload_length 0 message "" message_length 0
+            message_hex "" payload_hex "" discarded false responded false
+        } {
+            set ::state::gtp::$name $value
+        }
+    }
+
+    proc gtp_reset_connection {} { gtp_clear_message }
+    proc gtp_prepare_message {} {
+        set ::state::gtp::discarded false
+        set ::state::gtp::responded false
+    }
+
+    proc _gtp_hex_uint {value width field maximum} {
+        if {![string is integer -strict $value] || $value < 0 || $value > $maximum} {
+            error "GTP $field must be an integer from 0 to $maximum"
+        }
+        return [format %0*X $width $value]
+    }
+
+    proc _gtp_ie_wire {record version} {
+        set ie_type [_gtp_hex_uint [lindex $record 0] 2 type 255]
+        set data [lindex $record 2]
+        set length [expr {[string length $data] / 2}]
+        set wire "$ie_type[_gtp_hex_uint $length 4 length 65535]"
+        if {$version == 2} {
+            append wire [_gtp_hex_uint [lindex $record 1] 2 instance 15]
+        }
+        append wire $data
+        return $wire
+    }
+
+    proc gtp_rebuild_message {} {
+        set version $::state::gtp::version
+        set type $::state::gtp::type
+        set teid $::state::gtp::teid
+        set sequence $::state::gtp::sequence
+        set npdu $::state::gtp::npdu
+        set body ""
+        if {$type == 255} {
+            set body [binary encode hex $::state::gtp::payload]
+        } else {
+            foreach record $::state::gtp::ies { append body [_gtp_ie_wire $record $version] }
+        }
+        if {$version == 1} {
+            set rest "[_gtp_hex_uint $teid 8 teid 0xffffffff][_gtp_hex_uint $sequence 4 sequence 65535][_gtp_hex_uint $npdu 2 npdu 255]00$body"
+            set message "32[_gtp_hex_uint $type 2 type 255][_gtp_hex_uint [expr {[string length $rest] / 2 - 4}] 4 length 65535]$rest"
+        } elseif {$version == 2} {
+            set flags [expr {$teid ? 0x48 : 0x40}]
+            set header "[_gtp_hex_uint $flags 2 flags 255][_gtp_hex_uint $type 2 type 255]0000"
+            if {$teid} { append header [_gtp_hex_uint $teid 8 teid 0xffffffff] }
+            append header "[_gtp_hex_uint $sequence 6 sequence 0xffffff]00$body"
+            set message "[string range $header 0 3][_gtp_hex_uint [expr {[string length $header] / 2 - 4}] 4 length 65535][string range $header 8 end]"
+        } else {
+            error "GTP version must be 1 or 2"
+        }
+        set wire [binary decode hex $message]
+        set ::state::gtp::payload_hex [binary encode hex $::state::gtp::payload]
+        set ::state::gtp::payload_length [string length $::state::gtp::payload]
+        set ::state::gtp::message $wire
+        set ::state::gtp::message_hex [binary encode hex $wire]
+        set ::state::gtp::message_length [string length $wire]
+        set ::state::gtp::length [expr {[string length $wire] - ($version == 1 ? 8 : 4)}]
+        return ""
+    }
+
+    proc gtp_header_command {args} {
+        _gtp_require_event GTP::header
+        if {[llength $args] < 1} { error "GTP::header requires a field" }
+        set field [string tolower [lindex $args 0]]
+        set rest [lrange $args 1 end]
+        if {[lindex $rest 0] eq "-message"} {
+            if {[llength $rest] < 2} { error "GTP::header -message requires a value" }
+            set rest [lrange $rest 2 end]
+        }
+        if {$field in {version type}} {
+            if {[llength $rest] != 0} { error "GTP::header $field is read-only" }
+            return [set ::state::gtp::$field]
+        }
+        if {$field ni {teid npdu sequence}} { error "unsupported GTP header field $field" }
+        if {[llength $rest] == 0} { return [set ::state::gtp::$field] }
+        set operation [lindex $rest 0]
+        if {$operation eq "remove"} {
+            if {[llength $rest] != 1} { error "GTP::header $field remove takes no value" }
+            set ::state::gtp::$field 0
+        } elseif {$operation eq "set"} {
+            if {[llength $rest] != 2} { error "GTP::header $field set requires a value" }
+            set value [lindex $rest 1]
+            set maximum [expr {$field eq "sequence" ? ($::state::gtp::version == 1 ? 0xffff : 0xffffff) : ($field eq "npdu" ? 255 : 0xffffffff)}]
+            _gtp_hex_uint $value 1 $field $maximum
+            set ::state::gtp::$field $value
+        } else {
+            error "GTP::header $field expects set or remove"
+        }
+        gtp_rebuild_message
+        return [set ::state::gtp::$field]
+    }
+
+    proc _gtp_ie_code {value} {
+        array set names {imsi 1 cause 2 recovery 3 apn 71 msisdn 76 rat-type 82 ebi 73 f-teid 87 charging-id 127}
+        set key [string tolower [string map {_ -} $value]]
+        if {[info exists names($key)]} { return $names($key) }
+        return [_gtp_hex_uint $value 1 ie_type 255]
+    }
+
+    proc _gtp_ie_selector {path} {
+        set pieces [split $path :]
+        set code [_gtp_ie_code [lindex $pieces 0]]
+        set instance 0
+        if {[llength $pieces] > 1} { set instance [_gtp_hex_uint [lindex $pieces 1] 1 instance 15] }
+        return [list $code $instance]
+    }
+
+    proc _gtp_ie_matches {code instance} {
+        set result {}
+        set index 0
+        foreach record $::state::gtp::ies {
+            if {($code < 0 || [lindex $record 0] == $code) &&
+                ($instance < 0 || [lindex $record 1] == $instance)} {
+                lappend result $index
+            }
+            incr index
+        }
+        return $result
+    }
+
+    proc _gtp_ie_filter {args} {
+        set path ""
+        set code -1
+        set instance -1
+        set cursor 0
+        while {$cursor < [llength $args]} {
+            set token [lindex $args $cursor]
+            switch -- $token {
+                -message {
+                    if {$cursor + 1 >= [llength $args]} { error "GTP::ie -message requires a value" }
+                    incr cursor 2
+                }
+                -type {
+                    if {$cursor + 1 >= [llength $args]} { error "GTP::ie -type requires a value" }
+                    set code [_gtp_ie_code [lindex $args [incr cursor]]]
+                    incr cursor
+                }
+                -instance {
+                    if {$cursor + 1 >= [llength $args]} { error "GTP::ie -instance requires a value" }
+                    set instance [_gtp_hex_uint [lindex $args [incr cursor]] 1 instance 15]
+                    incr cursor
+                }
+                default {
+                    if {$path ne ""} { error "GTP::ie accepts only one IE path" }
+                    set path $token
+                    incr cursor
+                }
+            }
+        }
+        if {$path ne ""} {
+            lassign [_gtp_ie_selector $path] path_code path_instance
+            set code $path_code
+            set instance $path_instance
+        }
+        return [list $code $instance]
+    }
+
+    proc gtp_ie_command {args} {
+        _gtp_require_event GTP::ie
+        if {[llength $args] < 1} { error "GTP::ie requires a subcommand" }
+        set operation [lindex $args 0]
+        set rest [lrange $args 1 end]
+        if {$operation eq "get"} {
+            if {[llength $rest] < 1} { error "GTP::ie get requires a field or list" }
+            set operation [lindex $rest 0]
+            set rest [lrange $rest 1 end]
+        }
+        if {$operation eq "list"} {
+            set filter [_gtp_ie_filter {*}$rest]
+            set result {}
+            lassign $filter filter_code filter_instance
+            foreach absolute [_gtp_ie_matches $filter_code $filter_instance] {
+                set record [lindex $::state::gtp::ies $absolute]
+                lappend result "[lindex $record 0]:[lindex $record 1]"
+            }
+            return $result
+        }
+        if {$operation in {exists count}} {
+            set filter [_gtp_ie_filter {*}$rest]
+            lassign $filter code instance
+            set matches [_gtp_ie_matches $code $instance]
+            if {$operation eq "exists"} { return [expr {[llength $matches] > 0}] }
+            return [llength $matches]
+        }
+        if {$operation in {instance length encode-type value}} {
+            set path [lindex $rest end]
+            if {$path eq "" || [string match "-*" $path]} { error "GTP::ie $operation requires an IE path" }
+            lassign [_gtp_ie_selector $path] code instance
+            set matches [_gtp_ie_matches $code $instance]
+            if {![llength $matches]} { return "" }
+            set record [lindex $::state::gtp::ies [lindex $matches 0]]
+            switch -- $operation {
+                instance { return [lindex $record 1] }
+                length { return [expr {[string length [lindex $record 2]] / 2}] }
+                encode-type { return [expr {$::state::gtp::version == 2 ? 1 : 0}] }
+                value { return [lindex $record 2] }
+            }
+        }
+        error "unsupported GTP::ie operation $operation"
+    }
+
+    proc gtp_length_command {args} {
+        _gtp_require_event GTP::length
+        if {[llength $args] != 0} { error "GTP::length takes no arguments" }
+        return $::state::gtp::length
+    }
+    proc gtp_message_command {args} {
+        _gtp_require_event GTP::message
+        if {[llength $args] != 0} { error "GTP::message takes no arguments" }
+        return $::state::gtp::message
+    }
+    proc gtp_payload_command {args} {
+        _gtp_require_event GTP::payload
+        if {[llength $args] == 0} { return $::state::gtp::payload }
+        if {[llength $args] == 1 && [lindex $args 0] ne "replace"} {
+            set count [lindex $args 0]
+            if {![string is integer -strict $count] || $count < 0} { error "GTP::payload count must be non-negative" }
+            return [string range $::state::gtp::payload 0 [expr {$count - 1}]]
+        }
+        if {[lindex $args 0] eq "replace" && [llength $args] == 4} {
+            set offset [lindex $args 1]
+            set count [lindex $args 2]
+            if {![string is integer -strict $offset] || ![string is integer -strict $count] || $offset < 0 || $count < 0} { error "GTP::payload replace offsets must be non-negative integers" }
+            set current [::itest::cmd::_payload_bytes $::state::gtp::payload]
+            set current_length [string length $current]
+            if {$offset > $current_length || $count > $current_length - $offset} {
+                error "GTP::payload replace range exceeds payload length"
+            }
+            set replacement [::itest::cmd::_payload_bytes [lindex $args 3]]
+            set before [string range $current 0 [expr {$offset - 1}]]
+            set after [string range $current [expr {$offset + $count}] end]
+            set ::state::gtp::payload [::itest::cmd::_payload_bytes "$before$replacement$after"]
+            gtp_rebuild_message
+            return ""
+        }
+        error "unsupported GTP::payload form"
+    }
+    proc gtp_discard_command {args} { _gtp_require_event GTP::discard; if {[llength $args] != 0} { error "GTP::discard takes no arguments" }; set ::state::gtp::discarded true; return "" }
+    proc gtp_respond_command {args} { _gtp_require_event GTP::respond; if {[llength $args] != 1} { error "GTP::respond requires a message" }; set ::state::gtp::responded true; ::itest::log_decision gtp respond $args; return "" }
+    proc gtp_forward_command {args} { _gtp_require_event GTP::forward; if {[llength $args] != 1} { error "GTP::forward requires a message" }; ::itest::log_decision gtp forward $args; return "" }
+    proc gtp_clone_command {args} { _gtp_require_event GTP::clone; if {[llength $args] > 1} { error "GTP::clone accepts at most one message" }; ::itest::log_decision gtp clone $args; return $::state::gtp::message }
+    proc gtp_new_command {args} { _gtp_require_event GTP::new; if {[llength $args] != 2} { error "GTP::new requires version and type" }; set ::state::gtp::version [lindex $args 0]; set ::state::gtp::type [lindex $args 1]; gtp_rebuild_message; return $::state::gtp::message }
+    proc gtp_parse_command {args} { _gtp_require_event GTP::parse; if {[llength $args] != 1} { error "GTP::parse requires a byte stream" }; set ::state::gtp::message [lindex $args 0]; return $::state::gtp::message }
+    proc _gtp_tunnel_byte {payload offset} {
+        if {$offset < 0 || $offset >= [string length $payload]} { return -1 }
+        binary scan [string range $payload $offset $offset] c value
+        return [expr {$value & 255}]
+    }
+    proc _gtp_tunnel_u16 {payload offset} {
+        set high [_gtp_tunnel_byte $payload $offset]
+        set low [_gtp_tunnel_byte $payload [expr {$offset + 1}]]
+        if {$high < 0 || $low < 0} { return -1 }
+        return [expr {($high << 8) | $low}]
+    }
+    proc _gtp_tunnel_ip_info {} {
+        if {$::state::gtp::type != 255} { return {} }
+        set payload [::itest::cmd::_payload_bytes $::state::gtp::payload]
+        if {[string length $payload] < 1} { return {} }
+        set first [_gtp_tunnel_byte $payload 0]
+        set version [expr {$first >> 4}]
+        if {$version == 4} {
+            set header_length [expr {($first & 15) * 4}]
+            if {$header_length < 20 || [string length $payload] < $header_length} { return {} }
+            set source_parts {}
+            set destination_parts {}
+            for {set index 0} {$index < 4} {incr index} {
+                lappend source_parts [_gtp_tunnel_byte $payload [expr {12 + $index}]]
+                lappend destination_parts [_gtp_tunnel_byte $payload [expr {16 + $index}]]
+            }
+            return [list version 4 header_length $header_length protocol [_gtp_tunnel_byte $payload 9] source [join $source_parts .] destination [join $destination_parts .]]
+        }
+        if {$version == 6 && [string length $payload] >= 40} {
+            set source_groups {}
+            set destination_groups {}
+            for {set index 0} {$index < 16} {incr index 2} {
+                lappend source_groups [format %x [_gtp_tunnel_u16 $payload [expr {8 + $index}]]]
+                lappend destination_groups [format %x [_gtp_tunnel_u16 $payload [expr {24 + $index}]]]
+            }
+            return [list version 6 header_length 40 protocol [_gtp_tunnel_byte $payload 6] source [join $source_groups :] destination [join $destination_groups :]]
+        }
+        return {}
+    }
+    proc gtp_tunnel_command {args} {
+        _gtp_require_event GTP::tunnel
+        if {[llength $args] != 1} { error "GTP::tunnel requires a subcommand" }
+        set info [_gtp_tunnel_ip_info]
+        set subcommand [string tolower [lindex $args 0]]
+        if {$subcommand eq "is_ip"} { return [expr {[llength $info] > 0}] }
+        if {![llength $info]} { return "" }
+        switch -- $subcommand {
+            ip_version { return [dict get $info version] }
+            ip_proto - ip_protocol { return [dict get $info protocol] }
+            ip_src - ip_source - src_addr { return [dict get $info source] }
+            ip_dst - ip_destination - dst_addr { return [dict get $info destination] }
+            tcp_src_port - tcp_source_port - tcp_dst_port - tcp_destination_port -
+            udp_src_port - udp_source_port - udp_dst_port - udp_destination_port {
+                set wanted [expr {[string match "tcp_*" $subcommand] ? 6 : 17}]
+                if {[dict get $info protocol] != $wanted} { return "" }
+                set payload [::itest::cmd::_payload_bytes $::state::gtp::payload]
+                set header_length [dict get $info header_length]
+                set source_query [expr {$subcommand in {tcp_src_port tcp_source_port udp_src_port udp_source_port}}]
+                set offset [expr {$header_length + ($source_query ? 0 : 2)}]
+                set port [_gtp_tunnel_u16 $payload $offset]
+                if {$port < 0} { return "" }
+                return $port
+            }
+            default { error "unsupported GTP::tunnel subcommand $subcommand" }
         }
     }
 
@@ -5360,6 +5707,27 @@ if {[::tmm::_orig_info commands ::itest::cmd::cmd_radius_authenticate] ne ""} {
     }
 }
 foreach {original replacement} {
+    gtp_clone gtp_clone_command
+    gtp_discard gtp_discard_command
+    gtp_forward gtp_forward_command
+    gtp_header gtp_header_command
+    gtp_ie gtp_ie_command
+    gtp_length gtp_length_command
+    gtp_message gtp_message_command
+    gtp_new gtp_new_command
+    gtp_parse gtp_parse_command
+    gtp_payload gtp_payload_command
+    gtp_respond gtp_respond_command
+    gtp_tunnel gtp_tunnel_command
+} {
+    if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
+        ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
+        proc ::itest::cmd::$original {args} [format {
+            return [eval [linsert $args 0 ::itest::semantic::%s]]
+        } $replacement]
+    }
+}
+foreach {original replacement} {
     sip_call_id sip_call_id_command
     sip_discard sip_discard_command
     sip_from sip_from_command
@@ -5545,6 +5913,18 @@ foreach {name proc_name} {
     MR::store ::itest::semantic::mr_store_command
     MR::stream ::itest::semantic::mr_stream_command
     MR::transport ::itest::semantic::mr_transport_command
+    GTP::clone ::itest::semantic::gtp_clone_command
+    GTP::discard ::itest::semantic::gtp_discard_command
+    GTP::forward ::itest::semantic::gtp_forward_command
+    GTP::header ::itest::semantic::gtp_header_command
+    GTP::ie ::itest::semantic::gtp_ie_command
+    GTP::length ::itest::semantic::gtp_length_command
+    GTP::message ::itest::semantic::gtp_message_command
+    GTP::new ::itest::semantic::gtp_new_command
+    GTP::parse ::itest::semantic::gtp_parse_command
+    GTP::payload ::itest::semantic::gtp_payload_command
+    GTP::respond ::itest::semantic::gtp_respond_command
+    GTP::tunnel ::itest::semantic::gtp_tunnel_command
 } {
     ::itest::register_command $name $proc_name
 }

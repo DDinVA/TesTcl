@@ -294,6 +294,23 @@ EVENT_STATE_FIELDS = {
         "released",
         "response",
     },
+    "gtp": {
+        "version",
+        "type",
+        "teid",
+        "sequence",
+        "npdu",
+        "length",
+        "ies",
+        "payload",
+        "payload_length",
+        "message",
+        "message_length",
+        "message_hex",
+        "payload_hex",
+        "discarded",
+        "responded",
+    },
 }
 EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
@@ -307,6 +324,7 @@ EVENT_STATE_NAMESPACES = {
     "radius": "::state::radius",
     "message": "::state::message",
     "mr": "::state::mr",
+    "gtp": "::state::gtp",
 }
 
 
@@ -581,6 +599,18 @@ SEMANTIC_MOCK_COMMANDS = {
     "MR::store",
     "MR::stream",
     "MR::transport",
+    "GTP::clone",
+    "GTP::discard",
+    "GTP::forward",
+    "GTP::header",
+    "GTP::ie",
+    "GTP::length",
+    "GTP::message",
+    "GTP::new",
+    "GTP::parse",
+    "GTP::payload",
+    "GTP::respond",
+    "GTP::tunnel",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1449,12 +1479,22 @@ RADIUS_AUTH_ATTRIBUTE_CODES = {
     "nas-port-type": 61,
     "connect-info": 77,
 }
+GTP_MAX_MESSAGE_BYTES = 2 * 1024 * 1024
+GTP_MAX_WIRE_MESSAGE_BYTES = 65543
+GTP_HEADER_MIN_BYTES = 8
+GTP_SIGNALING_PORT = 2123
+GTP_USER_PLANE_PORT = 2152
+GTP_PRIME_PORT = 3386
+GTP_VERSION_1 = 1
+GTP_VERSION_2 = 2
+GTP_GPDU_TYPE = 255
+GTP_IE_HEADER_BYTES = 4
 MAX_PACKET_STREAMS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "wire"}
+PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -1612,6 +1652,19 @@ PACKET_PROTOCOL_FIELDS = {
         "route_status",
         "route",
     },
+    "gtp": {
+        "version",
+        "type",
+        "message_type",
+        "teid",
+        "sequence",
+        "npdu",
+        "ies",
+        "payload",
+        "payload_hex",
+        "message_hex",
+        "transport",
+    },
 }
 PACKET_EVENT_ADAPTERS = {
     "RULE_INIT": "trace initialization",
@@ -1667,6 +1720,12 @@ PACKET_EVENT_ADAPTERS = {
     "MR_DATA": "Message Routing Framework collected payload",
     "GENERICMESSAGE_INGRESS": "generic message ingress",
     "GENERICMESSAGE_EGRESS": "generic message egress",
+    "GTP_GPDU_INGRESS": "GTP user-plane ingress",
+    "GTP_GPDU_EGRESS": "GTP user-plane egress",
+    "GTP_PRIME_INGRESS": "GTP-prime ingress",
+    "GTP_PRIME_EGRESS": "GTP-prime egress",
+    "GTP_SIGNALLING_INGRESS": "GTP signalling ingress",
+    "GTP_SIGNALLING_EGRESS": "GTP signalling egress",
 }
 
 
@@ -3697,6 +3756,242 @@ def _radius_avps_tcl(avps: list[dict[str, Any]]) -> str:
     return " ".join(records)
 
 
+def _gtp_uint(value: Any, field: str, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise EmulatorInputError(f"GTP {field} must be an integer")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        parsed = int(value, 10)
+    else:
+        raise EmulatorInputError(f"GTP {field} must be an integer")
+    if not 0 <= parsed <= maximum:
+        raise EmulatorInputError(f"GTP {field} must be between 0 and {maximum}")
+    return parsed
+
+
+def _gtp_hex(value: Any, field: str) -> bytes:
+    text = _require_string(value, f"GTP {field}")
+    if len(text) % 2 or not re.fullmatch(r"[0-9a-fA-F]*", text):
+        raise EmulatorInputError(f"GTP {field} must be an even-length hexadecimal string")
+    try:
+        return bytes.fromhex(text)
+    except ValueError as exc:  # pragma: no cover - regex guards this path
+        raise EmulatorInputError(f"GTP {field} is not valid hexadecimal") from exc
+
+
+def _gtp_normalise_ies(raw: Any) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise EmulatorInputError("GTP ies must be an array")
+    if len(raw) > PACKET_MAX_COUNT:
+        raise EmulatorInputError(f"GTP ies cannot contain more than {PACKET_MAX_COUNT} entries")
+    allowed = {"type", "instance", "data", "data_hex", "data_base64"}
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise EmulatorInputError(f"GTP IE {index} must be an object")
+        unknown = sorted(set(item) - allowed)
+        if unknown:
+            raise EmulatorInputError(f"unsupported GTP IE {index} field(s): {', '.join(unknown)}")
+        ie_type = _gtp_uint(item.get("type"), f"IE {index} type", 255)
+        instance = _gtp_uint(item.get("instance", 0), f"IE {index} instance", 15)
+        sources = [key for key in ("data", "data_hex", "data_base64") if key in item]
+        if len(sources) > 1:
+            raise EmulatorInputError(f"GTP IE {index} must specify only one data source")
+        if not sources:
+            data = b""
+        elif sources[0] == "data_hex":
+            data = _gtp_hex(item["data_hex"], f"IE {index} data_hex")
+        elif sources[0] == "data_base64":
+            encoded = _require_string(item["data_base64"], f"GTP IE {index} data_base64")
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise EmulatorInputError(f"GTP IE {index} data_base64 is not valid base64") from exc
+        else:
+            raw_data = _require_string(item["data"], f"GTP IE {index} data")
+            try:
+                data = raw_data.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise EmulatorInputError(f"GTP IE {index} data must be valid UTF-8") from exc
+        if len(data) > 0xFFFF:
+            raise EmulatorInputError(f"GTP IE {index} exceeds the 65535-byte length limit")
+        result.append(
+            {
+                "type": ie_type,
+                "instance": instance,
+                "data": _decode_wire_text(data),
+                "data_hex": data.hex(),
+                "_data": data,
+            }
+        )
+    return result
+
+
+def _gtp_encode_ies(ies: list[dict[str, Any]], version: int) -> bytes:
+    encoded: list[bytes] = []
+    for index, item in enumerate(ies):
+        ie_type = _gtp_uint(item.get("type"), f"IE {index} type", 255)
+        instance = _gtp_uint(item.get("instance", 0), f"IE {index} instance", 15)
+        data = item.get("_data")
+        if not isinstance(data, bytes):
+            if "data_hex" in item:
+                data = _gtp_hex(item["data_hex"], f"IE {index} data_hex")
+            else:
+                data = _require_string(item.get("data", ""), f"GTP IE {index} data").encode("utf-8")
+        if version == GTP_VERSION_2:
+            encoded.append(bytes([ie_type]) + len(data).to_bytes(2, "big") + bytes([instance]) + data)
+        else:
+            encoded.append(bytes([ie_type]) + len(data).to_bytes(2, "big") + data)
+    return b"".join(encoded)
+
+
+def _gtp_encode_message(packet: dict[str, Any]) -> bytes:
+    version = _gtp_uint(packet.get("version", GTP_VERSION_2), "version", 2)
+    if version not in {GTP_VERSION_1, GTP_VERSION_2}:
+        raise EmulatorInputError("GTP version must be 1 or 2")
+    message_type = _gtp_uint(packet.get("type", 1), "type", 255)
+    teid = _gtp_uint(packet.get("teid", 0), "teid", 0xFFFF_FFFF)
+    sequence = _gtp_uint(
+        packet.get("sequence", 0), "sequence", 0xFFFF if version == GTP_VERSION_1 else 0xFFFFFF
+    )
+    npdu = _gtp_uint(packet.get("npdu", 0), "npdu", 255)
+    payload = packet.get("_gtp_payload")
+    if not isinstance(payload, bytes):
+        if "payload_hex" in packet:
+            payload = _gtp_hex(packet["payload_hex"], "payload_hex")
+        else:
+            payload = _require_string(packet.get("payload", ""), "GTP payload").encode("utf-8")
+    if len(payload) > GTP_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError("GTP payload exceeds the 2 MiB message limit")
+    body = payload if message_type == GTP_GPDU_TYPE else _gtp_encode_ies(packet.get("_gtp_ies", packet.get("ies", [])), version)
+    if version == GTP_VERSION_1:
+        flags = 0x32
+        rest = teid.to_bytes(4, "big") + sequence.to_bytes(2, "big") + bytes([npdu, 0]) + body
+        message = bytes([flags, message_type]) + (len(rest) - 4).to_bytes(2, "big") + rest
+    else:
+        flags = 0x48 if teid else 0x40
+        if teid:
+            header = bytes([flags, message_type]) + (0).to_bytes(2, "big") + teid.to_bytes(4, "big")
+        else:
+            header = bytes([flags, message_type]) + (0).to_bytes(2, "big")
+        header += sequence.to_bytes(3, "big") + b"\x00"
+        message = header + body
+        message = message[:2] + (len(message) - 4).to_bytes(2, "big") + message[4:]
+    if len(message) > GTP_MAX_WIRE_MESSAGE_BYTES:
+        raise EmulatorInputError("GTP message exceeds the 16-bit wire length limit")
+    return message
+
+
+def _gtp_parsed_ie(ie_type: int, instance: int, data: bytes) -> dict[str, Any]:
+    return {
+        "type": ie_type,
+        "instance": instance,
+        "data": _decode_wire_text(data),
+        "data_hex": data.hex(),
+        "_data": data,
+    }
+
+
+def _decode_gtp_message(payload: bytes, direction: str) -> tuple[dict[str, Any], int] | None:
+    if not payload:
+        return None
+    if len(payload) < GTP_HEADER_MIN_BYTES:
+        return None
+    flags = payload[0]
+    version = (flags >> 5) & 0x07
+    if version not in {GTP_VERSION_1, GTP_VERSION_2}:
+        raise EmulatorInputError("GTP version is not 1 or 2")
+    message_type = payload[1]
+    declared_length = int.from_bytes(payload[2:4], "big")
+    total_length = declared_length + (8 if version == GTP_VERSION_1 else 4)
+    if total_length < GTP_HEADER_MIN_BYTES or total_length > GTP_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError("GTP message length is invalid")
+    if len(payload) < total_length:
+        return None
+    message = bytes(payload[:total_length])
+    if version == GTP_VERSION_1:
+        teid = int.from_bytes(message[4:8], "big")
+        offset = 8
+        sequence = 0
+        npdu = 0
+        if flags & 0x07:
+            if total_length < 12:
+                raise EmulatorInputError("GTPv1 optional header is truncated")
+            sequence = int.from_bytes(message[8:10], "big")
+            npdu = message[10]
+            offset = 12
+    else:
+        teid_present = bool(flags & 0x08)
+        if teid_present:
+            if total_length < 12:
+                raise EmulatorInputError("GTPv2 header is truncated")
+            teid = int.from_bytes(message[4:8], "big")
+            sequence = int.from_bytes(message[8:11], "big")
+            offset = 12
+        else:
+            teid = 0
+            sequence = int.from_bytes(message[4:7], "big")
+            offset = 8
+        npdu = 0
+    body = message[offset:]
+    ies: list[dict[str, Any]] = []
+    payload_bytes = b""
+    if message_type == GTP_GPDU_TYPE:
+        payload_bytes = body
+    else:
+        cursor = 0
+        ie_header = 4 if version == GTP_VERSION_2 else 3
+        while cursor < len(body):
+            if len(body) - cursor < ie_header:
+                raise EmulatorInputError("GTP IE header is truncated")
+            ie_type = body[cursor]
+            ie_length = int.from_bytes(body[cursor + 1:cursor + 3], "big")
+            end = cursor + ie_header + ie_length
+            if end > len(body):
+                raise EmulatorInputError("GTP IE length is invalid")
+            instance = body[cursor + 3] & 0x0F if version == GTP_VERSION_2 else 0
+            data_start = cursor + ie_header
+            ies.append(_gtp_parsed_ie(ie_type, instance, body[data_start:end]))
+            cursor = end
+    return {
+        "protocol": "gtp",
+        "direction": direction,
+        "version": version,
+        "type": message_type,
+        "teid": teid,
+        "sequence": sequence,
+        "npdu": npdu,
+        "length": declared_length,
+        "ies": ies,
+        "payload": _decode_wire_text(payload_bytes),
+        "payload_hex": payload_bytes.hex(),
+        "payload_length": len(payload_bytes),
+        "message": _decode_wire_text(message),
+        "message_length": total_length,
+        "message_hex": message.hex(),
+        "_gtp_ies": ies,
+        "_gtp_payload": payload_bytes,
+        "_wire_payload": message,
+    }, total_length
+
+
+def _decode_gtp_datagram(payload: bytes, direction: str) -> dict[str, Any]:
+    decoded = _decode_gtp_message(payload, direction)
+    if decoded is None or decoded[1] != len(payload):
+        raise EmulatorInputError("a UDP GTP datagram must contain exactly one complete message")
+    return decoded[0]
+
+
+def _gtp_ies_tcl(ies: list[dict[str, Any]]) -> str:
+    return " ".join(
+        "{" + " ".join(_tcl_quote(str(item)) for item in (ie.get("type", 0), ie.get("instance", 0), ie.get("data_hex", ""))) + "}"
+        for ie in ies
+    )
+
+
 def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or not raw:
         raise EmulatorInputError("packets must be a non-empty array")
@@ -3807,6 +4102,11 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             elif field in {"fin", "masked"}:
                 normalised[field] = _packet_bool(packet[field], f"packet {index} {field}")
             elif field == "type":
+                if protocol == "gtp":
+                    normalised[field] = _gtp_uint(
+                        packet[field], f"packet {index} type", 255
+                    )
+                    continue
                 packet_type = _require_string(packet[field], f"packet {index} type").lower()
                 if protocol == "tls":
                     if packet_type not in {
@@ -3881,6 +4181,27 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 "route_status",
                 "route",
             }:
+                normalised[field] = _require_string(
+                    packet[field], f"packet {index} {field}"
+                )
+            elif protocol == "gtp" and field in {"type", "message_type"}:
+                normalised["type"] = _gtp_uint(
+                    packet[field], f"packet {index} {field}", 255
+                )
+            elif protocol == "gtp" and field in {
+                "version",
+                "teid",
+                "sequence",
+                "npdu",
+            }:
+                normalised[field] = _gtp_uint(
+                    packet[field], f"packet {index} {field}",
+                    2 if field == "version" else (255 if field == "npdu" else (0xFFFFFF if field == "sequence" else 0xFFFFFFFF)),
+                )
+            elif protocol == "gtp" and field == "ies":
+                normalised[field] = _gtp_normalise_ies(packet[field])
+                normalised["_gtp_ies"] = normalised[field]
+            elif protocol == "gtp" and field in {"message_hex", "payload_hex"}:
                 normalised[field] = _require_string(
                     packet[field], f"packet {index} {field}"
                 )
@@ -4139,6 +4460,78 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             normalised["payload"] = _decode_wire_text(payload)
             normalised["payload_length"] = len(payload)
             normalised["_mr_payload"] = payload
+        if protocol == "gtp":
+            if "type" in packet and "message_type" in packet:
+                packet_type = _gtp_uint(packet["type"], f"packet {index} type", 255)
+                message_type = _gtp_uint(
+                    packet["message_type"], f"packet {index} message_type", 255
+                )
+                if packet_type != message_type:
+                    raise EmulatorInputError(
+                        f"packet {index} type and message_type must match"
+                    )
+            if "message_hex" in normalised and any(
+                field in normalised for field in ("ies", "payload", "payload_hex")
+            ):
+                raise EmulatorInputError(
+                    f"packet {index} GTP message_hex cannot be combined with ies or payload"
+                )
+            if "payload" in normalised and "payload_hex" in normalised:
+                raise EmulatorInputError(
+                    f"packet {index} GTP payload cannot be combined with payload_hex"
+                )
+            if "type" not in normalised and any(
+                field in normalised for field in ("payload", "payload_hex")
+            ):
+                normalised["type"] = GTP_GPDU_TYPE
+            message_type = normalised.get("type", 1)
+            if message_type == GTP_GPDU_TYPE and packet.get("ies"):
+                raise EmulatorInputError(
+                    f"packet {index} GTP G-PDU cannot contain information elements"
+                )
+            if message_type != GTP_GPDU_TYPE and any(
+                field in packet for field in ("payload", "payload_hex")
+            ):
+                raise EmulatorInputError(
+                    f"packet {index} non-G-PDU GTP messages cannot contain payload"
+                )
+            if "message_hex" in normalised:
+                raw_message = _gtp_hex(normalised["message_hex"], f"packet {index} message_hex")
+                decoded = _decode_gtp_message(raw_message, direction)
+                if decoded is None or decoded[1] != len(raw_message):
+                    raise EmulatorInputError(
+                        f"packet {index} GTP message_hex must contain exactly one complete message"
+                    )
+                normalised.update(decoded[0])
+            else:
+                normalised.setdefault("version", GTP_VERSION_2)
+                normalised.setdefault("type", 1)
+                normalised.setdefault("teid", 0)
+                normalised.setdefault("sequence", 0)
+                normalised.setdefault("npdu", 0)
+                normalised.setdefault("ies", [])
+                normalised.setdefault("_gtp_ies", [])
+                if "payload_hex" in normalised:
+                    payload = _gtp_hex(normalised["payload_hex"], f"packet {index} payload_hex")
+                else:
+                    try:
+                        payload = str(normalised.get("payload", "")).encode("utf-8")
+                    except UnicodeEncodeError as exc:
+                        raise EmulatorInputError(
+                            f"packet {index} GTP payload must be valid UTF-8"
+                        ) from exc
+                if len(payload) > GTP_MAX_MESSAGE_BYTES:
+                    raise EmulatorInputError("GTP payload exceeds the 2 MiB message limit")
+                normalised["payload"] = _decode_wire_text(payload)
+                normalised["_gtp_payload"] = payload
+                normalised["_wire_payload"] = _gtp_encode_message(normalised)
+                decoded = _decode_gtp_message(normalised["_wire_payload"], direction)
+                if decoded is None:  # pragma: no cover - encoder contract guard
+                    raise EmulatorInputError(
+                        f"packet {index} GTP encoder produced an incomplete message"
+                    )
+                normalised.update(decoded[0])
+            normalised["message_type"] = normalised["type"]
         packets.append(normalised)
     return packets
 
@@ -4334,6 +4727,7 @@ class EmulatorSession:
         self._radius_raw_active = any(
             str(profile).upper() in {"RADIUS", "RADIUS_AAA"} for profile in self._profiles
         )
+        self._gtp_raw_active = any(str(profile).upper() == "GTP" for profile in self._profiles)
         self._thread.start()
         self._started.wait()
         if self._startup_error is not None:
@@ -4535,7 +4929,7 @@ class EmulatorSession:
         for layer, values in state.items():
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr"} and field in {"payload", "message", "authenticator"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp"} and field in {"payload", "message", "authenticator"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -4557,6 +4951,8 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::diameter_rebuild_message")
         if "radius" in state:
             session.eval_tcl("::itest::semantic::radius_rebuild_message")
+        if "gtp" in state:
+            session.eval_tcl("::itest::semantic::gtp_rebuild_message")
         fired_events = _split_tcl_list(session.eval_tcl("::itest::get_fired_events"))
         result = {
             "event": event_name,
@@ -4618,6 +5014,15 @@ class EmulatorSession:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol in {"udp", "dns", "radius"}:
             connection.update({"protocol": "17", "transport": "udp"})
+        elif protocol == "gtp":
+            endpoints = {
+                source.get("port"),
+                destination.get("port"),
+            }
+            transport = "tcp" if GTP_PRIME_PORT in endpoints else "udp"
+            connection.update(
+                {"protocol": "6" if transport == "tcp" else "17", "transport": transport}
+            )
         if "payload" in packet:
             payload_key = "client_payload" if direction == "client_to_server" else "server_payload"
             connection[payload_key] = packet["payload"]
@@ -4809,6 +5214,30 @@ class EmulatorSession:
                 "authenticator_hex",
             )
             state["radius"] = radius_state
+        elif protocol == "gtp":
+            gtp_state: dict[str, str] = {}
+            for field in EVENT_STATE_FIELDS["gtp"]:
+                if field not in packet:
+                    continue
+                if field in {"payload", "message"}:
+                    gtp_state[field] = packet[field]
+                elif field == "ies":
+                    gtp_state[field] = _gtp_ies_tcl(
+                        packet.get("_gtp_ies", packet.get("ies", []))
+                    )
+                else:
+                    gtp_state[field] = _packet_scalar(packet[field], field)
+            payload = packet.get("_gtp_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                payload = _gtp_hex(packet.get("payload_hex", ""), "payload_hex")
+            gtp_state["payload"] = bytes(payload)
+            gtp_state["payload_length"] = str(len(payload))
+            message = packet.get("_wire_payload")
+            if not isinstance(message, (bytes, bytearray)):
+                message = _gtp_encode_message(packet)
+            gtp_state["message"] = bytes(message)
+            gtp_state["message_length"] = str(len(message))
+            state["gtp"] = gtp_state
         elif protocol == "mr":
             fields = packet.get("fields", {})
             message_state: dict[str, str] = {
@@ -5002,7 +5431,7 @@ class EmulatorSession:
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
-        if packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter", "mr"}:
+        if packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter", "mr", "gtp"}:
             return
         source = packet["source"]
         destination = packet["destination"]
@@ -5022,7 +5451,7 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter", "mr", "gtp"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
@@ -5030,6 +5459,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::sip_reset_connection")
         session.eval_tcl("::itest::semantic::diameter_reset_connection")
         session.eval_tcl("::itest::semantic::mr_reset_connection")
+        session.eval_tcl("::itest::semantic::gtp_reset_connection")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
         events.append(
             self._fire_event_on_worker(
@@ -5176,6 +5606,10 @@ class EmulatorSession:
     def _looks_like_diameter_prefix(payload: bytes) -> bool:
         return bool(payload) and payload[0] == 1
 
+    @staticmethod
+    def _looks_like_gtp_prefix(payload: bytes) -> bool:
+        return bool(payload) and ((payload[0] >> 5) & 0x07) in {GTP_VERSION_1, GTP_VERSION_2}
+
     def _reassemble_packet(
         self, packet: dict[str, Any], packet_index: int
     ) -> tuple[dict[str, Any] | None, int]:
@@ -5209,6 +5643,19 @@ class EmulatorSession:
                 raw_payload = packet.get("_wire_payload")
                 if raw_payload:
                     merged = _decode_radius_datagram(raw_payload, packet["direction"])
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            merged[field] = packet[field]
+                    return merged, 0
+        if packet["protocol"] == "udp" and self._gtp_raw_active:
+            source_port = packet.get("source", {}).get("port")
+            destination_port = packet.get("destination", {}).get("port")
+            if {GTP_SIGNALING_PORT, GTP_USER_PLANE_PORT}.intersection(
+                {source_port, destination_port}
+            ):
+                raw_payload = packet.get("_wire_payload")
+                if raw_payload:
+                    merged = _decode_gtp_datagram(raw_payload, packet["direction"])
                     for field in ("source", "destination", "timestamp"):
                         if field in packet:
                             merged[field] = packet[field]
@@ -5379,6 +5826,43 @@ class EmulatorSession:
                     f"packet stream exceeds the {STREAM_MAX_BYTES // (1024 * 1024)} MiB limit"
                 )
             return None, stream.buffered_bytes
+        looks_like_gtp = self._gtp_raw_active and GTP_PRIME_PORT in {
+            packet.get("source", {}).get("port"),
+            packet.get("destination", {}).get("port"),
+        } and self._looks_like_gtp_prefix(combined)
+        if looks_like_gtp:
+            decoded_messages: list[dict[str, Any]] = []
+            remaining = combined
+            consumed_total = 0
+            while self._looks_like_gtp_prefix(remaining):
+                decoded_result = _decode_gtp_message(remaining, packet["direction"])
+                if decoded_result is None:
+                    break
+                decoded, consumed = decoded_result
+                if consumed <= 0 or consumed > len(remaining):
+                    raise EmulatorInputError("GTP decoder returned an invalid frame length")
+                decoded_messages.append(decoded)
+                remaining = remaining[consumed:]
+                consumed_total += consumed
+            if decoded_messages:
+                stream.buffer = remaining
+                if not has_gap:
+                    stream.segments.clear()
+                for message in decoded_messages:
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            message[field] = packet[field]
+                first = decoded_messages[0]
+                if len(decoded_messages) > 1:
+                    first["_coalesced_packets"] = decoded_messages[1:]
+                return first, consumed_total
+            stream.buffer = combined
+            if not has_gap:
+                stream.segments.clear()
+            if stream.buffered_bytes > GTP_MAX_MESSAGE_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError("GTP stream exceeds the 2 MiB message limit")
+            return None, stream.buffered_bytes
         looks_like_tls = bool(combined) and combined[0] in {20, 21, 22, 23}
         looks_like_http = self._looks_like_http_prefix(combined)
         if looks_like_tls:
@@ -5522,6 +6006,7 @@ class EmulatorSession:
                 "destination",
                 "flags",
                 "type",
+                "message_type",
                 "method",
                 "uri",
                 "headers",
@@ -5902,6 +6387,42 @@ class EmulatorSession:
                         session, event_name, self._packet_event_state(packet)
                     )
                 )
+                continue
+
+            if protocol == "gtp":
+                self._activate_packet_connection(session, packet, entry["events"])
+                if direction == "server_to_client" and not self._server_connection_open:
+                    self._configure_packet_connection(session, packet)
+                    entry["events"].append(
+                        self._fire_event_on_worker(
+                            session,
+                            "SERVER_CONNECTED",
+                            {"connection": self._packet_connection_state(packet)},
+                        )
+                    )
+                    self._server_connection_open = True
+                session.eval_tcl("::itest::semantic::gtp_prepare_message")
+                endpoints = {
+                    packet.get("source", {}).get("port"),
+                    packet.get("destination", {}).get("port"),
+                }
+                if GTP_PRIME_PORT in endpoints:
+                    event_base = "GTP_PRIME"
+                elif packet.get("type") == GTP_GPDU_TYPE or GTP_USER_PLANE_PORT in endpoints:
+                    event_base = "GTP_GPDU"
+                else:
+                    event_base = "GTP_SIGNALLING"
+                event_name = f"{event_base}_{'INGRESS' if direction == 'client_to_server' else 'EGRESS'}"
+                event_result = self._fire_event_on_worker(
+                    session, event_name, self._packet_event_state(packet)
+                )
+                entry["events"].append(event_result)
+                gtp_state = event_result.get("state", {}).get("gtp", {})
+                if gtp_state.get("discarded") in {"1", "true"}:
+                    entry["discarded"] = True
+                    entry["drop_reason"] = "message"
+                if gtp_state.get("responded") in {"1", "true"}:
+                    entry["responded"] = True
                 continue
 
             if protocol == "mr":

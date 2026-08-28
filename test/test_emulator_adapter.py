@@ -80,6 +80,40 @@ def _raw_ipv4_udp_hex(
     return (ip + udp + payload).hex()
 
 
+def _gtp_v2_hex(
+    message_type: int,
+    *,
+    teid: int = 0,
+    sequence: int = 0,
+    body: bytes = b"",
+) -> str:
+    flags = 0x48 if teid else 0x40
+    header = bytes([flags, message_type]) + b"\x00\x00"
+    if teid:
+        header += teid.to_bytes(4, "big")
+    header += sequence.to_bytes(3, "big") + b"\x00"
+    message = header + body
+    message = message[:2] + (len(message) - 4).to_bytes(2, "big") + message[4:]
+    return message.hex()
+
+
+def _gtp_v1_hex(
+    message_type: int,
+    *,
+    teid: int = 0,
+    sequence: int = 0,
+    npdu: int = 0,
+    body: bytes = b"",
+) -> str:
+    rest = (
+        teid.to_bytes(4, "big")
+        + sequence.to_bytes(2, "big")
+        + bytes([npdu, 0])
+        + body
+    )
+    return (bytes([0x32, message_type]) + len(rest).to_bytes(2, "big") + rest).hex()
+
+
 def _pcap_bytes(
     records: list[tuple[int, int, bytes]], *, linktype: int = 1, nano: bool = False
 ) -> bytes:
@@ -4123,6 +4157,199 @@ when MR_INGRESS {
             returned["trace"][0]["events"][-1]["state"]["mr"]["route_status"],
             "no_route_found",
         )
+
+    def test_gtp_v2_signalling_exposes_headers_and_information_elements(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["GTP"],
+                "irule": """
+when GTP_SIGNALLING_INGRESS {
+    log local0. "version=[GTP::header version] type=[GTP::header type] teid=[GTP::header teid] cause=[GTP::ie get value cause:0] count=[GTP::ie count -type cause] list=[GTP::ie get list -type cause]"
+    GTP::header sequence set 12
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "gtp",
+                        "version": 2,
+                        "type": 32,
+                        "teid": 0x12345678,
+                        "sequence": 7,
+                        "ies": [{"type": 2, "instance": 0, "data_hex": "01"}],
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = result["trace"][0]["events"][-1]
+        self.assertEqual(event["event"], "GTP_SIGNALLING_INGRESS")
+        self.assertTrue(event["fired"])
+        self.assertTrue(
+            any(
+                "version=2 type=32 teid=305419896 cause=01 count=1 list=2:0" in entry
+                for entry in event["logs"]
+            )
+        )
+        self.assertEqual(event["state"]["gtp"]["sequence"], "12")
+        self.assertEqual(
+            event["state"]["gtp"]["message_hex"],
+            "4820000d1234567800000c000200010001",
+        )
+
+    def test_gtp_v1_signalling_preserves_optional_header_fields(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["GTP"],
+                "irule": "when GTP_SIGNALLING_INGRESS { log local0. \"version=[GTP::header version] teid=[GTP::header teid] sequence=[GTP::header sequence] npdu=[GTP::header npdu] cause=[GTP::ie get value cause:0]\" }",
+                "packets": [
+                    {
+                        "protocol": "gtp",
+                        "version": 1,
+                        "type": 16,
+                        "teid": 9,
+                        "sequence": 3,
+                        "npdu": 4,
+                        "ies": [{"type": 2, "data_hex": "01"}],
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = result["trace"][0]["events"][-1]
+        self.assertTrue(
+            any(
+                "version=1 teid=9 sequence=3 npdu=4 cause=01" in entry
+                for entry in event["logs"]
+            )
+        )
+        self.assertEqual(event["state"]["gtp"]["version"], "1")
+
+    def test_gtp_u_payload_mutation_discard_and_tunnel_introspection(self) -> None:
+        tunneled_ip = bytes.fromhex(
+            _raw_ipv4_tcp_hex(
+                "192.0.2.1",
+                "198.51.100.2",
+                1234,
+                5678,
+                0x18,
+            )
+        )
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["GTP"],
+                "irule": """
+when GTP_GPDU_INGRESS {
+    log local0. "is=[GTP::tunnel is_ip] version=[GTP::tunnel ip_version] proto=[GTP::tunnel ip_proto] src=[GTP::tunnel tcp_src_port] dst=[GTP::tunnel tcp_dst_port]"
+    GTP::payload replace 0 4 TEST
+    GTP::discard
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "gtp",
+                        "version": 2,
+                        "type": 255,
+                        "teid": 1,
+                        "sequence": 1,
+                        "payload_hex": tunneled_ip.hex(),
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = result["trace"][0]["events"][-1]
+        self.assertTrue(
+            any("is=1 version=4 proto=6 src=1234 dst=5678" in entry for entry in event["logs"])
+        )
+        self.assertEqual(event["state"]["gtp"]["payload_hex"][:8], "54455354")
+        self.assertEqual(event["state"]["gtp"]["payload_length"], str(len(tunneled_ip)))
+        self.assertTrue(result["trace"][0]["discarded"])
+
+    def test_gtp_udp_and_gtp_prime_tcp_adapters_route_to_distinct_events(self) -> None:
+        message = bytes.fromhex(
+            _gtp_v2_hex(32, teid=7, sequence=3, body=b"\x02\x00\x01\x00\x01")
+        )
+        udp_result = self.adapter.run_scenario(
+            {
+                "profiles": ["GTP"],
+                "irule": "when GTP_SIGNALLING_INGRESS { log local0. udp }",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_udp_hex(
+                            "192.0.2.1", "198.51.100.2", 40000, 2123, message
+                        ),
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            udp_result["trace"][0]["events"][-1]["event"], "GTP_SIGNALLING_INGRESS"
+        )
+
+        first = message[:5]
+        second = message[5:]
+        tcp_result = self.adapter.run_scenario(
+            {
+                "profiles": ["GTP"],
+                "irule": "when GTP_PRIME_INGRESS { log local0. prime }",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "192.0.2.1", "198.51.100.2", 40000, 3386, 0x18, first,
+                            sequence=1000,
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "192.0.2.1", "198.51.100.2", 40000, 3386, 0x18, second,
+                            sequence=1000 + len(first),
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        trace = tcp_result["trace"]
+        self.assertTrue(trace[0]["buffered"])
+        self.assertEqual(trace[1]["events"][-1]["event"], "GTP_PRIME_INGRESS")
+
+    def test_gtp_type_alias_must_not_disagree(self) -> None:
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "type and message_type"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["GTP"],
+                    "irule": "when GTP_SIGNALLING_INGRESS { return }",
+                    "packets": [{"protocol": "gtp", "type": 32, "message_type": 33}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_gtp_payload_infers_g_pdu_type_when_type_is_omitted(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["GTP"],
+                "irule": "when GTP_GPDU_INGRESS { log local0. [GTP::header type] }",
+                "packets": [
+                    {
+                        "protocol": "GTP",
+                        "version": 2,
+                        "payload_hex": "64656661756c7420626f6479",
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = result["trace"][0]["events"][-1]
+        self.assertEqual(event["event"], "GTP_GPDU_INGRESS")
+        self.assertTrue(event["fired"])
+        self.assertEqual(event["state"]["gtp"]["type"], "255")
 
 
 if __name__ == "__main__":
