@@ -575,6 +575,58 @@ when HTTP_RESPONSE { HTTP::retry }
         self.assertEqual(request_result["retry"], {"attempts": 8, "exhausted": True})
         self.assertEqual(request_result["events_fired"].count("HTTP_RESPONSE"), 9)
 
+    def test_http_keepalive_and_redirect_are_state_derived(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    log local0. "keepalive=[HTTP::is_keepalive] header=[HTTP::header is_keepalive]"
+}
+when HTTP_RESPONSE {
+    log local0. "redirect=[HTTP::is_redirect] header=[HTTP::header is_redirect]"
+}
+""",
+                "requests": [
+                    {
+                        "headers": {"Connection": "close"},
+                        "response_status": 302,
+                        "response_headers": {"Location": "/new"},
+                        "response_body": "redirect",
+                    },
+                    {
+                        "response_status": 304,
+                        "response_headers": {"Location": "/not-a-redirect"},
+                        "response_body": "not modified",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first, second = result["results"]
+        self.assertTrue(any("keepalive=0 header=0" in entry for entry in first["logs"]))
+        self.assertTrue(any("redirect=1 header=1" in entry for entry in first["logs"]))
+        self.assertTrue(any("keepalive=1 header=1" in entry for entry in second["logs"]))
+        self.assertTrue(any("redirect=0 header=0" in entry for entry in second["logs"]))
+
+    def test_http_request_num_tracks_connection_requests_and_resets(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": 'when HTTP_REQUEST { log local0. "request-num=[HTTP::request_num]" }',
+                "requests": [
+                    {"uri": "/one"},
+                    {"uri": "/two"},
+                    {"uri": "/new-connection", "close_before": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first, second, third = result["results"]
+        self.assertTrue(any("request-num=1" in entry for entry in first["logs"]))
+        self.assertTrue(any("request-num=2" in entry for entry in second["logs"]))
+        self.assertTrue(any("request-num=1" in entry for entry in third["logs"]))
+
     def test_semantic_overlay_preserves_lb_select_pool_integration(self) -> None:
         result = self.adapter.run_scenario(
             {

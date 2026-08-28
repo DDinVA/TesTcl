@@ -19,6 +19,7 @@ namespace eval ::itest::semantic {
     variable http_retry_requested 0
     variable http_retry_request ""
     variable http_retry_reset 0
+    variable http_request_number 0
 
     proc _profile_enabled {name} {
         set wanted [string toupper $name]
@@ -2241,6 +2242,68 @@ namespace eval ::itest::semantic {
     proc server_addr_command {args} { return [_connection_value server_addr {*}$args] }
     proc server_port_command {args} { return [_connection_value server_port {*}$args] }
 
+    proc _http_response_context {} {
+        return [expr {$::itest::current_event in {
+            HTTP_RESPONSE HTTP_RESPONSE_DATA HTTP_RESPONSE_RELEASE
+        }}]
+    }
+
+    proc _http_header_value {name} {
+        if {[_http_response_context]} {
+            return [::state::http::response::header get $name]
+        }
+        return [::state::http::request::header get $name]
+    }
+
+    proc _http_version_value {} {
+        if {[_http_response_context]} {
+            if {![catch {set version $::state::http::response::version}]} {
+                return $version
+            }
+        }
+        if {![catch {set version $::state::http::request::version}]} {
+            return $version
+        }
+        return 1.1
+    }
+
+    proc http_is_keepalive_command {args} {
+        if {[llength $args] != 0} {
+            error "HTTP::is_keepalive takes no arguments"
+        }
+        set connection [string tolower [_http_header_value connection]]
+        if {[regexp {(^|[,[:space:]])close([,[:space:]]|$)} $connection]} {
+            return 0
+        }
+        if {[regexp {(^|[,[:space:]])keep-alive([,[:space:]]|$)} $connection]} {
+            return 1
+        }
+        set version [_http_version_value]
+        if {[catch {expr {double($version) >= 1.1}} keepalive]} {
+            return 1
+        }
+        return $keepalive
+    }
+
+    proc http_is_redirect_command {args} {
+        if {[llength $args] != 0} {
+            error "HTTP::is_redirect takes no arguments"
+        }
+        set status $::state::http::response::status
+        if {[lsearch -exact {301 302 303 305 307} $status] < 0} {
+            return 0
+        }
+        return [expr {[_http_header_value location] ne ""}]
+    }
+
+    proc http_request_num_command {args} {
+        if {[llength $args] != 0} {
+            error "HTTP::request_num takes no arguments"
+        }
+        variable http_request_number
+        return $http_request_number
+    }
+
     proc http_retry_command {args} {
         if {$::itest::current_event ni {HTTP_RESPONSE HTTP_RESPONSE_DATA}} {
             error "HTTP::retry is valid only during HTTP_RESPONSE or HTTP_RESPONSE_DATA"
@@ -2345,6 +2408,30 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_retry] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::http_retry ::itest::cmd::_testcl_http_retry_orig
     proc ::itest::cmd::http_retry {args} {
         return [eval [linsert $args 0 ::itest::semantic::http_retry_command]]
+    }
+}
+foreach {original replacement} {
+    http_is_keepalive http_is_keepalive_command
+    http_is_redirect http_is_redirect_command
+    http_request_num http_request_num_command
+} {
+    if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
+        ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
+        proc ::itest::cmd::$original {args} [format {
+            return [eval [linsert $args 0 ::itest::semantic::%s]]
+        } $replacement]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::http_header] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::http_header ::itest::cmd::_testcl_http_header_orig
+    proc ::itest::cmd::http_header {args} {
+        if {[llength $args] == 1 && [lindex $args 0] eq "is_keepalive"} {
+            return [::itest::semantic::http_is_keepalive_command]
+        }
+        if {[llength $args] == 1 && [lindex $args 0] eq "is_redirect"} {
+            return [::itest::semantic::http_is_redirect_command]
+        }
+        return [eval [linsert $args 0 ::itest::cmd::_testcl_http_header_orig]]
     }
 }
 if {[::tmm::_orig_info commands ::itest::cmd::http_cookie] ne ""} {

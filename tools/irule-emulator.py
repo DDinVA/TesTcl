@@ -212,6 +212,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTTP::reject_reason",
     "HTTP::response",
     "HTTP::retry",
+    "HTTP::is_keepalive",
+    "HTTP::is_redirect",
+    "HTTP::request_num",
     "HTTP::cookie",
     "HTTP::username",
     "IP::addr",
@@ -1904,6 +1907,7 @@ class EmulatorSession:
         )
         self._registered_events: list[str] = []
         self._request_count = 0
+        self._connection_request_number = 0
         self._connection_open = False
         self._server_connection_open = False
         self._tcp_buffers = {"client": "", "server": ""}
@@ -1976,6 +1980,13 @@ class EmulatorSession:
             if self._connection_open:
                 session.close_connection()
             self._connection_open = False
+            self._connection_request_number = 0
+        if not self._connection_open:
+            self._connection_request_number = 0
+        request_number = self._connection_request_number + 1
+        session.eval_tcl(
+            f"set ::itest::semantic::http_request_number {request_number}"
+        )
         kwargs = _request_kwargs(request)
         lb_failure = kwargs.pop("lb_failure", "")
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
@@ -2039,6 +2050,7 @@ class EmulatorSession:
         result["logs"] = log_history
         result["events_fired"] = result["events_fired"][fired_before:]
         self._request_count += 1
+        self._connection_request_number = request_number
         if retry_count:
             result["retry"] = {
                 "attempts": retry_count,
@@ -2047,6 +2059,7 @@ class EmulatorSession:
         if request.get("close_after"):
             session.close_connection()
             self._connection_open = False
+            self._connection_request_number = 0
         return result
 
     def run_request(self, request: dict[str, Any]) -> dict[str, Any]:

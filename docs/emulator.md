@@ -353,5 +353,12 @@ nested command blocks under the corresponding connection context. The
 `HTTP::retry` overlay preserves the final request/response state while exposing
 the replay count and exhaustion status; transport-level socket reset behavior
 from `HTTP::retry -reset` is not separately simulated yet. The
+`HTTP::is_keepalive` and `HTTP::header is_keepalive` paths derive their result
+from the active side's `Connection` header and HTTP version. Redirect detection
+matches the documented 301, 302, 303, 305, and 307 responses only when a
+`Location` header is present. The `HTTP::request_num` overlay counts logical
+requests on the current persistent connection, does not increment for an
+internal `HTTP::retry` replay, and resets when the adapter starts a new
+connection. The
 emulator profile remains fixed at
 `tmos-17.5`.
