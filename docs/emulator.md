@@ -314,6 +314,11 @@ facade over the same JSON contract, and an adapter-owned semantic overlay for
 selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, table, and
 HTTP cookie commands. The semantic overlay also models data-group `class`
 matching, lookup, enumeration, connection-scoped search iterators, and
-request/response cookie mutations. The
+request/response cookie mutations. TCP payload access is directional for
+client/server data events and supports byte-length, replacement, collection,
+offset, release, and response bookkeeping. `TCP::collect` gates data events
+until the requested length and skip window is available, consumes one
+collection window, and preserves partial buffers across calls on a persistent
+session. The
 emulator profile remains fixed at
 `tmos-17.5`.

@@ -544,6 +544,139 @@ namespace eval ::itest::semantic {
         return up
     }
 
+    proc _tcp_side {} {
+        if {$::itest::current_event in {
+            SERVER_DATA SERVER_CONNECTED SERVER_CLOSED SERVER_INIT SERVERSSL_DATA
+        }} {
+            return server
+        }
+        return client
+    }
+
+    proc _tcp_payload_var {} {
+        return "::state::connection::[_tcp_side]_payload"
+    }
+
+    proc _tcp_collect_key {} {
+        return "__testcl_tcp_collect_[_tcp_side]"
+    }
+
+    proc tcp_collect_command {args} {
+        if {[llength $args] > 2} {
+            error "TCP::collect accepts optional length and skip values"
+        }
+        set length 0
+        set skip 0
+        if {[llength $args] > 0} { set length [lindex $args 0] }
+        if {[llength $args] > 1} { set skip [lindex $args 1] }
+        foreach {label value} [list length $length skip $skip] {
+            if {![string is integer -strict $value] || $value < 0} {
+                error "TCP::collect $label must be a non-negative integer"
+            }
+        }
+        set ::state::vars::connection_vars([_tcp_collect_key]) [list length $length skip $skip]
+        ::itest::log_decision tcp collect [list [_tcp_side] $length $skip]
+        return ""
+    }
+
+    proc tcp_collection_request {side} {
+        if {$side ni {client server}} {
+            error "TCP collection side must be client or server"
+        }
+        set key "__testcl_tcp_collect_$side"
+        if {[info exists ::state::vars::connection_vars($key)]} {
+            return $::state::vars::connection_vars($key)
+        }
+        return ""
+    }
+
+    proc tcp_clear_collection {side} {
+        if {$side ni {client server}} {
+            error "TCP collection side must be client or server"
+        }
+        unset -nocomplain ::state::vars::connection_vars(__testcl_tcp_collect_$side)
+    }
+
+    proc tcp_clear_event_state {} {
+        unset -nocomplain ::state::vars::connection_vars(__testcl_tcp_released)
+    }
+
+    proc tcp_event_released {} {
+        if {[info exists ::state::vars::connection_vars(__testcl_tcp_released)]} {
+            return 1
+        }
+        return 0
+    }
+
+    proc tcp_payload_command {args} {
+        set payload_var [_tcp_payload_var]
+        if {[llength $args] == 0} {
+            return [set $payload_var]
+        }
+        set subcmd [lindex $args 0]
+        switch -exact -- $subcmd {
+            length {
+                if {[llength $args] != 1} { error "TCP::payload length takes no arguments" }
+                return [::itest::cmd::_payload_bytelength [set $payload_var]]
+            }
+            replace {
+                if {[llength $args] != 4} {
+                    error "TCP::payload replace requires offset, length, and data"
+                }
+                set offset [lindex $args 1]
+                set length [lindex $args 2]
+                if {![string is integer -strict $offset] || $offset < 0 ||
+                    ![string is integer -strict $length] || $length < 0} {
+                    error "TCP::payload replace offsets must be non-negative integers"
+                }
+                set updated [::itest::cmd::_payload_splice \
+                    [set $payload_var] $offset $length [lindex $args 3]]
+                set $payload_var $updated
+                ::itest::log_decision tcp payload_replace \
+                    [list [_tcp_side] $offset $length [lindex $args 3]]
+                return ""
+            }
+            default {
+                if {![string is integer -strict $subcmd] || $subcmd < 0 ||
+                    [llength $args] != 1} {
+                    error "TCP::payload accepts an optional non-negative size"
+                }
+                return [::itest::cmd::_payload_first [set $payload_var] $subcmd]
+            }
+        }
+    }
+
+    proc tcp_offset_command {args} {
+        if {[llength $args] != 0} { error "TCP::offset takes no arguments" }
+        return [::itest::cmd::_payload_bytelength [set [_tcp_payload_var]]]
+    }
+
+    proc tcp_release_command {args} {
+        if {[llength $args] > 1} { error "TCP::release accepts an optional length" }
+        set payload_var [_tcp_payload_var]
+        set available [::itest::cmd::_payload_bytelength [set $payload_var]]
+        set length $available
+        if {[llength $args] == 1} { set length [lindex $args 0] }
+        if {![string is integer -strict $length] || $length < 0} {
+            error "TCP::release length must be a non-negative integer"
+        }
+        if {$length > $available} { set length $available }
+        if {$length > 0} {
+            set $payload_var [::itest::cmd::_payload_splice [set $payload_var] 0 $length ""]
+        }
+        set ::state::vars::connection_vars(__testcl_tcp_released) 1
+        ::itest::log_decision tcp release [list [_tcp_side] $length]
+        return $length
+    }
+
+    proc tcp_respond_command {args} {
+        if {[llength $args] != 1} { error "TCP::respond requires a payload" }
+        set response [lindex $args 0]
+        set ::state::vars::connection_vars(__testcl_tcp_response) $response
+        ::itest::log_decision tcp respond [list [_tcp_side] $response]
+        return ""
+    }
+
     proc _cookie_in_response {} {
         return [expr {$::itest::current_event in {
             HTTP_RESPONSE HTTP_RESPONSE_DATA HTTP_RESPONSE_RELEASE
@@ -1653,6 +1786,19 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_cookie] ne ""} {
         return [eval [linsert $args 0 ::itest::semantic::cookie_command]]
     }
 }
+foreach {original replacement} {
+    tcp_collect tcp_collect_command
+    tcp_payload tcp_payload_command
+    tcp_release tcp_release_command
+    tcp_respond tcp_respond_command
+} {
+    if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
+        ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
+        proc ::itest::cmd::$original {args} [format {
+            return [eval [linsert $args 0 ::itest::semantic::%s]]
+        } $replacement]
+    }
+}
 
 # Override only the catalogued generated stubs implemented above. The mapping
 # stays in the upstream dispatcher, so Tcl command resolution and profiling
@@ -1666,6 +1812,11 @@ foreach {name proc_name} {
     HTTP::response ::itest::semantic::http_response
     HTTP::username ::itest::semantic::http_username
     HTTP::cookie ::itest::cmd::http_cookie
+    TCP::collect ::itest::cmd::tcp_collect
+    TCP::offset ::itest::semantic::tcp_offset_command
+    TCP::payload ::itest::cmd::tcp_payload
+    TCP::release ::itest::cmd::tcp_release
+    TCP::respond ::itest::cmd::tcp_respond
     IP::addr ::itest::semantic::ip_addr
     IP::version ::itest::semantic::ip_version
     PROFILE::clientssl ::itest::semantic::profile_clientssl

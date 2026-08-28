@@ -231,6 +231,11 @@ SEMANTIC_MOCK_COMMANDS = {
     "STATS::setmax",
     "STATS::setmin",
     "table",
+    "TCP::collect",
+    "TCP::offset",
+    "TCP::payload",
+    "TCP::release",
+    "TCP::respond",
     "URI::basename",
     "URI::compare",
     "URI::decode",
@@ -1751,6 +1756,8 @@ class EmulatorSession:
         self._registered_events: list[str] = []
         self._request_count = 0
         self._connection_open = False
+        self._server_connection_open = False
+        self._tcp_buffers = {"client": "", "server": ""}
         self._packet_streams: dict[tuple[Any, ...], _TcpStream] = {}
         self._thread.start()
         self._started.wait()
@@ -2018,7 +2025,9 @@ class EmulatorSession:
         session.eval_tcl("set ::orch::_connection_active 0")
         session.eval_tcl("::state::reset_connection_state")
         self._packet_streams.clear()
+        self._tcp_buffers = {"client": "", "server": ""}
         self._connection_open = False
+        self._server_connection_open = False
 
     @staticmethod
     def _packet_stream_key(packet: dict[str, Any]) -> tuple[Any, ...]:
@@ -2332,6 +2341,20 @@ class EmulatorSession:
                         )
                         self._close_packet_connection(session)
                 self._activate_packet_connection(session, packet, entry["events"])
+                if (
+                    direction == "server_to_client"
+                    and self._connection_open
+                    and not self._server_connection_open
+                ):
+                    self._configure_packet_connection(session, packet)
+                    entry["events"].append(
+                        self._fire_event_on_worker(
+                            session,
+                            "SERVER_CONNECTED",
+                            {"connection": self._packet_connection_state(packet)},
+                        )
+                    )
+                    self._server_connection_open = True
             elif protocol == "dns":
                 event_name = "DNS_REQUEST" if direction == "client_to_server" else "DNS_RESPONSE"
                 entry["events"].append(
@@ -2351,12 +2374,58 @@ class EmulatorSession:
             else:  # TCP
                 flags = set(packet.get("flags", []))
                 if packet.get("payload"):
-                    event_name = "CLIENT_DATA" if direction == "client_to_server" else "SERVER_DATA"
-                    entry["events"].append(
-                        self._fire_event_on_worker(
-                            session, event_name, self._packet_event_state(packet)
-                        )
+                    side = "client" if direction == "client_to_server" else "server"
+                    collection = _split_tcl_list(
+                        session.eval_tcl(f"::itest::semantic::tcp_collection_request {side}")
                     )
+                    if len(collection) != 4:
+                        entry["ignored"] = "tcp payload not collected"
+                    else:
+                        try:
+                            collection_values = {
+                                collection[index]: int(collection[index + 1])
+                                for index in range(0, len(collection), 2)
+                            }
+                        except (TypeError, ValueError):
+                            raise EmulatorInputError("invalid TCP collection state") from None
+                        self._tcp_buffers[side] += packet["payload"]
+                        skip = collection_values.get("skip", 0)
+                        length = collection_values.get("length", 0)
+                        required = skip + length
+                        if len(self._tcp_buffers[side]) < required:
+                            entry["buffered"] = True
+                            entry["buffered_bytes"] = len(self._tcp_buffers[side])
+                        else:
+                            event_start = skip
+                            event_end = event_start + length if length else None
+                            event_payload = self._tcp_buffers[side][event_start:event_end]
+                            remainder = self._tcp_buffers[side][event_end:]
+                            event_packet = dict(packet)
+                            event_packet["payload"] = event_payload
+                            event_name = (
+                                "CLIENT_DATA" if direction == "client_to_server" else "SERVER_DATA"
+                            )
+                            # F5 collection is consumed when the data event is
+                            # released. Clear it before dispatch so a rule can
+                            # explicitly re-arm TCP::collect from the event.
+                            session.eval_tcl(
+                                f"::itest::semantic::tcp_clear_collection {side}"
+                            )
+                            session.eval_tcl("::itest::semantic::tcp_clear_event_state")
+                            event_result = self._fire_event_on_worker(
+                                session, event_name, self._packet_event_state(event_packet)
+                            )
+                            entry["events"].append(event_result)
+                            connection_state = event_result.get("state", {}).get("connection", {})
+                            released = session.eval_tcl(
+                                "::itest::semantic::tcp_event_released"
+                            ) == "1"
+                            retained = (
+                                connection_state.get(f"{side}_payload", "")
+                                if released
+                                else ""
+                            )
+                            self._tcp_buffers[side] = retained + remainder
                 if flags.intersection({"FIN", "RST"}):
                     finish_http(at_index=index)
                     event_name = "CLIENT_CLOSED" if direction == "client_to_server" else "SERVER_CLOSED"
