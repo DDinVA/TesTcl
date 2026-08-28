@@ -431,6 +431,103 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc _member_status {pool_name member} {
+        if {[info exists ::state::lb::node_status(pool:$pool_name)] &&
+            $::state::lb::node_status(pool:$pool_name) in {down disabled}} {
+            return $::state::lb::node_status(pool:$pool_name)
+        }
+        if {[info exists ::state::lb::node_status($member)]} {
+            return $::state::lb::node_status($member)
+        }
+        return up
+    }
+
+    proc _select_available_member {pool_name} {
+        if {![info exists ::state::lb::pools($pool_name)]} {
+            return 0
+        }
+        set pool_info $::state::lb::pools($pool_name)
+        set members [lindex $pool_info 1]
+        foreach member $members {
+            if {[_member_status $pool_name $member] in {down disabled}} {
+                continue
+            }
+            set ::state::lb::pool_member $member
+            set colonpos [string last ":" $member]
+            if {$colonpos >= 0} {
+                set ::state::lb::node_addr [string range $member 0 [expr {$colonpos - 1}]]
+                set ::state::lb::node_port [string range $member [expr {$colonpos + 1}] end]
+            }
+            ::itest::log_decision lb pool_member_select $member
+            return 1
+        }
+        set ::state::lb::pool_member ""
+        set ::state::lb::node_addr ""
+        set ::state::lb::node_port 0
+        ::itest::log_decision lb pool_no_available $pool_name
+        return 0
+    }
+
+    proc pool_status_aware {args} {
+        set result [eval [linsert $args 0 ::itest::cmd::_testcl_pool_orig]]
+        if {[llength $args] == 0} {
+            return $result
+        }
+        set pool_name [lindex $args 0]
+        _select_available_member $pool_name
+        return $result
+    }
+
+    proc lb_reselect {args} {
+        if {$::state::lb::pool ne ""} {
+            _select_available_member $::state::lb::pool
+        }
+        ::itest::log_decision lb reselect $args
+        return ""
+    }
+
+    proc lb_status {args} {
+        set pool_name ""
+        set member ""
+        set index 0
+        while {$index < [llength $args]} {
+            set option [lindex $args $index]
+            switch -exact -- $option {
+                pool {
+                    incr index
+                    set pool_name [lindex $args $index]
+                }
+                member {
+                    incr index
+                    set member [lindex $args $index]
+                }
+                default {
+                    error "LB::status supports pool and member selectors"
+                }
+            }
+            incr index
+        }
+        if {$pool_name eq ""} {
+            set pool_name $::state::lb::pool
+        }
+        if {$member ne ""} {
+            return [_member_status $pool_name $member]
+        }
+        if {$pool_name ne "" &&
+            [info exists ::state::lb::node_status(pool:$pool_name)]} {
+            return $::state::lb::node_status(pool:$pool_name)
+        }
+        if {$pool_name ne "" && [info exists ::state::lb::pools($pool_name)]} {
+            foreach candidate [lindex $::state::lb::pools($pool_name) 1] {
+                if {[_member_status $pool_name $candidate] ni {down disabled}} {
+                    return up
+                }
+            }
+            return down
+        }
+        return up
+    }
+
     proc lb_down {args} { return [_lb_set_status down {*}$args] }
     proc lb_up {args} { return [_lb_set_status up {*}$args] }
 
@@ -485,6 +582,14 @@ namespace eval ::itest::semantic {
     }
 }
 
+# Preserve the upstream pool behavior and replace only its member choice.
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_pool] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_pool ::itest::cmd::_testcl_pool_orig
+    proc ::itest::cmd::cmd_pool {args} {
+        return [eval [linsert $args 0 ::itest::semantic::pool_status_aware]]
+    }
+}
+
 # Override only the catalogued generated stubs implemented above. The mapping
 # stays in the upstream dispatcher, so Tcl command resolution and profiling
 # retain the original iRule spelling.
@@ -512,7 +617,10 @@ foreach {name proc_name} {
     STATS::setmax ::itest::semantic::stats_setmax
     STATS::setmin ::itest::semantic::stats_setmin
     LB::down ::itest::semantic::lb_down
+    LB::reselect ::itest::semantic::lb_reselect
+    LB::status ::itest::semantic::lb_status
     LB::up ::itest::semantic::lb_up
+    pool ::itest::cmd::cmd_pool
     URI::basename ::itest::semantic::uri_basename
     URI::decode ::itest::semantic::uri_decode
     URI::encode ::itest::semantic::uri_encode

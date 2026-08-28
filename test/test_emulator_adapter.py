@@ -254,6 +254,7 @@ class EmulatorAdapterTests(unittest.TestCase):
 when HTTP_REQUEST {
     pool api_pool
     LB::down node 192.0.2.10 443
+    HTTP::header insert X-Down [LB::status pool api_pool member 192.0.2.10:443]
     LB::up pool api_pool
 }
 """,
@@ -265,6 +266,7 @@ when HTTP_REQUEST {
             result["results"][0]["semantic"]["lb_status"],
             {"192.0.2.10:443": "down", "pool:api_pool": "up"},
         )
+        self.assertEqual(result["results"][0]["request"]["headers"]["x-down"], "down")
         self.assertEqual(
             {
                 entry["name"]: entry["runtime_status"]
@@ -274,8 +276,68 @@ when HTTP_REQUEST {
             {
                 "LB::down": "semantic-mock",
                 "LB::up": "semantic-mock",
+                "LB::status": "semantic-mock",
             },
         )
+
+    def test_semantic_overlay_reselects_away_from_down_pool_member(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {
+                    "api_pool": [
+                        "192.0.2.10:443",
+                        "192.0.2.11:443",
+                    ]
+                },
+                "irule": """
+when HTTP_REQUEST {
+    pool api_pool
+    LB::down node 192.0.2.10 443
+    LB::reselect
+}
+""",
+                "request": {"uri": "/health"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_result = result["results"][0]
+        self.assertEqual(request_result["pool"], "api_pool")
+        self.assertEqual(request_result["node"], "192.0.2.11")
+        self.assertEqual(
+            request_result["semantic"]["lb_status"]["192.0.2.10:443"],
+            "down",
+        )
+        self.assertEqual(
+            {entry["name"]: entry["runtime_status"] for entry in result["fidelity"]["commands"]
+             if entry["name"].startswith("LB::")},
+            {
+                "LB::down": "semantic-mock",
+                "LB::reselect": "semantic-mock",
+            },
+        )
+
+    def test_semantic_overlay_preserves_lb_select_pool_integration(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {
+                    "api_pool": [
+                        "192.0.2.10:443",
+                        "192.0.2.11:443",
+                    ]
+                },
+                "irule": """
+when HTTP_REQUEST {
+    LB::select pool api_pool
+}
+""",
+                "request": {"uri": "/health"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(result["results"][0]["pool"], "api_pool")
+        self.assertEqual(result["results"][0]["node"], "192.0.2.10")
 
     def test_semantic_overlay_handles_zero_stats_and_malformed_uri_octets(self) -> None:
         result = self.adapter.run_scenario(

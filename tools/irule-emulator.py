@@ -207,6 +207,8 @@ SEMANTIC_MOCK_COMMANDS = {
     "IP::addr",
     "IP::version",
     "LB::down",
+    "LB::reselect",
+    "LB::status",
     "LB::up",
     "PROFILE::clientssl",
     "PROFILE::exists",
