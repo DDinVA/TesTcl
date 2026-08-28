@@ -794,7 +794,7 @@ namespace eval ::itest::semantic {
         if {$::itest::current_event in {
             SERVER_DATA SERVER_CONNECTED SERVER_CLOSED SERVER_INIT
             SERVERSSL_DATA SERVERSSL_HANDSHAKE SERVERSSL_SERVERCERT
-            SERVERSSL_SERVERHELLO HTTP_RESPONSE HTTP_RESPONSE_DATA
+            SERVERSSL_SERVERHELLO HTTP_RESPONSE HTTP_RESPONSE_CONTINUE HTTP_RESPONSE_DATA
             HTTP_RESPONSE_RELEASE
         }} {
             return server
@@ -2357,7 +2357,7 @@ namespace eval ::itest::semantic {
 
     proc _http_response_context {} {
         return [expr {$::itest::current_event in {
-            HTTP_RESPONSE HTTP_RESPONSE_DATA HTTP_RESPONSE_RELEASE
+            HTTP_RESPONSE HTTP_RESPONSE_CONTINUE HTTP_RESPONSE_DATA HTTP_RESPONSE_RELEASE
         }}]
     }
 
@@ -2641,6 +2641,18 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_header] ne ""} {
         }
         if {[llength $args] == 1 && [lindex $args 0] eq "is_redirect"} {
             return [::itest::semantic::http_is_redirect_command]
+        }
+        if {$::itest::current_event eq "HTTP_RESPONSE_CONTINUE"} {
+            set previous_event $::itest::current_event
+            set ::itest::current_event HTTP_RESPONSE
+            set rc [catch {
+                eval [linsert $args 0 ::itest::cmd::_testcl_http_header_orig]
+            } result options]
+            set ::itest::current_event $previous_event
+            if {$rc} {
+                return -options $options $result
+            }
+            return $result
         }
         if {[info exists ::state::http::response_committed] &&
             $::state::http::response_committed && [llength $args] > 0 &&

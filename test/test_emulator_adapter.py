@@ -1747,6 +1747,67 @@ when CLIENT_DATA { TCP::close; TCP::close }
         self.assertEqual(result["trace"][3]["status"], 204)
         self.assertEqual(result["trace"][3]["ignored"], "HTTP response has no pending HTTP request")
 
+    def test_http_continue_response_does_not_complete_pending_transaction(self) -> None:
+        request = b"POST /upload HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+        interim = b"HTTP/1.1 100 Continue\r\nX-Continue: yes\r\n\r\n"
+        final = b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nok"
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": (
+                    "when HTTP_REQUEST { pool api_pool } "
+                    'when HTTP_RESPONSE_CONTINUE { log local0. "continue=[HTTP::status] '
+                    'header=[HTTP::header value X-Continue]" } '
+                    'when HTTP_RESPONSE { log local0. "final=[HTTP::status]" }'
+                ),
+                "pools": {"api_pool": ["10.0.0.10:80"]},
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x02, sequence=1000
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                            request, sequence=1001
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "192.0.2.10", "10.0.0.5", 443, 51000, 0x18,
+                            interim, sequence=5000
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "192.0.2.10", "10.0.0.5", 443, 51000, 0x18,
+                            final, sequence=5000 + len(interim)
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["response"]["status"], 201)
+        continue_event = result["trace"][2]["events"][0]
+        self.assertTrue(
+            any("continue=100 header=yes" in entry for entry in continue_event["logs"]),
+            continue_event,
+        )
+        self.assertTrue(any("final=201" in entry for entry in result["results"][0]["logs"]))
+        self.assertEqual(continue_event["event"], "HTTP_RESPONSE_CONTINUE")
+        self.assertTrue(continue_event["fired"])
+
     def test_raw_ipv4_udp_dns_packet_decodes_query_state(self) -> None:
         dns_payload = (
             struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)

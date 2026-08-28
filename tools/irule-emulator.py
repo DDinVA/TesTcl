@@ -2745,7 +2745,30 @@ class EmulatorSession:
                     pending_http = (request, index)
                     entry["pending"] = True
                 else:
-                    if pending_http is None:
+                    response_status = int(packet.get("status", 200))
+                    if response_status < 200 and response_status != 101:
+                        session.eval_tcl(
+                            f"set ::state::http::response::status {response_status}"
+                        )
+                        session.eval_tcl("set ::state::http::response::payload \"\"")
+                        for header_name, header_value in packet.get(
+                            "response_headers", {}
+                        ).items():
+                            session.eval_tcl(
+                                "::state::http::response::header set "
+                                f"{_tcl_quote(header_name)} {_tcl_quote(header_value)}"
+                            )
+                        if response_status == 100:
+                            entry["events"].append(
+                                self._fire_event_on_worker(
+                                    session,
+                                    "HTTP_RESPONSE_CONTINUE",
+                                    self._packet_event_state(packet),
+                                )
+                            )
+                        else:
+                            entry["ignored"] = "interim HTTP response"
+                    elif pending_http is None:
                         entry["ignored"] = "HTTP response has no pending HTTP request"
                     else:
                         response_headers = packet.get("response_headers", packet.get("headers", {}))

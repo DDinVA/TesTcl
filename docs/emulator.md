@@ -291,6 +291,11 @@ events: it clears the active collection window and is reported as
 `http_release: true` in the transaction result. Explicit event injection
 remains available through the event API for lower-level tests.
 
+Raw packet replay also preserves interim HTTP responses: a `100 Continue`
+frame fires `HTTP_RESPONSE_CONTINUE` without completing the pending request,
+so a later final response supplies the transaction result. Other non-final
+1xx frames remain interim in the packet trace.
+
 For a classic PCAP file, keep the iRule scenario in a JSON file and replay it
 through the CLI:
 
@@ -372,7 +377,8 @@ the common `pool`, `addr`, `port`, `priority`, and `ratio` selectors; direct
 `node` overrides intentionally report the pool without claiming a pool member.
 `HTTP::request` and `HTTP::response` reconstruct raw header blocks with request
 or status lines and terminal CRLFs; request/response payloads remain separate
-through the payload collection APIs. The
+through the payload collection APIs. `HTTP_RESPONSE_CONTINUE` is emitted for
+raw `100 Continue` responses while the pending HTTP transaction remains open.
 `HTTP::redirect` commits a 302 response with a `Location` header and clears
 the response body; `HTTP::has_responded` reports that commitment to later
 rule logic. The emulator profile remains fixed at `tmos-17.5`.
