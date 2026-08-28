@@ -19,6 +19,7 @@ namespace eval ::itest::semantic {
     variable http_retry_requested 0
     variable http_retry_request ""
     variable http_retry_reset 0
+    variable http_close_requested 0
     variable http_request_number 0
 
     proc _profile_enabled {name} {
@@ -86,6 +87,11 @@ namespace eval ::itest::semantic {
         set http_retry_requested 0
         set http_retry_request ""
         set http_retry_reset 0
+    }
+
+    proc prepare_http_close {} {
+        variable http_close_requested
+        set http_close_requested 0
     }
 
     proc http_retry_snapshot {} {
@@ -2304,6 +2310,18 @@ namespace eval ::itest::semantic {
         return $http_request_number
     }
 
+    proc http_close_command {args} {
+        if {[llength $args] != 0} {
+            error "HTTP::close takes no arguments"
+        }
+        variable http_close_requested
+        set http_close_requested 1
+        set ::state::connection::state closing
+        set ::state::http::response_committed 1
+        ::itest::log_decision http close
+        return ""
+    }
+
     proc http_retry_command {args} {
         if {$::itest::current_event ni {HTTP_RESPONSE HTTP_RESPONSE_DATA}} {
             error "HTTP::retry is valid only during HTTP_RESPONSE or HTTP_RESPONSE_DATA"
@@ -2408,6 +2426,12 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_retry] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::http_retry ::itest::cmd::_testcl_http_retry_orig
     proc ::itest::cmd::http_retry {args} {
         return [eval [linsert $args 0 ::itest::semantic::http_retry_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::http_close] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::http_close ::itest::cmd::_testcl_http_close_orig
+    proc ::itest::cmd::http_close {args} {
+        return [eval [linsert $args 0 ::itest::semantic::http_close_command]]
     }
 }
 foreach {original replacement} {

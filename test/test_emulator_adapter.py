@@ -627,6 +627,30 @@ when HTTP_RESPONSE {
         self.assertTrue(any("request-num=2" in entry for entry in second["logs"]))
         self.assertTrue(any("request-num=1" in entry for entry in third["logs"]))
 
+    def test_http_close_terminates_persistent_session(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when CLIENT_ACCEPTED { log local0. accepted }
+when HTTP_REQUEST { log local0. request }
+when HTTP_RESPONSE { HTTP::close }
+when CLIENT_CLOSED { log local0. closed }
+""",
+                "requests": [
+                    {"uri": "/one", "response_body": "one"},
+                    {"uri": "/two", "response_body": "two"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first, second = result["results"]
+        self.assertEqual(first["connection_state"], "closing")
+        self.assertIn("CLIENT_CLOSED", first["events_fired"])
+        self.assertTrue(any("closed" in entry for entry in first["logs"]))
+        self.assertIn("CLIENT_ACCEPTED", second["events_fired"])
+        self.assertTrue(any("accepted" in entry for entry in second["logs"]))
+
     def test_semantic_overlay_preserves_lb_select_pool_integration(self) -> None:
         result = self.adapter.run_scenario(
             {

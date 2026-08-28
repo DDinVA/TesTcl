@@ -359,6 +359,8 @@ matches the documented 301, 302, 303, 305, and 307 responses only when a
 `Location` header is present. The `HTTP::request_num` overlay counts logical
 requests on the current persistent connection, does not increment for an
 internal `HTTP::retry` replay, and resets when the adapter starts a new
+connection. `HTTP::close` performs the corresponding emulated connection
+teardown, including `CLIENT_CLOSED`, before the next request can start a new
 connection. The
 emulator profile remains fixed at
 `tmos-17.5`.

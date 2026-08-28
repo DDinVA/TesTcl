@@ -211,6 +211,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTTP::password",
     "HTTP::reject_reason",
     "HTTP::response",
+    "HTTP::close",
     "HTTP::retry",
     "HTTP::is_keepalive",
     "HTTP::is_redirect",
@@ -1817,6 +1818,9 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
     semantic = _semantic_snapshot(session)
     lb_failure = _lb_failure_snapshot(session)
     http_retry = _http_retry_snapshot(session)
+    http_close_requested = session.eval_tcl(
+        "set ::itest::semantic::http_close_requested"
+    )
     lb_state = session.get_state("lb")
     connection_state = session.get_state("connection")
     response_status = int(response_state.get("status", "200"))
@@ -1859,6 +1863,8 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
             "request": http_retry.get("request", ""),
             "reset": http_retry.get("reset", "0") == "1",
         }
+    if str(http_close_requested) == "1":
+        result["http_close"] = True
     return result
 
 
@@ -1993,6 +1999,7 @@ class EmulatorSession:
         original_kwargs = dict(kwargs)
         retry_count = 0
         retry_exhausted = False
+        http_close_requested = False
         decision_history: list[Any] = []
         log_history: list[Any] = []
         result: dict[str, Any]
@@ -2003,6 +2010,7 @@ class EmulatorSession:
                     f"::itest::semantic::prepare_lb_failure {_tcl_quote(attempt_failure)}"
                 )
                 session.eval_tcl("::itest::semantic::prepare_http_retry")
+                session.eval_tcl("::itest::semantic::prepare_http_close")
                 session.eval_tcl("set ::itest::semantic::automatic_http_flow 1")
                 try:
                     use_existing_connection = self._connection_open and (
@@ -2024,8 +2032,10 @@ class EmulatorSession:
                 decision_history.extend(result.get("decisions", []))
                 log_history.extend(result.get("logs", []))
                 retry = result.pop("http_retry", None)
+                http_close = bool(result.pop("http_close", False))
                 self._connection_open = True
                 if not retry:
+                    http_close_requested = http_close
                     break
                 if retry_count >= MAX_HTTP_RETRIES:
                     retry_exhausted = True
@@ -2046,6 +2056,26 @@ class EmulatorSession:
             )
             session.eval_tcl("::itest::semantic::clear_lb_failure")
             session.eval_tcl("::itest::semantic::prepare_http_retry")
+            session.eval_tcl("::itest::semantic::prepare_http_close")
+        if http_close_requested:
+            events_before_close = _split_tcl_list(
+                session.eval_tcl("::itest::get_fired_events")
+            )
+            decisions_before_close = len(session.get_decisions())
+            logs_before_close = len(session.get_logs())
+            connection_active = session.eval_tcl("set ::orch::_connection_active")
+            if str(connection_active) == "1":
+                session.fire_event("CLIENT_CLOSED")
+            events_after_close = _split_tcl_list(
+                session.eval_tcl("::itest::get_fired_events")
+            )
+            result["events_fired"].extend(events_after_close[len(events_before_close):])
+            decision_history.extend(session.get_decisions()[decisions_before_close:])
+            log_history.extend(session.get_logs()[logs_before_close:])
+            session.eval_tcl("set ::orch::_connection_active 0")
+            session.eval_tcl("::state::reset_connection_state")
+            self._connection_open = False
+            self._connection_request_number = 0
         result["decisions"] = decision_history
         result["logs"] = log_history
         result["events_fired"] = result["events_fired"][fired_before:]
