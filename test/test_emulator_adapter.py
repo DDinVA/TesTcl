@@ -609,6 +609,68 @@ when HTTP_RESPONSE {
         self.assertTrue(any("keepalive=1 header=1" in entry for entry in second["logs"]))
         self.assertTrue(any("redirect=0 header=0" in entry for entry in second["logs"]))
 
+    def test_http_redirect_commits_response_and_has_responded_tracks_it(self) -> None:
+        request_redirect = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": (
+                    'when HTTP_REQUEST { '
+                    'HTTP::redirect "https://example.com/new"; '
+                    'set header_rc [catch {HTTP::header insert X-After blocked}]; '
+                    'log local0. "responded=[HTTP::has_responded] header_rc=$header_rc" '
+                    '}'
+                ),
+                "requests": [{"uri": "/old"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )["results"][0]
+        self.assertTrue(request_redirect["response_committed"])
+        self.assertEqual(request_redirect["response"]["status"], 302)
+        self.assertEqual(request_redirect["response"]["headers"]["location"], "https://example.com/new")
+        self.assertEqual(request_redirect["response"]["body"], "")
+        self.assertTrue(any("responded=1 header_rc=1" in entry for entry in request_redirect["logs"]))
+        self.assertEqual(request_redirect["pool"], "")
+
+        direct_response = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": (
+                    'when HTTP_REQUEST { HTTP::respond 401 content "denied"; '
+                    'log local0. "responded=[HTTP::has_responded]" }'
+                ),
+                "requests": [{"uri": "/private"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )["results"][0]
+        self.assertTrue(direct_response["response_committed"])
+        self.assertEqual(direct_response["response"]["status"], 401)
+        self.assertEqual(direct_response["response"]["body"], "denied")
+        self.assertTrue(any("responded=1" in entry for entry in direct_response["logs"]))
+
+        response_redirect = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["10.0.0.10:80"]},
+                "irule": (
+                    "when HTTP_REQUEST { pool api_pool } "
+                    'when HTTP_RESPONSE { if {[HTTP::status] == 404} { '
+                    'HTTP::redirect "/fallback"; '
+                    'log local0. "responded=[HTTP::has_responded]" } }'
+                ),
+                "request": {
+                    "uri": "/missing",
+                    "response_status": 404,
+                    "response_headers": {"Content-Length": "7"},
+                    "response_body": "missing",
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )["results"][0]
+        self.assertEqual(response_redirect["response"]["status"], 302)
+        self.assertEqual(response_redirect["response"]["headers"]["location"], "/fallback")
+        self.assertEqual(response_redirect["response"]["headers"].get("content-length"), None)
+        self.assertTrue(any("responded=1" in entry for entry in response_redirect["logs"]))
+
     def test_http_request_num_tracks_connection_requests_and_resets(self) -> None:
         result = self.adapter.run_scenario(
             {

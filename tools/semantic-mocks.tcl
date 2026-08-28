@@ -413,6 +413,44 @@ namespace eval ::itest::semantic {
         return [_http_message_command response {*}$args]
     }
 
+    proc http_has_responded_command {args} {
+        if {[llength $args] != 0} {
+            error "HTTP::has_responded takes no arguments"
+        }
+        if {[info exists ::state::http::response_committed] &&
+            $::state::http::response_committed} {
+            return 1
+        }
+        return 0
+    }
+
+    proc http_redirect_command {args} {
+        if {[llength $args] != 1} {
+            error "HTTP::redirect requires a URL"
+        }
+        if {$::itest::current_event ni {
+            CACHE_REQUEST CACHE_RESPONSE HTTP_CLASS_FAILED HTTP_CLASS_SELECTED
+            HTTP_REQUEST HTTP_REQUEST_DATA HTTP_RESPONSE HTTP_RESPONSE_DATA
+            LB_FAILED NAME_RESOLVED
+        }} {
+            error "HTTP::redirect is not valid in $::itest::current_event"
+        }
+        if {[info exists ::state::http::response_committed] &&
+            $::state::http::response_committed} {
+            error "HTTP response has already been committed"
+        }
+        set location [lindex $args 0]
+        set ::state::http::response::status 302
+        set ::state::http::response::reason "Found"
+        ::state::http::response::header remove "content-length"
+        ::state::http::response::header remove "transfer-encoding"
+        ::state::http::response::header set "location" $location
+        set ::state::http::response::payload ""
+        set ::state::http::response_committed 1
+        ::itest::log_decision http redirect $location
+        return ""
+    }
+
     proc _http_header_name {name} {
         set parts [split $name -]
         set result [list]
@@ -2553,6 +2591,8 @@ foreach {original replacement} {
     http_is_keepalive http_is_keepalive_command
     http_is_redirect http_is_redirect_command
     http_request_num http_request_num_command
+    http_has_responded http_has_responded_command
+    http_redirect http_redirect_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
         ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
@@ -2569,6 +2609,11 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_header] ne ""} {
         }
         if {[llength $args] == 1 && [lindex $args 0] eq "is_redirect"} {
             return [::itest::semantic::http_is_redirect_command]
+        }
+        if {[info exists ::state::http::response_committed] &&
+            $::state::http::response_committed && [llength $args] > 0 &&
+            [lindex $args 0] in {insert replace remove sanitize}} {
+            error "HTTP response has already been committed"
         }
         return [eval [linsert $args 0 ::itest::cmd::_testcl_http_header_orig]]
     }

@@ -371,6 +371,6 @@ the common `pool`, `addr`, `port`, `priority`, and `ratio` selectors; direct
 `HTTP::request` and `HTTP::response` reconstruct raw header blocks with request
 or status lines and terminal CRLFs; request/response payloads remain separate
 through the payload collection APIs. The
-The
-emulator profile remains fixed at
-`tmos-17.5`.
+`HTTP::redirect` commits a 302 response with a `Location` header and clears
+the response body; `HTTP::has_responded` reports that commitment to later
+rule logic. The emulator profile remains fixed at `tmos-17.5`.
