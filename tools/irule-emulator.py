@@ -1165,7 +1165,10 @@ PACKET_EVENT_ADAPTERS = {
     "SERVERSSL_HANDSHAKE": "TLS server handshake",
     "SERVERSSL_DATA": "TLS server data",
     "HTTP_REQUEST": "HTTP request transaction",
+    "HTTP_REQUEST_RELEASE": "HTTP request transaction release phase",
     "HTTP_RESPONSE": "HTTP response transaction",
+    "HTTP_RESPONSE_CONTINUE": "raw HTTP 100 Continue response",
+    "HTTP_RESPONSE_RELEASE": "HTTP response transaction release phase",
     "DNS_REQUEST": "DNS request packet",
     "DNS_RESPONSE": "DNS response packet",
 }

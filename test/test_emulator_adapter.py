@@ -324,6 +324,22 @@ when HTTP_REQUEST {
         self.assertIn("HTTP_REQUEST", {
             entry["name"] for entry in report["events"]["packet_adapter_events"]
         })
+        packet_adapters = {
+            entry["name"]: entry["adapter"]
+            for entry in report["events"]["packet_adapter_events"]
+        }
+        self.assertEqual(
+            packet_adapters["HTTP_REQUEST_RELEASE"],
+            "HTTP request transaction release phase",
+        )
+        self.assertEqual(
+            packet_adapters["HTTP_RESPONSE_CONTINUE"],
+            "raw HTTP 100 Continue response",
+        )
+        self.assertEqual(
+            packet_adapters["HTTP_RESPONSE_RELEASE"],
+            "HTTP response transaction release phase",
+        )
         self.assertGreater(
             report["events"]["catalog_count"], report["events"]["packet_adapter_count"]
         )
