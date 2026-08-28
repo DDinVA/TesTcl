@@ -651,6 +651,51 @@ when CLIENT_CLOSED { log local0. closed }
         self.assertIn("CLIENT_ACCEPTED", second["events_fired"])
         self.assertTrue(any("accepted" in entry for entry in second["logs"]))
 
+    def test_lb_server_reports_selected_member(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["192.0.2.10:443"]},
+                "irule": """
+when CLIENT_ACCEPTED { log local0. "before=[LB::server]" }
+when HTTP_REQUEST { pool api_pool }
+when LB_SELECTED {
+    log local0. "server=[LB::server] pool=[LB::server pool] addr=[LB::server addr] port=[LB::server port] priority=[LB::server priority]"
+}
+""",
+                "request": {"uri": "/health"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        logs = result["results"][0]["logs"]
+        self.assertTrue(any("before=" in entry for entry in logs))
+        self.assertTrue(
+            any(
+                "server=api_pool 192.0.2.10 443 pool=api_pool addr=192.0.2.10 port=443 priority=1"
+                in entry
+                for entry in logs
+            )
+        )
+
+    def test_lb_server_hides_pool_member_after_direct_node_override(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["192.0.2.10:443"]},
+                "irule": """
+when HTTP_REQUEST {
+    pool api_pool
+    node 192.0.2.99 8080
+    log local0. "server=[LB::server] addr=[LB::server addr] port=[LB::server port]"
+}
+""",
+                "request": {"uri": "/node"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        logs = result["results"][0]["logs"]
+        self.assertTrue(any("server=api_pool addr= port=" in entry for entry in logs))
+
     def test_semantic_overlay_preserves_lb_select_pool_integration(self) -> None:
         result = self.adapter.run_scenario(
             {

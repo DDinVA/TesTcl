@@ -2322,6 +2322,51 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc lb_server_command {args} {
+        if {[llength $args] > 1} {
+            error "LB::server accepts at most one selector"
+        }
+        set pool $::state::lb::pool
+        set selected 0
+        if {[info exists ::state::lb::selected]} {
+            set selected $::state::lb::selected
+        }
+        set addr ""
+        set port ""
+        if {$selected} {
+            set addr $::state::lb::node_addr
+            set port $::state::lb::node_port
+            set member $::state::lb::pool_member
+            if {$member eq ""} {
+                set selected 0
+            } else {
+                set separator [string last ":" $member]
+                if {$separator < 0} {
+                    if {$member ne $addr} { set selected 0 }
+                } elseif {[string range $member 0 [expr {$separator - 1}]] ne $addr ||
+                          [string range $member [expr {$separator + 1}] end] ne $port} {
+                    set selected 0
+                }
+            }
+            if {!$selected} {
+                set addr ""
+                set port ""
+            }
+        }
+        if {[llength $args] == 0 || [lindex $args 0] eq "name"} {
+            if {!$selected} { return $pool }
+            return [list $pool $addr $port]
+        }
+        switch -exact -- [lindex $args 0] {
+            pool { return $pool }
+            addr { return $addr }
+            port { return $port }
+            priority - ratio { if {$selected} { return 1 }; return "" }
+            route_domain - weight - ripeness { return "" }
+            default { error "unsupported LB::server selector" }
+        }
+    }
+
     proc http_retry_command {args} {
         if {$::itest::current_event ni {HTTP_RESPONSE HTTP_RESPONSE_DATA}} {
             error "HTTP::retry is valid only during HTTP_RESPONSE or HTTP_RESPONSE_DATA"
@@ -2432,6 +2477,12 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_close] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::http_close ::itest::cmd::_testcl_http_close_orig
     proc ::itest::cmd::http_close {args} {
         return [eval [linsert $args 0 ::itest::semantic::http_close_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::lb_server] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::lb_server ::itest::cmd::_testcl_lb_server_orig
+    proc ::itest::cmd::lb_server {args} {
+        return [eval [linsert $args 0 ::itest::semantic::lb_server_command]]
     }
 }
 foreach {original replacement} {

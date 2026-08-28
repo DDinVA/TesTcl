@@ -223,6 +223,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "LB::down",
     "LB::persist",
     "LB::reselect",
+    "LB::server",
     "LB::status",
     "LB::up",
     "class",

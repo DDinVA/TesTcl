@@ -361,6 +361,9 @@ requests on the current persistent connection, does not increment for an
 internal `HTTP::retry` replay, and resets when the adapter starts a new
 connection. `HTTP::close` performs the corresponding emulated connection
 teardown, including `CLIENT_CLOSED`, before the next request can start a new
-connection. The
+connection. `LB::server` reports the selected pool/member tuple and supports
+the common `pool`, `addr`, `port`, `priority`, and `ratio` selectors; direct
+`node` overrides intentionally report the pool without claiming a pool member.
+The
 emulator profile remains fixed at
 `tmos-17.5`.
