@@ -136,6 +136,49 @@ class EmulatorAdapterTests(unittest.TestCase):
         self.assertEqual(usage["HTTP::payload"]["runtime_status"], "handwritten-mock")
         self.assertEqual(result["fidelity"]["warnings"], [])
 
+    def test_http_data_events_require_collection_and_honor_length(self) -> None:
+        no_collect = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": 'when HTTP_REQUEST_DATA { log local0. "unexpected-data" }',
+                "requests": [{"body": "abc"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertNotIn("HTTP_REQUEST_DATA", no_collect["results"][0]["events_fired"])
+        self.assertFalse(any("unexpected-data" in entry for entry in no_collect["results"][0]["logs"]))
+
+        collected = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST { HTTP::collect 3 }
+when HTTP_REQUEST_DATA { log local0. "collected=[HTTP::payload]" }
+when HTTP_RESPONSE { HTTP::collect 2 }
+when HTTP_RESPONSE_DATA { log local0. "response=[HTTP::payload]" }
+""",
+                "requests": [{"body": "abc", "response_body": "ok"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertIn("HTTP_REQUEST_DATA", collected["results"][0]["events_fired"])
+        self.assertTrue(any("collected=abc" in entry for entry in collected["results"][0]["logs"]))
+        self.assertIn("HTTP_RESPONSE_DATA", collected["results"][0]["events_fired"])
+        self.assertTrue(any("response=ok" in entry for entry in collected["results"][0]["logs"]))
+
+        short = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST { HTTP::collect 4 }
+when HTTP_REQUEST_DATA { log local0. "should-not-fire" }
+""",
+                "requests": [{"body": "abc"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertNotIn("HTTP_REQUEST_DATA", short["results"][0]["events_fired"])
+
     def test_capabilities_are_complete_and_chunked(self) -> None:
         result = self.adapter._build_capabilities(self.adapter._find_tcl_lsp_root(self.tcl_lsp_root), 0, 7)
 
@@ -899,6 +942,50 @@ when CLIENT_DATA { log local0. "collected=[TCP::payload]" }
         second_event = result["trace"][2]["events"][0]
         self.assertTrue(any("collected=one" in entry for entry in first_event["logs"]))
         self.assertTrue(any("collected=two" in entry for entry in second_event["logs"]))
+
+    def test_tcp_release_stops_continuous_collection(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED { TCP::collect }
+when CLIENT_DATA {
+    log local0. "collected=[TCP::payload]"
+    TCP::release
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "flags": ["SYN"],
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "payload": "one",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "payload": "two",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(len(result["trace"][1]["events"]), 1)
+        self.assertEqual(result["trace"][2]["events"], [])
+        self.assertTrue(
+            any("collected=one" in entry for entry in result["trace"][1]["events"][0]["logs"])
+        )
 
     def test_peer_switches_tcp_context_and_emits_to_the_opposite_side(self) -> None:
         result = self.adapter.run_scenario(

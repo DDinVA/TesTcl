@@ -263,6 +263,11 @@ same packet array at
 `POST /v1/sessions/{session_id}/packets`, or through the MCP
 `irule_session_trace` tool.
 
+HTTP data events are only produced by the high-level request flow after
+`HTTP::collect` has armed the corresponding request or response body and the
+requested byte threshold is available. Explicit event injection remains
+available through the event API for lower-level tests.
+
 For a classic PCAP file, keep the iRule scenario in a JSON file and replay it
 through the CLI:
 
@@ -321,9 +326,9 @@ request/response cookie mutations. TCP payload access is directional for
 client/server data events and supports byte-length, replacement, collection,
 offset, release, and response bookkeeping. `TCP::collect` gates data events
 until the requested length and skip window is available; the no-argument form
-continues to fire for each received packet, while explicit lengths consume one
-collection window. Partial buffers are preserved across calls on a persistent
-session. `peer`, `clientside`, and `serverside` execute nested command blocks
-under the corresponding connection context. The
+continues to fire for each received packet until `TCP::release`, while explicit
+lengths consume one collection window. Partial buffers are preserved across
+calls on a persistent session. `peer`, `clientside`, and `serverside` execute
+nested command blocks under the corresponding connection context. The
 emulator profile remains fixed at
 `tmos-17.5`.

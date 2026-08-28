@@ -1832,10 +1832,14 @@ class EmulatorSession:
             self._connection_open = False
         kwargs = _request_kwargs(request)
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
-        if self._connection_open and not request.get("new_connection"):
-            result = _run_request_with_state(session, "run_next_request", kwargs)
-        else:
-            result = _run_request_with_state(session, "run_http_request", kwargs)
+        session.eval_tcl("set ::itest::semantic::automatic_http_flow 1")
+        try:
+            if self._connection_open and not request.get("new_connection"):
+                result = _run_request_with_state(session, "run_next_request", kwargs)
+            else:
+                result = _run_request_with_state(session, "run_http_request", kwargs)
+        finally:
+            session.eval_tcl("unset -nocomplain ::itest::semantic::automatic_http_flow")
         result["events_fired"] = result["events_fired"][fired_before:]
         self._connection_open = True
         self._request_count += 1

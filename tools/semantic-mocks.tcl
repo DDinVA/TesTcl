@@ -724,6 +724,7 @@ namespace eval ::itest::semantic {
             set $payload_var [::itest::cmd::_payload_splice [set $payload_var] 0 $length ""]
         }
         set ::state::vars::connection_vars(__testcl_tcp_released) 1
+        tcp_clear_collection [_tcp_side]
         ::itest::log_decision tcp release [list [_tcp_side] $length]
         return $length
     }
@@ -1844,6 +1845,39 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_cookie] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::http_cookie ::itest::cmd::_testcl_http_cookie_orig
     proc ::itest::cmd::http_cookie {args} {
         return [eval [linsert $args 0 ::itest::semantic::cookie_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
+    [::tmm::_orig_info commands ::itest::_testcl_fire_event_orig] eq ""} {
+    ::tmm::_orig_rename ::itest::fire_event ::itest::_testcl_fire_event_orig
+    proc ::itest::fire_event {event_name} {
+        set gated [info exists ::itest::semantic::automatic_http_flow]
+        set is_request_data [expr {$event_name eq "HTTP_REQUEST_DATA"}]
+        set is_response_data [expr {$event_name eq "HTTP_RESPONSE_DATA"}]
+        if {$gated && ($is_request_data || $is_response_data)} {
+            if {$is_request_data} {
+                set collecting $::state::http::collect_request
+                set length $::state::http::collect_request_length
+                set payload $::state::http::request::payload
+            } else {
+                set collecting $::state::http::collect_response
+                set length $::state::http::collect_response_length
+                set payload $::state::http::response::payload
+            }
+            if {!$collecting ||
+                ![string is integer -strict $length] ||
+                ($length > 0 && [string bytelength $payload] < $length)} {
+                return [list fired 0 reason "collect_not_ready"]
+            }
+            # HTTP data collection is released when its data event completes.
+            # Clearing before dispatch lets the handler explicitly re-arm it.
+            if {$is_request_data} {
+                set ::state::http::collect_request 0
+            } else {
+                set ::state::http::collect_response 0
+            }
+        }
+        return [uplevel 1 [list ::itest::_testcl_fire_event_orig $event_name]]
     }
 }
 foreach {original replacement} {
