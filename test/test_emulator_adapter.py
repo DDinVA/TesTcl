@@ -209,7 +209,10 @@ when HTTP_REQUEST_DATA { log local0. "should-not-fire" }
                 },
                 "irule": """
 when HTTP_REQUEST {
+    log local0. "unselected-server=[server_addr]:[server_port]"
+    pool api_pool
     log local0. "findstr=[findstr [HTTP::path] / 1] field=[getfield [HTTP::host] . 2] char=[getfield abc {} 2]"
+    log local0. "client=[client_addr]:[client_port] server=[server_addr]:[server_port] local=[local_addr]:[local_port]"
     log local0. "findclass=[findclass /api routes] matchclass=[matchclass /api equals routes]"
     log local0. "active=[active_members -list api_pool] all=[members -list api_pool] nodes=[nodes -list api_pool]"
     log local0. "substr=[substr prefix:/api?x=1 7 ?]"
@@ -230,6 +233,8 @@ when HTTP_REQUEST {
         self.assertTrue(any("findstr=api/v1" in entry for entry in logs))
         self.assertTrue(any("field=example" in entry for entry in logs))
         self.assertTrue(any("char=b" in entry for entry in logs))
+        self.assertTrue(any("unselected-server=0.0.0.0:0" in entry for entry in logs))
+        self.assertTrue(any("client=10.0.0.1:54321" in entry and "server=10.0.0.10:80" in entry and "local=192.168.1.100:443" in entry for entry in logs))
         self.assertTrue(any("findclass=/api api_pool matchclass=1" in entry for entry in logs))
         self.assertTrue(any("active={10.0.0.10 80} {10.0.0.11 80}" in entry for entry in logs))
         self.assertTrue(any("all={10.0.0.10 80} {10.0.0.11 80}" in entry for entry in logs))
@@ -241,6 +246,36 @@ when HTTP_REQUEST {
         self.assertTrue(any("sha384=cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7" in entry and "sha512=ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f" in entry for entry in logs))
         self.assertTrue(any("binary-md5=9fd6d2a57559960e059c385892142915" in entry for entry in logs))
         self.assertTrue(any("b64=hello" in entry for entry in logs))
+
+    def test_server_endpoint_aliases_clear_stale_member_after_pool_failure(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["10.0.0.10:80"]},
+                "irule": """
+when HTTP_REQUEST {
+    pool api_pool
+    LB::down pool api_pool
+    pool api_pool
+    log local0. "server=[server_addr]:[server_port]"
+}
+""",
+                "requests": [{"uri": "/"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any("server=0.0.0.0:0" in entry for entry in result["results"][0]["logs"]))
+
+        bare_member = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"bare_pool": ["10.0.0.20"]},
+                "irule": "when HTTP_REQUEST { pool bare_pool; log local0. \"server=[server_addr]:[server_port]\" }",
+                "requests": [{"uri": "/"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any("server=10.0.0.20:0" in entry for entry in bare_member["results"][0]["logs"]))
 
     def test_conformance_reports_catalog_and_packet_adapter_coverage(self) -> None:
         report = self.adapter._build_conformance(

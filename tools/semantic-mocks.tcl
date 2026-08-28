@@ -459,6 +459,7 @@ namespace eval ::itest::semantic {
     }
 
     proc _select_available_member {pool_name} {
+        set ::state::lb::selected 0
         if {![info exists ::state::lb::pools($pool_name)]} {
             return 0
         }
@@ -473,7 +474,11 @@ namespace eval ::itest::semantic {
             if {$colonpos >= 0} {
                 set ::state::lb::node_addr [string range $member 0 [expr {$colonpos - 1}]]
                 set ::state::lb::node_port [string range $member [expr {$colonpos + 1}] end]
+            } else {
+                set ::state::lb::node_addr $member
+                set ::state::lb::node_port 0
             }
+            set ::state::lb::selected 1
             ::itest::log_decision lb pool_member_select $member
             return 1
         }
@@ -2088,6 +2093,30 @@ namespace eval ::itest::semantic {
         return $values
     }
 
+    proc _connection_value {field args} {
+        if {[llength $args] != 0} { error "$field takes no arguments" }
+        if {$field in {server_addr server_port} &&
+            [info exists ::state::lb::selected] && $::state::lb::selected} {
+            switch -exact -- $field {
+                server_addr { return $::state::lb::node_addr }
+                server_port { return $::state::lb::node_port }
+            }
+        }
+        if {[info exists ::state::connection::$field]} {
+            return [set ::state::connection::$field]
+        }
+        return ""
+    }
+
+    proc client_addr_command {args} { return [_connection_value client_addr {*}$args] }
+    proc client_port_command {args} { return [_connection_value client_port {*}$args] }
+    proc local_addr_command {args} { return [_connection_value local_addr {*}$args] }
+    proc local_port_command {args} { return [_connection_value local_port {*}$args] }
+    proc remote_addr_command {args} { return [_connection_value remote_addr {*}$args] }
+    proc remote_port_command {args} { return [_connection_value remote_port {*}$args] }
+    proc server_addr_command {args} { return [_connection_value server_addr {*}$args] }
+    proc server_port_command {args} { return [_connection_value server_port {*}$args] }
+
     proc crc32_command {args} {
         if {[llength $args] != 1} { error "crc32 requires one value" }
         if {[catch {zlib crc32 [lindex $args 0]} value]} { return "" }
@@ -2207,6 +2236,8 @@ foreach {original replacement} {
     active_nodes active_nodes_command
     b64decode b64decode_command
     b64encode b64encode_command
+    client_addr client_addr_command
+    client_port client_port_command
     crc32 crc32_command
     decode_uri decode_uri_command
     domain domain_command
@@ -2220,7 +2251,13 @@ foreach {original replacement} {
     nodes nodes_command
     peer peer_command
     clientside clientside_command
+    local_addr local_addr_command
+    local_port local_port_command
+    remote_addr remote_addr_command
+    remote_port remote_port_command
     serverside serverside_command
+    server_addr server_addr_command
+    server_port server_port_command
     sha1 sha1_command
     sha256 sha256_command
     sha384 sha384_command

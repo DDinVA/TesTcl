@@ -54,6 +54,10 @@ those records. Table entries support subtables, add/set/replace/incr/append,
 key listing, delete-all, and lifetime/timeout expiry. Positive persistence
 timeouts expire records using the emulator clock, while timeout `0` means no
 expiry.
+Connection endpoint getters (`client_addr`, `client_port`, `local_addr`,
+`local_port`, `remote_addr`, `remote_port`, `server_addr`, and `server_port`)
+read the configured connection endpoints; server getters switch to the
+selected pool member after `pool` or `LB::reselect` establishes one.
 
 ## HTTP API
 
