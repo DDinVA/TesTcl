@@ -228,6 +228,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "STATS::set",
     "STATS::setmax",
     "STATS::setmin",
+    "table",
     "URI::basename",
     "URI::compare",
     "URI::decode",
@@ -645,7 +646,22 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         target: status
         for target, status in zip(lb_parts[::2], lb_parts[1::2])
     }
-    return {"stats": stats, "hsl_messages": hsl_messages, "lb_status": lb_status}
+    table_entries: list[dict[str, str]] = []
+    for raw_entry in _split_tcl_list(session.eval_tcl("::itest::semantic::table_snapshot")):
+        parts = _split_tcl_list(raw_entry)
+        if len(parts) >= 10:
+            table_entries.append(
+                {
+                    parts[index]: parts[index + 1]
+                    for index in range(0, len(parts) - 1, 2)
+                }
+            )
+    return {
+        "stats": stats,
+        "hsl_messages": hsl_messages,
+        "lb_status": lb_status,
+        "table": table_entries,
+    }
 
 
 def _install_runtime_shims(session: Any) -> None:

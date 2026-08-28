@@ -544,6 +544,318 @@ namespace eval ::itest::semantic {
         return up
     }
 
+    proc _table_parse_options {args} {
+        set options [dict create \
+            subtable "" \
+            mustexist 0 \
+            excl 0 \
+            notouch 0 \
+            georedundancy 0 \
+            remaining 0 \
+            count 0 \
+            all 0]
+        set positional [list]
+        set stop_options 0
+        set index 0
+        while {$index < [llength $args]} {
+            set arg [lindex $args $index]
+            if {!$stop_options && $arg eq "--"} {
+                set stop_options 1
+                incr index
+                continue
+            }
+            if {!$stop_options && [string match -* $arg]} {
+                switch -exact -- $arg {
+                    -mustexist { dict set options mustexist 1 }
+                    -excl { dict set options excl 1 }
+                    -notouch { dict set options notouch 1 }
+                    -georedundancy { dict set options georedundancy 1 }
+                    -remaining { dict set options remaining 1 }
+                    -count { dict set options count 1 }
+                    -all { dict set options all 1 }
+                    -subtable {
+                        incr index
+                        if {$index >= [llength $args]} {
+                            error "table -subtable requires a name"
+                        }
+                        dict set options subtable [lindex $args $index]
+                    }
+                    default { error "unsupported table option \"$arg\"" }
+                }
+            } else {
+                lappend positional $arg
+            }
+            incr index
+        }
+        if {[dict get $options mustexist] && [dict get $options excl]} {
+            error "table -mustexist and -excl are mutually exclusive"
+        }
+        return [list $options $positional]
+    }
+
+    proc _table_duration {value label} {
+        if {[string tolower $value] eq "indefinite"} {
+            return 0
+        }
+        if {![string is integer -strict $value] || $value < 0} {
+            error "table $label must be a non-negative integer or indefinite"
+        }
+        return $value
+    }
+
+    proc _table_new_record {value lifetime timeout} {
+        set now [clock seconds]
+        return [list \
+            value $value \
+            lifetime $lifetime \
+            timeout $timeout \
+            created $now \
+            touched $now]
+    }
+
+    proc _table_put {subtable key record} {
+        if {![info exists ::state::table::tables($subtable)]} {
+            set ::state::table::tables($subtable) [dict create]
+        }
+        dict set ::state::table::tables($subtable) $key $record
+    }
+
+    proc _table_remove {subtable key} {
+        if {![info exists ::state::table::tables($subtable)]} {
+            return
+        }
+        set bucket $::state::table::tables($subtable)
+        if {[dict exists $bucket $key]} {
+            dict unset bucket $key
+            set ::state::table::tables($subtable) $bucket
+        }
+    }
+
+    proc _table_fetch {subtable key {touch 1}} {
+        if {![info exists ::state::table::tables($subtable)]} {
+            return [list 0 [list]]
+        }
+        set bucket $::state::table::tables($subtable)
+        if {![dict exists $bucket $key]} {
+            return [list 0 [list]]
+        }
+        set record [dict get $bucket $key]
+        if {[catch {dict size $record}]} {
+            # Normalize records created by the upstream mock before this
+            # adapter overlay was loaded.
+            set value [lindex $record 0]
+            set timeout [lindex $record 1]
+            set lifetime [lindex $record 2]
+            set record [_table_new_record $value $lifetime $timeout]
+        }
+        set now [clock seconds]
+        set lifetime [dict get $record lifetime]
+        set timeout [dict get $record timeout]
+        set created [dict get $record created]
+        set touched [dict get $record touched]
+        if {($lifetime > 0 && $now >= ($created + $lifetime)) ||
+            ($timeout > 0 && $now >= ($touched + $timeout))} {
+            _table_remove $subtable $key
+            return [list 0 [list]]
+        }
+        if {$touch} {
+            dict set record touched $now
+            _table_put $subtable $key $record
+        }
+        return [list 1 $record]
+    }
+
+    proc _table_remaining {record field} {
+        set duration [dict get $record $field]
+        if {$duration == 0} {
+            return 0
+        }
+        if {$field eq "lifetime"} {
+            set expires [expr {[dict get $record created] + $duration}]
+        } else {
+            set expires [expr {[dict get $record touched] + $duration}]
+        }
+        set remaining [expr {$expires - [clock seconds]}]
+        if {$remaining < 0} { return 0 }
+        return $remaining
+    }
+
+    proc table_command {args} {
+        if {[llength $args] == 0} {
+            error "table requires a subcommand"
+        }
+        set subcmd [string tolower [lindex $args 0]]
+        lassign [_table_parse_options {*}[lrange $args 1 end]] options positional
+        set subtable [dict get $options subtable]
+        set touch [expr {![dict get $options notouch]}]
+        switch -exact -- $subcmd {
+            set - add - replace {
+                if {[llength $positional] < 2 || [llength $positional] > 4} {
+                    error "table $subcmd requires key, value, optional lifetime, and timeout"
+                }
+                set key [lindex $positional 0]
+                set value [lindex $positional 1]
+                set lifetime 0
+                set timeout 0
+                if {[llength $positional] > 2} {
+                    set lifetime [_table_duration [lindex $positional 2] lifetime]
+                }
+                if {[llength $positional] > 3} {
+                    set timeout [_table_duration [lindex $positional 3] timeout]
+                }
+                lassign [_table_fetch $subtable $key 0] exists ignored
+                if {$subcmd eq "add" && $exists} {
+                    error "table add key already exists"
+                }
+                if {$subcmd eq "replace" && !$exists} {
+                    error "table replace key does not exist"
+                }
+                if {[dict get $options mustexist] && !$exists} {
+                    error "table -mustexist key does not exist"
+                }
+                if {[dict get $options excl] && $exists} {
+                    error "table -excl key already exists"
+                }
+                _table_put $subtable $key [_table_new_record $value $lifetime $timeout]
+                ::itest::log_decision table $subcmd [list $subtable $key $value]
+                return $value
+            }
+            lookup {
+                if {[llength $positional] != 1} {
+                    error "table lookup requires a key"
+                }
+                lassign [_table_fetch $subtable [lindex $positional 0] $touch] exists record
+                if {!$exists} { return "" }
+                if {[dict get $options remaining]} {
+                    return [_table_remaining $record timeout]
+                }
+                return [dict get $record value]
+            }
+            incr {
+                if {[llength $positional] < 1 || [llength $positional] > 2} {
+                    error "table incr requires a key and optional amount"
+                }
+                set key [lindex $positional 0]
+                set amount 1
+                if {[llength $positional] == 2} {
+                    set amount [lindex $positional 1]
+                }
+                if {![string is integer -strict $amount]} {
+                    error "table incr amount must be an integer"
+                }
+                lassign [_table_fetch $subtable $key $touch] exists record
+                if {!$exists} {
+                    set record [_table_new_record 0 0 0]
+                }
+                set current [dict get $record value]
+                if {![string is integer -strict $current]} {
+                    error "table incr value must be an integer"
+                }
+                set value [expr {$current + $amount}]
+                dict set record value $value
+                if {$touch} { dict set record touched [clock seconds] }
+                _table_put $subtable $key $record
+                ::itest::log_decision table incr [list $subtable $key $amount]
+                return $value
+            }
+            append {
+                if {[llength $positional] != 2} {
+                    error "table append requires a key and string"
+                }
+                set key [lindex $positional 0]
+                lassign [_table_fetch $subtable $key $touch] exists record
+                if {!$exists} {
+                    set record [_table_new_record "" 0 0]
+                }
+                set value "[dict get $record value][lindex $positional 1]"
+                dict set record value $value
+                if {$touch} { dict set record touched [clock seconds] }
+                _table_put $subtable $key $record
+                ::itest::log_decision table append [list $subtable $key $value]
+                return $value
+            }
+            delete {
+                if {[dict get $options all]} {
+                    if {[llength $positional] != 0} {
+                        error "table delete -all does not accept a key"
+                    }
+                    unset -nocomplain ::state::table::tables($subtable)
+                    ::itest::log_decision table delete_all $subtable
+                    return ""
+                }
+                if {[llength $positional] != 1} {
+                    error "table delete requires a key"
+                }
+                _table_remove $subtable [lindex $positional 0]
+                ::itest::log_decision table delete [list $subtable [lindex $positional 0]]
+                return ""
+            }
+            timeout - lifetime {
+                if {[llength $positional] < 1 || [llength $positional] > 2} {
+                    error "table $subcmd requires a key and optional value"
+                }
+                set key [lindex $positional 0]
+                lassign [_table_fetch $subtable $key $touch] exists record
+                if {!$exists} { return 0 }
+                if {[llength $positional] == 1} {
+                    if {[dict get $options remaining]} {
+                        return [_table_remaining $record $subcmd]
+                    }
+                    return [dict get $record $subcmd]
+                }
+                set duration [_table_duration [lindex $positional 1] $subcmd]
+                dict set record $subcmd $duration
+                if {$touch} { dict set record touched [clock seconds] }
+                _table_put $subtable $key $record
+                return $duration
+            }
+            keys {
+                if {[llength $positional] > 1} {
+                    error "table keys accepts an optional pattern"
+                }
+                set pattern "*"
+                if {[llength $positional] == 1} {
+                    set pattern [lindex $positional 0]
+                }
+                set result [list]
+                if {[info exists ::state::table::tables($subtable)]} {
+                    foreach key [dict keys $::state::table::tables($subtable)] {
+                        lassign [_table_fetch $subtable $key $touch] exists ignored
+                        if {$exists && [string match $pattern $key]} {
+                            lappend result $key
+                        }
+                    }
+                }
+                if {[dict get $options count]} {
+                    return [llength $result]
+                }
+                return $result
+            }
+            default {
+                error "unsupported table subcommand \"$subcmd\""
+            }
+        }
+    }
+
+    proc table_snapshot {} {
+        set result [list]
+        foreach subtable [array names ::state::table::tables] {
+            set bucket $::state::table::tables($subtable)
+            foreach key [dict keys $bucket] {
+                lassign [_table_fetch $subtable $key 0] exists record
+                if {$exists} {
+                    lappend result [list \
+                        subtable $subtable \
+                        key $key \
+                        value [dict get $record value] \
+                        lifetime [dict get $record lifetime] \
+                        timeout [dict get $record timeout]]
+                }
+            }
+        }
+        return $result
+    }
+
     proc _persist_key {kind key} {
         return "[string tolower $kind]|$key"
     }
@@ -884,6 +1196,12 @@ if {[::tmm::_orig_info commands ::itest::cmd::cmd_persist] ne ""} {
         return [eval [linsert $args 0 ::itest::semantic::_persist_command]]
     }
 }
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_table] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_table ::itest::cmd::_testcl_table_orig
+    proc ::itest::cmd::cmd_table {args} {
+        return [eval [linsert $args 0 ::itest::semantic::table_command]]
+    }
+}
 
 # Override only the catalogued generated stubs implemented above. The mapping
 # stays in the upstream dispatcher, so Tcl command resolution and profiling
@@ -918,6 +1236,7 @@ foreach {name proc_name} {
     LB::status ::itest::semantic::lb_status
     LB::up ::itest::semantic::lb_up
     pool ::itest::cmd::cmd_pool
+    table ::itest::cmd::cmd_table
     URI::basename ::itest::semantic::uri_basename
     URI::decode ::itest::semantic::uri_decode
     URI::encode ::itest::semantic::uri_encode

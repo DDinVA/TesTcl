@@ -388,6 +388,63 @@ when HTTP_REQUEST {
             {"LB::persist": "semantic-mock", "persist": "semantic-mock"},
         )
 
+    def test_semantic_overlay_models_connection_table_subtables_and_mutations(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/write"} {
+        table set -subtable counters visits 1 60 60
+        table incr -subtable counters visits 2
+        table append -subtable counters message " ok"
+        table add -subtable counters added first indefinite 60
+        table replace -subtable counters added second 30 60
+        table set -subtable other visits 9 indefinite indefinite
+    } elseif {[HTTP::uri] eq "/read"} {
+        HTTP::header insert X-Visits [table lookup -subtable counters visits]
+        HTTP::header insert X-Message [table lookup -subtable counters message]
+        HTTP::header insert X-Added [table lookup -subtable counters added]
+        HTTP::header insert X-Keys [table keys -subtable counters -count]
+        HTTP::header insert X-Timeout [table timeout -subtable counters visits]
+        HTTP::header insert X-Lifetime [table lifetime -subtable counters added]
+    } elseif {[HTTP::uri] eq "/delete"} {
+        table delete -subtable counters -all
+    } else {
+        HTTP::header insert X-Visits [table lookup -subtable counters visits]
+        HTTP::header insert X-Keys [table keys -subtable counters -count]
+    }
+}
+""",
+                "requests": [
+                    {"uri": "/write"},
+                    {"uri": "/read"},
+                    {"uri": "/delete"},
+                    {"uri": "/empty"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        written, read, deleted, empty = result["results"]
+        self.assertEqual(read["request"]["headers"]["x-visits"], "3")
+        self.assertEqual(read["request"]["headers"]["x-message"], " ok")
+        self.assertEqual(read["request"]["headers"]["x-added"], "second")
+        self.assertEqual(read["request"]["headers"]["x-keys"], "3")
+        self.assertEqual(read["request"]["headers"]["x-timeout"], "60")
+        self.assertEqual(read["request"]["headers"]["x-lifetime"], "30")
+        self.assertEqual(empty["request"]["headers"]["x-visits"], "")
+        self.assertEqual(empty["request"]["headers"]["x-keys"], "0")
+        self.assertEqual(
+            {entry["runtime_status"] for entry in result["fidelity"]["commands"]
+             if entry["name"] == "table"},
+            {"semantic-mock"},
+        )
+        self.assertEqual(
+            {entry["key"] for entry in read["semantic"]["table"]},
+            {"visits", "message", "added"},
+        )
+
     def test_semantic_overlay_handles_zero_stats_and_malformed_uri_octets(self) -> None:
         result = self.adapter.run_scenario(
             {
