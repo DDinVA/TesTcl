@@ -34,6 +34,9 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 TMOS_VERSION = "17.5"
 DEFAULT_PROFILES = ["TCP", "HTTP"]
+LB_FAILURE_CAUSES = frozenset(
+    {"no_member", "unreachable", "queue_limit", "connection_timeout"}
+)
 HTTP_REASON_PHRASES = {
     100: "Continue",
     101: "Switching Protocols",
@@ -202,6 +205,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "HSL::send",
     "DNS::origin",
     "DNS::question",
+    "event",
     "HTTP::passthrough_reason",
     "HTTP::password",
     "HTTP::reject_reason",
@@ -849,6 +853,7 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
         "response_status",
         "response_headers",
         "response_body",
+        "lb_failure",
     }
     unknown = sorted(set(request) - allowed - {"close_before", "close_after", "new_connection"})
     if unknown:
@@ -882,7 +887,23 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
             ):
                 raise EmulatorInputError(f"{field} must be an object of strings")
             kwargs[field] = headers_value
+    if "lb_failure" in request:
+        failure = request["lb_failure"]
+        if not isinstance(failure, str) or failure not in LB_FAILURE_CAUSES:
+            causes = ", ".join(sorted(LB_FAILURE_CAUSES))
+            raise EmulatorInputError(f"lb_failure must be one of: {causes}")
+        kwargs["lb_failure"] = failure
     return kwargs
+
+
+def _lb_failure_snapshot(session: Any) -> dict[str, str]:
+    parts = _split_tcl_list(session.eval_tcl("::itest::semantic::lb_failure_snapshot"))
+    if len(parts) % 2:
+        raise EmulatorInputError("invalid load-balancer failure state")
+    snapshot = dict(zip(parts[::2], parts[1::2]))
+    if set(snapshot) - {"cause", "fired", "selected"}:
+        raise EmulatorInputError("invalid load-balancer failure fields")
+    return snapshot
 
 
 def _validate_request_flags(request: dict[str, Any]) -> None:
@@ -1739,13 +1760,14 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
     decisions = session.get_decisions()
     logs = session.get_logs()
     semantic = _semantic_snapshot(session)
+    lb_failure = _lb_failure_snapshot(session)
     lb_state = session.get_state("lb")
     connection_state = session.get_state("connection")
     response_status = int(response_state.get("status", "200"))
     response_reason = HTTP_REASON_PHRASES.get(
         response_status, response_state.get("reason", "")
     )
-    return {
+    result = {
         "pool": lb_state.get("pool", ""),
         "node": lb_state.get("node_addr", ""),
         "response_committed": str(committed) == "1",
@@ -1770,6 +1792,13 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
             "body": session.eval_tcl("set ::state::http::response::payload"),
         },
     }
+    if lb_failure.get("cause", ""):
+        result["lb_failure"] = {
+            "cause": lb_failure["cause"],
+            "fired": lb_failure.get("fired", "0") == "1",
+            "selected": lb_failure.get("selected", "0") == "1",
+        }
+    return result
 
 
 class EmulatorSession:
@@ -1890,7 +1919,11 @@ class EmulatorSession:
                 session.close_connection()
             self._connection_open = False
         kwargs = _request_kwargs(request)
+        lb_failure = kwargs.pop("lb_failure", "")
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
+        session.eval_tcl(
+            f"::itest::semantic::prepare_lb_failure {_tcl_quote(lb_failure)}"
+        )
         session.eval_tcl("set ::itest::semantic::automatic_http_flow 1")
         try:
             if self._connection_open and not request.get("new_connection"):
@@ -1899,6 +1932,7 @@ class EmulatorSession:
                 result = _run_request_with_state(session, "run_http_request", kwargs)
         finally:
             session.eval_tcl("unset -nocomplain ::itest::semantic::automatic_http_flow")
+            session.eval_tcl("::itest::semantic::clear_lb_failure")
         result["events_fired"] = result["events_fired"][fired_before:]
         self._connection_open = True
         self._request_count += 1

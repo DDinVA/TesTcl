@@ -12,6 +12,10 @@ namespace eval ::itest::semantic {
     array set hsl_handles {}
     variable hsl_messages {}
     variable next_hsl_handle 0
+    variable requested_lb_failure ""
+    variable lb_failure_pending 0
+    variable lb_failure_cause ""
+    variable lb_failure_fired 0
 
     proc _profile_enabled {name} {
         set wanted [string toupper $name]
@@ -35,6 +39,40 @@ namespace eval ::itest::semantic {
     proc hsl_snapshot {} {
         variable hsl_messages
         return $hsl_messages
+    }
+
+    proc prepare_lb_failure {cause} {
+        variable requested_lb_failure
+        variable lb_failure_pending
+        variable lb_failure_cause
+        variable lb_failure_fired
+        unset -nocomplain ::state::lb::failure_cause
+        set requested_lb_failure $cause
+        set lb_failure_pending [expr {$cause ne ""}]
+        set lb_failure_cause $cause
+        set lb_failure_fired 0
+    }
+
+    proc clear_lb_failure {} {
+        variable requested_lb_failure
+        variable lb_failure_pending
+        variable lb_failure_cause
+        variable lb_failure_fired
+        unset -nocomplain ::state::lb::failure_cause
+        set requested_lb_failure ""
+        set lb_failure_pending 0
+        set lb_failure_cause ""
+        set lb_failure_fired 0
+    }
+
+    proc lb_failure_snapshot {} {
+        variable lb_failure_cause
+        variable lb_failure_fired
+        set selected 0
+        if {[info exists ::state::lb::selected]} {
+            set selected $::state::lb::selected
+        }
+        return [list cause $lb_failure_cause fired $lb_failure_fired selected $selected]
     }
 
     proc lb_snapshot {} {
@@ -495,7 +533,14 @@ namespace eval ::itest::semantic {
             return $result
         }
         set pool_name [lindex $args 0]
-        _select_available_member $pool_name
+        if {![_select_available_member $pool_name]} {
+            variable lb_failure_pending
+            variable lb_failure_cause
+            set lb_failure_pending 1
+            if {$lb_failure_cause eq ""} {
+                set lb_failure_cause no_member
+            }
+        }
         return $result
     }
 
@@ -547,6 +592,35 @@ namespace eval ::itest::semantic {
             return down
         }
         return up
+    }
+
+    proc _maybe_fire_lb_failed {} {
+        variable requested_lb_failure
+        variable lb_failure_pending
+        variable lb_failure_cause
+        variable lb_failure_fired
+        if {$lb_failure_fired || $::itest::current_event eq "LB_FAILED"} {
+            return
+        }
+        if {[info exists ::state::http::response_committed] &&
+            $::state::http::response_committed} {
+            return
+        }
+        if {$requested_lb_failure ne ""} {
+            set cause $requested_lb_failure
+        } elseif {$lb_failure_pending &&
+                  (![info exists ::state::lb::selected] || !$::state::lb::selected)} {
+            set cause $lb_failure_cause
+        } else {
+            return
+        }
+        if {$cause eq ""} {
+            set cause no_member
+        }
+        set lb_failure_cause $cause
+        set lb_failure_fired 1
+        set ::state::lb::failure_cause $cause
+        uplevel 1 [list ::itest::_testcl_fire_event_orig LB_FAILED]
     }
 
     proc _tcp_side {} {
@@ -2178,6 +2252,19 @@ if {[::tmm::_orig_info commands ::itest::cmd::cmd_class] ne ""} {
         return [eval [linsert $args 0 ::itest::semantic::class_command]]
     }
 }
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_event] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_event ::itest::cmd::_testcl_event_orig
+    proc ::itest::cmd::cmd_event {args} {
+        if {[llength $args] == 1 && [lindex $args 0] eq "info"} {
+            if {[info exists ::state::lb::failure_cause] &&
+                $::itest::current_event eq "LB_FAILED"} {
+                return $::state::lb::failure_cause
+            }
+            return ""
+        }
+        return [eval [linsert $args 0 ::itest::cmd::_testcl_event_orig]]
+    }
+}
 if {[::tmm::_orig_info commands ::itest::cmd::http_cookie] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::http_cookie ::itest::cmd::_testcl_http_cookie_orig
     proc ::itest::cmd::http_cookie {args} {
@@ -2214,7 +2301,11 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                 set ::state::http::collect_response 0
             }
         }
-        return [uplevel 1 [list ::itest::_testcl_fire_event_orig $event_name]]
+        set result [uplevel 1 [list ::itest::_testcl_fire_event_orig $event_name]]
+        if {$gated && $event_name eq "HTTP_REQUEST"} {
+            ::itest::semantic::_maybe_fire_lb_failed
+        }
+        return $result
     }
 }
 foreach {original replacement} {

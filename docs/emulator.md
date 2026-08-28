@@ -172,8 +172,14 @@ curl -sS -X DELETE "http://127.0.0.1:8080/v1/sessions/${DNS_SESSION}"
 ```
 
 Requests may include a string `body`, plus `response_headers` and
-`response_body` to model the upstream response. The returned result includes
-the final request/response headers and bodies after the iRule runs. For
+`response_body` to model the upstream response. They may also include
+`lb_failure` with one of `no_member`, `unreachable`, `queue_limit`, or
+`connection_timeout`; this injects a bounded load-balancer failure before the
+serverside flow and fires `LB_FAILED`, allowing the rule to inspect
+`event info` and recover with a fallback pool or `LB::reselect`. A configured
+pool with no available members automatically produces the `no_member` cause.
+The returned result includes the final request/response headers and bodies
+after the iRule runs. For
 example:
 
 ```json

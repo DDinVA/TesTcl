@@ -440,6 +440,71 @@ when HTTP_REQUEST {
             },
         )
 
+    def test_lb_failure_injection_fires_event_info_and_fallback(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {
+                    "primary_pool": ["192.0.2.10:443"],
+                    "fallback_pool": ["192.0.2.20:443"],
+                },
+                "irule": """
+when HTTP_REQUEST { pool primary_pool }
+when LB_FAILED {
+    log local0. "failure=[event info] before=[server_addr]:[server_port]"
+    pool fallback_pool
+    LB::reselect
+}
+""",
+                "requests": [
+                    {"uri": "/health", "lb_failure": "connection_timeout"},
+                    {"uri": "/healthy"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_result = result["results"][0]
+        self.assertIn("LB_FAILED", request_result["events_fired"])
+        self.assertLess(
+            request_result["events_fired"].index("HTTP_REQUEST"),
+            request_result["events_fired"].index("LB_FAILED"),
+        )
+        self.assertEqual(request_result["pool"], "fallback_pool")
+        self.assertEqual(request_result["node"], "192.0.2.20")
+        self.assertEqual(
+            request_result["lb_failure"],
+            {"cause": "connection_timeout", "fired": True, "selected": True},
+        )
+        self.assertTrue(
+            any("failure=connection_timeout before=192.0.2.10:443" in entry
+                for entry in request_result["logs"])
+        )
+        self.assertNotIn("lb_failure", result["results"][1])
+
+    def test_failed_pool_selection_automatically_fires_lb_failed(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["192.0.2.10:443"]},
+                "irule": """
+when HTTP_REQUEST {
+    LB::down pool api_pool
+    pool api_pool
+}
+when LB_FAILED { log local0. "automatic=[event info]" }
+""",
+                "request": {"uri": "/health"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_result = result["results"][0]
+        self.assertIn("LB_FAILED", request_result["events_fired"])
+        self.assertEqual(
+            request_result["lb_failure"],
+            {"cause": "no_member", "fired": True, "selected": False},
+        )
+        self.assertTrue(any("automatic=no_member" in entry for entry in request_result["logs"]))
+
     def test_semantic_overlay_preserves_lb_select_pool_integration(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -1619,6 +1684,11 @@ when DNS_REQUEST {
             self.adapter.run_scenario({**base, "unknown": True}, tcl_lsp_root=self.tcl_lsp_root)
         with self.assertRaises(self.adapter.EmulatorInputError):
             self.adapter.run_scenario([], tcl_lsp_root=self.tcl_lsp_root)
+        with self.assertRaises(self.adapter.EmulatorInputError):
+            self.adapter.run_scenario(
+                {**base, "request": {"lb_failure": "not-a-cause"}},
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_session_manager_bounds_and_expires_sessions(self) -> None:
         config = {"irule": "when HTTP_REQUEST { pool api_pool }"}
