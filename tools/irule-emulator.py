@@ -248,6 +248,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "findclass",
     "findstr",
     "getfield",
+    "llookup",
     "matchclass",
     "md5",
     "members",

@@ -324,7 +324,7 @@ selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, table, TCP, and
 HTTP cookie commands, plus common global string, base64, data-group, and pool
 health and pool inventory functions, URI decoding, dotted-domain extraction, CRC32,
 and binary-compatible MD5/SHA1/SHA256/SHA384/SHA512 digests.
-The semantic overlay also models data-group `class`
+It also models multimap lookup through `llookup`. The semantic overlay also models data-group `class`
 matching, lookup, enumeration, connection-scoped search iterators, and
 request/response cookie mutations. TCP payload access is directional for
 client/server data events and supports byte-length, replacement, collection,

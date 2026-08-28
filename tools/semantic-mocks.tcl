@@ -2070,6 +2070,24 @@ namespace eval ::itest::semantic {
         return [join [lrange $labels $start end] "."]
     }
 
+    proc llookup_command {args} {
+        if {[llength $args] != 2} { error "llookup requires a multimap and key" }
+        set multimap [lindex $args 0]
+        set key [lindex $args 1]
+        if {[catch {llength $multimap} pair_count]} { return "" }
+        set values [list]
+        foreach pair $multimap {
+            if {[catch {llength $pair} field_count] || $field_count != 2} {
+                return ""
+            }
+            if {[lindex $pair 0] eq $key} {
+                lappend values [lindex $pair 1]
+            }
+        }
+        if {[llength $values] == 0} { return "" }
+        return $values
+    }
+
     proc crc32_command {args} {
         if {[llength $args] != 1} { error "crc32 requires one value" }
         if {[catch {zlib crc32 [lindex $args 0]} value]} { return "" }
@@ -2195,6 +2213,7 @@ foreach {original replacement} {
     findclass findclass_command
     findstr findstr_command
     getfield getfield_command
+    llookup llookup_command
     matchclass matchclass_command
     md5 md5_command
     members members_command
