@@ -229,8 +229,8 @@ ask for a higher-fidelity test when needed.
 One-shot scenarios may use `packets` instead of `request`/`requests`. A trace
 is a bounded sequence of structured packet records. TCP SYN/FIN/RST, TCP
 payloads, TLS handshake/data records, HTTP
-request/response pairs, WebSocket upgrade/frame packets, and DNS
-request/response messages are translated into the same Tcl events and state
+request/response pairs, WebSocket upgrade/frame packets, DNS request/response
+messages, and SIP request/response messages are translated into the same Tcl events and state
 layers used by the HTTP API. Generic UDP payloads are reported as unmapped
 because there is no protocol-specific event to infer. WebSocket support is a
 structured packet adapter: it models the HTTP upgrade and the eight WebSocket
@@ -249,6 +249,25 @@ MQTT field getters/setters are semantic mocks; `MQTT::replace`, `respond`,
 entries. See the F5 [`MQTT`](https://clouddocs.f5.com/api/irules/MQTT.html),
 [`MQTT::collect`](https://clouddocs.f5.com/api/irules/MQTT__collect.html), and
 [`MQTT::payload`](https://clouddocs.f5.com/api/irules/MQTT__payload.html)
+references for the production command/event contract.
+SIP support is pinned to the 17.5 SIP message-event model. A structured SIP
+packet uses `protocol: "sip"`, `type: "request"` or `type: "response"`, and
+request/response-specific start-line fields. The adapter emits the ingress,
+send, and done events for each direction:
+`SIP_REQUEST`, `SIP_REQUEST_SEND`, `SIP_REQUEST_DONE`, `SIP_RESPONSE`,
+`SIP_RESPONSE_SEND`, and `SIP_RESPONSE_DONE`. Raw SIP over TCP is recognized
+after TCP reassembly and framed using `Content-Length`, including split and
+coalesced messages; raw SIP over UDP accepts one complete datagram. Header
+names are case-insensitive and compact aliases such as `v` and `i` are
+handled. The semantic overlay covers SIP header/payload access and mutation,
+request/response fields, Via/Route helpers, `SIP::respond`, `SIP::discard`,
+and message-level `SIP::persist` settings. The latter does not yet implement
+the BIG-IP Message Routing Framework route table or persistence store. See the
+F5 [`SIP`](https://clouddocs.f5.com/api/irules/SIP.html),
+[`SIP::header`](https://clouddocs.f5.com/api/irules/SIP__header.html),
+[`SIP::payload`](https://clouddocs.f5.com/api/irules/SIP__payload.html),
+[`SIP::respond`](https://clouddocs.f5.com/api/irules/SIP__respond.html), and
+[`SIP::persist`](https://clouddocs.f5.com/api/irules/SIP__persist.html)
 references for the production command/event contract.
 For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
@@ -389,10 +408,10 @@ docker run --rm --publish 8080:8080 testcl-irule-emulator:17.5 \
 
 The current slice supports HTTP/TCP request simulation, structured packet
 traces, classic PCAP replay, sequence-aware persistent connection sessions,
-structured DNS/TLS event injection, catalog conformance reporting, an MCP
+structured DNS/TLS/SIP event injection, catalog conformance reporting, an MCP
 facade over the same JSON contract, and an adapter-owned semantic overlay for
 selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, table, TCP, and
-HTTP cookie commands, plus common global string, base64, data-group, and pool
+HTTP cookie commands, plus SIP request/response message adaptation and common global string, base64, data-group, and pool
 health and pool inventory functions, URI decoding, dotted-domain extraction, CRC32,
 and binary-compatible MD5/SHA1/SHA256/SHA384/SHA512 digests.
 It also models multimap lookup through `llookup`. The semantic overlay also models data-group `class`

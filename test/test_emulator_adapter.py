@@ -2508,7 +2508,14 @@ when SIP_RESPONSE_DONE { log local0. response-done }
         entry = response["trace"][0]
         self.assertEqual([event["event"] for event in entry["events"][-1:]], ["SIP_REQUEST"])
         self.assertTrue(entry["responded"])
-        self.assertEqual(entry["response"], {"status": 403, "phrase": "Forbidden"})
+        self.assertEqual(
+            entry["response"],
+            {
+                "status": 403,
+                "phrase": "Forbidden",
+                "headers": [["X-Reason", "blocked"]],
+            },
+        )
         discarded = self.adapter.run_scenario(
             {
                 "profiles": ["SIP"],
@@ -2527,6 +2534,86 @@ when SIP_RESPONSE_DONE { log local0. response-done }
         discarded_entry = discarded["trace"][0]
         self.assertTrue(discarded_entry["discarded"])
         self.assertEqual(discarded_entry["drop_reason"], "message")
+
+    def test_sip_compact_headers_insert_order_and_message_state_reset(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["SIP"],
+                "irule": """
+when SIP_REQUEST {
+    log local0. "call=[SIP::call_id] via=[SIP::via proto 0]"
+    SIP::header insert Via "SIP/2.0/UDP inserted.example.com"
+}
+when SIP_REQUEST_SEND { log local0. "message=[SIP::message]" }
+""",
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "type": "request",
+                        "method": "OPTIONS",
+                        "uri": "sip:example.com",
+                        "headers": [
+                            ["v", "SIP/2.0/UDP compact.example.com"],
+                            ["i", "compact-call"],
+                        ],
+                    },
+                    {
+                        "protocol": "sip",
+                        "type": "request",
+                        "method": "BYE",
+                        "uri": "sip:example.com",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first_events = result["trace"][0]["events"]
+        second_events = result["trace"][1]["events"]
+        self.assertTrue(any("call=compact-call via=UDP" in log for log in first_events[-3]["logs"]))
+        first_message = first_events[-2]["logs"]
+        self.assertTrue(any("Via: SIP/2.0/UDP inserted.example.com" in log for log in first_message))
+        self.assertTrue(any("v: SIP/2.0/UDP compact.example.com" in log for log in first_message))
+        self.assertTrue(any("call= via=" in log for log in second_events[-3]["logs"]))
+
+    def test_sip_rejects_non_decimal_or_duplicate_content_length(self) -> None:
+        for content_length in ("1_0", "+1"):
+            with self.assertRaises(self.adapter.EmulatorInputError):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["SIP"],
+                        "irule": "when SIP_REQUEST { log local0. ok }",
+                        "packets": [
+                            {
+                                "protocol": "sip",
+                                "type": "request",
+                                "message": (
+                                    "OPTIONS sip:example.com SIP/2.0\\r\\n"
+                                    f"Content-Length: {content_length}\\r\\n\\r\\n"
+                                ),
+                            }
+                        ],
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+        with self.assertRaises(self.adapter.EmulatorInputError):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["SIP"],
+                    "irule": "when SIP_REQUEST { log local0. ok }",
+                    "packets": [
+                        {
+                            "protocol": "sip",
+                            "type": "request",
+                            "message": (
+                                "OPTIONS sip:example.com SIP/2.0\\r\\n"
+                                "Content-Length: 0\\r\\n"
+                                "l: 0\\r\\n\\r\\n"
+                            ),
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_mqtt_rejects_unsupported_structured_direction_and_version(self) -> None:
         with self.assertRaises(self.adapter.EmulatorInputError):

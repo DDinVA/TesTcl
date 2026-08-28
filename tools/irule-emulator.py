@@ -2542,7 +2542,13 @@ SIP_COMPACT_HEADERS = {
 
 
 def _sip_header_name(value: Any, field: str = "SIP header name") -> str:
-    if not isinstance(value, str) or not value.strip() or "\r" in value or "\n" in value or ":" in value:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or "\r" in value
+        or "\n" in value
+        or not re.fullmatch(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", value.strip())
+    ):
         raise EmulatorInputError(f"{field} must be a non-empty header name")
     return value.strip()
 
@@ -2579,8 +2585,13 @@ def _sip_header_pairs(value: Any, field: str = "SIP headers") -> list[list[str]]
     return pairs
 
 
+def _sip_canonical_header_name(value: Any) -> str:
+    name = str(value).strip().lower()
+    return SIP_COMPACT_HEADERS.get(name, name)
+
+
 def _sip_header_matches(name: str, wanted: str) -> bool:
-    return name.lower() == wanted.lower() or name.lower() == SIP_COMPACT_HEADERS.get(wanted.lower(), "").lower()
+    return _sip_canonical_header_name(name) == _sip_canonical_header_name(wanted)
 
 
 def _sip_header_values(headers: list[list[str]], wanted: str) -> list[str]:
@@ -2593,8 +2604,11 @@ def _sip_content_length(headers: list[list[str]]) -> int:
         return 0
     if len(values) > 1:
         raise EmulatorInputError("SIP message has multiple Content-Length headers")
+    value = values[0].strip()
+    if not re.fullmatch(r"[0-9]+", value):
+        raise EmulatorInputError("SIP Content-Length must be a decimal integer")
     try:
-        length = int(values[0].strip())
+        length = int(value)
     except ValueError as exc:
         raise EmulatorInputError("SIP Content-Length must be an integer") from exc
     if length < 0 or length > SIP_MAX_MESSAGE_BYTES:
@@ -3600,6 +3614,9 @@ class EmulatorSession:
             state["mqtt"] = mqtt_state
         elif protocol == "sip":
             sip_state: dict[str, str] = {}
+            # Raw SIP TCP messages are synthesized from a generic TCP packet,
+            # so make the transport explicit before installing Tcl state.
+            sip_state["transport"] = str(packet.get("transport", "tcp"))
             for field in EVENT_STATE_FIELDS["sip"]:
                 if field in packet:
                     if field == "headers":
@@ -3618,15 +3635,17 @@ class EmulatorSession:
             sip_state["payload"] = bytes(payload)
             sip_state["payload_length"] = str(len(payload))
             message = packet.get("message")
+            wire_message = packet.get("_wire_payload")
+            if not isinstance(wire_message, (bytes, bytearray)):
+                wire_message = (
+                    _encode_sip_message(packet)
+                    if message is None
+                    else str(message).encode("utf-8")
+                )
             if message is None:
-                wire_message = packet.get("_wire_payload")
-                if not isinstance(wire_message, (bytes, bytearray)):
-                    wire_message = _encode_sip_message(packet)
                 message = _decode_wire_text(bytes(wire_message))
             sip_state["message"] = message
-            sip_state["message_length"] = str(
-                len(packet.get("_wire_payload", str(message).encode("utf-8")))
-            )
+            sip_state["message_length"] = str(len(wire_message))
             state["sip"] = sip_state
         return state
 
@@ -4081,6 +4100,7 @@ class EmulatorSession:
                 if not has_gap:
                     stream.segments.clear()
                 for message in decoded_messages:
+                    message["transport"] = "tcp"
                     for field in ("source", "destination", "timestamp"):
                         if field in packet:
                             message[field] = packet[field]
@@ -4442,9 +4462,24 @@ class EmulatorSession:
                 else:
                     if flags.get("responded") == "1":
                         entry["responded"] = True
+                        response_snapshot = _split_tcl_list(
+                            session.eval_tcl("::itest::semantic::sip_response_snapshot")
+                        )
+                        if len(response_snapshot) % 2:
+                            raise EmulatorInputError("invalid SIP response state")
+                        response_state = dict(
+                            zip(response_snapshot[::2], response_snapshot[1::2])
+                        )
+                        raw_headers = _split_tcl_list(response_state.get("headers", ""))
+                        if len(raw_headers) % 2:
+                            raise EmulatorInputError("invalid SIP response headers")
                         entry["response"] = {
-                            "status": int(flags.get("code", "0")),
-                            "phrase": flags.get("phrase", ""),
+                            "status": int(response_state.get("code", "0")),
+                            "phrase": response_state.get("phrase", ""),
+                            "headers": [
+                                [raw_headers[index], raw_headers[index + 1]]
+                                for index in range(0, len(raw_headers), 2)
+                            ],
                         }
                     else:
                         send_result = self._fire_event_on_worker(

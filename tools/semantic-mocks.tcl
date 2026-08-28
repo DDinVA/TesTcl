@@ -98,6 +98,7 @@ namespace eval ::itest::semantic {
 
     namespace eval ::state::sip {
         variable type "request"
+        variable transport "tcp"
         variable method ""
         variable uri ""
         variable version "SIP/2.0"
@@ -851,26 +852,33 @@ namespace eval ::itest::semantic {
         set sip_persist_timeout 0
         set sip_persist_bidirectional 0
         set sip_persist_direction detect
-        namespace eval ::state::sip {
-            variable type request
-            variable method ""
-            variable uri ""
-            variable version SIP/2.0
-            variable status ""
-            variable phrase ""
-            variable headers {}
-            variable payload ""
-            variable payload_length 0
-            variable message ""
-            variable message_length 0
-            variable call_id ""
-            variable from ""
-            variable to ""
-            variable route_status unrouted
-            variable persist_key ""
-            variable record_route {}
-            variable route {}
-            variable via {}
+        _sip_clear_message_state
+    }
+
+    proc _sip_clear_message_state {} {
+        foreach {name value} {
+            type request
+            transport tcp
+            method ""
+            uri ""
+            version SIP/2.0
+            status ""
+            phrase ""
+            headers {}
+            payload ""
+            payload_length 0
+            message ""
+            message_length 0
+            call_id ""
+            from ""
+            to ""
+            route_status unrouted
+            persist_key ""
+            record_route {}
+            route {}
+            via {}
+        } {
+            set ::state::sip::$name $value
         }
     }
 
@@ -880,32 +888,22 @@ namespace eval ::itest::semantic {
         variable sip_response_code
         variable sip_response_phrase
         variable sip_response_headers
+        variable sip_persist_key
+        variable sip_persist_mode
+        variable sip_persist_timeout
+        variable sip_persist_bidirectional
+        variable sip_persist_direction
         set sip_discarded 0
         set sip_response_requested 0
         set sip_response_code ""
         set sip_response_phrase ""
         set sip_response_headers {}
-        namespace eval ::state::sip {
-            variable type request
-            variable method ""
-            variable uri ""
-            variable version SIP/2.0
-            variable status ""
-            variable phrase ""
-            variable headers {}
-            variable payload ""
-            variable payload_length 0
-            variable message ""
-            variable message_length 0
-            variable call_id ""
-            variable from ""
-            variable to ""
-            variable route_status unrouted
-            variable persist_key ""
-            variable record_route {}
-            variable route {}
-            variable via {}
-        }
+        set sip_persist_key ""
+        set sip_persist_mode use
+        set sip_persist_timeout 0
+        set sip_persist_bidirectional 0
+        set sip_persist_direction detect
+        _sip_clear_message_state
     }
 
     proc sip_flags_snapshot {} {
@@ -916,6 +914,14 @@ namespace eval ::itest::semantic {
         return [list discarded $sip_discarded responded $sip_response_requested code $sip_response_code phrase $sip_response_phrase]
     }
 
+    proc sip_response_snapshot {} {
+        variable sip_response_requested
+        variable sip_response_code
+        variable sip_response_phrase
+        variable sip_response_headers
+        return [list requested $sip_response_requested code $sip_response_code phrase $sip_response_phrase headers $sip_response_headers]
+    }
+
     proc _sip_require_event {allowed command_name} {
         if {$::itest::current_event ni $allowed} {
             error "$command_name is not valid during $::itest::current_event"
@@ -923,8 +929,21 @@ namespace eval ::itest::semantic {
     }
 
     proc _sip_header_matches {name wanted} {
-        if {[string equal -nocase $name $wanted]} { return 1 }
-        set compact [switch -nocase -exact -- $wanted {
+        set canonical_name [switch -nocase -exact -- $name {
+            b - c { set result content-type }
+            e { set result content-encoding }
+            f { set result from }
+            i { set result call-id }
+            k { set result supported }
+            l { set result content-length }
+            m { set result contact }
+            r { set result refer-to }
+            s { set result subject }
+            t { set result to }
+            v { set result via }
+            default { set result [string tolower $name] }
+        }; set result]
+        set canonical_wanted [switch -nocase -exact -- $wanted {
             b - c { set result Content-Type }
             e { set result Content-Encoding }
             f { set result From }
@@ -938,7 +957,20 @@ namespace eval ::itest::semantic {
             v { set result Via }
             default { set result "" }
         }; set result]
-        return [expr {$compact ne "" && [string equal -nocase $name $compact]}]
+        if {$canonical_wanted eq ""} { set canonical_wanted [string tolower $wanted] }
+        return [string equal $canonical_name [string tolower $canonical_wanted]]
+    }
+
+    proc _sip_validate_header_name {name} {
+        if {![regexp {^[!#$%&'*+.^_`|~0-9A-Za-z-]+$} $name]} {
+            error "SIP header name is invalid"
+        }
+    }
+
+    proc _sip_validate_header_value {value} {
+        if {[string first "\r" $value] >= 0 || [string first "\n" $value] >= 0} {
+            error "SIP header value must not contain newlines"
+        }
     }
 
     proc _sip_header_indices {wanted} {
@@ -1062,6 +1094,8 @@ namespace eval ::itest::semantic {
                     set value [lindex $rest 1]
                     set supplied_index [expr {[llength $rest] == 3 ? [lindex $rest 2] : -1}]
                 }
+                _sip_validate_header_name $name
+                if {$command ne "remove"} { _sip_validate_header_value $value }
                 if {$supplied_index < -1 || ![string is integer -strict $supplied_index]} { error "SIP header index must be an integer" }
                 set matches [_sip_header_indices $name]
                 if {$command eq "remove"} {
@@ -1079,7 +1113,14 @@ namespace eval ::itest::semantic {
                     }
                 } else {
                     if {$supplied_index < 0} {
-                        lappend ::state::sip::headers $name $value
+                        if {[llength $matches] > 0} {
+                            set absolute [lindex $matches 0]
+                            set ::state::sip::headers [linsert $::state::sip::headers [expr {$absolute * 2}] $name $value]
+                        } elseif {[_sip_header_matches $name Via]} {
+                            set ::state::sip::headers [linsert $::state::sip::headers 0 $name $value]
+                        } else {
+                            lappend ::state::sip::headers $name $value
+                        }
                     } else {
                         set absolute [expr {$supplied_index * 2}]
                         set ::state::sip::headers [linsert $::state::sip::headers $absolute $name $value]
@@ -1186,9 +1227,14 @@ namespace eval ::itest::semantic {
         variable sip_response_phrase
         variable sip_response_headers
         _sip_require_event {SIP_REQUEST SIP_REQUEST_SEND} SIP::respond
-        if {[llength $args] < 1 || ([llength $args] % 2) == 0} { error "SIP::respond requires code, phrase, and optional header pairs" }
+        if {[llength $args] < 2 || (([llength $args] - 2) % 2) != 0} { error "SIP::respond requires code, phrase, and optional header pairs" }
         set code [lindex $args 0]
         if {![string is integer -strict $code] || $code < 100 || $code > 699} { error "SIP response code must be between 100 and 699" }
+        _sip_validate_header_value [lindex $args 1]
+        foreach {header_name header_value} [lrange $args 2 end] {
+            _sip_validate_header_name $header_name
+            _sip_validate_header_value $header_value
+        }
         set sip_response_code $code
         set sip_response_phrase [lindex $args 1]
         set sip_response_headers [lrange $args 2 end]
@@ -1235,8 +1281,12 @@ namespace eval ::itest::semantic {
         } else {
             if {[llength $args] > 2} { error "SIP::persist accepts a key and optional timeout" }
             set sip_persist_key $command
-            if {[llength $args] == 2} { set sip_persist_timeout [lindex $args 1] }
+            if {[llength $args] == 2} {
+                if {![string is integer -strict [lindex $args 1]] || [lindex $args 1] < 0} { error "SIP persistence timeout must be non-negative" }
+                set sip_persist_timeout [lindex $args 1]
+            }
         }
+        set ::state::sip::persist_key $sip_persist_key
         ::itest::log_decision sip persist $args
         return $sip_persist_key
     }
@@ -1277,8 +1327,15 @@ namespace eval ::itest::semantic {
         if {$field eq "sent_by"} { return $sent_by }
         if {$field ni {received branch maddr ttl}} { error "SIP::via field must be proto, sent_by, received, branch, maddr, or ttl" }
         foreach parameter [lrange $parts 1 end] {
-            set pair [split $parameter =]
-            if {[string equal -nocase [string trim [lindex $pair 0]] $field]} { return [expr {[llength $pair] > 1 ? [string trim [lindex $pair 1]] : ""}] }
+            set separator [string first = $parameter]
+            if {$separator < 0} {
+                set parameter_name [string trim $parameter]
+                set parameter_value ""
+            } else {
+                set parameter_name [string trim [string range $parameter 0 [expr {$separator - 1}]]]
+                set parameter_value [string trim [string range $parameter [expr {$separator + 1}] end]]
+            }
+            if {[string equal -nocase $parameter_name $field]} { return $parameter_value }
         }
         return ""
     }
