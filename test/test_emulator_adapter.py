@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
 import io
 import ipaddress
 import json
 import os
 import struct
+import subprocess
+import sys
 import threading
 import time
+import tempfile
 import unittest
 import urllib.error
 import urllib.request
@@ -65,6 +69,23 @@ def _raw_ipv4_udp_hex(
         ipaddress.ip_address(destination).packed,
     )
     return (ip + udp + payload).hex()
+
+
+def _pcap_bytes(
+    records: list[tuple[int, int, bytes]], *, linktype: int = 1, nano: bool = False
+) -> bytes:
+    """Build a little-endian classic PCAP for decoder tests."""
+    magic = b"\x4d\x3c\xb2\xa1" if nano else b"\xd4\xc3\xb2\xa1"
+    header = magic + struct.pack("<HHIIII", 2, 4, 0, 0, 65535, linktype)
+    body = bytearray(header)
+    for seconds, fraction, frame in records:
+        body.extend(struct.pack("<IIII", seconds, fraction, len(frame), len(frame)))
+        body.extend(frame)
+    return bytes(body)
+
+
+def _ethernet_ipv4(raw_hex: str) -> bytes:
+    return b"\x00" * 12 + b"\x08\x00" + bytes.fromhex(raw_hex)
 
 
 def _load_adapter():
@@ -368,6 +389,168 @@ class EmulatorAdapterTests(unittest.TestCase):
                 [{"protocol": "wire", "direction": "client_to_server", "raw_hex": raw.hex()}]
             )
 
+    def test_classic_pcap_replay_decodes_ethernet_and_preserves_timestamps(self) -> None:
+        request_payload = b"GET /health HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+        response_payload = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        request_hex = _raw_ipv4_tcp_hex(
+            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18, request_payload[:20]
+        )
+        request_tail_hex = _raw_ipv4_tcp_hex(
+            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18, request_payload[20:]
+        )
+        capture = _pcap_bytes(
+            [
+                (1, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
+                    "10.0.0.5", "192.0.2.10", 51000, 443, 0x02
+                ))),
+                (1, 500_000, _ethernet_ipv4(request_hex)),
+                (1, 600_000, _ethernet_ipv4(request_tail_hex)),
+                (2, 125_000, _ethernet_ipv4(_raw_ipv4_tcp_hex(
+                    "192.0.2.10", "10.0.0.5", 443, 51000, 0x18, response_payload
+                ))),
+            ]
+        )
+        result = self.adapter.run_pcap_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["10.0.0.10:80"]},
+                "irule": "when HTTP_REQUEST { pool api_pool }",
+            },
+            capture,
+            tcl_lsp_root=self.tcl_lsp_root,
+            direction="auto",
+            client_addr="10.0.0.5",
+            server_addr="192.0.2.10",
+        )
+
+        self.assertEqual(result["capture"]["record_count"], 4)
+        self.assertEqual(result["capture"]["ipv4_packet_count"], 4)
+        self.assertEqual(result["capture"]["timestamp_resolution"], "microseconds")
+        self.assertEqual(result["trace"][0]["timestamp"], 1.0)
+        self.assertEqual(result["trace"][1]["timestamp"], 1.5)
+        self.assertEqual(result["trace"][2]["timestamp"], 1.6)
+        self.assertEqual(result["trace"][3]["timestamp"], 2.125)
+        self.assertEqual(result["results"][0]["request"]["uri"], "/health")
+        self.assertEqual(result["results"][0]["response"]["body"], "ok")
+
+    def test_pcap_decoder_rejects_truncated_and_unsupported_captures(self) -> None:
+        valid_header = _pcap_bytes([])
+        with self.assertRaises(self.adapter.EmulatorInputError):
+            self.adapter._pcap_packets(
+                valid_header + struct.pack("<IIII", 1, 0, 20, 20) + b"short",
+                direction="client_to_server",
+                client_addr=None,
+                server_addr=None,
+            )
+        with self.assertRaises(self.adapter.EmulatorInputError):
+            self.adapter._pcap_packets(
+                b"\x0a\x0d\x0d\x0a" + b"\x00" * 32,
+                direction="client_to_server",
+                client_addr=None,
+                server_addr=None,
+            )
+        with self.assertRaises(self.adapter.EmulatorInputError):
+            self.adapter._pcap_packets(
+                _pcap_bytes(
+                    [(1, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
+                        "10.0.0.5", "192.0.2.10", 51000, 443, 0x02
+                    )))],
+                    linktype=147,
+                ),
+                direction="client_to_server",
+                client_addr=None,
+                server_addr=None,
+            )
+        nano_packets, nano_capture = self.adapter._pcap_packets(
+            _pcap_bytes(
+                [(7, 123_456_789, _ethernet_ipv4(_raw_ipv4_tcp_hex(
+                    "10.0.0.5", "192.0.2.10", 51000, 443, 0x02
+                )))],
+                nano=True,
+            ),
+            direction="client_to_server",
+            client_addr=None,
+            server_addr=None,
+        )
+        self.assertEqual(nano_capture["timestamp_resolution"], "nanoseconds")
+        self.assertAlmostEqual(nano_packets[0]["timestamp"], 7.123456789, places=9)
+
+    def test_http_api_replays_base64_classic_pcap(self) -> None:
+        dns_payload = (
+            struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+            + b"\x07example\x03com\x00"
+            + struct.pack("!HH", 1, 1)
+        )
+        capture = _pcap_bytes([
+            (3, 42, _ethernet_ipv4(_raw_ipv4_udp_hex(
+                "10.0.0.5", "192.0.2.53", 53000, 53, dns_payload
+            )))
+        ])
+        server = self.adapter.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self.adapter._http_handler(Path(self.tcl_lsp_root))
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/simulations/pcap",
+                data=json.dumps(
+                    {
+                        "scenario": {
+                            "profiles": ["UDP", "DNS"],
+                            "irule": "when DNS_REQUEST { log local0. dns-pcap }",
+                        },
+                        "pcap_base64": base64.b64encode(capture).decode("ascii"),
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                payload = json.loads(response.read())
+            self.assertEqual(payload["capture"]["record_count"], 1)
+            self.assertEqual(payload["trace"][0]["protocol"], "dns")
+            self.assertEqual(payload["trace"][0]["events"][0]["event"], "DNS_REQUEST")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+    def test_cli_replays_classic_pcap_file(self) -> None:
+        capture = _pcap_bytes([
+            (5, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
+                "10.0.0.5", "192.0.2.10", 51000, 443, 0x02
+            )))
+        ])
+        with tempfile.NamedTemporaryFile(suffix=".pcap") as capture_file:
+            capture_file.write(capture)
+            capture_file.flush()
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ADAPTER_PATH),
+                    "--scenario",
+                    "-",
+                    "--pcap",
+                    capture_file.name,
+                    "--tcl-lsp-root",
+                    self.tcl_lsp_root,
+                ],
+                input=json.dumps(
+                    {
+                        "profiles": ["TCP"],
+                        "irule": "when CLIENT_ACCEPTED { log local0. pcap-cli }",
+                    }
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["capture"]["ipv4_packet_count"], 1)
+        self.assertEqual(payload["trace"][0]["timestamp"], 5.0)
+
     def test_input_contract_rejects_wrong_profile_and_unknown_fields(self) -> None:
         base = {"irule": "when HTTP_REQUEST { pool api_pool }"}
         with self.assertRaises(self.adapter.EmulatorInputError):
@@ -472,6 +655,7 @@ class EmulatorAdapterTests(unittest.TestCase):
         tool_names = {tool["name"] for tool in responses[3]["result"]["tools"]}
         self.assertIn("irule_simulate", tool_names)
         self.assertIn("irule_conformance", tool_names)
+        self.assertIn("irule_pcap_replay", tool_names)
         self.assertIn("irule_session_trace", tool_names)
         capability_payload = responses[4]["result"]["structuredContent"]
         self.assertEqual(capability_payload["chunk"]["offset"], 1498)
@@ -492,6 +676,32 @@ class EmulatorAdapterTests(unittest.TestCase):
             )
             self.assertEqual(initialized["result"]["capabilities"], {"tools": {}})
             server.handle_message({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+            pcap = _pcap_bytes([
+                (4, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
+                    "10.0.0.5", "192.0.2.10", 51000, 443, 0x02
+                )))
+            ])
+            replayed = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 6,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_pcap_replay",
+                        "arguments": {
+                            "scenario": {
+                                "profiles": ["TCP"],
+                                "irule": "when CLIENT_ACCEPTED { log local0. pcap-mcp }",
+                            },
+                            "pcap_base64": base64.b64encode(pcap).decode("ascii"),
+                        },
+                    },
+                }
+            )
+            self.assertEqual(
+                replayed["result"]["structuredContent"]["capture"]["ipv4_packet_count"], 1
+            )
 
             created = server.handle_message(
                 {

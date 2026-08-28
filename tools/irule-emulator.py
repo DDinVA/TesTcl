@@ -12,6 +12,8 @@ Input is one JSON scenario object.  See docs/emulator.md for the schema.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import ipaddress
 import json
 import math
@@ -19,6 +21,7 @@ import os
 import queue
 import re
 import secrets
+import struct
 import sys
 import threading
 import time
@@ -816,6 +819,8 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
 PACKET_MAX_COUNT = 1000
 STREAM_MAX_BYTES = 2 * 1024 * 1024
 MAX_PACKET_STREAMS = 128
+PCAP_MAX_BYTES = 16 * 1024 * 1024
+PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
 PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
@@ -829,6 +834,7 @@ PACKET_COMMON_FIELDS = {
     "src_port",
     "dst_addr",
     "dst_port",
+    "timestamp",
 }
 PACKET_PROTOCOL_FIELDS = {
     "tcp": set(),
@@ -1065,7 +1071,9 @@ def _decode_dns_payload(payload: bytes, direction: str, index: int) -> dict[str,
 
 
 def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) -> dict[str, Any]:
-    unknown = sorted(set(raw_packet) - {"protocol", "direction", "raw_hex", "network"})
+    unknown = sorted(
+        set(raw_packet) - {"protocol", "direction", "raw_hex", "network", "timestamp"}
+    )
     if unknown:
         raise EmulatorInputError(
             f"unsupported wire packet {index} field(s): {', '.join(unknown)}"
@@ -1115,6 +1123,8 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
             "source": {"address": source_address, "port": int.from_bytes(payload[0:2], "big")},
             "destination": {"address": destination_address, "port": int.from_bytes(payload[2:4], "big")},
         }
+        if "timestamp" in raw_packet:
+            packet["timestamp"] = raw_packet["timestamp"]
         if tcp_payload:
             packet["payload"] = _decode_wire_text(tcp_payload)
             packet["_wire_payload"] = tcp_payload
@@ -1129,6 +1139,8 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
             "source": {"address": source_address, "port": int.from_bytes(payload[0:2], "big")},
             "destination": {"address": destination_address, "port": int.from_bytes(payload[2:4], "big")},
         }
+        if "timestamp" in raw_packet:
+            packet["timestamp"] = raw_packet["timestamp"]
         if udp_payload:
             packet["payload"] = _decode_wire_text(udp_payload)
             packet["_wire_payload"] = udp_payload
@@ -1136,6 +1148,174 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
     raise EmulatorInputError(
         f"wire packet {index} uses unsupported IPv4 protocol number {ip_protocol}"
     )
+
+
+def _wire_ipv4_endpoints(raw: bytes, index: int) -> tuple[str, str]:
+    if len(raw) < 20 or raw[0] >> 4 != 4:
+        raise EmulatorInputError(f"pcap IPv4 packet {index} is incomplete")
+    header_length = (raw[0] & 0x0F) * 4
+    if header_length < 20 or len(raw) < header_length:
+        raise EmulatorInputError(f"pcap IPv4 packet {index} has an invalid header length")
+    return str(ipaddress.ip_address(raw[12:16])), str(ipaddress.ip_address(raw[16:20]))
+
+
+def _extract_pcap_ipv4(frame: bytes, linktype: int, index: int) -> bytes | None:
+    if linktype == 101:  # LINKTYPE_RAW
+        return frame if len(frame) >= 1 and frame[0] >> 4 == 4 else None
+    if linktype != 1:  # LINKTYPE_ETHERNET
+        raise EmulatorInputError(
+            f"unsupported pcap link-layer type {linktype}; only Ethernet and raw IPv4 are supported"
+        )
+    if len(frame) < 14:
+        return None
+    cursor = 14
+    ether_type = int.from_bytes(frame[12:14], "big")
+    while ether_type in {0x8100, 0x88A8, 0x9100}:
+        if len(frame) < cursor + 4:
+            return None
+        ether_type = int.from_bytes(frame[cursor + 2 : cursor + 4], "big")
+        cursor += 4
+    if ether_type != 0x0800:
+        return None
+    if len(frame) <= cursor or frame[cursor] >> 4 != 4:
+        return None
+    return frame[cursor:]
+
+
+def _pcap_format(data: bytes) -> tuple[str, float]:
+    magic = data[:4]
+    formats = {
+        b"\xd4\xc3\xb2\xa1": ("<", 1_000_000.0),
+        b"\xa1\xb2\xc3\xd4": (">", 1_000_000.0),
+        b"\x4d\x3c\xb2\xa1": ("<", 1_000_000_000.0),
+        b"\xa1\xb2\x3c\x4d": (">", 1_000_000_000.0),
+    }
+    try:
+        return formats[magic]
+    except KeyError as exc:
+        raise EmulatorInputError(
+            "unsupported capture format; classic PCAP (not pcapng) is required"
+        ) from exc
+
+
+def _pcap_packets(
+    data: bytes,
+    *,
+    direction: str,
+    client_addr: str | None,
+    server_addr: str | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not isinstance(data, bytes):
+        raise EmulatorInputError("pcap data must be bytes")
+    if len(data) > PCAP_MAX_BYTES:
+        raise EmulatorInputError(f"pcap data exceeds the {PCAP_MAX_BYTES // (1024 * 1024)} MiB limit")
+    if len(data) < 24:
+        raise EmulatorInputError("pcap global header is incomplete")
+    endian, timestamp_scale = _pcap_format(data)
+    _magic, major, minor, _zone, _sigfigs, snaplen, linktype = struct.unpack(
+        endian + "IHHIIII", data[:24]
+    )
+    if major != 2 or minor not in {3, 4}:
+        raise EmulatorInputError(f"unsupported classic PCAP version {major}.{minor}")
+    if snaplen < 1 or snaplen > PCAP_MAX_PACKET_BYTES:
+        raise EmulatorInputError("pcap snaplen is outside the supported packet-size limit")
+    for field, value in (("pcap client_addr", client_addr), ("pcap server_addr", server_addr)):
+        if value is None:
+            continue
+        address = _require_string(value, field)
+        try:
+            parsed_address = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise EmulatorInputError(f"{field} must be an IPv4 address") from exc
+        if parsed_address.version != 4:
+            raise EmulatorInputError(f"{field} must be an IPv4 address")
+        if field.endswith("client_addr"):
+            client_addr = str(parsed_address)
+        else:
+            server_addr = str(parsed_address)
+    if direction == "auto":
+        if not client_addr or not server_addr:
+            raise EmulatorInputError(
+                "pcap direction auto requires both client_addr and server_addr"
+            )
+    else:
+        direction = _packet_direction(direction)
+
+    packets: list[dict[str, Any]] = []
+    offset = 24
+    record_count = 0
+    skipped_non_ipv4 = 0
+    skipped_unmatched = 0
+    while offset < len(data):
+        if len(data) - offset < 16:
+            raise EmulatorInputError(f"pcap record {record_count} header is incomplete")
+        ts_sec, ts_fraction, included_length, original_length = struct.unpack(
+            endian + "IIII", data[offset : offset + 16]
+        )
+        offset += 16
+        record_count += 1
+        if record_count > PACKET_MAX_COUNT:
+            raise EmulatorInputError(f"pcap cannot contain more than {PACKET_MAX_COUNT} records")
+        if included_length > snaplen or included_length > PCAP_MAX_PACKET_BYTES:
+            raise EmulatorInputError(f"pcap record {record_count - 1} exceeds the packet-size limit")
+        if original_length < included_length:
+            raise EmulatorInputError(f"pcap record {record_count - 1} has invalid captured length")
+        if len(data) - offset < included_length:
+            raise EmulatorInputError(f"pcap record {record_count - 1} payload is incomplete")
+        frame = data[offset : offset + included_length]
+        offset += included_length
+        ipv4 = _extract_pcap_ipv4(frame, linktype, record_count - 1)
+        if ipv4 is None:
+            skipped_non_ipv4 += 1
+            continue
+        source, destination = _wire_ipv4_endpoints(ipv4, record_count - 1)
+        packet_direction = direction
+        if direction == "auto":
+            if source == client_addr and destination == server_addr:
+                packet_direction = "client_to_server"
+            elif source == server_addr and destination == client_addr:
+                packet_direction = "server_to_client"
+            else:
+                skipped_unmatched += 1
+                continue
+        packets.append(
+            {
+                "protocol": "wire",
+                "direction": packet_direction,
+                "network": "ipv4",
+                "raw_hex": ipv4.hex(),
+                "timestamp": ts_sec + ts_fraction / timestamp_scale,
+            }
+        )
+    if not packets:
+        raise EmulatorInputError("pcap contained no usable IPv4 packets")
+    return packets, {
+        "format": "pcap",
+        "version": f"{major}.{minor}",
+        "linktype": linktype,
+        "timestamp_resolution": "nanoseconds" if timestamp_scale == 1_000_000_000.0 else "microseconds",
+        "record_count": record_count,
+        "ipv4_packet_count": len(packets),
+        "skipped_non_ipv4": skipped_non_ipv4,
+        "skipped_unmatched": skipped_unmatched,
+        "direction": direction,
+    }
+
+
+def _decode_pcap_base64(value: Any) -> bytes:
+    encoded = _require_string(value, "pcap_base64")
+    maximum_encoded_length = ((PCAP_MAX_BYTES + 2) // 3) * 4
+    if len(encoded) > maximum_encoded_length:
+        raise EmulatorInputError(
+            f"pcap_base64 exceeds the {PCAP_MAX_BYTES // (1024 * 1024)} MiB decoded limit"
+        )
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise EmulatorInputError("pcap_base64 is not valid base64") from exc
+    if len(data) > PCAP_MAX_BYTES:
+        raise EmulatorInputError(f"pcap data exceeds the {PCAP_MAX_BYTES // (1024 * 1024)} MiB limit")
+    return data
 
 
 def _packet_endpoint(raw: Any, prefix: str, packet_index: int) -> dict[str, Any]:
@@ -1207,6 +1387,18 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             "source": _packet_endpoint(packet.get("source"), "source", index),
             "destination": _packet_endpoint(packet.get("destination"), "destination", index),
         }
+        if "timestamp" in packet:
+            timestamp = packet["timestamp"]
+            if (
+                isinstance(timestamp, bool)
+                or not isinstance(timestamp, (int, float))
+                or not math.isfinite(float(timestamp))
+                or timestamp < 0
+            ):
+                raise EmulatorInputError(
+                    f"packet {index} timestamp must be a finite non-negative number"
+                )
+            normalised["timestamp"] = float(timestamp)
         for field, endpoint_key in (
             ("src_addr", "address"),
             ("src_port", "port"),
@@ -1791,16 +1983,23 @@ class EmulatorSession:
             original_packet = packet
             packet, buffered_bytes = self._reassemble_packet(packet, index)
             if packet is None:
-                trace.append(
-                    {
-                        "index": index,
-                        "protocol": original_packet["protocol"],
-                        "direction": original_packet["direction"],
-                        "events": [],
-                        "buffered": True,
-                        "buffered_bytes": buffered_bytes,
-                    }
-                )
+                buffered_entry: dict[str, Any] = {
+                    "index": index,
+                    "protocol": original_packet["protocol"],
+                    "direction": original_packet["direction"],
+                    "events": [],
+                    "buffered": True,
+                    "buffered_bytes": buffered_bytes,
+                }
+                for field in (
+                    "source",
+                    "destination",
+                    "flags",
+                    "timestamp",
+                ):
+                    if field in original_packet:
+                        buffered_entry[field] = original_packet[field]
+                trace.append(buffered_entry)
                 continue
             entry: dict[str, Any] = {
                 "index": index,
@@ -1819,6 +2018,7 @@ class EmulatorSession:
                 "sni",
                 "qname",
                 "qtype",
+                "timestamp",
             ):
                 if field in packet:
                     entry[field] = packet[field]
@@ -2102,6 +2302,25 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_pcap_replay",
+                "title": "Replay a PCAP capture",
+                "description": "Replay a bounded classic PCAP capture through the BIG-IP 17.5 packet and Tcl event adapters.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "scenario": scenario_schema,
+                        "pcap_base64": {"type": "string", "minLength": 1},
+                        "direction": {
+                            "type": "string",
+                            "enum": ["client_to_server", "server_to_client", "auto"],
+                            "default": "client_to_server",
+                        },
+                        "client_addr": {"type": "string"},
+                        "server_addr": {"type": "string"},
+                    },
+                    ["scenario", "pcap_base64"],
+                ),
+            },
+            {
                 "name": "irule_capabilities",
                 "title": "List iRule capabilities",
                 "description": "Return a bounded chunk of the complete pinned BIG-IP 17.5 command, event, and profile catalog.",
@@ -2229,6 +2448,34 @@ class McpProtocolServer:
             if set(args) != {"scenario"}:
                 raise McpProtocolError(-32602, "irule_simulate requires only scenario")
             return self._tool_success(run_scenario(args["scenario"], tcl_lsp_root=str(self._root)))
+
+        if name == "irule_pcap_replay":
+            unknown = sorted(
+                set(args)
+                - {"scenario", "pcap_base64", "direction", "client_addr", "server_addr"}
+            )
+            if unknown or "scenario" not in args or "pcap_base64" not in args:
+                fields = f": {', '.join(unknown)}" if unknown else ""
+                raise McpProtocolError(
+                    -32602,
+                    f"irule_pcap_replay requires scenario and pcap_base64{fields}",
+                )
+            scenario = args["scenario"]
+            if not isinstance(scenario, dict) or "irule_file" in scenario:
+                raise McpProtocolError(-32602, "irule_pcap_replay accepts an inline irule scenario only")
+            options = {
+                field: args[field]
+                for field in ("direction", "client_addr", "server_addr")
+                if field in args
+            }
+            return self._tool_success(
+                run_pcap_scenario(
+                    scenario,
+                    _decode_pcap_base64(args["pcap_base64"]),
+                    tcl_lsp_root=str(self._root),
+                    **options,
+                )
+            )
 
         if name == "irule_capabilities":
             unknown = sorted(set(args) - {"offset", "limit"})
@@ -2554,6 +2801,64 @@ def run_scenario(
     }
 
 
+def run_pcap_scenario(
+    scenario: Any,
+    pcap_data: bytes,
+    *,
+    tcl_lsp_root: str | None = None,
+    backend: str = "inprocess",
+    direction: str = "client_to_server",
+    client_addr: str | None = None,
+    server_addr: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(scenario, dict):
+        raise EmulatorInputError("pcap scenario must be a JSON object")
+    if any(field in scenario for field in ("request", "requests", "packets")):
+        raise EmulatorInputError("pcap replay scenario cannot also contain request, requests, or packets")
+    packets, capture = _pcap_packets(
+        pcap_data,
+        direction=direction,
+        client_addr=client_addr,
+        server_addr=server_addr,
+    )
+    replay_scenario = dict(scenario)
+    replay_scenario["packets"] = packets
+    result = run_scenario(
+        replay_scenario,
+        tcl_lsp_root=tcl_lsp_root,
+        backend=backend,
+    )
+    result["capture"] = capture
+    return result
+
+
+def run_pcap_file(
+    scenario: Any,
+    path: str,
+    *,
+    tcl_lsp_root: str | None = None,
+    backend: str = "inprocess",
+    direction: str = "client_to_server",
+    client_addr: str | None = None,
+    server_addr: str | None = None,
+) -> dict[str, Any]:
+    capture_path = Path(_require_string(path, "pcap path")).expanduser()
+    try:
+        with capture_path.open("rb") as capture_stream:
+            data = capture_stream.read(PCAP_MAX_BYTES + 1)
+    except OSError as exc:
+        raise EmulatorInputError(f"could not read pcap file {capture_path}: {exc}") from exc
+    return run_pcap_scenario(
+        scenario,
+        data,
+        tcl_lsp_root=tcl_lsp_root,
+        backend=backend,
+        direction=direction,
+        client_addr=client_addr,
+        server_addr=server_addr,
+    )
+
+
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     handler.send_response(status)
@@ -2591,7 +2896,10 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                 raise EmulatorInputError("request requires a valid Content-Length")
             if length > 2 * 1024 * 1024:
                 raise EmulatorResourceError("request body exceeds the 2 MiB limit")
-            return json.loads(self.rfile.read(length))
+            try:
+                return json.loads(self.rfile.read(length))
+            except UnicodeDecodeError as exc:
+                raise EmulatorInputError("request body must be valid UTF-8 JSON") from exc
 
         def _error(self, error: Exception) -> None:
             _json_response(self, _api_error_status(error), {"status": "error", "error": str(error)})
@@ -2633,6 +2941,48 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             parsed = urlparse(self.path)
+            if parsed.path == "/v1/simulations/pcap":
+                try:
+                    request = self._read_json()
+                    if not isinstance(request, dict):
+                        raise EmulatorInputError("pcap replay request must be a JSON object")
+                    allowed = {
+                        "scenario",
+                        "pcap_base64",
+                        "direction",
+                        "client_addr",
+                        "server_addr",
+                    }
+                    unknown = sorted(set(request) - allowed)
+                    if unknown:
+                        raise EmulatorInputError(
+                            f"unsupported pcap replay field(s): {', '.join(unknown)}"
+                        )
+                    if "scenario" not in request or "pcap_base64" not in request:
+                        raise EmulatorInputError(
+                            "pcap replay request requires scenario and pcap_base64"
+                        )
+                    scenario = request["scenario"]
+                    if not isinstance(scenario, dict) or "irule_file" in scenario:
+                        raise EmulatorInputError(
+                            "HTTP pcap replay accepts an inline irule scenario only"
+                        )
+                    options = {
+                        field: request[field]
+                        for field in ("direction", "client_addr", "server_addr")
+                        if field in request
+                    }
+                    payload = run_pcap_scenario(
+                        scenario,
+                        _decode_pcap_base64(request["pcap_base64"]),
+                        tcl_lsp_root=str(root),
+                        **options,
+                    )
+                except (json.JSONDecodeError, EmulatorInputError, EmulatorResourceError, OSError) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
             if parsed.path != "/v1/simulations":
                 parts = [unquote(part) for part in parsed.path.split("/") if part]
                 if len(parts) == 2 and parts == ["v1", "sessions"]:
@@ -2816,6 +3166,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a BIG-IP 17.5 iRule emulator scenario")
     parser.add_argument("--scenario", default="-", help="JSON scenario path, or - for stdin")
     parser.add_argument("--tcl-lsp-root", help="path to a tcl-lsp checkout")
+    parser.add_argument("--pcap", help="classic PCAP file to replay for the scenario")
+    parser.add_argument(
+        "--pcap-direction",
+        choices=("client_to_server", "server_to_client", "auto"),
+        default="client_to_server",
+        help="direction assigned to PCAP packets; auto uses client/server addresses",
+    )
+    parser.add_argument("--client-addr", help="client IPv4 address for --pcap-direction auto")
+    parser.add_argument("--server-addr", help="server IPv4 address for --pcap-direction auto")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--capabilities",
@@ -2847,6 +3206,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         root = _find_tcl_lsp_root(args.tcl_lsp_root)
+        if args.pcap and (args.serve or args.mcp or args.capabilities or args.conformance):
+            raise EmulatorInputError(
+                "--pcap can only be used with one-shot scenario execution"
+            )
         if args.serve:
             serve(root, args.host, args.port)
             return 0
@@ -2862,7 +3225,18 @@ def main(argv: list[str] | None = None) -> int:
                 scenario = json.load(sys.stdin)
             else:
                 scenario = json.loads(Path(args.scenario).read_text(encoding="utf-8"))
-            response = run_scenario(scenario, tcl_lsp_root=str(root), backend=args.backend)
+            if args.pcap:
+                response = run_pcap_file(
+                    scenario,
+                    args.pcap,
+                    tcl_lsp_root=str(root),
+                    backend=args.backend,
+                    direction=args.pcap_direction,
+                    client_addr=args.client_addr,
+                    server_addr=args.server_addr,
+                )
+            else:
+                response = run_scenario(scenario, tcl_lsp_root=str(root), backend=args.backend)
     except (OSError, json.JSONDecodeError, EmulatorInputError) as exc:
         response = {"status": "error", "error": str(exc)}
         print(json.dumps(response, separators=(",", ":")))

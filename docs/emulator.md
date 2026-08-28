@@ -57,7 +57,8 @@ curl -X POST -H 'Content-Type: application/json' \
 ```
 
 The service exposes `GET /healthz`, `GET /v1/capabilities`,
-`GET /v1/conformance`, and `POST /v1/simulations`. It also supports persistent sessions through
+`GET /v1/conformance`, `POST /v1/simulations`, and
+`POST /v1/simulations/pcap`. It also supports persistent sessions through
 `POST /v1/sessions`, `GET /v1/sessions/{session_id}`,
 `POST /v1/sessions/{session_id}/requests`,
 `POST /v1/sessions/{session_id}/packets`, and
@@ -65,6 +66,31 @@ The service exposes `GET /healthz`, `GET /v1/capabilities`,
 JSON request bodies at 2 MiB, and does not expose arbitrary Tcl evaluation.
 The HTTP API accepts inline `irule` text only; use the CLI's `irule_file` field
 when a rule must be loaded from a local file.
+
+Raw classic PCAP replay is available at `POST /v1/simulations/pcap`. The
+request contains an inline `scenario` and a base64-encoded `pcap_base64` value:
+
+```json
+{
+  "scenario": {
+    "profiles": ["TCP", "HTTP"],
+    "irule": "when HTTP_REQUEST { pool api_pool }",
+    "pools": {"api_pool": ["10.0.0.1:80"]}
+  },
+  "pcap_base64": "<base64 classic-pcap bytes>",
+  "direction": "auto",
+  "client_addr": "10.0.0.5",
+  "server_addr": "192.0.2.10"
+}
+```
+
+The endpoint accepts classic PCAP with Ethernet (including VLAN tags) or raw
+IPv4 link layers, and preserves each record timestamp in the returned packet
+trace. `direction` defaults to `client_to_server`; `auto` requires both
+endpoint addresses and skips packets that do not match either direction. The
+capture is bounded to 16 MiB, 1,000 records, and 2 MiB per packet. pcapng,
+IPv4 fragments, retransmission-aware sequencing, and out-of-order TCP
+reassembly are intentionally rejected or unsupported.
 
 For connection-aware testing, use the persistent session endpoints:
 `POST /v1/sessions` creates a session from an iRule, profiles, pools, and data
@@ -104,6 +130,8 @@ After the normal MCP `initialize` and `notifications/initialized` exchange,
 clients can discover these tools with `tools/list`:
 
 - `irule_simulate` runs a bounded one-shot scenario.
+- `irule_pcap_replay` replays a base64-encoded classic PCAP through the same
+  packet and Tcl event adapters.
 - `irule_capabilities` returns a chunk of the complete 17.5 catalog.
 - `irule_conformance` reports static catalog/runtime and packet-adapter coverage.
 - `irule_session_create`, `irule_session_inspect`, `irule_session_request`,
@@ -166,16 +194,17 @@ ask for a higher-fidelity test when needed.
 ## Structured packet traces
 
 One-shot scenarios may use `packets` instead of `request`/`requests`. A trace
-is a bounded sequence of structured packet records; it is not a pcap/pcapng
-file reader yet. TCP SYN/FIN/RST, TCP payloads, TLS handshake/data records, HTTP
+is a bounded sequence of structured packet records. TCP SYN/FIN/RST, TCP
+payloads, TLS handshake/data records, HTTP
 request/response pairs, and DNS request/response messages are translated into
 the same Tcl events and state layers used by the HTTP API. Generic UDP payloads
 are reported as unmapped because there is no protocol-specific event to infer.
 For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
 performs bounded TCP application reassembly across records and persistent
-session calls. Pcap/pcapng file ingestion, retransmission, and out-of-order
-stream handling remain future slices.
+session calls. Classic PCAP file/HTTP/MCP ingestion is supported separately;
+pcapng, retransmission, and out-of-order stream handling remain outside this
+slice.
 
 ```json
 {
@@ -218,6 +247,18 @@ HTTP transaction results. Persistent sessions accept the same packet array at
 `POST /v1/sessions/{session_id}/packets`, or through the MCP
 `irule_session_trace` tool.
 
+For a classic PCAP file, keep the iRule scenario in a JSON file and replay it
+through the CLI:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --scenario scenario.json --pcap traffic.pcap --pcap-direction auto \
+  --client-addr 10.0.0.5 --server-addr 192.0.2.10
+```
+
+The CLI is the only file-loading surface. HTTP and MCP callers provide PCAP
+bytes as base64 and cannot load arbitrary local paths.
+
 Use the static conformance report to see what the pinned 17.5 registry knows
 about and which events currently have packet adapters:
 
@@ -254,8 +295,8 @@ docker run --rm --publish 8080:8080 testcl-irule-emulator:17.5 \
 ## Current boundary
 
 The current slice supports HTTP/TCP request simulation, structured packet
-traces, persistent connection sessions, structured DNS/TLS event injection,
-catalog conformance reporting, and an MCP facade over the same JSON contract.
-The next slice should add raw pcap/byte decoding and semantic command mocks for
-the highest-value uncovered catalog entries. The emulator profile remains
-fixed at `tmos-17.5`.
+traces, classic PCAP replay, persistent connection sessions, structured DNS/TLS
+event injection, catalog conformance reporting, and an MCP facade over the same
+JSON contract. The next slice should add semantic command mocks for the
+highest-value uncovered catalog entries. The emulator profile remains fixed at
+`tmos-17.5`.
