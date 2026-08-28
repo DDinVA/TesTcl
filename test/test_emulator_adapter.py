@@ -197,6 +197,35 @@ when HTTP_REQUEST_DATA { log local0. "should-not-fire" }
         self.assertFalse(final["chunk"]["has_more"])
         self.assertEqual(final["commands"], [])
 
+    def test_common_global_string_and_pool_functions_are_semantic(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["10.0.0.10:80", "10.0.0.11:80"]},
+                "datagroups": {
+                    "routes": {
+                        "records": {"/api": "api_pool", "/static": "static_pool"}
+                    }
+                },
+                "irule": """
+when HTTP_REQUEST {
+    log local0. "findstr=[findstr [HTTP::path] / 1] field=[getfield [HTTP::host] . 2]"
+    log local0. "findclass=[findclass /api routes] matchclass=[matchclass /api equals routes]"
+    log local0. "members=[active_members -list api_pool] nodes=[active_nodes api_pool]"
+    log local0. "b64=[b64decode [b64encode hello]]"
+}
+""",
+                "requests": [{"host": "app.example.com", "uri": "/api/v1"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        logs = result["results"][0]["logs"]
+        self.assertTrue(any("findstr=api/v1" in entry for entry in logs))
+        self.assertTrue(any("field=example" in entry for entry in logs))
+        self.assertTrue(any("findclass=/api api_pool matchclass=1" in entry for entry in logs))
+        self.assertTrue(any("10.0.0.10 80" in entry and "10.0.0.11 80" in entry for entry in logs))
+        self.assertTrue(any("b64=hello" in entry for entry in logs))
+
     def test_conformance_reports_catalog_and_packet_adapter_coverage(self) -> None:
         report = self.adapter._build_conformance(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)

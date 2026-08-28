@@ -321,7 +321,8 @@ traces, classic PCAP replay, sequence-aware persistent connection sessions,
 structured DNS/TLS event injection, catalog conformance reporting, an MCP
 facade over the same JSON contract, and an adapter-owned semantic overlay for
 selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, table, TCP, and
-HTTP cookie commands. The semantic overlay also models data-group `class`
+HTTP cookie commands, plus common global string, base64, data-group, and pool
+health functions. The semantic overlay also models data-group `class`
 matching, lookup, enumeration, connection-scoped search iterators, and
 request/response cookie mutations. TCP payload access is directional for
 client/server data events and supports byte-length, replacement, collection,

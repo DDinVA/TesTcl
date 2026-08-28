@@ -1828,6 +1828,174 @@ namespace eval ::itest::semantic {
         }
         return client
     }
+
+    proc findstr_command {args} {
+        if {[llength $args] < 2 || [llength $args] > 4} {
+            error "findstr requires a string, search string, and optional skip/terminator"
+        }
+        set source [lindex $args 0]
+        set search [lindex $args 1]
+        set match [string first $search $source]
+        if {$match < 0} { return "" }
+        set skip 0
+        if {[llength $args] > 2} {
+            set skip [lindex $args 2]
+            if {![string is integer -strict $skip] || $skip < 0} {
+                error "findstr skip must be a non-negative integer"
+            }
+        }
+        set start [expr {$match + $skip}]
+        if {$start >= [string length $source]} { return "" }
+        if {[llength $args] < 4} {
+            return [string range $source $start end]
+        }
+        set terminator [lindex $args 3]
+        if {[string is integer -strict $terminator]} {
+            if {$terminator < 0} { error "findstr terminator length must be non-negative" }
+            return [string range $source $start [expr {$start + $terminator - 1}]]
+        }
+        set end [string first $terminator $source $start]
+        if {$end < 0} { set end [string length $source] }
+        return [string range $source $start [expr {$end - 1}]]
+    }
+
+    proc getfield_command {args} {
+        if {[llength $args] != 3} {
+            error "getfield requires a string, delimiter, and one-based field number"
+        }
+        set source [lindex $args 0]
+        set delimiter [lindex $args 1]
+        set field [lindex $args 2]
+        if {$delimiter eq ""} { error "getfield delimiter must not be empty" }
+        if {![string is integer -strict $field] || $field < 1} {
+            error "getfield field number must be a positive integer"
+        }
+        set fields [list]
+        set cursor 0
+        set delimiter_length [string length $delimiter]
+        while {1} {
+            set position [string first $delimiter $source $cursor]
+            if {$position < 0} {
+                lappend fields [string range $source $cursor end]
+                break
+            }
+            lappend fields [string range $source $cursor [expr {$position - 1}]]
+            set cursor [expr {$position + $delimiter_length}]
+        }
+        if {$field > [llength $fields]} { return "" }
+        return [lindex $fields [expr {$field - 1}]]
+    }
+
+    proc findclass_command {args} {
+        if {[llength $args] < 2 || [llength $args] > 3} {
+            error "findclass requires a key, class, and optional separator"
+        }
+        set key [lindex $args 0]
+        lassign [_class_group [lindex $args 1]] type records
+        foreach {name value} $records {
+            if {$name ne $key} { continue }
+            if {[llength $args] == 3} { return $value }
+            if {$value eq ""} { return $name }
+            return "$name $value"
+        }
+        return ""
+    }
+
+    proc matchclass_command {args} {
+        if {[llength $args] != 3} {
+            error "matchclass requires a value/class, operator, and class/value"
+        }
+        set left [lindex $args 0]
+        set operator [lindex $args 1]
+        set right [lindex $args 2]
+        if {[info exists ::state::datagroup::groups($left)]} {
+            set class_name $left
+            set item $right
+            set class_first 1
+        } else {
+            set class_name $right
+            set item $left
+            set class_first 0
+        }
+        lassign [_class_group $class_name] type records
+        set index 0
+        foreach {name value} $records {
+            set matched [expr {$class_first
+                ? [_class_compare $name $operator $item 0]
+                : [_class_compare $item $operator $name 0]}]
+            if {$matched} { return [expr {$index + 1}] }
+            incr index
+        }
+        return 0
+    }
+
+    proc _active_pool_members {pool_name} {
+        if {![info exists ::state::lb::pools($pool_name)]} { return [list] }
+        set members [list]
+        foreach member [lindex $::state::lb::pools($pool_name) 1] {
+            if {[_member_status $pool_name $member] ni {down disabled}} {
+                lappend members $member
+            }
+        }
+        return $members
+    }
+
+    proc _member_endpoint {member} {
+        set separator [string last : $member]
+        if {$separator < 0} { return [list $member 0] }
+        return [list [string range $member 0 [expr {$separator - 1}]] \
+            [string range $member [expr {$separator + 1}] end]]
+    }
+
+    proc active_members_command {args} {
+        set list_mode 0
+        if {[llength $args] == 2 && [lindex $args 0] eq "-list"} {
+            set list_mode 1
+            set pool_name [lindex $args 1]
+        } elseif {[llength $args] == 1} {
+            set pool_name [lindex $args 0]
+        } else {
+            error "active_members requires a pool or -list pool"
+        }
+        set members [_active_pool_members $pool_name]
+        if {!$list_mode} { return [llength $members] }
+        set result [list]
+        foreach member $members { lappend result [_member_endpoint $member] }
+        return $result
+    }
+
+    proc active_nodes_command {args} {
+        set list_mode 0
+        if {[llength $args] == 2 && [lindex $args 0] eq "-list"} {
+            set list_mode 1
+            set pool_name [lindex $args 1]
+        } elseif {[llength $args] == 1} {
+            set pool_name [lindex $args 0]
+        } else {
+            error "active_nodes requires a pool or -list pool"
+        }
+        set members [_active_pool_members $pool_name]
+        if {!$list_mode} { return [llength $members] }
+        set result [list]
+        foreach member $members {
+            lassign [_member_endpoint $member] address ignored
+            lappend result $address
+        }
+        return $result
+    }
+
+    proc b64encode_command {args} {
+        if {[llength $args] != 1} { error "b64encode requires one value" }
+        return [binary encode base64 [lindex $args 0]]
+    }
+
+    proc b64decode_command {args} {
+        if {[llength $args] != 1} { error "b64decode requires one value" }
+        if {[catch {binary decode base64 [lindex $args 0]} decoded]} {
+            return ""
+        }
+        return $decoded
+    }
 }
 
 # Preserve the upstream pool behavior and replace only its member choice.
@@ -1909,6 +2077,14 @@ foreach {original replacement} {
     }
 }
 foreach {original replacement} {
+    active_members active_members_command
+    active_nodes active_nodes_command
+    b64decode b64decode_command
+    b64encode b64encode_command
+    findclass findclass_command
+    findstr findstr_command
+    getfield getfield_command
+    matchclass matchclass_command
     peer peer_command
     clientside clientside_command
     serverside serverside_command
