@@ -119,6 +119,26 @@ namespace eval ::itest::semantic {
         variable via {}
     }
 
+    namespace eval ::state::diameter {
+        variable type request
+        variable version 1
+        variable rflag 1
+        variable pflag 0
+        variable eflag 0
+        variable tflag 0
+        variable command_code 0
+        variable application_id 0
+        variable hop_by_hop_id 0
+        variable end_to_end_id 0
+        variable avps {}
+        variable payload ""
+        variable payload_length 0
+        variable message ""
+        variable message_length 20
+        variable route_status unrouted
+        variable persist_key ""
+    }
+
     proc _profile_enabled {name} {
         set wanted [string toupper $name]
         foreach profile $::orch::config(profiles) {
@@ -1337,6 +1357,520 @@ namespace eval ::itest::semantic {
             }
             if {[string equal -nocase $parameter_name $field]} { return $parameter_value }
         }
+        return ""
+    }
+
+    proc diameter_reset_connection {} {
+        variable diameter_dropped
+        variable diameter_responded
+        variable diameter_response_args
+        variable diameter_retransmission_action
+        variable diameter_retransmission_default
+        variable diameter_raw_payload
+        variable diameter_disconnected
+        variable diameter_dynamic_lookup_connection
+        variable diameter_dynamic_lookup_message
+        variable diameter_dynamic_insertion
+        set diameter_dropped 0
+        set diameter_responded 0
+        set diameter_response_args {}
+        set diameter_retransmission_action retransmit
+        set diameter_retransmission_default retransmit
+        set diameter_raw_payload 0
+        set diameter_disconnected 0
+        set diameter_dynamic_lookup_connection 1
+        set diameter_dynamic_lookup_message 1
+        set diameter_dynamic_insertion 1
+        diameter_clear_message
+    }
+
+    proc diameter_clear_message {} {
+        foreach {name value} {
+            type request
+            version 1
+            rflag 1
+            pflag 0
+            eflag 0
+            tflag 0
+            command_code 0
+            application_id 0
+            hop_by_hop_id 0
+            end_to_end_id 0
+            avps {}
+            payload ""
+            payload_length 0
+            payload_hex ""
+            message ""
+            message_length 20
+            message_hex ""
+            route_status unrouted
+            persist_key ""
+        } {
+            set ::state::diameter::$name $value
+        }
+        set ::itest::semantic::diameter_raw_payload 0
+    }
+
+    proc diameter_prepare_message {} {
+        variable diameter_dropped
+        variable diameter_responded
+        variable diameter_response_args
+        variable diameter_disconnected
+        set diameter_dropped 0
+        set diameter_responded 0
+        set diameter_response_args {}
+        set diameter_disconnected 0
+        diameter_clear_message
+    }
+
+    proc diameter_flags_snapshot {} {
+        variable diameter_dropped
+        variable diameter_responded
+        variable diameter_response_args
+        variable diameter_disconnected
+        return [list dropped $diameter_dropped responded $diameter_responded response $diameter_response_args disconnected $diameter_disconnected]
+    }
+
+    proc diameter_response_snapshot {} {
+        variable diameter_responded
+        variable diameter_response_args
+        return [list requested $diameter_responded args $diameter_response_args]
+    }
+
+    proc _diameter_require_event {allowed command_name} {
+        if {$::itest::current_event ni $allowed} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc _diameter_int {value field maximum} {
+        if {![string is integer -strict $value] || $value < 0 || $value > $maximum} {
+            error "Diameter $field must be an integer from 0 to $maximum"
+        }
+        return $value
+    }
+
+    proc _diameter_hex_uint {value width field maximum} {
+        return [format %0*X $width [_diameter_int $value $field $maximum]]
+    }
+
+    proc _diameter_record_data {record} {
+        set raw [lindex $record 3]
+        if {$raw eq ""} { return [::itest::cmd::_payload_bytes ""] }
+        return [binary format H* $raw]
+    }
+
+    proc _diameter_record_wire {record} {
+        set code [_diameter_hex_uint [lindex $record 0] 8 code 0xffffffff]
+        set flags [_diameter_int [lindex $record 1] flags 255]
+        set vendor [_diameter_int [lindex $record 2] vendor_id 0xffffffff]
+        if {$vendor} { set flags [expr {$flags | 0x80}] }
+        set data [_diameter_record_data $record]
+        set header_length [expr {($flags & 0x80) ? 12 : 8}]
+        set length [expr {$header_length + [string length $data]}]
+        if {$length > 0xffffff} { error "Diameter AVP length exceeds wire limit" }
+        set result "${code}[format %02X $flags][format %06X $length]"
+        if {$flags & 0x80} { append result [_diameter_hex_uint $vendor 8 vendor_id 0xffffffff] }
+        append result [binary encode hex $data]
+        while {[string length $result] % 8} { append result 00 }
+        return $result
+    }
+
+    proc diameter_rebuild_message {} {
+        set version [_diameter_int $::state::diameter::version version 255]
+        set flags 0
+        if {$::state::diameter::rflag} { set flags [expr {$flags | 0x80}] }
+        if {$::state::diameter::pflag} { set flags [expr {$flags | 0x40}] }
+        if {$::state::diameter::eflag} { set flags [expr {$flags | 0x20}] }
+        if {$::state::diameter::tflag} { set flags [expr {$flags | 0x10}] }
+        if {$::itest::semantic::diameter_raw_payload} {
+            set payload [::itest::cmd::_payload_bytes $::state::diameter::payload]
+        } else {
+            set payload ""
+            foreach record $::state::diameter::avps {
+                append payload [binary decode hex [_diameter_record_wire $record]]
+            }
+        }
+        set length [expr {20 + [string length $payload]}]
+        if {$length > 0xffffff} { error "Diameter message length exceeds wire limit" }
+        set header [format %02X%06X%02X $version $length $flags]
+        append header [_diameter_hex_uint $::state::diameter::command_code 6 command_code 0xffffff]
+        append header [_diameter_hex_uint $::state::diameter::application_id 8 application_id 0xffffffff]
+        append header [_diameter_hex_uint $::state::diameter::hop_by_hop_id 8 hop_by_hop_id 0xffffffff]
+        append header [_diameter_hex_uint $::state::diameter::end_to_end_id 8 end_to_end_id 0xffffffff]
+        set message [binary decode hex $header]
+        append message $payload
+        set ::state::diameter::message $message
+        set ::state::diameter::payload $payload
+        set ::state::diameter::payload_length [string length $payload]
+        set ::state::diameter::payload_hex [binary encode hex $payload]
+        set ::state::diameter::message_length [string length $message]
+        set ::state::diameter::message_hex [binary encode hex $message]
+        return ""
+    }
+
+    proc _diameter_indices {code {vendor 0}} {
+        set result {}
+        set index 0
+        foreach record $::state::diameter::avps {
+            if {[lindex $record 0] == $code && [lindex $record 2] == $vendor} {
+                lappend result $index
+            }
+            incr index
+        }
+        return $result
+    }
+
+    proc _diameter_selector {args} {
+        if {[llength $args] < 1 || [llength $args] > 3} {
+            error "Diameter AVP selector requires code, optional vendor_id, and optional index"
+        }
+        set code [lindex $args 0]
+        if {![string is integer -strict $code] || $code < 0 || $code > 0xffffffff} {
+            error "Diameter AVP code must be an integer"
+        }
+        set vendor [expr {[llength $args] > 1 ? [lindex $args 1] : 0}]
+        set index [expr {[llength $args] > 2 ? [lindex $args 2] : 0}]
+        if {![string is integer -strict $vendor] || $vendor < 0 || $vendor > 0xffffffff} {
+            error "Diameter AVP vendor_id must be an integer"
+        }
+        if {![string is integer -strict $index] || $index < 0} {
+            error "Diameter AVP index must be non-negative"
+        }
+        set matches [_diameter_indices $code $vendor]
+        if {$index >= [llength $matches]} { return -1 }
+        return [lindex $matches $index]
+    }
+
+    proc _diameter_data_hex {value} {
+        return [binary encode hex [::itest::cmd::_payload_bytes $value]]
+    }
+
+    proc _diameter_set_record {absolute record} {
+        set ::state::diameter::avps [lreplace $::state::diameter::avps $absolute $absolute $record]
+        set ::itest::semantic::diameter_raw_payload 0
+        diameter_rebuild_message
+    }
+
+    proc diameter_header_command {args} {
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::header
+        if {[llength $args] < 1 || [llength $args] > 2} { error "DIAMETER::header requires a field and optional value" }
+        set field [string tolower [lindex $args 0]]
+        array set aliases {
+            command command_code cmd command_code appid application_id app_id application_id
+            hopid hop_by_hop_id hop_by_hop_id hop_by_hop_id endid end_to_end_id end_to_end_id end_to_end_id
+        }
+        if {[info exists aliases($field)]} { set field $aliases($field) }
+        if {$field ni {version length rflag pflag eflag tflag command_code application_id hop_by_hop_id end_to_end_id}} {
+            error "unsupported DIAMETER::header field $field"
+        }
+        if {[llength $args] == 1} { return [set ::state::diameter::$field] }
+        if {$field eq "length"} { error "DIAMETER::header length is read-only" }
+        set value [lindex $args 1]
+        if {$field in {rflag pflag eflag tflag}} {
+            if {$value ni {0 1 true false}} { error "Diameter header flags accept a boolean" }
+            set value [expr {$value in {1 true}}]
+        } elseif {$field eq "version"} {
+            set value [_diameter_int $value version 255]
+        } elseif {$field eq "command_code"} {
+            set value [_diameter_int $value command_code 0xffffff]
+        } else {
+            set value [_diameter_int $value $field 0xffffffff]
+        }
+        set ::state::diameter::$field $value
+        diameter_rebuild_message
+        ::itest::log_decision diameter header_set [list $field $value]
+        return $value
+    }
+
+    proc diameter_avp_command {args} {
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::avp
+        if {[llength $args] < 1} { error "DIAMETER::avp requires a subcommand" }
+        set operation [lindex $args 0]
+        set rest [lrange $args 1 end]
+        switch -exact -- $operation {
+            count {
+                if {[llength $rest] < 1 || [llength $rest] > 2} { error "DIAMETER::avp count requires code and optional vendor_id" }
+                return [llength [_diameter_indices [lindex $rest 0] [expr {[llength $rest] == 2 ? [lindex $rest 1] : 0}]]]
+            }
+            create - append {
+                if {[llength $rest] < 2 || [llength $rest] > 3} { error "DIAMETER::avp $operation requires code, data, and optional vendor_id" }
+                set code [lindex $rest 0]
+                set data [lindex $rest 1]
+                set vendor [expr {[llength $rest] == 3 ? [lindex $rest 2] : 0}]
+                set record [list [_diameter_int $code code 0xffffffff] 0 [_diameter_int $vendor vendor_id 0xffffffff] [_diameter_data_hex $data]]
+                lappend ::state::diameter::avps $record
+                set ::itest::semantic::diameter_raw_payload 0
+                diameter_rebuild_message
+                ::itest::log_decision diameter avp_$operation $record
+                return [llength $::state::diameter::avps]
+            }
+            insert {
+                if {[llength $rest] < 3 || [llength $rest] > 4} { error "DIAMETER::avp insert requires position, code, data, and optional vendor_id" }
+                set position [_diameter_int [lindex $rest 0] position [llength $::state::diameter::avps]]
+                set vendor [expr {[llength $rest] == 4 ? [lindex $rest 3] : 0}]
+                set record [list [_diameter_int [lindex $rest 1] code 0xffffffff] 0 [_diameter_int $vendor vendor_id 0xffffffff] [_diameter_data_hex [lindex $rest 2]]]
+                set ::state::diameter::avps [linsert $::state::diameter::avps $position $record]
+                set ::itest::semantic::diameter_raw_payload 0
+                diameter_rebuild_message
+                return [llength $::state::diameter::avps]
+            }
+            delete {
+                set absolute [_diameter_selector $rest]
+                if {$absolute >= 0} {
+                    set ::state::diameter::avps [lreplace $::state::diameter::avps $absolute $absolute]
+                    diameter_rebuild_message
+                }
+                return ""
+            }
+            replace {
+                if {[llength $rest] < 2 || [llength $rest] > 4} { error "DIAMETER::avp replace requires code, data, and optional vendor_id/index" }
+                set code [lindex $rest 0]
+                set data [lindex $rest 1]
+                set selector [linsert [lrange $rest 2 end] 0 $code]
+                set absolute [_diameter_selector $selector]
+                if {$absolute < 0} { error "Diameter AVP was not found" }
+                set old [lindex $::state::diameter::avps $absolute]
+                _diameter_set_record $absolute [list [lindex $old 0] [lindex $old 1] [lindex $old 2] [_diameter_data_hex $data]]
+                return ""
+            }
+            flags {
+                if {[llength $rest] < 2 || [lindex $rest 0] ni {get set}} { error "DIAMETER::avp flags syntax is get|set code ?value? ?vendor_id? ?index?" }
+                set action [lindex $rest 0]
+                set selector [lrange $rest 1 end]
+                if {$action eq "set"} {
+                    if {[llength $selector] < 2 || [llength $selector] > 4} { error "DIAMETER::avp flags set requires code and value" }
+                    set value [_diameter_int [lindex $selector 1] flags 255]
+                    set selector [linsert [lrange $selector 2 end] 0 [lindex $selector 0]]
+                } elseif {[llength $selector] < 1 || [llength $selector] > 3} { error "DIAMETER::avp flags get requires code" }
+                set absolute [_diameter_selector $selector]
+                if {$absolute < 0} { return "" }
+                set old [lindex $::state::diameter::avps $absolute]
+                if {$action eq "get"} { return [lindex $old 1] }
+                _diameter_set_record $absolute [list [lindex $old 0] $value [lindex $old 2] [lindex $old 3]]
+                return $value
+            }
+            code - length - data {
+                set absolute [_diameter_selector $rest]
+                if {$absolute < 0} { return "" }
+                set record [lindex $::state::diameter::avps $absolute]
+                if {$operation eq "code"} { return [lindex $record 0] }
+                if {$operation eq "data"} { return [_diameter_record_data $record] }
+                return [expr {(([lindex $record 1] & 0x80) ? 12 : 8) + [string length [_diameter_record_data $record]]}]
+            }
+            default { error "unsupported DIAMETER::avp operation $operation" }
+        }
+    }
+
+    proc _diameter_simple_command {name args} {
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} $name
+        if {[llength $args] != 0} { error "$name takes no arguments" }
+        switch -exact -- $name {
+            DIAMETER::length { return $::state::diameter::message_length }
+            DIAMETER::message { return $::state::diameter::message }
+            DIAMETER::is_request { return $::state::diameter::rflag }
+            DIAMETER::is_retransmission { return $::state::diameter::tflag }
+            DIAMETER::route_status { return $::state::diameter::route_status }
+            DIAMETER::retransmission_reason { return [expr {$::state::diameter::tflag ? "timeout" : ""}] }
+            default { error "unsupported Diameter simple command $name" }
+        }
+    }
+
+    proc diameter_command_command {args} {
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::command
+        if {[llength $args] > 1} { error "DIAMETER::command accepts zero or one value" }
+        if {[llength $args] == 0} { return $::state::diameter::command_code }
+        set ::state::diameter::command_code [_diameter_int [lindex $args 0] command_code 0xffffff]
+        diameter_rebuild_message
+        return $::state::diameter::command_code
+    }
+
+    proc diameter_length_command {args} { return [_diameter_simple_command DIAMETER::length {*}$args] }
+    proc diameter_message_command {args} { return [_diameter_simple_command DIAMETER::message {*}$args] }
+    proc diameter_is_request_command {args} { return [_diameter_simple_command DIAMETER::is_request {*}$args] }
+    proc diameter_is_response_command {args} {
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::is_response
+        if {[llength $args] != 0} { error "DIAMETER::is_response takes no arguments" }
+        return [expr {!$::state::diameter::rflag}]
+    }
+    proc diameter_is_retransmission_command {args} { return [_diameter_simple_command DIAMETER::is_retransmission {*}$args] }
+
+    proc diameter_payload_command {args} {
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::payload
+        if {[llength $args] == 0} { return $::state::diameter::payload }
+        if {[llength $args] != 2 || [lindex $args 0] ne "replace"} { error "DIAMETER::payload syntax is replace payload" }
+        set ::state::diameter::payload [::itest::cmd::_payload_bytes [lindex $args 1]]
+        set ::itest::semantic::diameter_raw_payload 1
+        diameter_rebuild_message
+        ::itest::log_decision diameter payload_replace
+        return ""
+    }
+
+    proc _diameter_find_data {code} {
+        set absolute [_diameter_selector [list $code]]
+        if {$absolute < 0} { return "" }
+        return [_diameter_record_data [lindex $::state::diameter::avps $absolute]]
+    }
+
+    proc _diameter_set_data {code value} {
+        set absolute [_diameter_selector [list $code]]
+        set data_hex [_diameter_data_hex $value]
+        if {$absolute < 0} {
+            lappend ::state::diameter::avps [list $code 0 0 $data_hex]
+        } else {
+            set old [lindex $::state::diameter::avps $absolute]
+            set ::state::diameter::avps [lreplace $::state::diameter::avps $absolute $absolute [list [lindex $old 0] [lindex $old 1] [lindex $old 2] $data_hex]]
+        }
+        set ::itest::semantic::diameter_raw_payload 0
+        diameter_rebuild_message
+        return $value
+    }
+
+    proc diameter_result_command {args} {
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::result
+        if {[llength $args] == 0} {
+            set data [_diameter_find_data 268]
+            if {[string length $data] != 4} { return "" }
+            scan [binary encode hex $data] %x value
+            return $value
+        }
+        if {[llength $args] != 1} { error "DIAMETER::result accepts zero or one value" }
+        set value [_diameter_int [lindex $args 0] result 0xffffffff]
+        return [_diameter_set_data 268 [binary decode hex [_diameter_hex_uint $value 8 result 0xffffffff]]]
+    }
+
+    proc diameter_session_command {args} {
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::session
+        if {[llength $args] == 0} { return [_diameter_find_data 263] }
+        if {[llength $args] != 1} { error "DIAMETER::session accepts zero or one value" }
+        return [_diameter_set_data 263 [lindex $args 0]]
+    }
+
+    proc _diameter_host_realm_command {code args} {
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::host
+        if {[llength $args] < 1 || [llength $args] > 2 || [lindex $args 0] ni {origin dest}} { error "DIAMETER::host/realm requires origin or dest and optional value" }
+        set selector [lindex $args 0]
+        set value_code [expr {$code == 264 ? ($selector eq "origin" ? 264 : 293) : ($selector eq "origin" ? 296 : 283)}]
+        if {[llength $args] == 1} { return [_diameter_find_data $value_code] }
+        return [_diameter_set_data $value_code [lindex $args 1]]
+    }
+    proc diameter_host_command {args} { return [_diameter_host_realm_command 264 {*}$args] }
+    proc diameter_realm_command {args} { return [_diameter_host_realm_command 296 {*}$args] }
+
+    proc diameter_route_status_command {args} { return [_diameter_simple_command DIAMETER::route_status {*}$args] }
+    proc diameter_state_command {args} {
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::state
+        if {[llength $args] != 0} { error "DIAMETER::state takes no arguments" }
+        return up
+    }
+
+    proc diameter_persist_command {args} {
+        variable diameter_persist_mode
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::persist
+        if {[llength $args] == 0} { return $::state::diameter::persist_key }
+        set command [lindex $args 0]
+        if {$command in {reset use ignore bypass replace}} {
+            if {[llength $args] != 1} { error "DIAMETER::persist $command takes no arguments" }
+            set diameter_persist_mode $command
+            if {$command eq "reset"} { set ::state::diameter::persist_key "" }
+        } else {
+            if {[llength $args] > 2} { error "DIAMETER::persist accepts a key and optional timeout" }
+            set ::state::diameter::persist_key $command
+        }
+        ::itest::log_decision diameter persist $args
+        return $::state::diameter::persist_key
+    }
+
+    proc diameter_drop_command {args} {
+        variable diameter_dropped
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::drop
+        if {[llength $args] != 0} { error "DIAMETER::drop takes no arguments" }
+        set diameter_dropped 1
+        ::itest::log_decision diameter drop
+        return ""
+    }
+
+    proc diameter_respond_command {args} {
+        variable diameter_responded
+        variable diameter_response_args
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS} DIAMETER::respond
+        if {[llength $args] != 5} { error "DIAMETER::respond requires version, rflag, pflag, eflag, and tflag" }
+        set version [_diameter_int [lindex $args 0] version 255]
+        set flags {}
+        foreach {name value} {rflag 1 pflag 2 eflag 3 tflag 4} {
+            set raw [lindex $args $value]
+            if {$raw ni {0 1 true false}} { error "Diameter $name accepts a boolean" }
+            lappend flags [expr {$raw in {1 true}}]
+        }
+        set ::state::diameter::version $version
+        lassign $flags ::state::diameter::rflag ::state::diameter::pflag ::state::diameter::eflag ::state::diameter::tflag
+        diameter_rebuild_message
+        set diameter_response_args $args
+        set diameter_responded 1
+        ::itest::log_decision diameter respond $args
+        return ""
+    }
+
+    proc diameter_retransmission_command {args} {
+        variable diameter_retransmission_action
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::retransmission
+        if {[llength $args] == 0} { return $diameter_retransmission_action }
+        if {[llength $args] != 2 || [lindex $args 0] ne "action" || [lindex $args 1] ni {disabled busy unable retransmit}} { error "DIAMETER::retransmission syntax is action disabled|busy|unable|retransmit" }
+        set diameter_retransmission_action [lindex $args 1]
+        ::itest::log_decision diameter retransmission $diameter_retransmission_action
+        return $diameter_retransmission_action
+    }
+    proc diameter_retransmission_default_command {args} {
+        variable diameter_retransmission_default
+        _diameter_require_event {CLIENT_ACCEPTED SERVER_CONNECTED} DIAMETER::retransmission_default
+        if {[llength $args] == 0} { return $diameter_retransmission_default }
+        if {[llength $args] != 2 || [lindex $args 0] ne "action" || [lindex $args 1] ni {disabled busy unable retransmit}} { error "DIAMETER::retransmission_default syntax is action disabled|busy|unable|retransmit" }
+        set diameter_retransmission_default [lindex $args 1]
+        return $diameter_retransmission_default
+    }
+    proc diameter_retransmission_reason_command {args} { return [_diameter_simple_command DIAMETER::retransmission_reason {*}$args] }
+    proc diameter_retransmit_command {args} {
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::retransmit
+        if {[llength $args] > 2 || ([llength $args] > 0 && [lindex $args 0] ni {disabled busy unable retransmit})} { error "DIAMETER::retransmit accepts an optional action and note" }
+        ::itest::log_decision diameter retransmit $args
+        return ""
+    }
+    proc diameter_retry_command {args} {
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::retry
+        if {[llength $args] < 1 || [llength $args] > 2} { error "DIAMETER::retry requires a message and optional across flag" }
+        ::itest::log_decision diameter retry $args
+        return ""
+    }
+    proc diameter_skip_capabilities_exchange_command {args} {
+        _diameter_require_event {CLIENT_ACCEPTED SERVER_CONNECTED} DIAMETER::skip_capabilities_exchange
+        if {[llength $args] > 1} { error "DIAMETER::skip_capabilities_exchange accepts an optional hostname" }
+        ::itest::log_decision diameter skip_capabilities_exchange $args
+        return ""
+    }
+    proc diameter_dynamic_route_lookup_command {args} {
+        variable diameter_dynamic_lookup_connection
+        variable diameter_dynamic_lookup_message
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::dynamic_route_lookup
+        if {[llength $args] == 0} { return $diameter_dynamic_lookup_message }
+        if {[llength $args] != 2 || [lindex $args 0] ni {connection message} || [lindex $args 1] ni {0 1 true false enabled disabled}} { error "DIAMETER::dynamic_route_lookup requires connection|message and a boolean" }
+        set value [expr {[lindex $args 1] in {1 true enabled}}]
+        if {[lindex $args 0] eq "connection"} { set diameter_dynamic_lookup_connection $value } else { set diameter_dynamic_lookup_message $value }
+        return $value
+    }
+    proc diameter_dynamic_route_insertion_command {args} {
+        variable diameter_dynamic_insertion
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS DIAMETER_RETRANSMISSION} DIAMETER::dynamic_route_insertion
+        if {[llength $args] == 0} { return $diameter_dynamic_insertion }
+        if {[llength $args] != 1 || [lindex $args 0] ni {0 1 true false enabled disabled}} { error "DIAMETER::dynamic_route_insertion requires a boolean" }
+        set diameter_dynamic_insertion [expr {[lindex $args 0] in {1 true enabled}}]
+        return $diameter_dynamic_insertion
+    }
+    proc diameter_disconnect_command {args} {
+        variable diameter_disconnected
+        _diameter_require_event {DIAMETER_INGRESS DIAMETER_EGRESS} DIAMETER::disconnect
+        if {[llength $args] != 3} { error "DIAMETER::disconnect requires origin host, origin realm, and cause" }
+        set diameter_disconnected 1
+        ::itest::log_decision diameter disconnect $args
         return ""
     }
 
@@ -4071,6 +4605,42 @@ foreach {original replacement} {
     }
 }
 foreach {original replacement} {
+    diameter_avp diameter_avp_command
+    diameter_command diameter_command_command
+    diameter_disconnect diameter_disconnect_command
+    diameter_drop diameter_drop_command
+    diameter_dynamic_route_insertion diameter_dynamic_route_insertion_command
+    diameter_dynamic_route_lookup diameter_dynamic_route_lookup_command
+    diameter_header diameter_header_command
+    diameter_host diameter_host_command
+    diameter_is_request diameter_is_request_command
+    diameter_is_response diameter_is_response_command
+    diameter_is_retransmission diameter_is_retransmission_command
+    diameter_length diameter_length_command
+    diameter_message diameter_message_command
+    diameter_payload diameter_payload_command
+    diameter_persist diameter_persist_command
+    diameter_realm diameter_realm_command
+    diameter_respond diameter_respond_command
+    diameter_result diameter_result_command
+    diameter_retransmission diameter_retransmission_command
+    diameter_retransmission_default diameter_retransmission_default_command
+    diameter_retransmission_reason diameter_retransmission_reason_command
+    diameter_retransmit diameter_retransmit_command
+    diameter_retry diameter_retry_command
+    diameter_route_status diameter_route_status_command
+    diameter_session diameter_session_command
+    diameter_skip_capabilities_exchange diameter_skip_capabilities_exchange_command
+    diameter_state diameter_state_command
+} {
+    if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
+        ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
+        proc ::itest::cmd::$original {args} [format {
+            return [eval [linsert $args 0 ::itest::semantic::%s]]
+        } $replacement]
+    }
+}
+foreach {original replacement} {
     sip_call_id sip_call_id_command
     sip_discard sip_discard_command
     sip_from sip_from_command
@@ -4194,6 +4764,33 @@ foreach {name proc_name} {
     SIP::to ::itest::semantic::sip_to_command
     SIP::uri ::itest::semantic::sip_uri_command
     SIP::via ::itest::semantic::sip_via_command
+    DIAMETER::avp ::itest::semantic::diameter_avp_command
+    DIAMETER::command ::itest::semantic::diameter_command_command
+    DIAMETER::disconnect ::itest::semantic::diameter_disconnect_command
+    DIAMETER::drop ::itest::semantic::diameter_drop_command
+    DIAMETER::dynamic_route_insertion ::itest::semantic::diameter_dynamic_route_insertion_command
+    DIAMETER::dynamic_route_lookup ::itest::semantic::diameter_dynamic_route_lookup_command
+    DIAMETER::header ::itest::semantic::diameter_header_command
+    DIAMETER::host ::itest::semantic::diameter_host_command
+    DIAMETER::is_request ::itest::semantic::diameter_is_request_command
+    DIAMETER::is_response ::itest::semantic::diameter_is_response_command
+    DIAMETER::is_retransmission ::itest::semantic::diameter_is_retransmission_command
+    DIAMETER::length ::itest::semantic::diameter_length_command
+    DIAMETER::message ::itest::semantic::diameter_message_command
+    DIAMETER::payload ::itest::semantic::diameter_payload_command
+    DIAMETER::persist ::itest::semantic::diameter_persist_command
+    DIAMETER::realm ::itest::semantic::diameter_realm_command
+    DIAMETER::respond ::itest::semantic::diameter_respond_command
+    DIAMETER::result ::itest::semantic::diameter_result_command
+    DIAMETER::retransmission ::itest::semantic::diameter_retransmission_command
+    DIAMETER::retransmission_default ::itest::semantic::diameter_retransmission_default_command
+    DIAMETER::retransmission_reason ::itest::semantic::diameter_retransmission_reason_command
+    DIAMETER::retransmit ::itest::semantic::diameter_retransmit_command
+    DIAMETER::retry ::itest::semantic::diameter_retry_command
+    DIAMETER::route_status ::itest::semantic::diameter_route_status_command
+    DIAMETER::session ::itest::semantic::diameter_session_command
+    DIAMETER::skip_capabilities_exchange ::itest::semantic::diameter_skip_capabilities_exchange_command
+    DIAMETER::state ::itest::semantic::diameter_state_command
 } {
     ::itest::register_command $name $proc_name
 }

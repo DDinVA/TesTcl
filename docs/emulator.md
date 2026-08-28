@@ -275,6 +275,42 @@ F5 [`SIP`](https://clouddocs.f5.com/api/irules/SIP.html),
 [`SIP::respond`](https://clouddocs.f5.com/api/irules/SIP__respond.html), and
 [`SIP::persist`](https://clouddocs.f5.com/api/irules/SIP__persist.html)
 references for the production command/event contract.
+Diameter support is pinned to the 17.5 catalog. Structured
+`protocol: "diameter"` packets and raw Diameter-over-TCP packets drive
+`DIAMETER_INGRESS` or `DIAMETER_EGRESS`; a packet with the retransmit flag also
+drives `DIAMETER_RETRANSMISSION`. The codec validates the version, 24-bit
+message length, AVP padding, vendor AVPs, request/proxiable/error/retransmit
+flags, command/application identifiers, and hop-by-hop/end-to-end identifiers.
+AVPs can be supplied as UTF-8, hexadecimal, base64, or 32/64-bit unsigned
+values. The semantic overlay covers the catalogued Diameter header, AVP,
+payload, host/realm, result, session, routing-status, persistence,
+respond/drop/disconnect, retransmission, retry, and dynamic-route controls.
+Header and AVP mutations rebuild the modeled wire message, and raw TCP
+reassembly handles split and coalesced Diameter messages. This is a bounded
+message/router model: it does not implement a live Diameter peer, realm/route
+table, capability exchange, transport timers, or production persistence
+storage. For example:
+
+```json
+{
+  "profiles": ["TCP", "DIAMETER"],
+  "irule": "when DIAMETER_INGRESS { if {[DIAMETER::result] == 5001} { DIAMETER::drop } }",
+  "packets": [{
+    "protocol": "diameter",
+    "type": "request",
+    "command_code": 272,
+    "application_id": 4,
+    "avps": [
+      {"code": 263, "data": "session-1"},
+      {"code": 268, "type": "unsigned32", "data": "2720"}
+    ]
+  }]
+}
+```
+See the F5 [`DIAMETER`](https://clouddocs.f5.com/api/irules/DIAMETER.html),
+[`DIAMETER::avp`](https://clouddocs.f5.com/api/irules/DIAMETER__avp.html), and
+[`DIAMETER::header`](https://clouddocs.f5.com/api/irules/DIAMETER__header.html)
+references for the production command/event contract.
 For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
 performs bounded sequence-aware TCP application reassembly across records and

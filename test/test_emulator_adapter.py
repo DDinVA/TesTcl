@@ -2649,6 +2649,192 @@ when SIP_REQUEST_SEND { log local0. "message=[SIP::message]" }
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+    def test_diameter_structured_messages_expose_headers_avps_and_mutations(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "DIAMETER"],
+                "irule": """
+when DIAMETER_INGRESS {
+    log local0. "command=[DIAMETER::command] app=[DIAMETER::header application_id] host=[DIAMETER::host origin] realm=[DIAMETER::realm origin] result=[DIAMETER::result] count=[DIAMETER::avp count 264]"
+    DIAMETER::header pflag 1
+    DIAMETER::avp replace 264 edited.example.com
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "diameter",
+                        "direction": "client_to_server",
+                        "type": "request",
+                        "command_code": 272,
+                        "application_id": 4,
+                        "hop_by_hop_id": 0x10203040,
+                        "end_to_end_id": 0x50607080,
+                        "avps": [
+                            {"code": 263, "data": "session-1"},
+                            {"code": 264, "data": "origin.example.com"},
+                            {"code": 296, "data": "example.com"},
+                            {"code": 268, "type": "unsigned32", "data": "2001"},
+                        ],
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        entry = result["trace"][0]
+        diameter_event = next(
+            event for event in entry["events"] if event["event"] == "DIAMETER_INGRESS"
+        )
+        self.assertTrue(diameter_event["fired"])
+        self.assertTrue(
+            any(
+                "command=272 app=4 host=origin.example.com realm=example.com result=2001 count=1"
+                in log
+                for log in diameter_event["logs"]
+            )
+        )
+        self.assertEqual(diameter_event["state"]["diameter"]["pflag"], "1")
+        message_hex = diameter_event["state"]["diameter"]["message_hex"]
+        self.assertIn(b"edited.example.com", bytes.fromhex(message_hex))
+        self.assertNotIn(b"origin.example.com", bytes.fromhex(message_hex))
+
+    def test_diameter_raw_tcp_reassembly_handles_split_and_coalesced_messages(self) -> None:
+        first = self.adapter._diameter_encode_message(
+            {
+                "type": "request",
+                "command_code": 272,
+                "application_id": 4,
+                "hop_by_hop_id": 1,
+                "end_to_end_id": 2,
+                "avps": [{"code": 263, "data": "first"}],
+                "_diameter_avps": [{"code": 263, "data": "first"}],
+            }
+        )
+        second = self.adapter._diameter_encode_message(
+            {
+                "type": "response",
+                "command_code": 272,
+                "application_id": 4,
+                "hop_by_hop_id": 3,
+                "end_to_end_id": 4,
+                "avps": [{"code": 268, "type": "unsigned32", "data": "2001"}],
+                "_diameter_avps": [
+                    {
+                        "code": 268,
+                        "type": "unsigned32",
+                        "data": "2001",
+                        "_data": (2001).to_bytes(4, "big"),
+                    }
+                ],
+            }
+        )
+        combined = first + second
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "DIAMETER"],
+                "irule": "when DIAMETER_INGRESS { log local0. \"command=[DIAMETER::command] length=[DIAMETER::length]\" }\nwhen DIAMETER_EGRESS { log local0. egress }",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 3868, 3868, 0x02, sequence=1000
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 3868, 3868, 0x18,
+                            combined[:17], sequence=1001
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 3868, 3868, 0x18,
+                            combined[17:], sequence=1018
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertTrue(result["trace"][1]["buffered"])
+        diameter_entries = [entry for entry in result["trace"] if entry["protocol"] == "diameter"]
+        self.assertEqual(len(diameter_entries), 2)
+        self.assertEqual(
+            [event["event"] for event in diameter_entries[0]["events"] if event["fired"]],
+            ["DIAMETER_INGRESS"],
+        )
+        self.assertEqual(
+            [event["event"] for event in diameter_entries[1]["events"] if event["fired"]],
+            ["DIAMETER_INGRESS"],
+        )
+        self.assertIn("command=272 length=36", " ".join(diameter_entries[0]["events"][-1]["logs"]))
+
+    def test_diameter_response_drop_retransmission_and_wire_validation(self) -> None:
+        response = self.adapter.run_scenario(
+            {
+                "profiles": ["DIAMETER"],
+                "irule": "when DIAMETER_INGRESS { DIAMETER::respond 1 0 0 0 0 }",
+                "packets": [
+                    {
+                        "protocol": "diameter",
+                        "type": "request",
+                        "command_code": 280,
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(response["trace"][0]["responded"])
+        self.assertEqual(response["trace"][0]["response"]["arguments"], ["1", "0", "0", "0", "0"])
+
+        dropped = self.adapter.run_scenario(
+            {
+                "profiles": ["DIAMETER"],
+                "irule": "when DIAMETER_INGRESS { DIAMETER::drop }",
+                "packets": [{"protocol": "diameter", "command_code": 280}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(dropped["trace"][0]["dropped"])
+        self.assertEqual(dropped["trace"][0]["drop_reason"], "message")
+
+        retransmitted = self.adapter.run_scenario(
+            {
+                "profiles": ["DIAMETER"],
+                "irule": """
+when DIAMETER_INGRESS { DIAMETER::header pflag 1 }
+when DIAMETER_RETRANSMISSION { log local0. "retransmit=[DIAMETER::is_retransmission] pflag=[DIAMETER::header pflag]" }
+""",
+                "packets": [{"protocol": "diameter", "tflag": True, "command_code": 280}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        retransmission_event = next(
+            event for event in retransmitted["trace"][0]["events"]
+            if event["event"] == "DIAMETER_RETRANSMISSION"
+        )
+        self.assertTrue(
+            any("retransmit=1 pflag=1" in log for log in retransmission_event["logs"])
+        )
+
+        invalid = bytearray.fromhex("0100001c80000110000000000000000000000000")
+        invalid.extend(bytes.fromhex("0000010c00000000"))
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "AVP length"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["DIAMETER"],
+                    "irule": "when DIAMETER_INGRESS { log local0. invalid }",
+                    "packets": [{"protocol": "diameter", "message_hex": invalid.hex()}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_mqtt_rejects_unsupported_structured_direction_and_version(self) -> None:
         with self.assertRaises(self.adapter.EmulatorInputError):
             self.adapter.run_scenario(

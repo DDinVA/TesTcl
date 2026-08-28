@@ -228,6 +228,27 @@ EVENT_STATE_FIELDS = {
         "route",
         "via",
     },
+    "diameter": {
+        "type",
+        "version",
+        "rflag",
+        "pflag",
+        "eflag",
+        "tflag",
+        "command_code",
+        "application_id",
+        "hop_by_hop_id",
+        "end_to_end_id",
+        "avps",
+        "payload",
+        "payload_length",
+        "message",
+        "message_length",
+        "message_hex",
+        "payload_hex",
+        "route_status",
+        "persist_key",
+    },
 }
 EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
@@ -237,6 +258,7 @@ EVENT_STATE_NAMESPACES = {
     "websocket": "::state::websocket",
     "mqtt": "::state::mqtt",
     "sip": "::state::sip",
+    "diameter": "::state::diameter",
 }
 
 
@@ -449,6 +471,33 @@ SEMANTIC_MOCK_COMMANDS = {
     "SIP::to",
     "SIP::uri",
     "SIP::via",
+    "DIAMETER::avp",
+    "DIAMETER::command",
+    "DIAMETER::disconnect",
+    "DIAMETER::drop",
+    "DIAMETER::dynamic_route_insertion",
+    "DIAMETER::dynamic_route_lookup",
+    "DIAMETER::header",
+    "DIAMETER::host",
+    "DIAMETER::is_request",
+    "DIAMETER::is_response",
+    "DIAMETER::is_retransmission",
+    "DIAMETER::length",
+    "DIAMETER::message",
+    "DIAMETER::payload",
+    "DIAMETER::persist",
+    "DIAMETER::realm",
+    "DIAMETER::respond",
+    "DIAMETER::result",
+    "DIAMETER::retransmission",
+    "DIAMETER::retransmission_default",
+    "DIAMETER::retransmission_reason",
+    "DIAMETER::retransmit",
+    "DIAMETER::retry",
+    "DIAMETER::route_status",
+    "DIAMETER::session",
+    "DIAMETER::skip_capabilities_exchange",
+    "DIAMETER::state",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1284,12 +1333,13 @@ STREAM_MAX_BYTES = 2 * 1024 * 1024
 WEBSOCKET_MAX_FRAME_BYTES = STREAM_MAX_BYTES
 MQTT_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 SIP_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
+DIAMETER_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 MAX_PACKET_STREAMS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "mqtt", "sip", "wire"}
+PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "mqtt", "sip", "diameter", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -1410,6 +1460,23 @@ PACKET_PROTOCOL_FIELDS = {
         "route",
         "via",
     },
+    "diameter": {
+        "type",
+        "version",
+        "rflag",
+        "pflag",
+        "eflag",
+        "tflag",
+        "command_code",
+        "application_id",
+        "hop_by_hop_id",
+        "end_to_end_id",
+        "avps",
+        "message_hex",
+        "payload_hex",
+        "route_status",
+        "persist_key",
+    },
 }
 PACKET_EVENT_ADAPTERS = {
     "RULE_INIT": "trace initialization",
@@ -1452,6 +1519,9 @@ PACKET_EVENT_ADAPTERS = {
     "SIP_RESPONSE": "SIP server response ingress",
     "SIP_RESPONSE_DONE": "SIP response routing completion",
     "SIP_RESPONSE_SEND": "SIP response client-side send",
+    "DIAMETER_INGRESS": "Diameter client-side message ingress",
+    "DIAMETER_EGRESS": "Diameter message egress",
+    "DIAMETER_RETRANSMISSION": "Diameter request retransmission",
 }
 
 
@@ -2868,6 +2938,360 @@ def _decode_sip_messages(
     return messages, payload[position:]
 
 
+DIAMETER_AVP_VENDOR_FLAG = 0x80
+DIAMETER_FLAG_REQUEST = 0x80
+DIAMETER_FLAG_PROXIABLE = 0x40
+DIAMETER_FLAG_ERROR = 0x20
+DIAMETER_FLAG_RETRANSMIT = 0x10
+DIAMETER_HEADER_LENGTH = 20
+DIAMETER_AVP_HEADER_LENGTH = 8
+DIAMETER_AVP_VENDOR_HEADER_LENGTH = 12
+DIAMETER_AVP_NAME_CODES = {
+    "session-id": 263,
+    "origin-host": 264,
+    "origin-realm": 296,
+    "destination-host": 293,
+    "destination-realm": 283,
+    "result-code": 268,
+    "product-name": 269,
+    "supported-vendor-id": 265,
+    "disconnect-cause": 273,
+    "auth-application-id": 258,
+}
+DIAMETER_INTEGER32_AVPS = frozenset(
+    {258, 268, 273, 277, 280, 281, 282, 283, 285, 286, 287, 288, 289, 290, 291, 292, 296}
+)
+
+
+def _diameter_uint(value: Any, field: str, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise EmulatorInputError(f"Diameter {field} must be an integer")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        parsed = int(value, 10)
+    else:
+        raise EmulatorInputError(f"Diameter {field} must be an integer")
+    if not 0 <= parsed <= maximum:
+        raise EmulatorInputError(f"Diameter {field} must be between 0 and {maximum}")
+    return parsed
+
+
+def _diameter_bool(value: Any, field: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return _packet_bool(value, f"Diameter {field}") == "1"
+
+
+def _diameter_hex(value: Any, field: str) -> bytes:
+    text = _require_string(value, f"Diameter {field}")
+    if len(text) % 2 or not re.fullmatch(r"[0-9a-fA-F]*", text):
+        raise EmulatorInputError(f"Diameter {field} must be an even-length hexadecimal string")
+    try:
+        result = bytes.fromhex(text)
+    except ValueError as exc:  # pragma: no cover - regex guards this path
+        raise EmulatorInputError(f"Diameter {field} is not valid hexadecimal") from exc
+    if len(result) > DIAMETER_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"Diameter {field} exceeds the {DIAMETER_MAX_MESSAGE_BYTES // (1024 * 1024)} MiB limit"
+        )
+    return result
+
+
+def _diameter_avp_code(value: Any, field: str) -> int:
+    if isinstance(value, str):
+        name = value.lower()
+        if name in DIAMETER_AVP_NAME_CODES:
+            return DIAMETER_AVP_NAME_CODES[name]
+    return _diameter_uint(value, field, 0xFFFF_FFFF)
+
+
+def _diameter_avp_data(value: dict[str, Any], index: int) -> bytes:
+    supplied = [field for field in ("data", "data_hex", "data_base64") if field in value]
+    if len(supplied) > 1:
+        raise EmulatorInputError(
+            f"Diameter AVP {index} must specify only one of data, data_hex, or data_base64"
+        )
+    if not supplied:
+        return b""
+    field = supplied[0]
+    if field == "data_hex":
+        return _diameter_hex(value[field], f"AVP {index} data_hex")
+    if field == "data_base64":
+        encoded = _require_string(value[field], f"Diameter AVP {index} data_base64")
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise EmulatorInputError(
+                f"Diameter AVP {index} data_base64 is not valid base64"
+            ) from exc
+        if len(decoded) > DIAMETER_MAX_MESSAGE_BYTES:
+            raise EmulatorInputError(
+                f"Diameter AVP {index} data exceeds the {DIAMETER_MAX_MESSAGE_BYTES // (1024 * 1024)} MiB limit"
+            )
+        return decoded
+    data = _require_string(value[field], f"Diameter AVP {index} data")
+    data_type = str(value.get("type", "utf8")).lower()
+    if data_type in {"hex", "raw"}:
+        return _diameter_hex(data, f"AVP {index} data")
+    if data_type == "base64":
+        try:
+            decoded = base64.b64decode(data, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise EmulatorInputError(f"Diameter AVP {index} data is not valid base64") from exc
+        if len(decoded) > DIAMETER_MAX_MESSAGE_BYTES:
+            raise EmulatorInputError(
+                f"Diameter AVP {index} data exceeds the {DIAMETER_MAX_MESSAGE_BYTES // (1024 * 1024)} MiB limit"
+            )
+        return decoded
+    if data_type in {"integer32", "unsigned32"}:
+        number = _diameter_uint(data, f"AVP {index} data", 0xFFFF_FFFF)
+        return number.to_bytes(4, "big")
+    if data_type in {"integer64", "unsigned64"}:
+        number = _diameter_uint(data, f"AVP {index} data", 0xFFFF_FFFF_FFFF_FFFF)
+        return number.to_bytes(8, "big")
+    try:
+        encoded = data.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise EmulatorInputError(f"Diameter AVP {index} data must be valid UTF-8") from exc
+    if len(encoded) > DIAMETER_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"Diameter AVP {index} data exceeds the {DIAMETER_MAX_MESSAGE_BYTES // (1024 * 1024)} MiB limit"
+        )
+    return encoded
+
+
+def _diameter_normalise_avps(raw: Any) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise EmulatorInputError("Diameter avps must be an array")
+    if len(raw) > PACKET_MAX_COUNT:
+        raise EmulatorInputError(f"Diameter avps cannot contain more than {PACKET_MAX_COUNT} entries")
+    result: list[dict[str, Any]] = []
+    allowed = {"code", "flags", "vendor_id", "data", "data_hex", "data_base64", "type"}
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise EmulatorInputError(f"Diameter AVP {index} must be an object")
+        unknown = sorted(set(item) - allowed)
+        if unknown:
+            raise EmulatorInputError(
+                f"unsupported Diameter AVP {index} field(s): {', '.join(unknown)}"
+            )
+        if "code" not in item:
+            raise EmulatorInputError(f"Diameter AVP {index} requires code")
+        code = _diameter_avp_code(item["code"], f"AVP {index} code")
+        flags = _diameter_uint(item.get("flags", 0), f"AVP {index} flags", 0xFF)
+        vendor_id = _diameter_uint(item.get("vendor_id", 0), f"AVP {index} vendor_id", 0xFFFF_FFFF)
+        if vendor_id:
+            flags |= DIAMETER_AVP_VENDOR_FLAG
+        data = _diameter_avp_data(item, index)
+        data_type = str(item.get("type", "utf8"))
+        result.append(
+            {
+                "code": code,
+                "flags": flags,
+                "vendor_id": vendor_id,
+                "data": _decode_wire_text(data),
+                "data_hex": data.hex(),
+                "type": data_type,
+                "_data": data,
+            }
+        )
+    return result
+
+
+def _diameter_encode_avp(avp: dict[str, Any]) -> bytes:
+    code = _diameter_avp_code(avp["code"], "AVP code")
+    flags = _diameter_uint(avp.get("flags", 0), "AVP flags", 0xFF)
+    vendor_id = _diameter_uint(avp.get("vendor_id", 0), "AVP vendor_id", 0xFFFF_FFFF)
+    data = avp.get("_data")
+    if not isinstance(data, bytes):
+        data = _diameter_avp_data(avp, 0)
+    if vendor_id:
+        flags |= DIAMETER_AVP_VENDOR_FLAG
+    header_length = DIAMETER_AVP_VENDOR_HEADER_LENGTH if flags & DIAMETER_AVP_VENDOR_FLAG else DIAMETER_AVP_HEADER_LENGTH
+    length = header_length + len(data)
+    if length > 0xFF_FFFF:
+        raise EmulatorInputError("Diameter AVP length exceeds the three-byte wire limit")
+    header = code.to_bytes(4, "big") + bytes([flags]) + length.to_bytes(3, "big")
+    if flags & DIAMETER_AVP_VENDOR_FLAG:
+        header += vendor_id.to_bytes(4, "big")
+    encoded = header + data
+    return encoded + (b"\x00" * ((-len(encoded)) % 4))
+
+
+def _diameter_avps_payload(avps: list[dict[str, Any]]) -> bytes:
+    payload = b"".join(_diameter_encode_avp(avp) for avp in avps)
+    if len(payload) > DIAMETER_MAX_MESSAGE_BYTES - DIAMETER_HEADER_LENGTH:
+        raise EmulatorInputError(
+            f"Diameter AVP payload exceeds the {DIAMETER_MAX_MESSAGE_BYTES // (1024 * 1024)} MiB limit"
+        )
+    return payload
+
+
+def _diameter_encode_message(packet: dict[str, Any]) -> bytes:
+    version = _diameter_uint(packet.get("version", 1), "version", 0xFF)
+    flags = 0
+    if _diameter_bool(packet.get("rflag"), "rflag", packet.get("type", "request") == "request"):
+        flags |= DIAMETER_FLAG_REQUEST
+    if _diameter_bool(packet.get("pflag"), "pflag"):
+        flags |= DIAMETER_FLAG_PROXIABLE
+    if _diameter_bool(packet.get("eflag"), "eflag"):
+        flags |= DIAMETER_FLAG_ERROR
+    if _diameter_bool(packet.get("tflag"), "tflag"):
+        flags |= DIAMETER_FLAG_RETRANSMIT
+    if "_diameter_payload" in packet:
+        payload = packet["_diameter_payload"]
+        if not isinstance(payload, bytes):
+            raise EmulatorInputError("Diameter internal payload must be bytes")
+    elif "payload_hex" in packet:
+        payload = _diameter_hex(packet["payload_hex"], "payload_hex")
+    else:
+        avps = packet.get("_diameter_avps", packet.get("avps", []))
+        if not isinstance(avps, list):
+            raise EmulatorInputError("Diameter avps must be an array")
+        payload = _diameter_avps_payload(avps)
+    length = DIAMETER_HEADER_LENGTH + len(payload)
+    if length > DIAMETER_MAX_MESSAGE_BYTES or length > 0xFF_FFFF:
+        raise EmulatorInputError("Diameter message length exceeds the supported limit")
+    header = bytes([version]) + length.to_bytes(3, "big") + bytes([flags])
+    header += _diameter_uint(packet.get("command_code", 0), "command_code", 0xFF_FFFF).to_bytes(3, "big")
+    header += _diameter_uint(packet.get("application_id", 0), "application_id", 0xFFFF_FFFF).to_bytes(4, "big")
+    header += _diameter_uint(packet.get("hop_by_hop_id", 0), "hop_by_hop_id", 0xFFFF_FFFF).to_bytes(4, "big")
+    header += _diameter_uint(packet.get("end_to_end_id", 0), "end_to_end_id", 0xFFFF_FFFF).to_bytes(4, "big")
+    return header + payload
+
+
+def _diameter_parsed_avp(code: int, flags: int, vendor_id: int, data: bytes) -> dict[str, Any]:
+    data_type = "integer32" if code in DIAMETER_INTEGER32_AVPS and len(data) == 4 else "utf8"
+    value: Any = _decode_wire_text(data)
+    if data_type == "integer32":
+        value = str(int.from_bytes(data, "big"))
+    return {
+        "code": code,
+        "flags": flags,
+        "vendor_id": vendor_id,
+        "data": value,
+        "data_hex": data.hex(),
+        "type": data_type,
+        "_data": data,
+    }
+
+
+def _decode_diameter_message(
+    payload: bytes, direction: str
+) -> tuple[dict[str, Any], int] | None:
+    if not payload:
+        return None
+    if len(payload) < DIAMETER_HEADER_LENGTH:
+        return None
+    version = payload[0]
+    if version != 1:
+        raise EmulatorInputError(f"unsupported Diameter version {version}")
+    length = int.from_bytes(payload[1:4], "big")
+    if length < DIAMETER_HEADER_LENGTH:
+        raise EmulatorInputError("Diameter message length is smaller than its header")
+    if length > DIAMETER_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"Diameter message exceeds the {DIAMETER_MAX_MESSAGE_BYTES // (1024 * 1024)} MiB limit"
+        )
+    if len(payload) < length:
+        return None
+    message = bytes(payload[:length])
+    flags = message[4]
+    command_code = int.from_bytes(message[5:8], "big")
+    application_id = int.from_bytes(message[8:12], "big")
+    hop_by_hop_id = int.from_bytes(message[12:16], "big")
+    end_to_end_id = int.from_bytes(message[16:20], "big")
+    avps: list[dict[str, Any]] = []
+    cursor = DIAMETER_HEADER_LENGTH
+    while cursor < length:
+        if length - cursor < DIAMETER_AVP_HEADER_LENGTH:
+            raise EmulatorInputError("Diameter AVP header is truncated")
+        code = int.from_bytes(message[cursor : cursor + 4], "big")
+        avp_flags = message[cursor + 4]
+        avp_length = int.from_bytes(message[cursor + 5 : cursor + 8], "big")
+        header_length = (
+            DIAMETER_AVP_VENDOR_HEADER_LENGTH
+            if avp_flags & DIAMETER_AVP_VENDOR_FLAG
+            else DIAMETER_AVP_HEADER_LENGTH
+        )
+        if avp_length < header_length or cursor + avp_length > length:
+            raise EmulatorInputError("Diameter AVP length is invalid")
+        vendor_id = 0
+        data_start = cursor + DIAMETER_AVP_HEADER_LENGTH
+        if avp_flags & DIAMETER_AVP_VENDOR_FLAG:
+            vendor_id = int.from_bytes(message[data_start : data_start + 4], "big")
+            data_start += 4
+        data = bytes(message[data_start : cursor + avp_length])
+        avps.append(_diameter_parsed_avp(code, avp_flags, vendor_id, data))
+        padded_length = (avp_length + 3) & ~3
+        if cursor + padded_length > length:
+            raise EmulatorInputError("Diameter AVP padding exceeds the message")
+        if any(message[cursor + avp_length : cursor + padded_length]):
+            raise EmulatorInputError("Diameter AVP padding must be zero")
+        cursor += padded_length
+    return {
+        "protocol": "diameter",
+        "direction": direction,
+        "type": "request" if flags & DIAMETER_FLAG_REQUEST else "response",
+        "version": version,
+        "rflag": bool(flags & DIAMETER_FLAG_REQUEST),
+        "pflag": bool(flags & DIAMETER_FLAG_PROXIABLE),
+        "eflag": bool(flags & DIAMETER_FLAG_ERROR),
+        "tflag": bool(flags & DIAMETER_FLAG_RETRANSMIT),
+        "command_code": command_code,
+        "application_id": application_id,
+        "hop_by_hop_id": hop_by_hop_id,
+        "end_to_end_id": end_to_end_id,
+        "avps": avps,
+        "payload_hex": message[DIAMETER_HEADER_LENGTH:].hex(),
+        "message_hex": message.hex(),
+        "message": _decode_wire_text(message),
+        "message_length": length,
+        "_diameter_avps": avps,
+        "_diameter_payload": message[DIAMETER_HEADER_LENGTH:],
+        "_wire_payload": message,
+    }, length
+
+
+def _decode_diameter_messages(
+    payload: bytes, direction: str
+) -> tuple[list[dict[str, Any]], bytes]:
+    messages: list[dict[str, Any]] = []
+    position = 0
+    while position < len(payload):
+        decoded = _decode_diameter_message(payload[position:], direction)
+        if decoded is None:
+            break
+        message, consumed = decoded
+        if consumed <= 0:
+            raise EmulatorInputError("Diameter decoder returned an invalid message length")
+        messages.append(message)
+        if len(messages) > PACKET_MAX_COUNT:
+            raise EmulatorInputError(
+                f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} Diameter messages"
+            )
+        position += consumed
+    return messages, payload[position:]
+
+
+def _diameter_avps_tcl(avps: list[dict[str, Any]]) -> str:
+    records = []
+    for avp in avps:
+        fields = [
+            str(avp.get("code", 0)),
+            str(avp.get("flags", 0)),
+            str(avp.get("vendor_id", 0)),
+            str(avp.get("data_hex", "")),
+        ]
+        # Braces group the inner list for the outer list; the quoted fields
+        # remain Tcl list delimiters when the inner value is lindex'ed.
+        records.append("{" + " ".join(_tcl_quote(field) for field in fields) + "}")
+    return " ".join(records)
+
+
 def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or not raw:
         raise EmulatorInputError("packets must be a non-empty array")
@@ -2960,6 +3384,9 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 continue
             if field == "headers" and protocol == "sip":
                 normalised[field] = _sip_header_pairs(packet[field], f"packet {index} headers")
+            elif field == "avps" and protocol == "diameter":
+                normalised[field] = _diameter_normalise_avps(packet[field])
+                normalised["_diameter_avps"] = normalised[field]
             elif field in {"headers", "response_headers"}:
                 value = packet[field]
                 if not isinstance(value, dict) or not all(
@@ -3001,7 +3428,31 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                         raise EmulatorInputError(
                             f"unsupported SIP packet type: {packet_type}"
                         )
+                elif protocol == "diameter":
+                    if packet_type not in {"request", "response"}:
+                        raise EmulatorInputError(
+                            f"unsupported Diameter packet type: {packet_type}"
+                        )
                 normalised[field] = packet_type
+            elif protocol == "diameter" and field in {
+                "version",
+                "command_code",
+                "application_id",
+                "hop_by_hop_id",
+                "end_to_end_id",
+            }:
+                maximum = 0xFF if field == "version" else (
+                    0xFF_FFFF if field == "command_code" else 0xFFFF_FFFF
+                )
+                normalised[field] = _diameter_uint(
+                    packet[field], f"packet {index} {field}", maximum
+                )
+            elif protocol == "diameter" and field in {"rflag", "pflag", "eflag", "tflag"}:
+                normalised[field] = _packet_bool(packet[field], f"packet {index} {field}")
+            elif protocol == "diameter" and field in {"message_hex", "payload_hex"}:
+                normalised[field] = _require_string(
+                    packet[field], f"packet {index} {field}"
+                )
             else:
                 normalised[field] = _packet_scalar(packet[field], f"packet {index} {field}")
 
@@ -3145,6 +3596,45 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 if parsed is None:  # pragma: no cover - encoder contract guard
                     raise EmulatorInputError(
                         f"packet {index} SIP encoder produced an incomplete message"
+                    )
+                normalised.update(parsed)
+        if protocol == "diameter":
+            if "message_hex" in normalised and (
+                "avps" in normalised or "payload_hex" in normalised
+            ):
+                raise EmulatorInputError(
+                    f"packet {index} Diameter message_hex cannot be combined with avps or payload_hex"
+                )
+            if "avps" in normalised and "payload_hex" in normalised:
+                raise EmulatorInputError(
+                    f"packet {index} Diameter avps cannot be combined with payload_hex"
+                )
+            if "type" not in normalised:
+                normalised["type"] = "request"
+            if "rflag" not in normalised:
+                normalised["rflag"] = normalised["type"] == "request"
+            if "message_hex" in normalised:
+                raw_message = _diameter_hex(normalised["message_hex"], f"packet {index} message_hex")
+                decoded = _decode_diameter_message(raw_message, direction)
+                if decoded is None or decoded[1] != len(raw_message):
+                    raise EmulatorInputError(
+                        f"packet {index} Diameter message_hex must contain exactly one complete message"
+                    )
+                parsed, _ = decoded
+                if parsed["type"] != normalised["type"]:
+                    raise EmulatorInputError(
+                        f"packet {index} Diameter type does not match its request flag"
+                    )
+                normalised.update(parsed)
+            else:
+                if "avps" not in normalised:
+                    normalised["avps"] = []
+                    normalised["_diameter_avps"] = []
+                normalised["_wire_payload"] = _diameter_encode_message(normalised)
+                parsed, _ = _decode_diameter_message(normalised["_wire_payload"], direction)
+                if parsed is None:  # pragma: no cover - encoder contract guard
+                    raise EmulatorInputError(
+                        f"packet {index} Diameter encoder produced an incomplete message"
                     )
                 normalised.update(parsed)
         packets.append(normalised)
@@ -3333,6 +3823,10 @@ class EmulatorSession:
         )
         self._sip_raw_active = any(
             str(profile).upper() in {"SIP", "SIPROUTER", "SIPSESSION"}
+            for profile in self._profiles
+        )
+        self._diameter_raw_active = any(
+            str(profile).upper() in {"DIAMETER", "DIAMETERSESSION", "DIAMETER_ENDPOINT", "MR"}
             for profile in self._profiles
         )
         self._thread.start()
@@ -3536,7 +4030,7 @@ class EmulatorSession:
         for layer, values in state.items():
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip"} and field in {"payload", "message"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter"} and field in {"payload", "message"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -3554,6 +4048,8 @@ class EmulatorSession:
         event_result = session.fire_event(event_name)
         if "sip" in state:
             session.eval_tcl("::itest::semantic::sip_rebuild_message")
+        if "diameter" in state:
+            session.eval_tcl("::itest::semantic::diameter_rebuild_message")
         fired_events = _split_tcl_list(session.eval_tcl("::itest::get_fired_events"))
         result = {
             "event": event_name,
@@ -3611,7 +4107,7 @@ class EmulatorSession:
         protocol = packet["protocol"]
         if protocol == "sip" and packet.get("transport", "tcp") == "udp":
             connection.update({"protocol": "17", "transport": "udp"})
-        elif protocol in {"tcp", "tls", "http", "websocket", "mqtt", "sip"}:
+        elif protocol in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter"}:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol in {"udp", "dns"}:
             connection.update({"protocol": "17", "transport": "udp"})
@@ -3747,6 +4243,32 @@ class EmulatorSession:
             sip_state["message"] = message
             sip_state["message_length"] = str(len(wire_message))
             state["sip"] = sip_state
+        elif protocol == "diameter":
+            diameter_state: dict[str, str] = {}
+            for field in EVENT_STATE_FIELDS["diameter"]:
+                if field not in packet:
+                    continue
+                if field == "avps":
+                    diameter_state[field] = _diameter_avps_tcl(
+                        packet.get("_diameter_avps", packet[field])
+                    )
+                elif field in {"payload", "message"}:
+                    diameter_state[field] = packet[field]
+                else:
+                    diameter_state[field] = _packet_scalar(packet[field], field)
+            payload = packet.get("_diameter_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                payload = _diameter_hex(packet.get("payload_hex", ""), "payload_hex")
+            diameter_state["payload"] = bytes(payload)
+            diameter_state["payload_length"] = str(len(payload))
+            message = packet.get("_diameter_message")
+            if not isinstance(message, (bytes, bytearray)):
+                message = packet.get("_wire_payload")
+            if not isinstance(message, (bytes, bytearray)):
+                message = _diameter_encode_message(packet)
+            diameter_state["message"] = bytes(message)
+            diameter_state["message_length"] = str(len(message))
+            state["diameter"] = diameter_state
         return state
 
     def _current_sip_event_state(
@@ -3769,6 +4291,20 @@ class EmulatorSession:
                 sip_state[field] = raw
             else:
                 sip_state[field] = raw
+        return state
+
+    def _current_diameter_event_state(
+        self, session: Any, packet: dict[str, Any]
+    ) -> dict[str, dict[str, str]]:
+        """Build a Diameter event state from the mutable Tcl message."""
+        state: dict[str, dict[str, str]] = {
+            "connection": self._packet_connection_state(packet),
+            "diameter": {},
+        }
+        diameter_state = state["diameter"]
+        for field in EVENT_STATE_FIELDS["diameter"]:
+            raw = session.eval_tcl(f"set ::state::diameter::{field}")
+            diameter_state[field] = raw
         return state
 
     @staticmethod
@@ -3883,7 +4419,7 @@ class EmulatorSession:
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
-        if packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip"}:
+        if packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter"}:
             return
         source = packet["source"]
         destination = packet["destination"]
@@ -3903,12 +4439,13 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
         session.eval_tcl("::itest::semantic::mqtt_reset_connection")
         session.eval_tcl("::itest::semantic::sip_reset_connection")
+        session.eval_tcl("::itest::semantic::diameter_reset_connection")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
         events.append(
             self._fire_event_on_worker(
@@ -4050,6 +4587,10 @@ class EmulatorSession:
             method.startswith(payload) or payload.startswith(method + b" ")
             for method in methods
         )
+
+    @staticmethod
+    def _looks_like_diameter_prefix(payload: bytes) -> bool:
+        return bool(payload) and payload[0] == 1
 
     def _reassemble_packet(
         self, packet: dict[str, Any], packet_index: int
@@ -4201,6 +4742,32 @@ class EmulatorSession:
                     stream.segments.clear()
                 for message in decoded_messages:
                     message["transport"] = "tcp"
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            message[field] = packet[field]
+                first = decoded_messages[0]
+                if len(decoded_messages) > 1:
+                    first["_coalesced_packets"] = decoded_messages[1:]
+                return first, len(combined) - len(remaining)
+            stream.buffer = combined
+            if not has_gap:
+                stream.segments.clear()
+            if stream.buffered_bytes > STREAM_MAX_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"packet stream exceeds the {STREAM_MAX_BYTES // (1024 * 1024)} MiB limit"
+                )
+            return None, stream.buffered_bytes
+        looks_like_diameter = self._diameter_raw_active and self._looks_like_diameter_prefix(combined)
+        if looks_like_diameter:
+            decoded_messages, remaining = _decode_diameter_messages(
+                combined, packet["direction"]
+            )
+            if decoded_messages:
+                stream.buffer = remaining
+                if not has_gap:
+                    stream.segments.clear()
+                for message in decoded_messages:
                     for field in ("source", "destination", "timestamp"):
                         if field in packet:
                             message[field] = packet[field]
@@ -4404,6 +4971,17 @@ class EmulatorSession:
                 "record_route",
                 "route",
                 "via",
+                "rflag",
+                "pflag",
+                "eflag",
+                "tflag",
+                "command_code",
+                "application_id",
+                "hop_by_hop_id",
+                "end_to_end_id",
+                "avps",
+                "message_hex",
+                "payload_hex",
                 "timestamp",
                 "seq",
                 "ack",
@@ -4603,6 +5181,67 @@ class EmulatorSession:
                                     self._current_sip_event_state(session, packet),
                                 )
                             )
+                continue
+
+            if protocol == "diameter":
+                self._activate_packet_connection(session, packet, entry["events"])
+                if direction == "server_to_client" and not self._server_connection_open:
+                    self._configure_packet_connection(session, packet)
+                    entry["events"].append(
+                        self._fire_event_on_worker(
+                            session,
+                            "SERVER_CONNECTED",
+                            {"connection": self._packet_connection_state(packet)},
+                        )
+                    )
+                    self._server_connection_open = True
+                session.eval_tcl("::itest::semantic::diameter_prepare_message")
+                event_name = (
+                    "DIAMETER_INGRESS"
+                    if direction == "client_to_server"
+                    else "DIAMETER_EGRESS"
+                )
+                entry["events"].append(
+                    self._fire_event_on_worker(
+                        session, event_name, self._packet_event_state(packet)
+                    )
+                )
+                raw_flags = _split_tcl_list(
+                    session.eval_tcl("::itest::semantic::diameter_flags_snapshot")
+                )
+                if len(raw_flags) % 2:
+                    raise EmulatorInputError("invalid Diameter message state")
+                message_flags = dict(zip(raw_flags[::2], raw_flags[1::2]))
+                if message_flags.get("dropped") == "1":
+                    entry["dropped"] = True
+                    entry["drop_reason"] = "message"
+                if message_flags.get("responded") == "1":
+                    entry["responded"] = True
+                    response_snapshot = _split_tcl_list(
+                        session.eval_tcl("::itest::semantic::diameter_response_snapshot")
+                    )
+                    if len(response_snapshot) % 2:
+                        raise EmulatorInputError("invalid Diameter response state")
+                    response_state = dict(
+                        zip(response_snapshot[::2], response_snapshot[1::2])
+                    )
+                    response_args = _split_tcl_list(response_state.get("args", ""))
+                    entry["response"] = {
+                        "arguments": response_args,
+                        "message_hex": session.eval_tcl(
+                            "binary encode hex $::state::diameter::message"
+                        ),
+                    }
+                if message_flags.get("disconnected") == "1":
+                    entry["disconnect_requested"] = True
+                if packet.get("tflag"):
+                    entry["events"].append(
+                        self._fire_event_on_worker(
+                            session,
+                            "DIAMETER_RETRANSMISSION",
+                            self._current_diameter_event_state(session, packet),
+                        )
+                    )
                 continue
 
             if protocol == "websocket":
