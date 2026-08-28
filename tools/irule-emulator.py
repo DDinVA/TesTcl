@@ -249,6 +249,20 @@ EVENT_STATE_FIELDS = {
         "route_status",
         "persist_key",
     },
+    "radius": {
+        "code",
+        "id",
+        "authenticator",
+        "attributes",
+        "payload",
+        "payload_length",
+        "message",
+        "message_length",
+        "message_hex",
+        "payload_hex",
+        "rtdom",
+        "subscriber",
+    },
 }
 EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
@@ -259,6 +273,7 @@ EVENT_STATE_NAMESPACES = {
     "mqtt": "::state::mqtt",
     "sip": "::state::sip",
     "diameter": "::state::diameter",
+    "radius": "::state::radius",
 }
 
 
@@ -498,6 +513,12 @@ SEMANTIC_MOCK_COMMANDS = {
     "DIAMETER::session",
     "DIAMETER::skip_capabilities_exchange",
     "DIAMETER::state",
+    "RADIUS::avp",
+    "RADIUS::code",
+    "RADIUS::id",
+    "RADIUS::rtdom",
+    "RADIUS::subscriber",
+    "radius_authenticate",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1334,12 +1355,44 @@ WEBSOCKET_MAX_FRAME_BYTES = STREAM_MAX_BYTES
 MQTT_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 SIP_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 DIAMETER_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
+RADIUS_MAX_MESSAGE_BYTES = 4096
+RADIUS_AUTHENTICATOR_BYTES = 16
+RADIUS_HEADER_LENGTH = 20
+RADIUS_ATTRIBUTE_HEADER_LENGTH = 2
+RADIUS_VENDOR_SPECIFIC = 26
+RADIUS_AUTH_REQUEST = 1
+RADIUS_ACCOUNTING_REQUEST = 4
+RADIUS_ACCOUNTING_RESPONSE = 5
+RADIUS_AUTH_RESPONSE_CODES = frozenset({2, 3, 11})
+RADIUS_AUTH_ATTRIBUTE_CODES = {
+    "user-name": 1,
+    "user-password": 2,
+    "nas-ip-address": 4,
+    "nas-port": 5,
+    "service-type": 6,
+    "framed-ip-address": 8,
+    "reply-message": 18,
+    "state": 24,
+    "class": 25,
+    "vendor-specific": 26,
+    "session-timeout": 27,
+    "called-station-id": 30,
+    "calling-station-id": 31,
+    "nas-identifier": 32,
+    "acct-status-type": 40,
+    "acct-input-octets": 42,
+    "acct-output-octets": 43,
+    "acct-session-id": 44,
+    "event-timestamp": 55,
+    "nas-port-type": 61,
+    "connect-info": 77,
+}
 MAX_PACKET_STREAMS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "mqtt", "sip", "diameter", "wire"}
+PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -1477,6 +1530,16 @@ PACKET_PROTOCOL_FIELDS = {
         "route_status",
         "persist_key",
     },
+    "radius": {
+        "code",
+        "id",
+        "authenticator_hex",
+        "avps",
+        "message_hex",
+        "payload_hex",
+        "rtdom",
+        "subscriber",
+    },
 }
 PACKET_EVENT_ADAPTERS = {
     "RULE_INIT": "trace initialization",
@@ -1522,6 +1585,10 @@ PACKET_EVENT_ADAPTERS = {
     "DIAMETER_INGRESS": "Diameter client-side message ingress",
     "DIAMETER_EGRESS": "Diameter message egress",
     "DIAMETER_RETRANSMISSION": "Diameter request retransmission",
+    "RADIUS_AAA_AUTH_REQUEST": "RADIUS authentication request",
+    "RADIUS_AAA_AUTH_RESPONSE": "RADIUS authentication response",
+    "RADIUS_AAA_ACCT_REQUEST": "RADIUS accounting request",
+    "RADIUS_AAA_ACCT_RESPONSE": "RADIUS accounting response",
 }
 
 
@@ -3292,6 +3359,266 @@ def _diameter_avps_tcl(avps: list[dict[str, Any]]) -> str:
     return " ".join(records)
 
 
+def _radius_uint(value: Any, field: str, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise EmulatorInputError(f"RADIUS {field} must be an integer")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        parsed = int(value, 10)
+    else:
+        raise EmulatorInputError(f"RADIUS {field} must be an integer")
+    if not 0 <= parsed <= maximum:
+        raise EmulatorInputError(f"RADIUS {field} must be between 0 and {maximum}")
+    return parsed
+
+
+def _radius_hex(value: Any, field: str) -> bytes:
+    text = _require_string(value, f"RADIUS {field}")
+    if len(text) % 2 or not re.fullmatch(r"[0-9a-fA-F]*", text):
+        raise EmulatorInputError(f"RADIUS {field} must be an even-length hexadecimal string")
+    try:
+        return bytes.fromhex(text)
+    except ValueError as exc:  # pragma: no cover - regex guards this path
+        raise EmulatorInputError(f"RADIUS {field} is not valid hexadecimal") from exc
+
+
+def _radius_attr_code(value: Any, field: str) -> int:
+    if isinstance(value, str):
+        key = value.lower().replace("_", "-")
+        if key in RADIUS_AUTH_ATTRIBUTE_CODES:
+            return RADIUS_AUTH_ATTRIBUTE_CODES[key]
+    return _radius_uint(value, field, 255)
+
+
+def _radius_attr_data(value: dict[str, Any], index: int) -> tuple[bytes, str]:
+    supplied = [field for field in ("data", "data_hex", "data_base64") if field in value]
+    if len(supplied) > 1:
+        raise EmulatorInputError(
+            f"RADIUS attribute {index} must specify only one of data, data_hex, or data_base64"
+        )
+    if not supplied:
+        return b"", "octet"
+    source = supplied[0]
+    if source == "data_hex":
+        return _radius_hex(value[source], f"attribute {index} data_hex"), "octet"
+    if source == "data_base64":
+        encoded = _require_string(value[source], f"RADIUS attribute {index} data_base64")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise EmulatorInputError(
+                f"RADIUS attribute {index} data_base64 is not valid base64"
+            ) from exc
+        return data, "octet"
+
+    raw = _require_string(value[source], f"RADIUS attribute {index} data")
+    data_type = str(value.get("type", "string")).lower()
+    if data_type in {"integer", "unsigned32"}:
+        return _radius_uint(raw, f"attribute {index} data", 0xFFFF_FFFF).to_bytes(4, "big"), "integer"
+    if data_type in {"integer64", "unsigned64"}:
+        return _radius_uint(raw, f"attribute {index} data", 0xFFFF_FFFF_FFFF_FFFF).to_bytes(8, "big"), "integer64"
+    if data_type == "ip4":
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError as exc:
+            raise EmulatorInputError(f"RADIUS attribute {index} data is not an IP address") from exc
+        if address.version != 4:
+            raise EmulatorInputError(f"RADIUS attribute {index} requires an IPv4 address")
+        return address.packed, "ip4"
+    if data_type == "ip6":
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError as exc:
+            raise EmulatorInputError(f"RADIUS attribute {index} data is not an IP address") from exc
+        if address.version != 6:
+            raise EmulatorInputError(f"RADIUS attribute {index} requires an IPv6 address")
+        return address.packed, "ip6"
+    if data_type in {"hex", "octet", "raw"} and re.fullmatch(r"[0-9a-fA-F]*", raw) and len(raw) % 2 == 0:
+        return bytes.fromhex(raw), "octet"
+    try:
+        return raw.encode("utf-8"), "string"
+    except UnicodeEncodeError as exc:
+        raise EmulatorInputError(f"RADIUS attribute {index} data must be valid UTF-8") from exc
+
+
+def _radius_normalise_avps(raw: Any) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise EmulatorInputError("RADIUS avps must be an array")
+    if len(raw) > PACKET_MAX_COUNT:
+        raise EmulatorInputError(f"RADIUS avps cannot contain more than {PACKET_MAX_COUNT} entries")
+    allowed = {"code", "vendor_id", "vendor_type", "data", "data_hex", "data_base64", "type"}
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise EmulatorInputError(f"RADIUS attribute {index} must be an object")
+        unknown = sorted(set(item) - allowed)
+        if unknown:
+            raise EmulatorInputError(
+                f"unsupported RADIUS attribute {index} field(s): {', '.join(unknown)}"
+            )
+        if "code" not in item:
+            raise EmulatorInputError(f"RADIUS attribute {index} requires code")
+        code = _radius_attr_code(item["code"], f"attribute {index} code")
+        vendor_id = _radius_uint(item.get("vendor_id", 0), f"attribute {index} vendor_id", 0xFFFF_FFFF)
+        vendor_type = _radius_uint(item.get("vendor_type", 0), f"attribute {index} vendor_type", 255)
+        if vendor_id or vendor_type:
+            if code != RADIUS_VENDOR_SPECIFIC:
+                raise EmulatorInputError(
+                    f"RADIUS attribute {index} vendor fields require code 26 (Vendor-Specific)"
+                )
+        data, inferred_type = _radius_attr_data(item, index)
+        header_length = 8 if code == RADIUS_VENDOR_SPECIFIC else 2
+        if header_length + len(data) > 255:
+            raise EmulatorInputError(f"RADIUS attribute {index} exceeds the 255-byte attribute limit")
+        result.append(
+            {
+                "code": code,
+                "vendor_id": vendor_id,
+                "vendor_type": vendor_type,
+                "data": _decode_wire_text(data),
+                "data_hex": data.hex(),
+                "type": str(item.get("type", inferred_type)),
+                "_data": data,
+            }
+        )
+    return result
+
+
+def _radius_encode_avp(avp: dict[str, Any]) -> bytes:
+    code = _radius_attr_code(avp["code"], "attribute code")
+    vendor_id = _radius_uint(avp.get("vendor_id", 0), "attribute vendor_id", 0xFFFF_FFFF)
+    vendor_type = _radius_uint(avp.get("vendor_type", 0), "attribute vendor_type", 255)
+    data = avp.get("_data")
+    if not isinstance(data, bytes):
+        data, _ = _radius_attr_data(avp, 0)
+    if code == RADIUS_VENDOR_SPECIFIC:
+        if not vendor_id or not vendor_type:
+            raise EmulatorInputError("RADIUS Vendor-Specific attributes require vendor_id and vendor_type")
+        data = vendor_id.to_bytes(4, "big") + bytes([vendor_type, len(data) + 2]) + data
+    elif vendor_id or vendor_type:
+        raise EmulatorInputError("RADIUS vendor fields require attribute code 26")
+    length = RADIUS_ATTRIBUTE_HEADER_LENGTH + len(data)
+    if length > 255:
+        raise EmulatorInputError("RADIUS attribute length exceeds the one-byte wire limit")
+    return bytes([code, length]) + data
+
+
+def _radius_encode_message(packet: dict[str, Any]) -> bytes:
+    code = _radius_uint(packet.get("code", RADIUS_AUTH_REQUEST), "code", 255)
+    identifier = _radius_uint(packet.get("id", 0), "id", 255)
+    authenticator = packet.get("_radius_authenticator")
+    if not isinstance(authenticator, bytes):
+        authenticator = _radius_hex(packet.get("authenticator_hex", "00" * RADIUS_AUTHENTICATOR_BYTES), "authenticator_hex")
+    if len(authenticator) != RADIUS_AUTHENTICATOR_BYTES:
+        raise EmulatorInputError("RADIUS authenticator must contain exactly 16 bytes")
+    attrs = packet.get("_radius_avps", packet.get("avps", []))
+    if not isinstance(attrs, list):
+        raise EmulatorInputError("RADIUS avps must be an array")
+    payload = b"".join(_radius_encode_avp(avp) for avp in attrs)
+    length = RADIUS_HEADER_LENGTH + len(payload)
+    if length > RADIUS_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError("RADIUS message exceeds the 4096-byte wire limit")
+    return bytes([code, identifier]) + length.to_bytes(2, "big") + authenticator + payload
+
+
+def _radius_parsed_avp(code: int, vendor_id: int, vendor_type: int, data: bytes) -> dict[str, Any]:
+    if code in {4, 8} and len(data) == 4:
+        data_type = "ip4"
+        value: Any = str(ipaddress.ip_address(data))
+    elif len(data) == 4 and code in {5, 6, 27, 40, 42, 43, 46, 47, 55, 61}:
+        data_type = "integer"
+        value = str(int.from_bytes(data, "big"))
+    elif len(data) == 8 and code in {42, 43}:
+        data_type = "integer64"
+        value = str(int.from_bytes(data, "big"))
+    else:
+        data_type = "string"
+        value = _decode_wire_text(data)
+    return {
+        "code": code,
+        "vendor_id": vendor_id,
+        "vendor_type": vendor_type,
+        "data": value,
+        "data_hex": data.hex(),
+        "type": data_type,
+        "_data": data,
+    }
+
+
+def _decode_radius_message(payload: bytes, direction: str) -> tuple[dict[str, Any], int] | None:
+    if not payload:
+        return None
+    if len(payload) < RADIUS_HEADER_LENGTH:
+        return None
+    code = payload[0]
+    identifier = payload[1]
+    length = int.from_bytes(payload[2:4], "big")
+    if length < RADIUS_HEADER_LENGTH or length > RADIUS_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError("RADIUS message length is invalid")
+    if len(payload) < length:
+        return None
+    message = bytes(payload[:length])
+    attrs: list[dict[str, Any]] = []
+    cursor = RADIUS_HEADER_LENGTH
+    while cursor < length:
+        if length - cursor < RADIUS_ATTRIBUTE_HEADER_LENGTH:
+            raise EmulatorInputError("RADIUS attribute header is truncated")
+        attr_code = message[cursor]
+        attr_length = message[cursor + 1]
+        if attr_length < RADIUS_ATTRIBUTE_HEADER_LENGTH or cursor + attr_length > length:
+            raise EmulatorInputError("RADIUS attribute length is invalid")
+        data = message[cursor + RADIUS_ATTRIBUTE_HEADER_LENGTH : cursor + attr_length]
+        vendor_id = 0
+        vendor_type = 0
+        if attr_code == RADIUS_VENDOR_SPECIFIC:
+            if len(data) < 6 or data[5] < 2 or 4 + data[5] != len(data):
+                raise EmulatorInputError("RADIUS Vendor-Specific attribute is invalid")
+            vendor_id = int.from_bytes(data[:4], "big")
+            vendor_type = data[4]
+            data = data[6 : 4 + data[5]]
+        attrs.append(_radius_parsed_avp(attr_code, vendor_id, vendor_type, data))
+        cursor += attr_length
+    return {
+        "protocol": "radius",
+        "direction": direction,
+        "code": code,
+        "id": identifier,
+        "authenticator_hex": message[4:20].hex(),
+        "avps": attrs,
+        "payload_hex": message[20:].hex(),
+        "message_hex": message.hex(),
+        "message": _decode_wire_text(message),
+        "message_length": length,
+        "_radius_avps": attrs,
+        "_radius_authenticator": message[4:20],
+        "_wire_payload": message,
+    }, length
+
+
+def _decode_radius_datagram(payload: bytes, direction: str) -> dict[str, Any]:
+    decoded = _decode_radius_message(payload, direction)
+    if decoded is None or decoded[1] != len(payload):
+        raise EmulatorInputError("a UDP RADIUS datagram must contain exactly one complete message")
+    return decoded[0]
+
+
+def _radius_avps_tcl(avps: list[dict[str, Any]]) -> str:
+    records = []
+    for avp in avps:
+        fields = [
+            str(avp.get("code", 0)),
+            str(avp.get("vendor_id", 0)),
+            str(avp.get("vendor_type", 0)),
+            str(avp.get("type", "string")),
+            str(avp.get("data_hex", "")),
+        ]
+        records.append("{" + " ".join(_tcl_quote(field) for field in fields) + "}")
+    return " ".join(records)
+
+
 def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or not raw:
         raise EmulatorInputError("packets must be a non-empty array")
@@ -3387,6 +3714,9 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             elif field == "avps" and protocol == "diameter":
                 normalised[field] = _diameter_normalise_avps(packet[field])
                 normalised["_diameter_avps"] = normalised[field]
+            elif field == "avps" and protocol == "radius":
+                normalised[field] = _radius_normalise_avps(packet[field])
+                normalised["_radius_avps"] = normalised[field]
             elif field in {"headers", "response_headers"}:
                 value = packet[field]
                 if not isinstance(value, dict) or not all(
@@ -3637,6 +3967,40 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                         f"packet {index} Diameter encoder produced an incomplete message"
                     )
                 normalised.update(parsed)
+        if protocol == "radius":
+            if "message_hex" in normalised and (
+                "avps" in normalised or "payload_hex" in normalised
+            ):
+                raise EmulatorInputError(
+                    f"packet {index} RADIUS message_hex cannot be combined with avps or payload_hex"
+                )
+            if "avps" in normalised and "payload_hex" in normalised:
+                raise EmulatorInputError(
+                    f"packet {index} RADIUS avps cannot be combined with payload_hex"
+                )
+            if "message_hex" in normalised:
+                raw_message = _radius_hex(normalised["message_hex"], f"packet {index} message_hex")
+                decoded = _decode_radius_message(raw_message, direction)
+                if decoded is None or decoded[1] != len(raw_message):
+                    raise EmulatorInputError(
+                        f"packet {index} RADIUS message_hex must contain exactly one complete message"
+                    )
+                normalised.update(decoded[0])
+            else:
+                normalised.setdefault("code", RADIUS_AUTH_REQUEST)
+                normalised.setdefault("id", 0)
+                normalised.setdefault(
+                    "authenticator_hex", "00" * RADIUS_AUTHENTICATOR_BYTES
+                )
+                normalised.setdefault("avps", [])
+                normalised.setdefault("_radius_avps", [])
+                normalised["_wire_payload"] = _radius_encode_message(normalised)
+                parsed = _decode_radius_message(normalised["_wire_payload"], direction)
+                if parsed is None:  # pragma: no cover - encoder contract guard
+                    raise EmulatorInputError(
+                        f"packet {index} RADIUS encoder produced an incomplete message"
+                    )
+                normalised.update(parsed[0])
         packets.append(normalised)
     return packets
 
@@ -3828,6 +4192,9 @@ class EmulatorSession:
         self._diameter_raw_active = any(
             str(profile).upper() in {"DIAMETER", "DIAMETERSESSION", "DIAMETER_ENDPOINT", "MR"}
             for profile in self._profiles
+        )
+        self._radius_raw_active = any(
+            str(profile).upper() in {"RADIUS", "RADIUS_AAA"} for profile in self._profiles
         )
         self._thread.start()
         self._started.wait()
@@ -4030,7 +4397,7 @@ class EmulatorSession:
         for layer, values in state.items():
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter"} and field in {"payload", "message"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter", "radius"} and field in {"payload", "message", "authenticator"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -4050,6 +4417,8 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::sip_rebuild_message")
         if "diameter" in state:
             session.eval_tcl("::itest::semantic::diameter_rebuild_message")
+        if "radius" in state:
+            session.eval_tcl("::itest::semantic::radius_rebuild_message")
         fired_events = _split_tcl_list(session.eval_tcl("::itest::get_fired_events"))
         result = {
             "event": event_name,
@@ -4109,7 +4478,7 @@ class EmulatorSession:
             connection.update({"protocol": "17", "transport": "udp"})
         elif protocol in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter"}:
             connection.update({"protocol": "6", "transport": "tcp"})
-        elif protocol in {"udp", "dns"}:
+        elif protocol in {"udp", "dns", "radius"}:
             connection.update({"protocol": "17", "transport": "udp"})
         if "payload" in packet:
             payload_key = "client_payload" if direction == "client_to_server" else "server_payload"
@@ -4269,6 +4638,39 @@ class EmulatorSession:
             diameter_state["message"] = bytes(message)
             diameter_state["message_length"] = str(len(message))
             state["diameter"] = diameter_state
+        elif protocol == "radius":
+            radius_state: dict[str, str] = {}
+            for field in EVENT_STATE_FIELDS["radius"]:
+                if field not in packet:
+                    continue
+                if field in {"payload", "message", "authenticator"}:
+                    radius_state[field] = packet[field]
+                elif field == "attributes":
+                    radius_state[field] = _radius_avps_tcl(
+                        packet.get("_radius_avps", packet.get("avps", []))
+                    )
+                else:
+                    radius_state[field] = _packet_scalar(packet[field], field)
+            radius_state["attributes"] = _radius_avps_tcl(
+                packet.get("_radius_avps", packet.get("avps", []))
+            )
+            payload = packet.get("_radius_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                payload = _radius_hex(packet.get("payload_hex", ""), "payload_hex")
+            radius_state["payload"] = bytes(payload)
+            radius_state["payload_length"] = str(len(payload))
+            message = packet.get("_radius_message")
+            if not isinstance(message, (bytes, bytearray)):
+                message = packet.get("_wire_payload")
+            if not isinstance(message, (bytes, bytearray)):
+                message = _radius_encode_message(packet)
+            radius_state["message"] = bytes(message)
+            radius_state["message_length"] = str(len(message))
+            radius_state["authenticator"] = _radius_hex(
+                packet.get("authenticator_hex", "00" * RADIUS_AUTHENTICATOR_BYTES),
+                "authenticator_hex",
+            )
+            state["radius"] = radius_state
         return state
 
     def _current_sip_event_state(
@@ -4618,6 +5020,17 @@ class EmulatorSession:
                     if field in packet:
                         merged[field] = packet[field]
                 return merged, 0
+        if packet["protocol"] == "udp" and self._radius_raw_active:
+            source_port = packet.get("source", {}).get("port")
+            destination_port = packet.get("destination", {}).get("port")
+            if 1812 in {source_port, destination_port} or 1813 in {source_port, destination_port}:
+                raw_payload = packet.get("_wire_payload")
+                if raw_payload:
+                    merged = _decode_radius_datagram(raw_payload, packet["direction"])
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            merged[field] = packet[field]
+                    return merged, 0
         if packet["protocol"] == "udp" and packet.get("_wire_payload"):
             decoded_dns = _decode_dns_payload(
                 packet["_wire_payload"], packet["direction"], packet_index
@@ -4980,14 +5393,32 @@ class EmulatorSession:
                 "hop_by_hop_id",
                 "end_to_end_id",
                 "avps",
+                "code",
+                "id",
+                "authenticator_hex",
+                "attributes",
                 "message_hex",
                 "payload_hex",
+                "rtdom",
+                "subscriber",
                 "timestamp",
                 "seq",
                 "ack",
             ):
                 if field in packet:
-                    entry[field] = packet[field]
+                    if field == "avps" and isinstance(packet[field], list):
+                        entry[field] = [
+                            {
+                                key: value
+                                for key, value in avp.items()
+                                if not key.startswith("_")
+                            }
+                            if isinstance(avp, dict)
+                            else avp
+                            for avp in packet[field]
+                        ]
+                    else:
+                        entry[field] = packet[field]
             trace.append(entry)
             retransmission = bool(packet.pop("_retransmission", False))
             if retransmission:
@@ -5242,6 +5673,28 @@ class EmulatorSession:
                             self._current_diameter_event_state(session, packet),
                         )
                     )
+                continue
+
+            if protocol == "radius":
+                session.eval_tcl("::itest::semantic::radius_prepare_message")
+                code = int(packet.get("code", RADIUS_AUTH_REQUEST))
+                if direction == "client_to_server":
+                    event_name = (
+                        "RADIUS_AAA_ACCT_REQUEST"
+                        if code == RADIUS_ACCOUNTING_REQUEST
+                        else "RADIUS_AAA_AUTH_REQUEST"
+                    )
+                else:
+                    event_name = (
+                        "RADIUS_AAA_ACCT_RESPONSE"
+                        if code == RADIUS_ACCOUNTING_RESPONSE
+                        else "RADIUS_AAA_AUTH_RESPONSE"
+                    )
+                entry["events"].append(
+                    self._fire_event_on_worker(
+                        session, event_name, self._packet_event_state(packet)
+                    )
+                )
                 continue
 
             if protocol == "websocket":

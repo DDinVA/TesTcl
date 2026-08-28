@@ -28,7 +28,7 @@ references rather than maintained as an unqualified list of mocked commands.
 The optional TMOS 17.5 emulator exposes the pinned `tcl-lsp` registry in
 bounded chunks and reports static command-handler and packet-event coverage
 through its conformance endpoint. Structured packet traces currently cover
-TCP, TLS, HTTP, UDP/DNS, SIP over TCP or UDP, Diameter over TCP, and raw IPv4 transport records. Fragmented IPv4
+TCP, TLS, HTTP, UDP/DNS, SIP over TCP or UDP, Diameter over TCP, RADIUS over UDP, and raw IPv4 transport records. Fragmented IPv4
 packets and pcapng file ingestion remain outside the current boundary. Classic
 PCAP ingestion is supported, and TCP stream reassembly includes bounded gap,
 overlap, and retransmission de-duplication handling. Diameter validates and
@@ -37,6 +37,10 @@ Diameter ingress, egress, and retransmission events. Its routing, retry,
 retransmission, persistence, and capability-exchange commands are modeled as
 deterministic test state rather than a complete Diameter peer or TMM
 route/persistence implementation.
+RADIUS packet handling validates standard and Vendor-Specific attributes and
+exposes the four TMOS 17.5 AAA request/response events. It intentionally does
+not implement shared-secret cryptography, password obfuscation, live AAA
+servers, or timer-driven retransmission.
 
 The upstream registry is broader than the target release. Capability entries
 carry `target_status`, and the conformance response reports both the full

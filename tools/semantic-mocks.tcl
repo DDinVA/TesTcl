@@ -139,6 +139,21 @@ namespace eval ::itest::semantic {
         variable persist_key ""
     }
 
+    namespace eval ::state::radius {
+        variable code 1
+        variable id 0
+        variable authenticator ""
+        variable attributes {}
+        variable payload ""
+        variable payload_length 0
+        variable message ""
+        variable message_length 20
+        variable message_hex ""
+        variable payload_hex ""
+        variable rtdom ""
+        variable subscriber ""
+    }
+
     proc _profile_enabled {name} {
         set wanted [string toupper $name]
         foreach profile $::orch::config(profiles) {
@@ -1872,6 +1887,290 @@ namespace eval ::itest::semantic {
         set diameter_disconnected 1
         ::itest::log_decision diameter disconnect $args
         return ""
+    }
+
+    proc _radius_require_event {command_name} {
+        if {$::itest::current_event ni {
+            CLIENT_ACCEPTED CLIENT_CLOSED CLIENT_DATA SERVER_CLOSED SERVER_CONNECTED SERVER_DATA
+            RADIUS_AAA_AUTH_REQUEST RADIUS_AAA_AUTH_RESPONSE RADIUS_AAA_ACCT_REQUEST RADIUS_AAA_ACCT_RESPONSE
+        }} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc radius_clear_message {} {
+        foreach {name value} {
+            code 1
+            id 0
+            authenticator ""
+            attributes {}
+            payload ""
+            payload_length 0
+            message ""
+            message_length 20
+            message_hex ""
+            payload_hex ""
+            rtdom ""
+            subscriber ""
+        } {
+            set ::state::radius::$name $value
+        }
+    }
+
+    proc radius_reset_connection {} { radius_clear_message }
+    proc radius_prepare_message {} { radius_clear_message }
+
+    proc _radius_int {value field maximum} {
+        if {![string is integer -strict $value] || $value < 0 || $value > $maximum} {
+            error "RADIUS $field must be an integer from 0 to $maximum"
+        }
+        return $value
+    }
+
+    proc _radius_hex_uint {value width field maximum} {
+        return [format %0*X $width [_radius_int $value $field $maximum]]
+    }
+
+    proc _radius_record_data {record} {
+        set raw [lindex $record 4]
+        if {$raw eq ""} { return [::itest::cmd::_payload_bytes ""] }
+        return [binary decode hex $raw]
+    }
+
+    proc _radius_record_wire {record} {
+        set code [_radius_int [lindex $record 0] code 255]
+        set vendor [_radius_int [lindex $record 1] vendor_id 0xffffffff]
+        set vendor_type [_radius_int [lindex $record 2] vendor_type 255]
+        set data [_radius_record_data $record]
+        if {$code == 26} {
+            if {!$vendor || !$vendor_type} { error "RADIUS Vendor-Specific attributes require vendor_id and vendor_type" }
+            set inner_length [expr {2 + [string length $data]}]
+            if {$inner_length > 255} { error "RADIUS Vendor-Specific attribute is too long" }
+            set content [_radius_hex_uint $vendor 8 vendor_id 0xffffffff][format %02X%02X $vendor_type $inner_length]
+            append content [binary encode hex $data]
+        } else {
+            if {$vendor || $vendor_type} { error "RADIUS vendor fields require attribute code 26" }
+            set content [binary encode hex $data]
+        }
+        set length [expr {2 + [string length $content] / 2}]
+        if {$length > 255} { error "RADIUS attribute length exceeds wire limit" }
+        return [format %02X%02X $code $length]$content
+    }
+
+    proc radius_rebuild_message {} {
+        set code [_radius_int $::state::radius::code code 255]
+        set id [_radius_int $::state::radius::id id 255]
+        set auth $::state::radius::authenticator
+        if {$auth eq ""} { set auth [binary format H32 00000000000000000000000000000000] }
+        if {[string length $auth] != 16} { error "RADIUS authenticator must contain exactly 16 bytes" }
+        set payload ""
+        foreach record $::state::radius::attributes {
+            append payload [binary decode hex [_radius_record_wire $record]]
+        }
+        set length [expr {20 + [string length $payload]}]
+        if {$length > 4096} { error "RADIUS message exceeds the 4096-byte wire limit" }
+        set header [format %02X%02X%04X $code $id $length]
+        append header [binary encode hex $auth]
+        set message [binary decode hex $header]
+        append message $payload
+        set ::state::radius::payload $payload
+        set ::state::radius::payload_length [string length $payload]
+        set ::state::radius::payload_hex [binary encode hex $payload]
+        set ::state::radius::message $message
+        set ::state::radius::message_length [string length $message]
+        set ::state::radius::message_hex [binary encode hex $message]
+        return ""
+    }
+
+    proc _radius_attribute_code {value} {
+        array set names {
+            user-name 1 user-password 2 nas-ip-address 4 nas-port 5 service-type 6
+            framed-ip-address 8 reply-message 18 state 24 class 25 vendor-specific 26
+            session-timeout 27 called-station-id 30 calling-station-id 31 nas-identifier 32
+            acct-status-type 40 acct-input-octets 42 acct-output-octets 43 acct-session-id 44
+            event-timestamp 55 nas-port-type 61 connect-info 77
+        }
+        set key [string tolower [string map {_ -} $value]]
+        if {[info exists names($key)]} { return $names($key) }
+        return [_radius_int $value attribute 255]
+    }
+
+    proc _radius_type {value {default string}} {
+        if {$value eq ""} { return $default }
+        set value [string tolower $value]
+        if {$value in {octet string integer integer64 ip4 ip6 ip4prefix ip6prefix}} { return $value }
+        return octet
+    }
+
+    proc _radius_indices {code vendor vendor_type} {
+        set result {}
+        set index 0
+        foreach record $::state::radius::attributes {
+            if {[lindex $record 0] == $code && [lindex $record 1] == $vendor && [lindex $record 2] == $vendor_type} {
+                lappend result $index
+            }
+            incr index
+        }
+        return $result
+    }
+
+    proc _radius_selector {args} {
+        if {[llength $args] < 1} { error "RADIUS::avp requires an attribute" }
+        set code [_radius_attribute_code [lindex $args 0]]
+        set type string
+        set index 0
+        set vendor 0
+        set vendor_type 0
+        set cursor 1
+        while {$cursor < [llength $args]} {
+            set token [lindex $args $cursor]
+            if {$token in {octet string integer integer64 ip4 ip6 ip4prefix ip6prefix}} {
+                set type [_radius_type $token]
+                incr cursor
+            } elseif {$token eq "index"} {
+                if {$cursor + 1 >= [llength $args]} { error "RADIUS::avp index requires a value" }
+                set index [_radius_int [lindex $args [incr cursor]] index 0xffffffff]
+                incr cursor
+            } elseif {$token eq "vendor-id"} {
+                if {$cursor + 1 >= [llength $args]} { error "RADIUS::avp vendor-id requires a value" }
+                set vendor [_radius_int [lindex $args [incr cursor]] vendor_id 0xffffffff]
+                incr cursor
+            } elseif {$token eq "vendor-type"} {
+                if {$cursor + 1 >= [llength $args]} { error "RADIUS::avp vendor-type requires a value" }
+                set vendor_type [_radius_int [lindex $args [incr cursor]] vendor_type 255]
+                incr cursor
+            } else {
+                error "unsupported RADIUS::avp option $token"
+            }
+        }
+        set matches [_radius_indices $code $vendor $vendor_type]
+        set absolute -1
+        if {$index < [llength $matches]} { set absolute [lindex $matches $index] }
+        return [dict create code $code type $type index $index vendor $vendor vendor_type $vendor_type absolute $absolute]
+    }
+
+    proc _radius_data_hex {value type} {
+        switch -- $type {
+            integer { return [_radius_hex_uint $value 8 integer 0xffffffff] }
+            integer64 { return [_radius_hex_uint $value 16 integer64 0xffffffffffffffff] }
+            ip4 {
+                set octets [split $value .]
+                if {[llength $octets] != 4} { error "RADIUS ip4 value is invalid" }
+                set hex ""
+                foreach octet $octets { append hex [_radius_hex_uint $octet 2 ip4 255] }
+                return $hex
+            }
+            default { return [binary encode hex [::itest::cmd::_payload_bytes $value]] }
+        }
+    }
+
+    proc _radius_value {record type} {
+        set data [_radius_record_data $record]
+        switch -- $type {
+            integer - integer64 {
+                if {[string length $data] ni {4 8}} { return "" }
+                scan [binary encode hex $data] %x value
+                return $value
+            }
+            ip4 {
+                if {[string length $data] != 4} { return "" }
+                set hex [binary encode hex $data]
+                return [join [list [scan [string range $hex 0 1] %x] [scan [string range $hex 2 3] %x] [scan [string range $hex 4 5] %x] [scan [string range $hex 6 7] %x]] .]
+            }
+            octet { return [binary encode hex $data] }
+            default {
+                if {[catch {encoding convertfrom utf-8 $data} value]} { return $data }
+                return $value
+            }
+        }
+    }
+
+    proc _radius_set_record {absolute record} {
+        set ::state::radius::attributes [lreplace $::state::radius::attributes $absolute $absolute $record]
+        radius_rebuild_message
+    }
+
+    proc radius_avp_command {args} {
+        _radius_require_event RADIUS::avp
+        if {[llength $args] < 1} { error "RADIUS::avp requires an attribute or subcommand" }
+        set operation [lindex $args 0]
+        if {$operation in {insert replace delete}} {
+            set rest [lrange $args 1 end]
+            if {$operation eq "delete"} {
+                set selector [_radius_selector {*}$rest]
+                set absolute [dict get $selector absolute]
+                if {$absolute >= 0} {
+                    set ::state::radius::attributes [lreplace $::state::radius::attributes $absolute $absolute]
+                    radius_rebuild_message
+                }
+                return ""
+            }
+            if {[llength $rest] < 1 || ($operation eq "replace" && [llength $rest] < 2)} {
+                error "RADIUS::avp $operation requires an attribute and value"
+            }
+            set code [_radius_attribute_code [lindex $rest 0]]
+            set value ""
+            if {[llength $rest] > 1} { set value [lindex $rest 1] }
+            set type string
+            set option_start 2
+            if {[llength $rest] > 2 && [lindex $rest 2] in {octet string integer integer64 ip4 ip6 ip4prefix ip6prefix}} {
+                set type [_radius_type [lindex $rest 2]]
+                set option_start 3
+            }
+            set selector [_radius_selector [lindex $rest 0] {*}[lrange $rest $option_start end]]
+            set vendor [dict get $selector vendor]
+            set vendor_type [dict get $selector vendor_type]
+            set record [list $code $vendor $vendor_type $type [_radius_data_hex $value $type]]
+            if {$operation eq "insert"} {
+                lappend ::state::radius::attributes $record
+            } else {
+                set absolute [dict get $selector absolute]
+                if {$absolute < 0} { error "RADIUS attribute was not found" }
+                _radius_set_record $absolute $record
+                return ""
+            }
+            radius_rebuild_message
+            ::itest::log_decision radius avp_$operation $record
+            return ""
+        }
+        set selector [_radius_selector {*}$args]
+        set absolute [dict get $selector absolute]
+        if {$absolute < 0} { return "" }
+        return [_radius_value [lindex $::state::radius::attributes $absolute] [dict get $selector type]]
+    }
+
+    proc radius_code_command {args} {
+        _radius_require_event RADIUS::code
+        if {[llength $args] != 0} { error "RADIUS::code takes no arguments" }
+        return $::state::radius::code
+    }
+
+    proc radius_id_command {args} {
+        _radius_require_event RADIUS::id
+        if {[llength $args] != 0} { error "RADIUS::id takes no arguments" }
+        return $::state::radius::id
+    }
+
+    proc radius_rtdom_command {args} {
+        _radius_require_event RADIUS::rtdom
+        if {[llength $args] > 1} { error "RADIUS::rtdom accepts zero or one value" }
+        if {[llength $args] == 0} { return $::state::radius::rtdom }
+        set ::state::radius::rtdom [_radius_int [lindex $args 0] route_domain 0xffffffff]
+        ::itest::log_decision radius rtdom $::state::radius::rtdom
+        return $::state::radius::rtdom
+    }
+
+    proc radius_subscriber_command {args} {
+        _radius_require_event RADIUS::subscriber
+        if {[llength $args] > 1} { error "RADIUS::subscriber accepts zero or one value" }
+        if {[llength $args] == 0} { return $::state::radius::subscriber }
+        set ::state::radius::subscriber [lindex $args 0]
+        return $::state::radius::subscriber
+    }
+
+    proc radius_authenticate_command {args} {
+        ::itest::log_decision radius authenticate $args
+        return 0
     }
 
     proc lb_snapshot {} {
@@ -4641,6 +4940,26 @@ foreach {original replacement} {
     }
 }
 foreach {original replacement} {
+    radius_avp radius_avp_command
+    radius_code radius_code_command
+    radius_id radius_id_command
+    radius_rtdom radius_rtdom_command
+    radius_subscriber radius_subscriber_command
+} {
+    if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
+        ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
+        proc ::itest::cmd::$original {args} [format {
+            return [eval [linsert $args 0 ::itest::semantic::%s]]
+        } $replacement]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_radius_authenticate] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_radius_authenticate ::itest::cmd::_testcl_cmd_radius_authenticate_orig
+    proc ::itest::cmd::cmd_radius_authenticate {args} {
+        return [eval [linsert $args 0 ::itest::semantic::radius_authenticate_command]]
+    }
+}
+foreach {original replacement} {
     sip_call_id sip_call_id_command
     sip_discard sip_discard_command
     sip_from sip_from_command
@@ -4791,6 +5110,12 @@ foreach {name proc_name} {
     DIAMETER::session ::itest::semantic::diameter_session_command
     DIAMETER::skip_capabilities_exchange ::itest::semantic::diameter_skip_capabilities_exchange_command
     DIAMETER::state ::itest::semantic::diameter_state_command
+    RADIUS::avp ::itest::semantic::radius_avp_command
+    RADIUS::code ::itest::semantic::radius_code_command
+    RADIUS::id ::itest::semantic::radius_id_command
+    RADIUS::rtdom ::itest::semantic::radius_rtdom_command
+    RADIUS::subscriber ::itest::semantic::radius_subscriber_command
+    radius_authenticate ::itest::semantic::radius_authenticate_command
 } {
     ::itest::register_command $name $proc_name
 }

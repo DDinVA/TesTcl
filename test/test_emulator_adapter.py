@@ -2835,6 +2835,123 @@ when DIAMETER_RETRANSMISSION { log local0. "retransmit=[DIAMETER::is_retransmiss
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+    def test_radius_structured_messages_expose_codes_attributes_and_mutations(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP", "RADIUS"],
+                "irule": """
+when RADIUS_AAA_AUTH_REQUEST {
+    log local0. "code=[RADIUS::code] id=[RADIUS::id] user=[RADIUS::avp User-Name string] ip=[RADIUS::avp 4 ip4]"
+    RADIUS::avp replace User-Name alice
+    RADIUS::rtdom 7
+    RADIUS::subscriber subscriber-1
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "radius",
+                        "direction": "client_to_server",
+                        "code": 1,
+                        "id": 9,
+                        "avps": [
+                            {"code": "User-Name", "data": "bob"},
+                            {"code": "NAS-IP-Address", "type": "ip4", "data": "192.0.2.20"},
+                            {"code": 26, "vendor_id": 10415, "vendor_type": 1, "data": "imsi-1"},
+                        ],
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        event = next(
+            event for event in result["trace"][0]["events"]
+            if event["event"] == "RADIUS_AAA_AUTH_REQUEST"
+        )
+        self.assertTrue(event["fired"])
+        self.assertTrue(any("code=1 id=9 user=bob ip=192.0.2.20" in log for log in event["logs"]))
+        self.assertEqual(event["state"]["radius"]["rtdom"], "7")
+        self.assertEqual(event["state"]["radius"]["subscriber"], "subscriber-1")
+        self.assertIn(b"alice", bytes.fromhex(event["state"]["radius"]["message_hex"]))
+        self.assertNotIn(b"bob", bytes.fromhex(event["state"]["radius"]["message_hex"]))
+
+    def test_radius_raw_udp_replay_decodes_auth_and_accounting_events(self) -> None:
+        auth = self.adapter._radius_encode_message(
+            {
+                "code": 1,
+                "id": 3,
+                "authenticator_hex": "11" * 16,
+                "_radius_avps": [
+                    {"code": 1, "type": "string", "data": "alice", "_data": b"alice"}
+                ],
+            }
+        )
+        acct = self.adapter._radius_encode_message(
+            {
+                "code": 4,
+                "id": 4,
+                "authenticator_hex": "22" * 16,
+                "_radius_avps": [
+                    {"code": 40, "type": "integer", "data": "1", "_data": (1).to_bytes(4, "big")}
+                ],
+            }
+        )
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP", "RADIUS_AAA"],
+                "irule": "when RADIUS_AAA_AUTH_REQUEST { log local0. auth }\nwhen RADIUS_AAA_ACCT_REQUEST { log local0. acct }",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_udp_hex("10.0.0.5", "192.0.2.10", 51000, 1812, auth),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_udp_hex("10.0.0.5", "192.0.2.10", 51000, 1813, acct),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(result["trace"][0]["protocol"], "radius")
+        self.assertEqual(result["trace"][0]["events"][-1]["event"], "RADIUS_AAA_AUTH_REQUEST")
+        self.assertEqual(result["trace"][1]["events"][-1]["event"], "RADIUS_AAA_ACCT_REQUEST")
+        self.assertTrue(any("auth" in log for log in result["trace"][0]["events"][-1]["logs"]))
+        self.assertTrue(any("acct" in log for log in result["trace"][1]["events"][-1]["logs"]))
+
+    def test_radius_response_events_vendor_attributes_and_validation(self) -> None:
+        response = self.adapter.run_scenario(
+            {
+                "profiles": ["RADIUS"],
+                "irule": "when RADIUS_AAA_AUTH_RESPONSE { log local0. \"response code=[RADIUS::code] id=[RADIUS::id]\" }",
+                "packets": [
+                    {
+                        "protocol": "radius",
+                        "direction": "server_to_client",
+                        "code": 2,
+                        "id": 9,
+                        "avps": [{"code": "Reply-Message", "data": "welcome"}],
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = response["trace"][0]["events"][-1]
+        self.assertEqual(event["event"], "RADIUS_AAA_AUTH_RESPONSE")
+        self.assertTrue(any("response code=2 id=9" in log for log in event["logs"]))
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "vendor fields"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["RADIUS"],
+                    "irule": "when RADIUS_AAA_AUTH_REQUEST { log local0. invalid }",
+                    "packets": [{"protocol": "radius", "avps": [{"code": 1, "vendor_id": 7, "data": "x"}]}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_mqtt_rejects_unsupported_structured_direction_and_version(self) -> None:
         with self.assertRaises(self.adapter.EmulatorInputError):
             self.adapter.run_scenario(

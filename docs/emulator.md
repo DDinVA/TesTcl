@@ -311,6 +311,21 @@ See the F5 [`DIAMETER`](https://clouddocs.f5.com/api/irules/DIAMETER.html),
 [`DIAMETER::avp`](https://clouddocs.f5.com/api/irules/DIAMETER__avp.html), and
 [`DIAMETER::header`](https://clouddocs.f5.com/api/irules/DIAMETER__header.html)
 references for the production command/event contract.
+RADIUS support is pinned to the 17.5 AAA event model. Structured
+`protocol: "radius"` packets and raw UDP packets on ports 1812/1813 drive
+`RADIUS_AAA_AUTH_REQUEST`, `RADIUS_AAA_AUTH_RESPONSE`,
+`RADIUS_AAA_ACCT_REQUEST`, or `RADIUS_AAA_ACCT_RESPONSE` based on direction
+and RADIUS code. The codec validates the 20-byte header, message length,
+attribute lengths, standard attributes, and Vendor-Specific attributes (type
+26). `RADIUS::avp` supports named or numeric attributes, string/octet,
+integer, integer64, and IP address values, including indexed vendor
+attributes; `RADIUS::code`, `RADIUS::id`, `RADIUS::rtdom`, and
+`RADIUS::subscriber` expose deterministic message/session state. This is a
+bounded packet model and does not perform shared-secret authentication,
+password hiding, live AAA, or RADIUS retransmission timers. See the F5
+[`RADIUS`](https://clouddocs.f5.com/api/irules/RADIUS.html) and
+[`RADIUS::avp`](https://clouddocs.f5.com/api/irules/RADIUS__avp.html)
+references for the production command/event contract.
 For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
 performs bounded sequence-aware TCP application reassembly across records and
@@ -450,7 +465,7 @@ docker run --rm --publish 8080:8080 testcl-irule-emulator:17.5 \
 
 The current slice supports HTTP/TCP request simulation, structured packet
 traces, classic PCAP replay, sequence-aware persistent connection sessions,
-structured DNS/TLS/SIP event injection, catalog conformance reporting, an MCP
+structured DNS/TLS/SIP/RADIUS event injection, catalog conformance reporting, an MCP
 facade over the same JSON contract, and an adapter-owned semantic overlay for
 selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, table, TCP, and
 HTTP cookie commands, plus SIP request/response message adaptation and common global string, base64, data-group, and pool
