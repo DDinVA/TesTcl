@@ -1035,6 +1035,56 @@ when SERVER_DATA { log local0. "server=[TCP::payload]" }
         self.assertEqual(result["emitted"][0]["direction"], "client_to_server")
         self.assertEqual(result["emitted"][0]["payload"], "peer-reply")
 
+    def test_tcp_close_emits_fin_without_tearing_down_until_peer_fin(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED { TCP::collect }
+when CLIENT_DATA { TCP::close; TCP::close }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "flags": ["SYN"],
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "payload": "hello",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "flags": ["FIN", "ACK"],
+                        "source": {"address": "192.0.2.10", "port": 443},
+                        "destination": {"address": "10.0.0.5", "port": 51000},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        close_event = result["trace"][1]["events"][0]
+        self.assertEqual(close_event["event"], "CLIENT_DATA")
+        self.assertEqual(
+            result["emitted"][0],
+            {
+                "protocol": "tcp",
+                "side": "client",
+                "direction": "server_to_client",
+                "control": "FIN",
+                "packet_index": 1,
+                "event": "CLIENT_DATA",
+            },
+        )
+        self.assertEqual(result["trace"][2]["events"][-1]["event"], "SERVER_CLOSED")
+
     def test_raw_ipv4_tcp_packets_decode_into_http_transaction(self) -> None:
         request_payload = b"GET /health HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
         tls_payload = _tls_client_hello_payload("api.example.com")

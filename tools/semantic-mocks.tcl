@@ -650,7 +650,7 @@ namespace eval ::itest::semantic {
 
     proc tcp_clear_event_state {} {
         unset -nocomplain ::state::vars::connection_vars(__testcl_tcp_released)
-        unset -nocomplain ::state::vars::connection_vars(__testcl_tcp_responses)
+        unset -nocomplain ::state::vars::connection_vars(__testcl_tcp_emissions)
     }
 
     proc tcp_event_released {} {
@@ -660,9 +660,9 @@ namespace eval ::itest::semantic {
         return 0
     }
 
-    proc tcp_response_snapshot {} {
-        if {[info exists ::state::vars::connection_vars(__testcl_tcp_responses)]} {
-            return $::state::vars::connection_vars(__testcl_tcp_responses)
+    proc tcp_emission_snapshot {} {
+        if {[info exists ::state::vars::connection_vars(__testcl_tcp_emissions)]} {
+            return $::state::vars::connection_vars(__testcl_tcp_emissions)
         }
         return ""
     }
@@ -732,9 +732,23 @@ namespace eval ::itest::semantic {
     proc tcp_respond_command {args} {
         if {[llength $args] != 1} { error "TCP::respond requires a payload" }
         set response [lindex $args 0]
-        lappend ::state::vars::connection_vars(__testcl_tcp_responses) \
-            [list side [_tcp_side] payload $response byte_length [string bytelength $response]]
+        lappend ::state::vars::connection_vars(__testcl_tcp_emissions) \
+            [list kind data side [_tcp_side] payload $response byte_length [string bytelength $response]]
         ::itest::log_decision tcp respond [list [_tcp_side] $response]
+        return ""
+    }
+
+    proc tcp_close_command {args} {
+        if {[llength $args] != 0} { error "TCP::close takes no arguments" }
+        set side [_tcp_side]
+        set fin_key "__testcl_tcp_fin_sent_$side"
+        if {![info exists ::state::vars::connection_vars($fin_key)]} {
+            lappend ::state::vars::connection_vars(__testcl_tcp_emissions) \
+                [list kind fin side $side]
+            set ::state::vars::connection_vars($fin_key) 1
+        }
+        set ::state::connection::state closing
+        ::itest::log_decision tcp close [list $side]
         return ""
     }
 
@@ -1881,6 +1895,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
     }
 }
 foreach {original replacement} {
+    tcp_close tcp_close_command
     tcp_collect tcp_collect_command
     tcp_payload tcp_payload_command
     tcp_release tcp_release_command

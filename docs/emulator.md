@@ -256,9 +256,10 @@ pcapng and IPv4 fragment handling remain outside this slice.
 ```
 
 The response includes a per-packet `trace`, translated event results, and
-HTTP transaction results. TCP responses emitted by `TCP::respond` are exposed
-both on the event as `emissions` and in the top-level `emitted` array, with
-their modeled egress direction and byte length. Persistent sessions accept the
+HTTP transaction results. TCP responses and graceful FIN requests emitted by
+`TCP::respond`/`TCP::close` are exposed both on the event as `emissions` and in
+the top-level `emitted` array, with their modeled egress direction. Data
+emissions include byte length; FIN emissions include `control: "FIN"`. Persistent sessions accept the
 same packet array at
 `POST /v1/sessions/{session_id}/packets`, or through the MCP
 `irule_session_trace` tool.

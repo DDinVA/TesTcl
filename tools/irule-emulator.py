@@ -232,6 +232,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "STATS::setmin",
     "table",
     "TCP::collect",
+    "TCP::close",
     "TCP::offset",
     "TCP::payload",
     "TCP::release",
@@ -1898,7 +1899,7 @@ class EmulatorSession:
                 for entry in session.get_logs()
             ],
         }
-        emissions = self._tcp_response_emissions(session)
+        emissions = self._tcp_emissions(session)
         if emissions:
             result["emissions"] = emissions
         return result
@@ -1997,37 +1998,46 @@ class EmulatorSession:
         return events[packet["type"]]
 
     @staticmethod
-    def _tcp_response_emissions(session: Any) -> list[dict[str, Any]]:
+    def _tcp_emissions(session: Any) -> list[dict[str, Any]]:
         emissions: list[dict[str, Any]] = []
-        raw_responses = _split_tcl_list(
-            session.eval_tcl("::itest::semantic::tcp_response_snapshot")
+        raw_emissions = _split_tcl_list(
+            session.eval_tcl("::itest::semantic::tcp_emission_snapshot")
         )
-        for raw_response in raw_responses:
-            parts = _split_tcl_list(raw_response)
-            if len(parts) != 6:
-                raise EmulatorInputError("invalid TCP response state")
+        for raw_emission in raw_emissions:
+            parts = _split_tcl_list(raw_emission)
+            if len(parts) not in {4, 8}:
+                raise EmulatorInputError("invalid TCP emission state")
             values = {
                 parts[index]: parts[index + 1]
                 for index in range(0, len(parts), 2)
             }
             side = values.get("side")
             if side not in {"client", "server"}:
-                raise EmulatorInputError("invalid TCP response side")
+                raise EmulatorInputError("invalid TCP emission side")
+            direction = "server_to_client" if side == "client" else "client_to_server"
+            if values.get("kind") == "fin":
+                emissions.append(
+                    {
+                        "protocol": "tcp",
+                        "side": side,
+                        "direction": direction,
+                        "control": "FIN",
+                    }
+                )
+                continue
+            if values.get("kind") != "data":
+                raise EmulatorInputError("invalid TCP emission kind")
             try:
                 byte_length = int(values["byte_length"])
             except (KeyError, TypeError, ValueError):
                 raise EmulatorInputError("invalid TCP response byte length") from None
-            emissions.append(
-                {
-                    "protocol": "tcp",
-                    "side": side,
-                    "direction": (
-                        "server_to_client" if side == "client" else "client_to_server"
-                    ),
-                    "payload": values.get("payload", ""),
-                    "byte_length": byte_length,
-                }
-            )
+            emissions.append({
+                "protocol": "tcp",
+                "side": side,
+                "direction": direction,
+                "payload": values.get("payload", ""),
+                "byte_length": byte_length,
+            })
         return emissions
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
