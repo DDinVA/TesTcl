@@ -1984,6 +1984,72 @@ namespace eval ::itest::semantic {
         return $result
     }
 
+    proc members_command {args} {
+        set list_mode 0
+        if {[llength $args] == 2 && [lindex $args 0] eq "-list"} {
+            set list_mode 1
+            set pool_name [lindex $args 1]
+        } elseif {[llength $args] == 1} {
+            set pool_name [lindex $args 0]
+        } else {
+            error "members requires a pool or -list pool"
+        }
+        if {![info exists ::state::lb::pools($pool_name)]} {
+            if {$list_mode} { return [list] }
+            return 0
+        }
+        set members [lindex $::state::lb::pools($pool_name) 1]
+        if {!$list_mode} { return [llength $members] }
+        set result [list]
+        foreach member $members { lappend result [_member_endpoint $member] }
+        return $result
+    }
+
+    proc nodes_command {args} {
+        set list_mode 0
+        if {[llength $args] == 2 && [lindex $args 0] eq "-list"} {
+            set list_mode 1
+            set pool_name [lindex $args 1]
+        } elseif {[llength $args] == 1} {
+            set pool_name [lindex $args 0]
+        } else {
+            error "nodes requires a pool or -list pool"
+        }
+        if {![info exists ::state::lb::pools($pool_name)]} {
+            if {$list_mode} { return [list] }
+            return 0
+        }
+        set members [lindex $::state::lb::pools($pool_name) 1]
+        if {!$list_mode} { return [llength $members] }
+        set result [list]
+        foreach member $members {
+            lassign [_member_endpoint $member] address ignored
+            lappend result $address
+        }
+        return $result
+    }
+
+    proc substr_command {args} {
+        if {[llength $args] < 2 || [llength $args] > 3} {
+            error "substr requires a string, skip count, and optional terminator"
+        }
+        set source [lindex $args 0]
+        set start [lindex $args 1]
+        if {![string is integer -strict $start] || $start < 0} {
+            error "substr skip count must be a non-negative integer"
+        }
+        if {$start >= [string length $source]} { return "" }
+        if {[llength $args] == 2} { return [string range $source $start end] }
+        set terminator [lindex $args 2]
+        if {[string is integer -strict $terminator]} {
+            if {$terminator < 0} { error "substr terminator length must be non-negative" }
+            return [string range $source $start [expr {$start + $terminator - 1}]]
+        }
+        set end [string first $terminator $source $start]
+        if {$end < 0} { set end [string length $source] }
+        return [string range $source $start [expr {$end - 1}]]
+    }
+
     proc b64encode_command {args} {
         if {[llength $args] != 1} { error "b64encode requires one value" }
         return [binary encode base64 [lindex $args 0]]
@@ -2085,9 +2151,12 @@ foreach {original replacement} {
     findstr findstr_command
     getfield getfield_command
     matchclass matchclass_command
+    members members_command
+    nodes nodes_command
     peer peer_command
     clientside clientside_command
     serverside serverside_command
+    substr substr_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::cmd_$original] ne ""} {
         ::tmm::_orig_rename ::itest::cmd::cmd_$original ::itest::cmd::_testcl_${original}_orig

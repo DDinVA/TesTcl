@@ -211,7 +211,8 @@ when HTTP_REQUEST_DATA { log local0. "should-not-fire" }
 when HTTP_REQUEST {
     log local0. "findstr=[findstr [HTTP::path] / 1] field=[getfield [HTTP::host] . 2]"
     log local0. "findclass=[findclass /api routes] matchclass=[matchclass /api equals routes]"
-    log local0. "members=[active_members -list api_pool] nodes=[active_nodes api_pool]"
+    log local0. "active=[active_members -list api_pool] all=[members -list api_pool] nodes=[nodes -list api_pool]"
+    log local0. "substr=[substr prefix:/api?x=1 7 ?]"
     log local0. "b64=[b64decode [b64encode hello]]"
 }
 """,
@@ -223,7 +224,10 @@ when HTTP_REQUEST {
         self.assertTrue(any("findstr=api/v1" in entry for entry in logs))
         self.assertTrue(any("field=example" in entry for entry in logs))
         self.assertTrue(any("findclass=/api api_pool matchclass=1" in entry for entry in logs))
-        self.assertTrue(any("10.0.0.10 80" in entry and "10.0.0.11 80" in entry for entry in logs))
+        self.assertTrue(any("active={10.0.0.10 80} {10.0.0.11 80}" in entry for entry in logs))
+        self.assertTrue(any("all={10.0.0.10 80} {10.0.0.11 80}" in entry for entry in logs))
+        self.assertTrue(any("nodes=10.0.0.10 10.0.0.11" in entry for entry in logs))
+        self.assertTrue(any("substr=/api" in entry for entry in logs))
         self.assertTrue(any("b64=hello" in entry for entry in logs))
 
     def test_conformance_reports_catalog_and_packet_adapter_coverage(self) -> None:
