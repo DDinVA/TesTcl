@@ -696,6 +696,54 @@ when HTTP_REQUEST {
         logs = result["results"][0]["logs"]
         self.assertTrue(any("server=api_pool addr= port=" in entry for entry in logs))
 
+    def test_http_request_and_response_return_raw_header_blocks(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    log local0. "request=[HTTP::request]"
+}
+when HTTP_RESPONSE {
+    log local0. "response=[HTTP::response]"
+}
+""",
+                "request": {
+                    "method": "POST",
+                    "uri": "/submit?mode=full",
+                    "host": "api.example.com",
+                    "headers": {"X-Test": "yes"},
+                    "body": "payload",
+                    "response_status": 503,
+                    "response_headers": {"X-Upstream": "retry", "Location": "/later"},
+                    "response_body": "temporary failure",
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        logs = result["results"][0]["logs"]
+        self.assertTrue(
+            any(
+                "request=POST /submit?mode=full HTTP/1.1\r\n"
+                in entry
+                for entry in logs
+            )
+        )
+        self.assertTrue(
+            any(
+                "X-Test: yes\r\nHost: api.example.com\r\n\r\n"
+                in entry
+                for entry in logs
+            )
+        )
+        self.assertTrue(
+            any(
+                "response=HTTP/1.1 503 Service Unavailable\r\nX-Upstream: retry\r\nLocation: /later\r\n\r\n"
+                in entry
+                for entry in logs
+            )
+        )
+
     def test_semantic_overlay_preserves_lb_select_pool_integration(self) -> None:
         result = self.adapter.run_scenario(
             {

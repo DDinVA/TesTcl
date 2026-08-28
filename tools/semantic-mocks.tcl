@@ -410,7 +410,65 @@ namespace eval ::itest::semantic {
     }
 
     proc http_response {args} {
-        return $::state::http::response::status
+        return [_http_message_command response {*}$args]
+    }
+
+    proc _http_header_name {name} {
+        set parts [split $name -]
+        set result [list]
+        foreach part $parts {
+            if {$part eq ""} {
+                lappend result ""
+            } else {
+                lappend result "[string toupper [string index $part 0]][string range $part 1 end]"
+            }
+        }
+        return [join $result -]
+    }
+
+    proc _http_message_command {kind args} {
+        if {[llength $args] != 0} {
+            error "HTTP::$kind takes no arguments"
+        }
+        set lines [list]
+        if {$kind eq "request"} {
+            lappend lines "${::state::http::request::method} ${::state::http::request::uri} HTTP/${::state::http::request::version}"
+            set headers $::state::http::request::headers
+        } else {
+            set status $::state::http::response::status
+            set reason $::state::http::response::reason
+            if {$reason eq "" || $reason eq "OK"} {
+                switch -exact -- $status {
+                    200 { set reason "OK" }
+                    201 { set reason "Created" }
+                    202 { set reason "Accepted" }
+                    204 { set reason "No Content" }
+                    301 { set reason "Moved Permanently" }
+                    302 { set reason "Found" }
+                    303 { set reason "See Other" }
+                    304 { set reason "Not Modified" }
+                    305 { set reason "Use Proxy" }
+                    307 { set reason "Temporary Redirect" }
+                    400 { set reason "Bad Request" }
+                    401 { set reason "Unauthorized" }
+                    403 { set reason "Forbidden" }
+                    404 { set reason "Not Found" }
+                    500 { set reason "Internal Server Error" }
+                    501 { set reason "Not Implemented" }
+                    502 { set reason "Bad Gateway" }
+                    503 { set reason "Service Unavailable" }
+                    504 { set reason "Gateway Timeout" }
+                }
+            }
+            lappend lines "HTTP/${::state::http::response::version} $status $reason"
+            set headers $::state::http::response::headers
+        }
+        dict for {name values} $headers {
+            foreach value $values {
+                lappend lines "[_http_header_name $name]: $value"
+            }
+        }
+        return "[join $lines \r\n]\r\n\r\n"
     }
 
     proc http_reject_reason {args} {
@@ -2477,6 +2535,12 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_close] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::http_close ::itest::cmd::_testcl_http_close_orig
     proc ::itest::cmd::http_close {args} {
         return [eval [linsert $args 0 ::itest::semantic::http_close_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::http_request] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::http_request ::itest::cmd::_testcl_http_request_orig
+    proc ::itest::cmd::http_request {args} {
+        return [eval [linsert $args 0 ::itest::semantic::_http_message_command request]]
     }
 }
 if {[::tmm::_orig_info commands ::itest::cmd::lb_server] ne ""} {

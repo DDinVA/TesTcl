@@ -364,6 +364,9 @@ teardown, including `CLIENT_CLOSED`, before the next request can start a new
 connection. `LB::server` reports the selected pool/member tuple and supports
 the common `pool`, `addr`, `port`, `priority`, and `ratio` selectors; direct
 `node` overrides intentionally report the pool without claiming a pool member.
+`HTTP::request` and `HTTP::response` reconstruct raw header blocks with request
+or status lines and terminal CRLFs; request/response payloads remain separate
+through the payload collection APIs. The
 The
 emulator profile remains fixed at
 `tmos-17.5`.

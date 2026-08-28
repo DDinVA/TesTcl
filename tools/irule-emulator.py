@@ -211,6 +211,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTTP::password",
     "HTTP::reject_reason",
     "HTTP::response",
+    "HTTP::request",
     "HTTP::close",
     "HTTP::retry",
     "HTTP::is_keepalive",
