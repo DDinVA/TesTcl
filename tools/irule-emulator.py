@@ -177,6 +177,28 @@ EVENT_STATE_FIELDS = {
         "session_present",
         "topic_list",
     },
+    "sip": {
+        "type",
+        "transport",
+        "method",
+        "uri",
+        "version",
+        "status",
+        "phrase",
+        "headers",
+        "payload",
+        "payload_length",
+        "message",
+        "message_length",
+        "call_id",
+        "from",
+        "to",
+        "route_status",
+        "persist_key",
+        "record_route",
+        "route",
+        "via",
+    },
 }
 EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
@@ -185,6 +207,7 @@ EVENT_STATE_NAMESPACES = {
     "dns": "::state::dns",
     "websocket": "::state::websocket",
     "mqtt": "::state::mqtt",
+    "sip": "::state::sip",
 }
 
 
@@ -375,6 +398,22 @@ SEMANTIC_MOCK_COMMANDS = {
     "MQTT::topic",
     "MQTT::type",
     "MQTT::username",
+    "SIP::call_id",
+    "SIP::discard",
+    "SIP::from",
+    "SIP::header",
+    "SIP::message",
+    "SIP::method",
+    "SIP::payload",
+    "SIP::persist",
+    "SIP::record-route",
+    "SIP::respond",
+    "SIP::response",
+    "SIP::route",
+    "SIP::route_status",
+    "SIP::to",
+    "SIP::uri",
+    "SIP::via",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1160,12 +1199,13 @@ PACKET_MAX_COUNT = 1000
 STREAM_MAX_BYTES = 2 * 1024 * 1024
 WEBSOCKET_MAX_FRAME_BYTES = STREAM_MAX_BYTES
 MQTT_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
+SIP_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 MAX_PACKET_STREAMS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "mqtt", "wire"}
+PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "mqtt", "sip", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -1265,6 +1305,27 @@ PACKET_PROTOCOL_FIELDS = {
         "session_present",
         "topic_list",
     },
+    "sip": {
+        "type",
+        "transport",
+        "method",
+        "uri",
+        "version",
+        "status",
+        "phrase",
+        "headers",
+        "body",
+        "payload",
+        "message",
+        "call_id",
+        "from",
+        "to",
+        "route_status",
+        "persist_key",
+        "record_route",
+        "route",
+        "via",
+    },
 }
 PACKET_EVENT_ADAPTERS = {
     "RULE_INIT": "trace initialization",
@@ -1301,6 +1362,12 @@ PACKET_EVENT_ADAPTERS = {
     "MQTT_SERVER_INGRESS": "MQTT message received from server",
     "MQTT_SERVER_DATA": "collected MQTT server PUBLISH payload",
     "MQTT_CLIENT_SHUTDOWN": "MQTT client TCP shutdown",
+    "SIP_REQUEST": "SIP client request ingress",
+    "SIP_REQUEST_DONE": "SIP request routing completion",
+    "SIP_REQUEST_SEND": "SIP request server-side send",
+    "SIP_RESPONSE": "SIP server response ingress",
+    "SIP_RESPONSE_DONE": "SIP response routing completion",
+    "SIP_RESPONSE_SEND": "SIP response client-side send",
 }
 
 
@@ -2458,6 +2525,251 @@ def _encode_mqtt_message(packet: dict[str, Any]) -> bytes:
     return bytes([(numbers[packet_type] << 4) | flags]) + _mqtt_encode_remaining_length(len(body)) + body
 
 
+SIP_COMPACT_HEADERS = {
+    "b": "Content-Type",
+    "c": "Content-Type",
+    "e": "Content-Encoding",
+    "f": "From",
+    "i": "Call-ID",
+    "k": "Supported",
+    "l": "Content-Length",
+    "m": "Contact",
+    "r": "Refer-To",
+    "s": "Subject",
+    "t": "To",
+    "v": "Via",
+}
+
+
+def _sip_header_name(value: Any, field: str = "SIP header name") -> str:
+    if not isinstance(value, str) or not value.strip() or "\r" in value or "\n" in value or ":" in value:
+        raise EmulatorInputError(f"{field} must be a non-empty header name")
+    return value.strip()
+
+
+def _sip_header_value(value: Any, field: str = "SIP header value") -> str:
+    if not isinstance(value, str) or "\r" in value or "\n" in value:
+        raise EmulatorInputError(f"{field} must not contain newlines")
+    return value
+
+
+def _sip_header_pairs(value: Any, field: str = "SIP headers") -> list[list[str]]:
+    if value is None:
+        return []
+    pairs: list[list[str]] = []
+    if isinstance(value, dict):
+        items = value.items()
+        for name, raw_value in items:
+            header_name = _sip_header_name(name)
+            values = raw_value if isinstance(raw_value, list) else [raw_value]
+            if not values:
+                pairs.append([header_name, ""])
+            for item in values:
+                pairs.append([header_name, _sip_header_value(item)])
+        return pairs
+    if not isinstance(value, list):
+        raise EmulatorInputError(f"{field} must be an object or array of [name, value] pairs")
+    for index, item in enumerate(value):
+        if not isinstance(item, list) or len(item) != 2:
+            raise EmulatorInputError(f"{field}[{index}] must be a [name, value] pair")
+        pairs.append([
+            _sip_header_name(item[0], f"{field}[{index}] name"),
+            _sip_header_value(item[1], f"{field}[{index}] value"),
+        ])
+    return pairs
+
+
+def _sip_header_matches(name: str, wanted: str) -> bool:
+    return name.lower() == wanted.lower() or name.lower() == SIP_COMPACT_HEADERS.get(wanted.lower(), "").lower()
+
+
+def _sip_header_values(headers: list[list[str]], wanted: str) -> list[str]:
+    return [value for name, value in headers if _sip_header_matches(name, wanted)]
+
+
+def _sip_content_length(headers: list[list[str]]) -> int:
+    values = _sip_header_values(headers, "Content-Length")
+    if not values:
+        return 0
+    if len(values) > 1:
+        raise EmulatorInputError("SIP message has multiple Content-Length headers")
+    try:
+        length = int(values[0].strip())
+    except ValueError as exc:
+        raise EmulatorInputError("SIP Content-Length must be an integer") from exc
+    if length < 0 or length > SIP_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError("SIP Content-Length is out of range")
+    return length
+
+
+def _sip_derived_fields(headers: list[list[str]]) -> dict[str, str]:
+    via_values = _sip_header_values(headers, "Via")
+    record_route_values = _sip_header_values(headers, "Record-Route")
+    route_values = _sip_header_values(headers, "Route")
+    call_id_values = _sip_header_values(headers, "Call-ID")
+    from_values = _sip_header_values(headers, "From")
+    to_values = _sip_header_values(headers, "To")
+    return {
+        "call_id": call_id_values[0][:256] if call_id_values else "",
+        "from": from_values[0] if from_values else "",
+        "to": to_values[0] if to_values else "",
+        "record_route": json.dumps(record_route_values, separators=(",", ":")),
+        "route": json.dumps(route_values, separators=(",", ":")),
+        "via": json.dumps(via_values, separators=(",", ":")),
+    }
+
+
+def _sip_start_line(packet: dict[str, Any]) -> str:
+    version = str(packet.get("version", "SIP/2.0"))
+    if version != "SIP/2.0":
+        raise EmulatorInputError("SIP version must be SIP/2.0")
+    if packet.get("type") == "request":
+        method = str(packet.get("method", "")).upper()
+        uri = str(packet.get("uri", ""))
+        if not method or not re.fullmatch(r"[A-Z][A-Z0-9!#$%&'*+.^_`|~-]*", method):
+            raise EmulatorInputError("SIP request method is invalid")
+        if not uri or any(char in uri for char in "\r\n "):
+            raise EmulatorInputError("SIP request URI is invalid")
+        return f"{method} {uri} {version}"
+    try:
+        status = int(packet.get("status", 0))
+    except (TypeError, ValueError) as exc:
+        raise EmulatorInputError("SIP response status must be an integer") from exc
+    if not 100 <= status <= 699:
+        raise EmulatorInputError("SIP response status must be between 100 and 699")
+    phrase = str(packet.get("phrase", ""))
+    if "\r" in phrase or "\n" in phrase:
+        raise EmulatorInputError("SIP response phrase must not contain newlines")
+    return f"{version} {status} {phrase}".rstrip()
+
+
+def _encode_sip_message(packet: dict[str, Any]) -> bytes:
+    payload = packet.get("payload", packet.get("body", ""))
+    if isinstance(payload, (bytes, bytearray)):
+        payload_bytes = bytes(payload)
+    else:
+        try:
+            payload_bytes = str(payload).encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise EmulatorInputError("SIP payload must be valid UTF-8") from exc
+    if len(payload_bytes) > SIP_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError("SIP payload exceeds the stream size limit")
+    headers = _sip_header_pairs(packet.get("headers", []))
+    headers = [pair for pair in headers if not _sip_header_matches(pair[0], "Content-Length")]
+    headers.append(["Content-Length", str(len(payload_bytes))])
+    lines = [_sip_start_line(packet)] + [f"{name}: {value}" for name, value in headers]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("utf-8") + payload_bytes
+
+
+def _decode_sip_message(
+    payload: bytes, direction: str
+) -> tuple[dict[str, Any], int] | None:
+    if not payload:
+        return None
+    delimiter = b"\r\n\r\n"
+    delimiter_width = 4
+    header_end = payload.find(delimiter)
+    if header_end < 0:
+        delimiter = b"\n\n"
+        delimiter_width = 2
+        header_end = payload.find(delimiter)
+    if header_end < 0:
+        if len(payload) > SIP_MAX_MESSAGE_BYTES:
+            raise EmulatorInputError("SIP headers exceed the stream size limit")
+        return None
+    header_bytes = payload[:header_end]
+    try:
+        header_text = header_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EmulatorInputError("SIP headers must be valid UTF-8") from exc
+    lines = header_text.replace("\r\n", "\n").split("\n")
+    if not lines or not lines[0].strip():
+        raise EmulatorInputError("SIP message has no start line")
+    unfolded: list[str] = []
+    for line in lines:
+        if line.startswith((" ", "\t")):
+            if not unfolded:
+                raise EmulatorInputError("SIP header continuation has no preceding header")
+            unfolded[-1] += " " + line.strip()
+        else:
+            unfolded.append(line)
+    start_line = unfolded[0].strip()
+    headers: list[list[str]] = []
+    for line in unfolded[1:]:
+        if ":" not in line:
+            raise EmulatorInputError("SIP header is missing a colon")
+        name, value = line.split(":", 1)
+        headers.append([_sip_header_name(name), _sip_header_value(value.strip())])
+    if start_line.startswith("SIP/"):
+        parts = start_line.split(None, 2)
+        if len(parts) < 2 or parts[0] != "SIP/2.0" or not re.fullmatch(r"[1-6][0-9][0-9]", parts[1]):
+            raise EmulatorInputError("SIP response start line is invalid")
+        packet_type = "response"
+        version = parts[0]
+        status = int(parts[1])
+        phrase = parts[2] if len(parts) == 3 else ""
+        method = ""
+        uri = ""
+    else:
+        parts = start_line.split()
+        if len(parts) != 3 or parts[2] != "SIP/2.0" or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*", parts[0]
+        ):
+            raise EmulatorInputError("SIP request start line is invalid")
+        packet_type = "request"
+        method, uri, version = parts
+        status = None
+        phrase = ""
+    body_start = header_end + delimiter_width
+    content_length = _sip_content_length(headers)
+    total_length = body_start + content_length
+    if total_length > SIP_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError("SIP message exceeds the stream size limit")
+    if len(payload) < total_length:
+        return None
+    wire_message = bytes(payload[:total_length])
+    body = bytes(payload[body_start:total_length])
+    result: dict[str, Any] = {
+        "protocol": "sip",
+        "direction": direction,
+        "type": packet_type,
+        "version": version,
+        "headers": headers,
+        "payload": _decode_wire_text(body),
+        "_sip_payload": body,
+        "message": _decode_wire_text(wire_message),
+        "message_length": total_length,
+        "_wire_payload": wire_message,
+    }
+    if packet_type == "request":
+        result.update({"method": method.upper(), "uri": uri})
+    else:
+        result.update({"status": status, "phrase": phrase})
+    result.update(_sip_derived_fields(headers))
+    return result, total_length
+
+
+def _decode_sip_messages(
+    payload: bytes, direction: str
+) -> tuple[list[dict[str, Any]], bytes]:
+    messages: list[dict[str, Any]] = []
+    position = 0
+    while position < len(payload):
+        decoded = _decode_sip_message(payload[position:], direction)
+        if decoded is None:
+            break
+        message, consumed = decoded
+        if consumed <= 0:
+            raise EmulatorInputError("SIP decoder returned an invalid message length")
+        messages.append(message)
+        if len(messages) > PACKET_MAX_COUNT:
+            raise EmulatorInputError(
+                f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} SIP messages"
+            )
+        position += consumed
+    return messages, payload[position:]
+
+
 def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or not raw:
         raise EmulatorInputError("packets must be a non-empty array")
@@ -2548,7 +2860,9 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
         for field in PACKET_PROTOCOL_FIELDS[protocol]:
             if field not in packet:
                 continue
-            if field in {"headers", "response_headers"}:
+            if field == "headers" and protocol == "sip":
+                normalised[field] = _sip_header_pairs(packet[field], f"packet {index} headers")
+            elif field in {"headers", "response_headers"}:
                 value = packet[field]
                 if not isinstance(value, dict) or not all(
                     isinstance(key, str) and isinstance(item, str) for key, item in value.items()
@@ -2583,6 +2897,11 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     if packet_type not in MQTT_PACKET_TYPES.values():
                         raise EmulatorInputError(
                             f"unsupported MQTT packet type: {packet_type}"
+                        )
+                elif protocol == "sip":
+                    if packet_type not in {"request", "response"}:
+                        raise EmulatorInputError(
+                            f"unsupported SIP packet type: {packet_type}"
                         )
                 normalised[field] = packet_type
             else:
@@ -2685,6 +3004,51 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             except UnicodeEncodeError as exc:
                 raise EmulatorInputError(f"packet {index} MQTT payload must be valid UTF-8") from exc
             normalised["_wire_payload"] = _encode_mqtt_message(normalised)
+        if protocol == "sip":
+            packet_type = normalised.get("type")
+            if packet_type is None:
+                raise EmulatorInputError(f"packet {index} SIP packets require type")
+            transport = normalised.get("transport", "tcp").lower()
+            if transport not in {"tcp", "udp"}:
+                raise EmulatorInputError(
+                    f"packet {index} SIP transport must be tcp or udp"
+                )
+            normalised["transport"] = transport
+            if "message" in normalised:
+                try:
+                    raw_message = normalised["message"].encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise EmulatorInputError(
+                        f"packet {index} SIP message must be valid UTF-8"
+                    ) from exc
+                decoded = _decode_sip_message(raw_message, direction)
+                if decoded is None or decoded[1] != len(raw_message):
+                    raise EmulatorInputError(
+                        f"packet {index} SIP message must contain exactly one complete message"
+                    )
+                parsed, _ = decoded
+                if parsed["type"] != packet_type:
+                    raise EmulatorInputError(
+                        f"packet {index} SIP type does not match its start line"
+                    )
+                normalised.update(parsed)
+            else:
+                if packet_type == "request":
+                    if "method" not in normalised or "uri" not in normalised:
+                        raise EmulatorInputError(
+                            f"packet {index} SIP requests require method and uri"
+                        )
+                elif "status" not in normalised:
+                    raise EmulatorInputError(
+                        f"packet {index} SIP responses require status"
+                    )
+                normalised["_wire_payload"] = _encode_sip_message(normalised)
+                parsed, _ = _decode_sip_message(normalised["_wire_payload"], direction)
+                if parsed is None:  # pragma: no cover - encoder contract guard
+                    raise EmulatorInputError(
+                        f"packet {index} SIP encoder produced an incomplete message"
+                    )
+                normalised.update(parsed)
         packets.append(normalised)
     return packets
 
@@ -2852,6 +3216,10 @@ class EmulatorSession:
         self._websocket_raw_active = False
         self._mqtt_raw_active = any(
             str(profile).upper() == "MQTT" for profile in self._profiles
+        )
+        self._sip_raw_active = any(
+            str(profile).upper() in {"SIP", "SIPROUTER", "SIPSESSION"}
+            for profile in self._profiles
         )
         self._thread.start()
         self._started.wait()
@@ -3054,7 +3422,7 @@ class EmulatorSession:
         for layer, values in state.items():
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt"} and field in {"payload", "message"}:
+                if layer in {"websocket", "mqtt", "sip"} and field in {"payload", "message"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -3070,6 +3438,8 @@ class EmulatorSession:
                     session.eval_tcl(f"set {namespace}::{field} {_tcl_quote(value)}")
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
         event_result = session.fire_event(event_name)
+        if "sip" in state:
+            session.eval_tcl("::itest::semantic::sip_rebuild_message")
         fired_events = _split_tcl_list(session.eval_tcl("::itest::get_fired_events"))
         result = {
             "event": event_name,
@@ -3125,7 +3495,9 @@ class EmulatorSession:
         if "port" in destination:
             connection[f"{destination_prefix}_port"] = str(destination["port"])
         protocol = packet["protocol"]
-        if protocol in {"tcp", "tls", "http", "websocket", "mqtt"}:
+        if protocol == "sip" and packet.get("transport", "tcp") == "udp":
+            connection.update({"protocol": "17", "transport": "udp"})
+        elif protocol in {"tcp", "tls", "http", "websocket", "mqtt", "sip"}:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol in {"udp", "dns"}:
             connection.update({"protocol": "17", "transport": "udp"})
@@ -3226,6 +3598,58 @@ class EmulatorSession:
             mqtt_state["message"] = bytes(message)
             mqtt_state["message_length"] = str(len(message))
             state["mqtt"] = mqtt_state
+        elif protocol == "sip":
+            sip_state: dict[str, str] = {}
+            for field in EVENT_STATE_FIELDS["sip"]:
+                if field in packet:
+                    if field == "headers":
+                        headers = _sip_header_pairs(packet[field])
+                        # This value is assigned to a Tcl variable by
+                        # _fire_event_on_worker, so it must be a list value,
+                        # not a braced single-word Tcl command argument.
+                        sip_state[field] = " ".join(
+                            _tcl_quote(item) for pair in headers for item in pair
+                        )
+                    else:
+                        sip_state[field] = _packet_scalar(packet[field], field)
+            payload = packet.get("_sip_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                payload = str(packet.get("payload", "")).encode("utf-8")
+            sip_state["payload"] = bytes(payload)
+            sip_state["payload_length"] = str(len(payload))
+            message = packet.get("message")
+            if message is None:
+                wire_message = packet.get("_wire_payload")
+                if not isinstance(wire_message, (bytes, bytearray)):
+                    wire_message = _encode_sip_message(packet)
+                message = _decode_wire_text(bytes(wire_message))
+            sip_state["message"] = message
+            sip_state["message_length"] = str(
+                len(packet.get("_wire_payload", str(message).encode("utf-8")))
+            )
+            state["sip"] = sip_state
+        return state
+
+    def _current_sip_event_state(
+        self, session: Any, packet: dict[str, Any]
+    ) -> dict[str, dict[str, str]]:
+        """Build event input from the mutable SIP state after an earlier phase."""
+        state: dict[str, dict[str, str]] = {
+            "connection": self._packet_connection_state(packet),
+            "sip": {},
+        }
+        sip_state = state["sip"]
+        for field in EVENT_STATE_FIELDS["sip"]:
+            raw = session.eval_tcl(f"set ::state::sip::{field}")
+            if field == "headers":
+                values = _split_tcl_list(raw)
+                if len(values) % 2:
+                    raise EmulatorInputError("invalid SIP header state")
+                sip_state[field] = " ".join(_tcl_quote(value) for value in values)
+            elif field in {"payload", "message"}:
+                sip_state[field] = raw
+            else:
+                sip_state[field] = raw
         return state
 
     @staticmethod
@@ -3340,7 +3764,7 @@ class EmulatorSession:
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
-        if packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt"}:
+        if packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip"}:
             return
         source = packet["source"]
         destination = packet["destination"]
@@ -3360,11 +3784,12 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
         session.eval_tcl("::itest::semantic::mqtt_reset_connection")
+        session.eval_tcl("::itest::semantic::sip_reset_connection")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
         events.append(
             self._fire_event_on_worker(
@@ -3482,6 +3907,31 @@ class EmulatorSession:
             return False
         return True
 
+    @staticmethod
+    def _looks_like_sip_prefix(payload: bytes) -> bool:
+        if payload.startswith(b"SIP/2.0 "):
+            return True
+        methods = (
+            b"ACK",
+            b"BYE",
+            b"CANCEL",
+            b"INFO",
+            b"INVITE",
+            b"MESSAGE",
+            b"NOTIFY",
+            b"OPTIONS",
+            b"PRACK",
+            b"PUBLISH",
+            b"REFER",
+            b"REGISTER",
+            b"SUBSCRIBE",
+            b"UPDATE",
+        )
+        return any(
+            method.startswith(payload) or payload.startswith(method + b" ")
+            for method in methods
+        )
+
     def _reassemble_packet(
         self, packet: dict[str, Any], packet_index: int
     ) -> tuple[dict[str, Any] | None, int]:
@@ -3492,6 +3942,22 @@ class EmulatorSession:
         Structured packets without sequence numbers retain the original append-
         in-arrival-order behavior.
         """
+        if packet["protocol"] == "udp" and self._sip_raw_active:
+            raw_payload = packet.get("_wire_payload")
+            if raw_payload is None and packet.get("payload"):
+                raw_payload = packet["payload"].encode("utf-8")
+            if raw_payload and self._looks_like_sip_prefix(raw_payload):
+                decoded = _decode_sip_message(raw_payload, packet["direction"])
+                if decoded is None or decoded[1] != len(raw_payload):
+                    raise EmulatorInputError(
+                        "a UDP SIP datagram must contain exactly one complete message"
+                    )
+                merged, _ = decoded
+                merged["transport"] = "udp"
+                for field in ("source", "destination", "timestamp"):
+                    if field in packet:
+                        merged[field] = packet[field]
+                return merged, 0
         if packet["protocol"] == "udp" and packet.get("_wire_payload"):
             decoded_dns = _decode_dns_payload(
                 packet["_wire_payload"], packet["direction"], packet_index
@@ -3581,6 +4047,33 @@ class EmulatorSession:
         looks_like_mqtt = self._mqtt_raw_active and self._looks_like_mqtt_prefix(combined)
         if looks_like_mqtt:
             decoded_messages, remaining = _decode_mqtt_messages(
+                combined, packet["direction"]
+            )
+            if decoded_messages:
+                stream.buffer = remaining
+                if not has_gap:
+                    stream.segments.clear()
+                for message in decoded_messages:
+                    message["transport"] = "tcp"
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            message[field] = packet[field]
+                first = decoded_messages[0]
+                if len(decoded_messages) > 1:
+                    first["_coalesced_packets"] = decoded_messages[1:]
+                return first, len(combined) - len(remaining)
+            stream.buffer = combined
+            if not has_gap:
+                stream.segments.clear()
+            if stream.buffered_bytes > STREAM_MAX_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"packet stream exceeds the {STREAM_MAX_BYTES // (1024 * 1024)} MiB limit"
+                )
+            return None, stream.buffered_bytes
+        looks_like_sip = self._sip_raw_active and self._looks_like_sip_prefix(combined)
+        if looks_like_sip:
+            decoded_messages, remaining = _decode_sip_messages(
                 combined, packet["direction"]
             )
             if decoded_messages:
@@ -3780,6 +4273,17 @@ class EmulatorSession:
                 "return_code_list",
                 "session_present",
                 "topic_list",
+                "version",
+                "transport",
+                "phrase",
+                "call_id",
+                "from",
+                "to",
+                "route_status",
+                "persist_key",
+                "record_route",
+                "route",
+                "via",
                 "timestamp",
                 "seq",
                 "ack",
@@ -3913,6 +4417,57 @@ class EmulatorSession:
                                 entry["drop_reason"] = "message"
                 if message_state.get("disconnect") == "1":
                     entry["disconnect_requested"] = True
+                continue
+
+            if protocol == "sip":
+                self._activate_packet_connection(session, packet, entry["events"])
+                session.eval_tcl("::itest::semantic::sip_prepare_message")
+                is_request = packet.get("type") == "request"
+                ingress_event = "SIP_REQUEST" if is_request else "SIP_RESPONSE"
+                send_event = "SIP_REQUEST_SEND" if is_request else "SIP_RESPONSE_SEND"
+                done_event = "SIP_REQUEST_DONE" if is_request else "SIP_RESPONSE_DONE"
+                ingress_result = self._fire_event_on_worker(
+                    session, ingress_event, self._packet_event_state(packet)
+                )
+                entry["events"].append(ingress_result)
+                raw_flags = _split_tcl_list(
+                    session.eval_tcl("::itest::semantic::sip_flags_snapshot")
+                )
+                if len(raw_flags) % 2:
+                    raise EmulatorInputError("invalid SIP message state")
+                flags = dict(zip(raw_flags[::2], raw_flags[1::2]))
+                if flags.get("discarded") == "1":
+                    entry["discarded"] = True
+                    entry["drop_reason"] = "message"
+                else:
+                    if flags.get("responded") == "1":
+                        entry["responded"] = True
+                        entry["response"] = {
+                            "status": int(flags.get("code", "0")),
+                            "phrase": flags.get("phrase", ""),
+                        }
+                    else:
+                        send_result = self._fire_event_on_worker(
+                            session, send_event, self._current_sip_event_state(session, packet)
+                        )
+                        entry["events"].append(send_result)
+                        raw_flags = _split_tcl_list(
+                            session.eval_tcl("::itest::semantic::sip_flags_snapshot")
+                        )
+                        if len(raw_flags) % 2:
+                            raise EmulatorInputError("invalid SIP message state")
+                        flags = dict(zip(raw_flags[::2], raw_flags[1::2]))
+                        if flags.get("discarded") == "1":
+                            entry["discarded"] = True
+                            entry["drop_reason"] = "message"
+                        else:
+                            entry["events"].append(
+                                self._fire_event_on_worker(
+                                    session,
+                                    done_event,
+                                    self._current_sip_event_state(session, packet),
+                                )
+                            )
                 continue
 
             if protocol == "websocket":

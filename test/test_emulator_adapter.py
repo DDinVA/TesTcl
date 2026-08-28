@@ -2353,6 +2353,181 @@ when MQTT_CLIENT_SHUTDOWN { log local0. shutdown }
         self.assertEqual(result["trace"][3]["protocol"], "mqtt")
         self.assertEqual(result["trace"][4]["protocol"], "tcp")
 
+    def test_sip_structured_lifecycle_headers_payload_and_response_rewrite(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["SIP"],
+                "irule": """
+when SIP_REQUEST {
+    log local0. "method=[SIP::method] uri=[SIP::uri] call=[SIP::call_id] from=[SIP::from]"
+    SIP::header replace X-Test changed
+    SIP::payload insert 5 "!"
+    SIP::persist [SIP::call_id]
+}
+when SIP_REQUEST_SEND {
+    log local0. "names=[SIP::header names] payload=[SIP::payload] key=[SIP::persist]"
+}
+when SIP_REQUEST_DONE { log local0. "done=[SIP::route_status]" }
+when SIP_RESPONSE {
+    log local0. "code=[SIP::response code] via=[SIP::via proto 0]"
+    SIP::response rewrite 202 Accepted
+}
+when SIP_RESPONSE_SEND { log local0. "sent=[SIP::response code]" }
+when SIP_RESPONSE_DONE { log local0. response-done }
+""",
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "direction": "client_to_server",
+                        "type": "request",
+                        "method": "INVITE",
+                        "uri": "sip:bob@example.com",
+                        "headers": {
+                            "Via": "SIP/2.0/UDP proxy.example.com;branch=z9",
+                            "From": "<sip:alice@example.com>;tag=1",
+                            "To": "<sip:bob@example.com>",
+                            "Call-ID": "call-123",
+                            "CSeq": "1 INVITE",
+                        },
+                        "payload": "hello",
+                    },
+                    {
+                        "protocol": "sip",
+                        "direction": "server_to_client",
+                        "type": "response",
+                        "status": 200,
+                        "phrase": "OK",
+                        "headers": {
+                            "Via": "SIP/2.0/UDP proxy.example.com;branch=z9",
+                            "From": "<sip:alice@example.com>;tag=1",
+                            "To": "<sip:bob@example.com>;tag=2",
+                            "Call-ID": "call-123",
+                            "CSeq": "1 INVITE",
+                        },
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_events = result["trace"][0]["events"]
+        self.assertEqual(
+            [event["event"] for event in request_events[-3:]],
+            ["SIP_REQUEST", "SIP_REQUEST_SEND", "SIP_REQUEST_DONE"],
+        )
+        self.assertTrue(any("call=call-123" in log for log in request_events[-3]["logs"]))
+        self.assertTrue(any("X-Test" in log and "hello!" in log for log in request_events[-2]["logs"]))
+        self.assertIn("X-Test: changed", request_events[-1]["state"]["sip"]["message"])
+        self.assertIn("hello!", request_events[-1]["state"]["sip"]["message"])
+        response_events = result["trace"][1]["events"]
+        self.assertEqual(
+            [event["event"] for event in response_events],
+            ["SIP_RESPONSE", "SIP_RESPONSE_SEND", "SIP_RESPONSE_DONE"],
+        )
+        self.assertTrue(any("via=UDP" in log for log in response_events[0]["logs"]))
+        self.assertEqual(response_events[-1]["state"]["sip"]["status"], "202")
+
+    def test_sip_raw_tcp_and_udp_messages_drive_request_events(self) -> None:
+        raw_message = (
+            b"OPTIONS sip:server@example.com SIP/2.0\r\n"
+            b"Via: SIP/2.0/TCP client.example.com;branch=z9\r\n"
+            b"Call-ID: raw-1\r\nContent-Length: 4\r\n\r\nping"
+        )
+        tcp_packets = [
+            {
+                "protocol": "wire",
+                "direction": "client_to_server",
+                "raw_hex": _raw_ipv4_tcp_hex(
+                    "10.0.0.5", "192.0.2.10", 5060, 5060, 0x02, sequence=5000
+                ),
+            },
+            {
+                "protocol": "wire",
+                "direction": "client_to_server",
+                "raw_hex": _raw_ipv4_tcp_hex(
+                    "10.0.0.5", "192.0.2.10", 5060, 5060, 0x18,
+                    raw_message[:40], sequence=5001,
+                ),
+            },
+            {
+                "protocol": "wire",
+                "direction": "client_to_server",
+                "raw_hex": _raw_ipv4_tcp_hex(
+                    "10.0.0.5", "192.0.2.10", 5060, 5060, 0x18,
+                    raw_message[40:], sequence=5041,
+                ),
+            },
+        ]
+        udp_message = (
+            b"REGISTER sip:example.com SIP/2.0\r\n"
+            b"Via: SIP/2.0/UDP client.example.com\r\n"
+            b"Call-ID: udp-1\r\nContent-Length: 0\r\n\r\n"
+        )
+        udp_packets = [
+            {
+                "protocol": "wire",
+                "direction": "client_to_server",
+                "raw_hex": _raw_ipv4_udp_hex(
+                    "10.0.0.5", "192.0.2.10", 5060, 5060, udp_message
+                ),
+            }
+        ]
+        rule = "when SIP_REQUEST { log local0. \"[SIP::method] [SIP::call_id] [SIP::payload]\" }"
+        tcp_result = self.adapter.run_scenario(
+            {"profiles": ["SIP"], "irule": rule, "packets": tcp_packets},
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        tcp_entries = [entry for entry in tcp_result["trace"] if entry["protocol"] == "sip"]
+        self.assertEqual(len(tcp_entries), 1)
+        self.assertTrue(any("OPTIONS raw-1 ping" in log for log in tcp_entries[0]["events"][-1]["logs"]))
+        udp_result = self.adapter.run_scenario(
+            {"profiles": ["SIP"], "irule": rule, "packets": udp_packets},
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        udp_entry = udp_result["trace"][0]
+        self.assertEqual(udp_entry["protocol"], "sip")
+        self.assertEqual(udp_entry["transport"], "udp")
+        self.assertEqual(udp_entry["events"][-1]["state"]["connection"]["protocol"], "17")
+        self.assertTrue(any("REGISTER udp-1" in log for log in udp_entry["events"][-1]["logs"]))
+
+    def test_sip_respond_and_discard_stop_the_forward_lifecycle(self) -> None:
+        response = self.adapter.run_scenario(
+            {
+                "profiles": ["SIP"],
+                "irule": "when SIP_REQUEST { SIP::respond 403 Forbidden X-Reason blocked }",
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "type": "request",
+                        "method": "INVITE",
+                        "uri": "sip:bob@example.com",
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        entry = response["trace"][0]
+        self.assertEqual([event["event"] for event in entry["events"][-1:]], ["SIP_REQUEST"])
+        self.assertTrue(entry["responded"])
+        self.assertEqual(entry["response"], {"status": 403, "phrase": "Forbidden"})
+        discarded = self.adapter.run_scenario(
+            {
+                "profiles": ["SIP"],
+                "irule": "when SIP_REQUEST { SIP::discard }",
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "type": "request",
+                        "method": "BYE",
+                        "uri": "sip:bob@example.com",
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        discarded_entry = discarded["trace"][0]
+        self.assertTrue(discarded_entry["discarded"])
+        self.assertEqual(discarded_entry["drop_reason"], "message")
+
     def test_mqtt_rejects_unsupported_structured_direction_and_version(self) -> None:
         with self.assertRaises(self.adapter.EmulatorInputError):
             self.adapter.run_scenario(

@@ -42,6 +42,17 @@ namespace eval ::itest::semantic {
     variable mqtt_dropped 0
     variable mqtt_disconnect_requested 0
 
+    variable sip_discarded 0
+    variable sip_response_requested 0
+    variable sip_response_code ""
+    variable sip_response_phrase ""
+    variable sip_response_headers {}
+    variable sip_persist_key ""
+    variable sip_persist_mode "use"
+    variable sip_persist_timeout 0
+    variable sip_persist_bidirectional 0
+    variable sip_persist_direction "detect"
+
     namespace eval ::state::websocket {
         variable request_headers {}
         variable response_headers {}
@@ -83,6 +94,28 @@ namespace eval ::itest::semantic {
         variable return_code_list {}
         variable session_present 0
         variable topic_list {}
+    }
+
+    namespace eval ::state::sip {
+        variable type "request"
+        variable method ""
+        variable uri ""
+        variable version "SIP/2.0"
+        variable status ""
+        variable phrase ""
+        variable headers {}
+        variable payload ""
+        variable payload_length 0
+        variable message ""
+        variable message_length 0
+        variable call_id ""
+        variable from ""
+        variable to ""
+        variable route_status "unrouted"
+        variable persist_key ""
+        variable record_route {}
+        variable route {}
+        variable via {}
     }
 
     proc _profile_enabled {name} {
@@ -794,6 +827,459 @@ namespace eval ::itest::semantic {
         if {[llength $args] != 0} { error "MQTT::enable takes no arguments" }
         set mqtt_enabled 1
         ::itest::log_decision mqtt enable
+        return ""
+    }
+
+    proc sip_reset_connection {} {
+        variable sip_discarded
+        variable sip_response_requested
+        variable sip_response_code
+        variable sip_response_phrase
+        variable sip_response_headers
+        variable sip_persist_key
+        variable sip_persist_mode
+        variable sip_persist_timeout
+        variable sip_persist_bidirectional
+        variable sip_persist_direction
+        set sip_discarded 0
+        set sip_response_requested 0
+        set sip_response_code ""
+        set sip_response_phrase ""
+        set sip_response_headers {}
+        set sip_persist_key ""
+        set sip_persist_mode use
+        set sip_persist_timeout 0
+        set sip_persist_bidirectional 0
+        set sip_persist_direction detect
+        namespace eval ::state::sip {
+            variable type request
+            variable method ""
+            variable uri ""
+            variable version SIP/2.0
+            variable status ""
+            variable phrase ""
+            variable headers {}
+            variable payload ""
+            variable payload_length 0
+            variable message ""
+            variable message_length 0
+            variable call_id ""
+            variable from ""
+            variable to ""
+            variable route_status unrouted
+            variable persist_key ""
+            variable record_route {}
+            variable route {}
+            variable via {}
+        }
+    }
+
+    proc sip_prepare_message {} {
+        variable sip_discarded
+        variable sip_response_requested
+        variable sip_response_code
+        variable sip_response_phrase
+        variable sip_response_headers
+        set sip_discarded 0
+        set sip_response_requested 0
+        set sip_response_code ""
+        set sip_response_phrase ""
+        set sip_response_headers {}
+        namespace eval ::state::sip {
+            variable type request
+            variable method ""
+            variable uri ""
+            variable version SIP/2.0
+            variable status ""
+            variable phrase ""
+            variable headers {}
+            variable payload ""
+            variable payload_length 0
+            variable message ""
+            variable message_length 0
+            variable call_id ""
+            variable from ""
+            variable to ""
+            variable route_status unrouted
+            variable persist_key ""
+            variable record_route {}
+            variable route {}
+            variable via {}
+        }
+    }
+
+    proc sip_flags_snapshot {} {
+        variable sip_discarded
+        variable sip_response_requested
+        variable sip_response_code
+        variable sip_response_phrase
+        return [list discarded $sip_discarded responded $sip_response_requested code $sip_response_code phrase $sip_response_phrase]
+    }
+
+    proc _sip_require_event {allowed command_name} {
+        if {$::itest::current_event ni $allowed} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc _sip_header_matches {name wanted} {
+        if {[string equal -nocase $name $wanted]} { return 1 }
+        set compact [switch -nocase -exact -- $wanted {
+            b - c { set result Content-Type }
+            e { set result Content-Encoding }
+            f { set result From }
+            i { set result Call-ID }
+            k { set result Supported }
+            l { set result Content-Length }
+            m { set result Contact }
+            r { set result Refer-To }
+            s { set result Subject }
+            t { set result To }
+            v { set result Via }
+            default { set result "" }
+        }; set result]
+        return [expr {$compact ne "" && [string equal -nocase $name $compact]}]
+    }
+
+    proc _sip_header_indices {wanted} {
+        set result {}
+        set index 0
+        foreach {name value} $::state::sip::headers {
+            if {[_sip_header_matches $name $wanted]} { lappend result $index }
+            incr index
+        }
+        return $result
+    }
+
+    proc _sip_header_at {wanted index} {
+        set matches [_sip_header_indices $wanted]
+        if {$index < 0 || $index >= [llength $matches]} { return "" }
+        set absolute [lindex $matches $index]
+        return [lindex $::state::sip::headers [expr {$absolute * 2 + 1}]]
+    }
+
+    proc _sip_header_first {wanted} {
+        return [_sip_header_at $wanted 0]
+    }
+
+    proc _sip_recompute_derived {} {
+        set ::state::sip::call_id [string range [_sip_header_first Call-ID] 0 255]
+        set ::state::sip::from [_sip_header_first From]
+        set ::state::sip::to [_sip_header_first To]
+        set record_route {}
+        foreach {name value} $::state::sip::headers {
+            if {[_sip_header_matches $name Record-Route]} { lappend record_route $value }
+        }
+        set ::state::sip::record_route $record_route
+        set route {}
+        foreach {name value} $::state::sip::headers {
+            if {[_sip_header_matches $name Route]} { lappend route $value }
+        }
+        set ::state::sip::route $route
+        set via {}
+        foreach {name value} $::state::sip::headers {
+            if {[_sip_header_matches $name Via]} { lappend via $value }
+        }
+        set ::state::sip::via $via
+    }
+
+    proc sip_rebuild_message {} {
+        _sip_recompute_derived
+        set payload $::state::sip::payload
+        set header_lines {}
+        foreach {name value} $::state::sip::headers {
+            if {![_sip_header_matches $name Content-Length]} {
+                lappend header_lines "$name: $value"
+            }
+        }
+        lappend header_lines "Content-Length: [string bytelength $payload]"
+        if {$::state::sip::type eq "request"} {
+            set start "$::state::sip::method $::state::sip::uri $::state::sip::version"
+        } else {
+            set start "$::state::sip::version $::state::sip::status $::state::sip::phrase"
+        }
+        set message "$start\r\n[join $header_lines \r\n]\r\n\r\n$payload"
+        set ::state::sip::message $message
+        set ::state::sip::message_length [string bytelength $message]
+        set ::state::sip::payload_length [string bytelength $payload]
+        return ""
+    }
+
+    proc sip_header_command {args} {
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_DONE SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_DONE SIP_RESPONSE_SEND} SIP::header
+        if {[llength $args] == 0} { error "SIP::header requires a name or subcommand" }
+        set command [lindex $args 0]
+        set rest [lrange $args 1 end]
+        switch -exact -- $command {
+            value {
+                if {[llength $rest] < 1 || [llength $rest] > 2} { error "SIP::header value requires a name and optional index" }
+                set index [expr {[llength $rest] == 2 ? [lindex $rest 1] : 0}]
+                if {![string is integer -strict $index] || $index < 0} { error "SIP header index must be non-negative" }
+                return [_sip_header_at [lindex $rest 0] $index]
+            }
+            names {
+                if {[llength $rest] != 0} { error "SIP::header names takes no arguments" }
+                set result {}
+                foreach {name value} $::state::sip::headers { lappend result $name }
+                return $result
+            }
+            at {
+                if {[llength $rest] != 1 || ![string is integer -strict [lindex $rest 0]] || [lindex $rest 0] < 0} { error "SIP::header at requires a non-negative index" }
+                set absolute [expr {[lindex $rest 0] * 2}]
+                if {$absolute >= [llength $::state::sip::headers]} { return "" }
+                return [lindex $::state::sip::headers $absolute]
+            }
+            exists {
+                if {[llength $rest] != 1} { error "SIP::header exists requires a name" }
+                return [expr {[llength [_sip_header_indices [lindex $rest 0]]] > 0}]
+            }
+            count {
+                if {[llength $rest] > 1} { error "SIP::header count accepts zero or one name" }
+                if {[llength $rest] == 0} { return [expr {[llength $::state::sip::headers] / 2}] }
+                return [llength [_sip_header_indices [lindex $rest 0]]]
+            }
+            values {
+                if {[llength $rest] > 1} { error "SIP::header values accepts zero or one name" }
+                set result {}
+                if {[llength $rest] == 0} {
+                    foreach {name value} $::state::sip::headers { lappend result $value }
+                } else {
+                    foreach index [_sip_header_indices [lindex $rest 0]] {
+                        lappend result [lindex $::state::sip::headers [expr {$index * 2 + 1}]]
+                    }
+                }
+                return $result
+            }
+            insert - replace - remove {
+                if {$command eq "remove"} {
+                    if {[llength $rest] < 1 || [llength $rest] > 2} { error "SIP::header remove requires a name and optional index" }
+                    set name [lindex $rest 0]
+                    set value ""
+                    set supplied_index [expr {[llength $rest] == 2 ? [lindex $rest 1] : 0}]
+                } else {
+                    if {[llength $rest] < 2 || [llength $rest] > 3} { error "SIP::header $command requires name, value, and optional index" }
+                    set name [lindex $rest 0]
+                    set value [lindex $rest 1]
+                    set supplied_index [expr {[llength $rest] == 3 ? [lindex $rest 2] : -1}]
+                }
+                if {$supplied_index < -1 || ![string is integer -strict $supplied_index]} { error "SIP header index must be an integer" }
+                set matches [_sip_header_indices $name]
+                if {$command eq "remove"} {
+                    if {[llength $matches] > $supplied_index} {
+                        set absolute [lindex $matches $supplied_index]
+                        set ::state::sip::headers [lreplace $::state::sip::headers [expr {$absolute * 2}] [expr {$absolute * 2 + 1}]]
+                    }
+                } elseif {$command eq "replace"} {
+                    set target [expr {$supplied_index >= 0 ? ($supplied_index < [llength $matches] ? [lindex $matches $supplied_index] : -1) : ([llength $matches] ? [lindex $matches 0] : -1)}]
+                    if {$target < 0} {
+                        lappend ::state::sip::headers $name $value
+                    } else {
+                        lset ::state::sip::headers [expr {$target * 2}] $name
+                        lset ::state::sip::headers [expr {$target * 2 + 1}] $value
+                    }
+                } else {
+                    if {$supplied_index < 0} {
+                        lappend ::state::sip::headers $name $value
+                    } else {
+                        set absolute [expr {$supplied_index * 2}]
+                        set ::state::sip::headers [linsert $::state::sip::headers $absolute $name $value]
+                    }
+                }
+                sip_rebuild_message
+                ::itest::log_decision sip header_$command [list $name $value]
+                return ""
+            }
+            default {
+                if {[llength $rest] > 1} { error "SIP::header shorthand accepts a name and optional index" }
+                set index [expr {[llength $rest] == 1 ? [lindex $rest 0] : 0}]
+                if {![string is integer -strict $index] || $index < 0} { error "SIP header index must be non-negative" }
+                return [_sip_header_at $command $index]
+            }
+        }
+    }
+
+    proc sip_simple_header_command {field header args} {
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_DONE SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_DONE SIP_RESPONSE_SEND} SIP::$field
+        if {[llength $args] != 0} { error "SIP::$field takes no arguments" }
+        return [_sip_header_first $header]
+    }
+
+    proc sip_call_id_command {args} { return [sip_simple_header_command call_id Call-ID {*}$args] }
+    proc sip_from_command {args} { return [sip_simple_header_command from From {*}$args] }
+    proc sip_to_command {args} { return [sip_simple_header_command to To {*}$args] }
+    proc sip_method_command {args} {
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_DONE SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_DONE SIP_RESPONSE_SEND} SIP::method
+        if {[llength $args] != 0} { error "SIP::method takes no arguments" }
+        return $::state::sip::method
+    }
+    proc sip_message_command {args} {
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_DONE SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_DONE SIP_RESPONSE_SEND} SIP::message
+        if {[llength $args] != 0} { error "SIP::message takes no arguments" }
+        return $::state::sip::message
+    }
+    proc sip_uri_command {args} {
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_DONE SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_DONE SIP_RESPONSE_SEND} SIP::uri
+        if {[llength $args] > 1} { error "SIP::uri accepts zero or one argument" }
+        if {[llength $args] == 0} { return $::state::sip::uri }
+        set value [lindex $args 0]
+        if {[string first "\r" $value] >= 0 || [string first "\n" $value] >= 0 || [string first " " $value] >= 0} { error "SIP::uri contains invalid whitespace" }
+        set ::state::sip::uri $value
+        sip_rebuild_message
+        ::itest::log_decision sip uri_set $value
+        return $value
+    }
+
+    proc sip_payload_command {args} {
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_DONE SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_DONE SIP_RESPONSE_SEND} SIP::payload
+        set payload $::state::sip::payload
+        if {[llength $args] == 0} { return $payload }
+        if {[llength $args] == 1 && [lindex $args 0] eq "length"} { return [::itest::cmd::_payload_bytelength $payload] }
+        if {[llength $args] == 1 || [llength $args] == 2} {
+            foreach value $args { if {![string is integer -strict $value] || $value < 0} { error "SIP::payload offsets and lengths must be non-negative integers" } }
+            set offset [lindex $args 0]
+            set length [expr {[llength $args] == 1 ? $offset : [lindex $args 1]}]
+            if {[llength $args] == 1} { set offset 0 }
+            if {$length == 0} { return [::itest::cmd::_payload_bytes ""] }
+            return [string range [::itest::cmd::_payload_bytes $payload] $offset [expr {$offset + $length - 1}]]
+        }
+        set operation [lindex $args 0]
+        if {$operation eq "replace" && [llength $args] == 4} {
+            set offset [lindex $args 1]; set length [lindex $args 2]; set value [lindex $args 3]
+            if {![string is integer -strict $offset] || $offset < 0 || ![string is integer -strict $length] || $length < 0} { error "SIP::payload replace offsets and lengths must be non-negative integers" }
+            set payload [::itest::cmd::_payload_splice $payload $offset $length $value]
+        } elseif {$operation eq "insert" && [llength $args] == 3} {
+            set offset [lindex $args 1]
+            if {![string is integer -strict $offset] || $offset < 0} { error "SIP::payload insert offset must be non-negative" }
+            set payload [::itest::cmd::_payload_splice $payload $offset 0 [lindex $args 2]]
+        } elseif {$operation eq "delete" && [llength $args] == 3} {
+            set offset [lindex $args 1]; set length [lindex $args 2]
+            if {![string is integer -strict $offset] || $offset < 0 || ![string is integer -strict $length] || $length < 0} { error "SIP::payload delete offsets and lengths must be non-negative integers" }
+            set payload [::itest::cmd::_payload_splice $payload $offset $length ""]
+        } else { error "unsupported SIP::payload syntax" }
+        set ::state::sip::payload $payload
+        sip_rebuild_message
+        ::itest::log_decision sip payload_$operation
+        return ""
+    }
+
+    proc sip_response_command {args} {
+        variable sip_response_code
+        variable sip_response_phrase
+        _sip_require_event {SIP_RESPONSE SIP_RESPONSE_DONE SIP_RESPONSE_SEND} SIP::response
+        if {[llength $args] == 1 && [lindex $args 0] in {code phrase}} {
+            return [expr {[lindex $args 0] eq "code" ? $::state::sip::status : $::state::sip::phrase}]
+        }
+        if {[llength $args] < 2 || [lindex $args 0] ne "rewrite"} { error "SIP::response syntax is code, phrase, or rewrite code phrase" }
+        set code [lindex $args 1]
+        if {![string is integer -strict $code] || $code < 100 || $code > 699} { error "SIP response code must be between 100 and 699" }
+        set phrase [expr {[llength $args] > 2 ? [lindex $args 2] : $::state::sip::phrase}]
+        set ::state::sip::status $code
+        set ::state::sip::phrase $phrase
+        sip_rebuild_message
+        ::itest::log_decision sip response_rewrite [list $code $phrase]
+        return ""
+    }
+
+    proc sip_respond_command {args} {
+        variable sip_response_requested
+        variable sip_response_code
+        variable sip_response_phrase
+        variable sip_response_headers
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_SEND} SIP::respond
+        if {[llength $args] < 1 || ([llength $args] % 2) == 0} { error "SIP::respond requires code, phrase, and optional header pairs" }
+        set code [lindex $args 0]
+        if {![string is integer -strict $code] || $code < 100 || $code > 699} { error "SIP response code must be between 100 and 699" }
+        set sip_response_code $code
+        set sip_response_phrase [lindex $args 1]
+        set sip_response_headers [lrange $args 2 end]
+        set sip_response_requested 1
+        ::itest::log_decision sip respond [list $code $sip_response_phrase $sip_response_headers]
+        return ""
+    }
+
+    proc sip_discard_command {args} {
+        variable sip_discarded
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_SEND} SIP::discard
+        if {[llength $args] != 0} { error "SIP::discard takes no arguments" }
+        set sip_discarded 1
+        ::itest::log_decision sip discard
+        return ""
+    }
+
+    proc sip_persist_command {args} {
+        variable sip_persist_key
+        variable sip_persist_mode
+        variable sip_persist_timeout
+        variable sip_persist_bidirectional
+        variable sip_persist_direction
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_SEND} SIP::persist
+        if {[llength $args] == 0} { return $sip_persist_key }
+        set command [lindex $args 0]
+        if {$command in {reset use ignore bypass replace}} {
+            if {[llength $args] != 1} { error "SIP::persist $command takes no arguments" }
+            set sip_persist_mode $command
+            if {$command eq "reset"} { set sip_persist_key "" }
+        } elseif {$command eq "timeout"} {
+            if {[llength $args] > 2} { error "SIP::persist timeout accepts zero or one value" }
+            if {[llength $args] == 1} { return $sip_persist_timeout }
+            if {![string is integer -strict [lindex $args 1]] || [lindex $args 1] < 0} { error "SIP persistence timeout must be non-negative" }
+            set sip_persist_timeout [lindex $args 1]
+        } elseif {$command eq "bidirectional"} {
+            if {[llength $args] == 1} { return $sip_persist_bidirectional }
+            if {[llength $args] != 2 || [lindex $args 1] ni {0 1 true false}} { error "SIP::persist bidirectional accepts a boolean" }
+            set sip_persist_bidirectional [expr {[lindex $args 1] in {1 true}}]
+        } elseif {$command eq "direction"} {
+            if {[llength $args] == 1} { return $sip_persist_direction }
+            if {[llength $args] != 2 || [lindex $args 1] ni {detect forward reverse}} { error "SIP persistence direction must be detect, forward, or reverse" }
+            set sip_persist_direction [lindex $args 1]
+        } else {
+            if {[llength $args] > 2} { error "SIP::persist accepts a key and optional timeout" }
+            set sip_persist_key $command
+            if {[llength $args] == 2} { set sip_persist_timeout [lindex $args 1] }
+        }
+        ::itest::log_decision sip persist $args
+        return $sip_persist_key
+    }
+
+    proc sip_route_status_command {args} {
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_DONE SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_DONE SIP_RESPONSE_SEND} SIP::route_status
+        if {[llength $args] != 0} { error "SIP::route_status takes no arguments" }
+        return $::state::sip::route_status
+    }
+
+    proc _sip_list_header_command {field header args} {
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_DONE SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_DONE SIP_RESPONSE_SEND} SIP::$field
+        if {[llength $args] > 1} { error "SIP::$field accepts zero or one index" }
+        set index [expr {[llength $args] == 1 ? [lindex $args 0] : 0}]
+        if {![string is integer -strict $index] || $index < 0} { error "SIP::$field index must be non-negative" }
+        return [_sip_header_at $header $index]
+    }
+    proc sip_record_route_command {args} { return [_sip_list_header_command record-route Record-Route {*}$args] }
+    proc sip_route_command {args} { return [_sip_list_header_command route Route {*}$args] }
+
+    proc sip_via_command {args} {
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_DONE SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_DONE SIP_RESPONSE_SEND} SIP::via
+        if {[llength $args] > 2} { error "SIP::via accepts a field and optional index" }
+        set field ""
+        set index 0
+        if {[llength $args] == 1} {
+            if {[string is integer -strict [lindex $args 0]]} { set index [lindex $args 0] } else { set field [lindex $args 0] }
+        } elseif {[llength $args] == 2} { set field [lindex $args 0]; set index [lindex $args 1] }
+        if {![string is integer -strict $index] || $index < 0} { error "SIP::via index must be non-negative" }
+        set value [_sip_header_at Via $index]
+        if {$field eq ""} { return $value }
+        if {$value eq ""} { return "" }
+        set parts [split $value ";"]
+        set sent_by [string trim [lindex [split [lindex $parts 0]] 1]]
+        set protocol_parts [split [lindex [split [lindex $parts 0]] 0] /]
+        set proto [lindex $protocol_parts end]
+        if {$field eq "proto"} { return $proto }
+        if {$field eq "sent_by"} { return $sent_by }
+        if {$field ni {received branch maddr ttl}} { error "SIP::via field must be proto, sent_by, received, branch, maddr, or ttl" }
+        foreach parameter [lrange $parts 1 end] {
+            set pair [split $parameter =]
+            if {[string equal -nocase [string trim [lindex $pair 0]] $field]} { return [expr {[llength $pair] > 1 ? [string trim [lindex $pair 1]] : ""}] }
+        }
         return ""
     }
 
@@ -3527,6 +4013,31 @@ foreach {original replacement} {
         } $replacement]
     }
 }
+foreach {original replacement} {
+    sip_call_id sip_call_id_command
+    sip_discard sip_discard_command
+    sip_from sip_from_command
+    sip_header sip_header_command
+    sip_message sip_message_command
+    sip_method sip_method_command
+    sip_payload sip_payload_command
+    sip_persist sip_persist_command
+    sip_record_route sip_record_route_command
+    sip_respond sip_respond_command
+    sip_response sip_response_command
+    sip_route sip_route_command
+    sip_route_status sip_route_status_command
+    sip_to sip_to_command
+    sip_uri sip_uri_command
+    sip_via sip_via_command
+} {
+    if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
+        ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
+        proc ::itest::cmd::$original {args} [format {
+            return [eval [linsert $args 0 ::itest::semantic::%s]]
+        } $replacement]
+    }
+}
 
 # Override only the catalogued generated stubs implemented above. The mapping
 # stays in the upstream dispatcher, so Tcl command resolution and profiling
@@ -3610,6 +4121,22 @@ foreach {name proc_name} {
     MQTT::topic ::itest::cmd::mqtt_topic
     MQTT::type ::itest::cmd::mqtt_type
     MQTT::username ::itest::cmd::mqtt_username
+    SIP::call_id ::itest::semantic::sip_call_id_command
+    SIP::discard ::itest::semantic::sip_discard_command
+    SIP::from ::itest::semantic::sip_from_command
+    SIP::header ::itest::semantic::sip_header_command
+    SIP::message ::itest::semantic::sip_message_command
+    SIP::method ::itest::semantic::sip_method_command
+    SIP::payload ::itest::semantic::sip_payload_command
+    SIP::persist ::itest::semantic::sip_persist_command
+    SIP::record-route ::itest::semantic::sip_record_route_command
+    SIP::respond ::itest::semantic::sip_respond_command
+    SIP::response ::itest::semantic::sip_response_command
+    SIP::route ::itest::semantic::sip_route_command
+    SIP::route_status ::itest::semantic::sip_route_status_command
+    SIP::to ::itest::semantic::sip_to_command
+    SIP::uri ::itest::semantic::sip_uri_command
+    SIP::via ::itest::semantic::sip_via_command
 } {
     ::itest::register_command $name $proc_name
 }

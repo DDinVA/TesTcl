@@ -1,0 +1,97 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-08-28T22:04:29Z",
+  "phase": null,
+  "phase_name": "emulator modernization",
+  "phase_dir": ".planning",
+  "plan": 2,
+  "task": 2,
+  "total_tasks": 6,
+  "status": "paused",
+  "completed_tasks": [
+    {
+      "id": 1,
+      "name": "Inventory SIP catalog signatures and event lifecycle",
+      "status": "done",
+      "commit": "uncommitted SIP work"
+    },
+    {
+      "id": 2,
+      "name": "Implement structured and raw SIP message adapters",
+      "status": "in_progress",
+      "progress": "Structured SIP request/response lifecycle, SIP header and payload mutation, raw TCP framing, and raw UDP decoding are implemented; targeted verification exposed two defects."
+    }
+  ],
+  "remaining_tasks": [
+    {
+      "id": 2,
+      "name": "Finish SIP adapter and lifecycle termination semantics",
+      "status": "in_progress",
+      "details": "Initialize SIP transport state for raw messages and make SIP::respond prevent SEND/DONE forwarding events."
+    },
+    {
+      "id": 3,
+      "name": "Add semantic SIP command/state coverage",
+      "status": "pending"
+    },
+    {
+      "id": 4,
+      "name": "Add regression tests and documentation",
+      "status": "pending"
+    },
+    {
+      "id": 5,
+      "name": "Run host, Tcl, container, and self-review gates",
+      "status": "pending"
+    },
+    {
+      "id": 6,
+      "name": "Commit verified SIP slice",
+      "status": "pending"
+    }
+  ],
+  "blockers": [
+    {
+      "description": "Two targeted SIP tests are not green yet: raw SIP packet state can reference an unset transport variable, and SIP::respond still allows SIP_REQUEST_DONE to run.",
+      "type": "technical",
+      "workaround": "Resume by fixing initialization and the response/discard lifecycle branch before broader verification."
+    }
+  ],
+  "async_jobs": [],
+  "human_actions_pending": [
+    {
+      "action": "No fork, push, or pull request has been performed.",
+      "context": "The work is still local on codex/modernize-baseline; external GitHub publication needs an explicit later decision.",
+      "blocking": false
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "Target TMOS/iRule behavior at version 17.5 only.",
+      "rationale": "The user explicitly narrowed the compatibility target, avoiding cross-version ambiguity.",
+      "phase": "emulator modernization"
+    },
+    {
+      "decision": "Use the pinned bitwisecook/tcl-lsp catalog as the command/event source and layer semantic handlers over generated fallbacks.",
+      "rationale": "This allows the full catalog to be consumed while concentrating fidelity work on high-value protocol behavior.",
+      "phase": "emulator modernization"
+    },
+    {
+      "decision": "Run all Python through uv with Python 3.13 or newer.",
+      "rationale": "The user reported crashes from local/system Python; the verified host runtime is uv Python 3.13.9 and the container is Python 3.13.15.",
+      "phase": "emulator modernization"
+    },
+    {
+      "decision": "Build protocol fidelity incrementally using structured packet adapters plus bounded raw packet decoding.",
+      "rationale": "This preserves the existing lightweight API while creating a path toward stateful emulation without requiring a full BIG-IP/vLab.",
+      "phase": "emulator modernization"
+    }
+  ],
+  "uncommitted_files": [
+    "test/test_emulator_adapter.py",
+    "tools/irule-emulator.py",
+    "tools/semantic-mocks.tcl"
+  ],
+  "next_action": "Resume with the three targeted SIP tests, fix the unset transport state and SIP::respond lifecycle termination, then rerun the full uv/3.13 host suite before touching docs or committing the SIP slice.",
+  "context_notes": "The last clean commit is 7d49c35 feat: emulate MQTT message events. The current SIP work is intentionally WIP. One structured SIP lifecycle test passes; the raw TCP/UDP test errors on ::state::sip::transport, and the respond/discard test fails because SIP_REQUEST_DONE is still emitted. Do not describe the SIP slice as complete. Existing committed work covers catalog ingestion, HTTP/TLS/UDP/DNS, WebSocket, MQTT, API/MCP surfaces, and a uv-based Python 3.13 container, but the full true TMM emulation goal remains substantially incomplete."
+}
