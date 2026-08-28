@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import queue
 import re
@@ -1153,6 +1154,397 @@ class SessionManager:
             session.close()
 
 
+MCP_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+MCP_MAX_MESSAGE_BYTES = 2 * 1024 * 1024
+MCP_SERVER_INFO = {
+    "name": "testcl-irule-emulator",
+    "title": "BIG-IP 17.5 iRule emulator",
+    "version": "0.1",
+}
+
+
+class McpProtocolError(ValueError):
+    """A JSON-RPC/MCP request error that must not become a tool result."""
+
+    def __init__(self, code: int, message: str, data: Any = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.data = data
+
+
+def _mcp_object_schema(
+    properties: dict[str, Any], required: list[str] | None = None
+) -> dict[str, Any]:
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": False,
+    }
+    if required:
+        schema["required"] = required
+    return schema
+
+
+class McpProtocolServer:
+    """Small stdio MCP adapter over the emulator's existing service contract."""
+
+    def __init__(self, root: Path, manager: SessionManager | None = None) -> None:
+        self._root = root
+        self._manager = manager if manager is not None else SessionManager(root)
+        self._owns_manager = manager is None
+        self._initialized = False
+        self._ready = False
+        self._protocol_version: str | None = None
+
+    @property
+    def tools(self) -> list[dict[str, Any]]:
+        scenario_schema = {
+            "type": "object",
+            "description": "An inline tmos-17.5 scenario accepted by the emulator.",
+        }
+        return [
+            {
+                "name": "irule_simulate",
+                "title": "Simulate an iRule",
+                "description": "Run one bounded BIG-IP 17.5 iRule scenario and return protocol state, decisions, logs, and fidelity warnings.",
+                "inputSchema": _mcp_object_schema(
+                    {"scenario": scenario_schema}, ["scenario"]
+                ),
+            },
+            {
+                "name": "irule_capabilities",
+                "title": "List iRule capabilities",
+                "description": "Return a bounded chunk of the complete pinned BIG-IP 17.5 command, event, and profile catalog.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "offset": {"type": "integer", "minimum": 0, "default": 0},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100},
+                    }
+                ),
+            },
+            {
+                "name": "irule_session_create",
+                "title": "Create an iRule session",
+                "description": "Create a persistent connection-aware emulator session for repeated requests or protocol events.",
+                "inputSchema": _mcp_object_schema(
+                    {"scenario": scenario_schema}, ["scenario"]
+                ),
+            },
+            {
+                "name": "irule_session_inspect",
+                "title": "Inspect an iRule session",
+                "description": "Return session lifecycle metadata, registered events, and static fidelity analysis.",
+                "inputSchema": _mcp_object_schema(
+                    {"session_id": {"type": "string", "minLength": 1}}, ["session_id"]
+                ),
+            },
+            {
+                "name": "irule_session_request",
+                "title": "Send a session request",
+                "description": "Run one HTTP request on a persistent emulator session while preserving connection state.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "session_id": {"type": "string", "minLength": 1},
+                        "request": {"type": "object"},
+                    },
+                    ["session_id", "request"],
+                ),
+            },
+            {
+                "name": "irule_session_event",
+                "title": "Fire an iRule event",
+                "description": "Inject a catalogued BIG-IP 17.5 event with structured connection, TLS, or DNS state.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "session_id": {"type": "string", "minLength": 1},
+                        "event": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+                        "state": {"type": "object"},
+                    },
+                    ["session_id", "event"],
+                ),
+            },
+            {
+                "name": "irule_session_close",
+                "title": "Close an iRule session",
+                "description": "Close a persistent emulator session and release its Tcl interpreter.",
+                "inputSchema": _mcp_object_schema(
+                    {"session_id": {"type": "string", "minLength": 1}}, ["session_id"]
+                ),
+            },
+        ]
+
+    @staticmethod
+    def _error_response(request_id: Any, error: McpProtocolError) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": error.code, "message": str(error)},
+        }
+        if error.data is not None:
+            payload["error"]["data"] = error.data
+        return payload
+
+    @staticmethod
+    def _require_args(params: Any) -> dict[str, Any]:
+        if params is None:
+            return {}
+        if not isinstance(params, dict):
+            raise McpProtocolError(-32602, "request params must be an object")
+        return params
+
+    @staticmethod
+    def _tool_error(error: Exception) -> dict[str, Any]:
+        payload = {"status": "error", "error": str(error)}
+        return {
+            "content": [{"type": "text", "text": json.dumps(payload, separators=(",", ":"))}],
+            "structuredContent": payload,
+            "isError": True,
+        }
+
+    @staticmethod
+    def _tool_success(payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "content": [{"type": "text", "text": json.dumps(payload, separators=(",", ":"))}],
+            "structuredContent": payload,
+            "isError": False,
+        }
+
+    def _call_tool(self, name: Any, arguments: Any) -> dict[str, Any]:
+        if not isinstance(name, str) or not name:
+            raise McpProtocolError(-32602, "tools/call requires a tool name")
+        known_tools = {tool["name"] for tool in self.tools}
+        if name not in known_tools:
+            raise McpProtocolError(-32602, f"unknown tool: {name}")
+        args = self._require_args(arguments)
+
+        if name == "irule_simulate":
+            if set(args) != {"scenario"}:
+                raise McpProtocolError(-32602, "irule_simulate requires only scenario")
+            return self._tool_success(run_scenario(args["scenario"], tcl_lsp_root=str(self._root)))
+
+        if name == "irule_capabilities":
+            unknown = sorted(set(args) - {"offset", "limit"})
+            if unknown:
+                raise McpProtocolError(-32602, f"unsupported irule_capabilities field(s): {', '.join(unknown)}")
+            offset = args.get("offset", 0)
+            limit = args.get("limit", 100)
+            if isinstance(offset, bool) or not isinstance(offset, int):
+                raise McpProtocolError(-32602, "capability offset must be an integer")
+            if isinstance(limit, bool) or not isinstance(limit, int):
+                raise McpProtocolError(-32602, "capability limit must be an integer")
+            return self._tool_success(_build_capabilities(self._root, offset, limit))
+
+        if name == "irule_session_create":
+            if set(args) != {"scenario"}:
+                raise McpProtocolError(-32602, "irule_session_create requires only scenario")
+            session_id: str | None = None
+            try:
+                session_id = self._manager.create(args["scenario"])
+                return self._tool_success(self._manager.metadata(session_id))
+            except Exception:
+                if session_id is not None:
+                    try:
+                        self._manager.close(session_id)
+                    except EmulatorNotFoundError:
+                        pass
+                raise
+
+        session_id = args.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise McpProtocolError(-32602, f"{name} requires a non-empty session_id")
+
+        if name == "irule_session_inspect":
+            if set(args) != {"session_id"}:
+                raise McpProtocolError(-32602, "irule_session_inspect accepts only session_id")
+            return self._tool_success(self._manager.metadata(session_id))
+
+        if name == "irule_session_request":
+            if set(args) != {"session_id", "request"} or not isinstance(args["request"], dict):
+                raise McpProtocolError(-32602, "irule_session_request requires session_id and request object")
+            result = self._manager.execute(session_id, lambda session: session.run_request(args["request"]))
+            metadata = self._manager.metadata(session_id)
+            return self._tool_success(
+                {
+                    "status": "ok",
+                    "schema_version": 1,
+                    "profile": "tmos-17.5",
+                    "tmos_version": TMOS_VERSION,
+                    "session_id": session_id,
+                    "fidelity": metadata["fidelity"],
+                    "request_number": metadata["request_count"],
+                    "result": result,
+                }
+            )
+
+        if name == "irule_session_event":
+            if set(args) - {"session_id", "event", "state"} or "event" not in args:
+                raise McpProtocolError(-32602, "irule_session_event requires session_id and event")
+            result = self._manager.execute(
+                session_id,
+                lambda session: session.fire_event(args["event"], args.get("state")),
+            )
+            metadata = self._manager.metadata(session_id)
+            return self._tool_success(
+                {
+                    "status": "ok",
+                    "schema_version": 1,
+                    "profile": "tmos-17.5",
+                    "tmos_version": TMOS_VERSION,
+                    "session_id": session_id,
+                    "fidelity": metadata["fidelity"],
+                    "result": result,
+                }
+            )
+
+        if name == "irule_session_close":
+            if set(args) != {"session_id"}:
+                raise McpProtocolError(-32602, "irule_session_close accepts only session_id")
+            self._manager.close(session_id)
+            return self._tool_success(
+                {
+                    "status": "ok",
+                    "schema_version": 1,
+                    "profile": "tmos-17.5",
+                    "tmos_version": TMOS_VERSION,
+                    "session_id": session_id,
+                    "closed": True,
+                }
+            )
+
+        raise McpProtocolError(-32601, f"method not implemented: {name}")
+
+    def _dispatch(self, method: str, params: Any) -> dict[str, Any] | None:
+        if method == "notifications/initialized":
+            self._ready = True
+            return None
+        if method == "ping":
+            self._require_args(params)
+            return {}
+        if method == "initialize":
+            if self._initialized:
+                raise McpProtocolError(-32600, "initialize may only be called once")
+            request = self._require_args(params)
+            protocol_version = request.get("protocolVersion")
+            if not isinstance(protocol_version, str):
+                raise McpProtocolError(-32602, "initialize requires protocolVersion")
+            if protocol_version not in MCP_PROTOCOL_VERSIONS:
+                raise McpProtocolError(
+                    -32602,
+                    f"unsupported MCP protocol version: {protocol_version}",
+                    {"supported": list(MCP_PROTOCOL_VERSIONS)},
+                )
+            self._protocol_version = protocol_version
+            self._initialized = True
+            return {
+                "protocolVersion": protocol_version,
+                "capabilities": {"tools": {}},
+                "serverInfo": MCP_SERVER_INFO,
+                "instructions": "Use the irule_* tools for bounded BIG-IP 17.5 emulation; no arbitrary Tcl evaluation is exposed.",
+            }
+        if not self._initialized:
+            raise McpProtocolError(-32002, "server is not initialized")
+        if method == "tools/list":
+            request = self._require_args(params)
+            if request.get("cursor") not in (None, ""):
+                raise McpProtocolError(-32602, "tools/list pagination is not supported")
+            return {"tools": self.tools}
+        if method == "tools/call":
+            request = self._require_args(params)
+            unknown = sorted(set(request) - {"name", "arguments"})
+            if unknown:
+                raise McpProtocolError(
+                    -32602, f"unsupported tools/call field(s): {', '.join(unknown)}"
+                )
+            if "name" not in request:
+                raise McpProtocolError(-32602, "tools/call requires name")
+            try:
+                return self._call_tool(request["name"], request.get("arguments"))
+            except McpProtocolError:
+                raise
+            except (EmulatorInputError, EmulatorNotFoundError, EmulatorResourceError, OSError) as exc:
+                return self._tool_error(exc)
+            except Exception as exc:  # keep a bad rule from taking down the stdio server
+                return self._tool_error(EmulatorInputError(f"tool execution failed: {exc}"))
+        raise McpProtocolError(-32601, f"method not found: {method}")
+
+    def handle_message(self, message: Any) -> dict[str, Any] | None:
+        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+            raise McpProtocolError(-32600, "message must be a JSON-RPC 2.0 object")
+        method = message.get("method")
+        if not isinstance(method, str) or not method:
+            raise McpProtocolError(-32600, "message requires a method")
+        has_id = "id" in message
+        request_id = message.get("id")
+        if has_id and (
+            isinstance(request_id, bool)
+            or not isinstance(request_id, (str, int, float, type(None)))
+            or (isinstance(request_id, float) and not math.isfinite(request_id))
+        ):
+            raise McpProtocolError(-32600, "request id must be a string, number, or null")
+        try:
+            result = self._dispatch(method, message.get("params"))
+        except McpProtocolError as exc:
+            if not has_id:
+                return None
+            return self._error_response(request_id, exc)
+        if not has_id:
+            return None
+        return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+    def close(self) -> None:
+        if self._owns_manager:
+            self._manager.close_all()
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def serve_mcp(root: Path, input_stream: Any = None, output_stream: Any = None) -> None:
+    """Serve newline-delimited JSON-RPC over stdio with stdout kept protocol-pure."""
+    input_stream = sys.stdin if input_stream is None else input_stream
+    output_stream = sys.stdout if output_stream is None else output_stream
+    server = McpProtocolServer(root)
+    try:
+        for line in input_stream:
+            if not line.strip():
+                continue
+            if len(line.encode("utf-8")) > MCP_MAX_MESSAGE_BYTES:
+                response = McpProtocolServer._error_response(
+                    None,
+                    McpProtocolError(-32600, "MCP message exceeds the 2 MiB limit"),
+                )
+                output_stream.write(json.dumps(response, separators=(",", ":")) + "\n")
+                output_stream.flush()
+                continue
+            request_id = None
+            try:
+                message = json.loads(line, parse_constant=_reject_json_constant)
+                if isinstance(message, dict) and "id" in message:
+                    request_id = message["id"]
+                response = server.handle_message(message)
+            except json.JSONDecodeError as exc:
+                response = McpProtocolServer._error_response(
+                    None, McpProtocolError(-32700, f"parse error: {exc.msg}")
+                )
+            except McpProtocolError as exc:
+                response = McpProtocolServer._error_response(None, exc)
+            except ValueError as exc:
+                response = McpProtocolServer._error_response(
+                    None, McpProtocolError(-32700, f"parse error: {exc}")
+                )
+            except Exception as exc:  # keep transport alive across unexpected request failures
+                print(f"MCP request failed: {exc}", file=sys.stderr)
+                response = McpProtocolServer._error_response(
+                    request_id, McpProtocolError(-32603, "internal MCP server error")
+                )
+            if response is not None:
+                output_stream.write(json.dumps(response, separators=(",", ":")) + "\n")
+                output_stream.flush()
+    finally:
+        server.close()
+
+
 def run_scenario(
     scenario: Any,
     *,
@@ -1428,6 +1820,11 @@ def main(argv: list[str] | None = None) -> int:
         help="emit a chunk of the complete tcl-lsp iRule capability catalog",
     )
     mode.add_argument("--serve", action="store_true", help="serve the HTTP API instead of reading stdin")
+    mode.add_argument(
+        "--mcp",
+        action="store_true",
+        help="serve the emulator tools over newline-delimited MCP JSON-RPC on stdin/stdout",
+    )
     parser.add_argument("--offset", type=int, default=0, help="capability chunk start")
     parser.add_argument("--limit", type=int, default=100, help="capability chunk size")
     parser.add_argument("--host", default="127.0.0.1", help="HTTP API bind address")
@@ -1444,6 +1841,9 @@ def main(argv: list[str] | None = None) -> int:
         root = _find_tcl_lsp_root(args.tcl_lsp_root)
         if args.serve:
             serve(root, args.host, args.port)
+            return 0
+        if args.mcp:
+            serve_mcp(root)
             return 0
         if args.capabilities:
             response = _build_capabilities(root, args.offset, args.limit)

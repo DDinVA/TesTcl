@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import threading
@@ -136,6 +137,130 @@ class EmulatorAdapterTests(unittest.TestCase):
             server.shutdown()
             thread.join(timeout=5)
             server.server_close()
+
+    def test_mcp_stdio_handshake_tools_and_protocol_errors(self) -> None:
+        messages = "\n".join(
+            [
+                "not-json",
+                '{"jsonrpc":"2.0","id":NaN,"method":"ping"}',
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {},
+                            "clientInfo": {"name": "test", "version": "1"},
+                        },
+                    }
+                ),
+                json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+                json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "irule_capabilities",
+                            "arguments": {"offset": 1498, "limit": 2},
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 4,
+                        "method": "tools/call",
+                        "params": {"name": "missing_tool", "arguments": {}},
+                    }
+                ),
+            ]
+        ) + "\n"
+        output = io.StringIO()
+        self.adapter.serve_mcp(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            input_stream=io.StringIO(messages),
+            output_stream=output,
+        )
+
+        responses = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(len(responses), 6)
+        self.assertEqual(responses[0]["error"]["code"], -32700)
+        self.assertEqual(responses[1]["error"]["code"], -32700)
+        self.assertEqual(responses[2]["id"], 1)
+        self.assertEqual(responses[2]["result"]["protocolVersion"], "2025-06-18")
+        tool_names = {tool["name"] for tool in responses[3]["result"]["tools"]}
+        self.assertIn("irule_simulate", tool_names)
+        capability_payload = responses[4]["result"]["structuredContent"]
+        self.assertEqual(capability_payload["chunk"]["offset"], 1498)
+        self.assertLessEqual(capability_payload["chunk"]["count"], 2)
+        self.assertEqual(responses[5]["error"]["code"], -32602)
+
+    def test_mcp_tools_use_the_same_session_contract(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        server = self.adapter.McpProtocolServer(root)
+        try:
+            initialized = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2025-06-18"},
+                }
+            )
+            self.assertEqual(initialized["result"]["capabilities"], {"tools": {}})
+            server.handle_message({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+            created = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_session_create",
+                        "arguments": {
+                            "scenario": {
+                                "profiles": ["UDP", "DNS"],
+                                "irule": "when DNS_REQUEST { log local0. dns-request }",
+                            }
+                        },
+                    },
+                }
+            )
+            created_payload = created["result"]["structuredContent"]
+            session_id = created_payload["session_id"]
+            fired = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_session_event",
+                        "arguments": {
+                            "session_id": session_id,
+                            "event": "DNS_REQUEST",
+                            "state": {"dns": {"qname": "example.com"}},
+                        },
+                    },
+                }
+            )
+            self.assertTrue(fired["result"]["structuredContent"]["result"]["fired"])
+            closed = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_session_close",
+                        "arguments": {"session_id": session_id},
+                    },
+                }
+            )
+            self.assertTrue(closed["result"]["structuredContent"]["closed"])
+        finally:
+            server.close()
 
     def test_persistent_http_session_preserves_connection_state(self) -> None:
         manager = self.adapter.SessionManager(Path(self.tcl_lsp_root), idle_timeout=60)

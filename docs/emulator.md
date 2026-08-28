@@ -87,6 +87,29 @@ curl -sS -X POST -H 'Content-Type: application/json' \
 curl -sS -X DELETE "http://127.0.0.1:8080/v1/sessions/${SESSION}"
 ```
 
+## MCP stdio facade
+
+The same adapter can be launched as a dependency-light MCP server. It speaks
+newline-delimited JSON-RPC on stdin/stdout, keeps protocol output off stdout,
+and delegates every tool call to the existing emulator and session manager:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh --mcp
+docker run --rm -i testcl-irule-emulator:17.5 --mcp
+```
+
+After the normal MCP `initialize` and `notifications/initialized` exchange,
+clients can discover these tools with `tools/list`:
+
+- `irule_simulate` runs a bounded one-shot scenario.
+- `irule_capabilities` returns a chunk of the complete 17.5 catalog.
+- `irule_session_create`, `irule_session_inspect`, `irule_session_request`,
+  `irule_session_event`, and `irule_session_close` manage persistent sessions.
+
+Tool failures are returned as MCP tool results with `isError: true`; malformed
+JSON-RPC requests and unknown methods use protocol-level errors. The facade
+does not expose arbitrary Tcl evaluation or local `irule_file` loading.
+
 Event sessions can use non-HTTP profiles. For example, a DNS request can be
 driven without a packet generator:
 
@@ -164,6 +187,7 @@ docker run --rm --publish 8080:8080 testcl-irule-emulator:17.5 \
 ## Current boundary
 
 The current slice supports HTTP/TCP request simulation, persistent connection
-sessions, and structured DNS/TLS event injection. The next slices should add
-packet-level protocol state and an MCP facade over the same JSON contract. The
-emulator profile remains fixed at `tmos-17.5`.
+sessions, structured DNS/TLS event injection, and an MCP facade over the same
+JSON contract. The next slice should add packet-level protocol state and
+catalog-driven conformance fixtures. The emulator profile remains fixed at
+`tmos-17.5`.
