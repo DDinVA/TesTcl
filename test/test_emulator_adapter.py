@@ -8,6 +8,7 @@ import io
 import ipaddress
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -1906,7 +1907,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 45)
+        self.assertEqual(queue["command_count"], 44)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -9188,6 +9189,59 @@ when HTTP_REQUEST { call fail_proc }
             try:
                 with self.subTest(message=message), self.assertRaisesRegex(
                     self.adapter.EmulatorInputError, message
+                ):
+                    invalid.fire_event("HTTP_REQUEST")
+            finally:
+                invalid.close()
+
+    def test_fasthash_returns_repeatable_bounded_hashes(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    set value [fasthash "hello"]
+    set repeat [fasthash "hello"]
+    set empty [fasthash ""]
+    set binary [fasthash [binary format H* 006162]]
+    log local0. "value=$value repeat=$repeat empty=$empty binary=$binary"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = session.fire_event("HTTP_REQUEST")
+            message = next(entry for entry in result["logs"] if "value=" in entry)
+            match = re.search(
+                r"value=(\d+) repeat=(\d+) empty=(\d+) binary=(\d+)", message
+            )
+            self.assertIsNotNone(match)
+            values = [int(value) for value in match.groups()]
+            self.assertEqual(values[0], values[1])
+            self.assertTrue(all(0 <= value <= (1 << 63) - 1 for value in values))
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            self.assertEqual(usage["fasthash"]["runtime_status"], "semantic-mock")
+        finally:
+            session.close()
+
+        for invalid_rule in (
+            "when HTTP_REQUEST { fasthash }",
+            "when HTTP_REQUEST { fasthash one two }",
+        ):
+            invalid = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {"profiles": ["HTTP"], "irule": invalid_rule},
+                allow_irule_file=True,
+                allow_requests=False,
+                allow_packets=False,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError, "fasthash requires one value"
                 ):
                     invalid.fire_event("HTTP_REQUEST")
             finally:

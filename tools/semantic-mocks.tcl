@@ -21270,6 +21270,12 @@ namespace eval ::itest::semantic {
         return [binary decode base64 $encoded]
     }
 
+    proc fasthash_command {args} {
+        if {[llength $args] != 1} { error "fasthash requires one value" }
+        set value [binary encode base64 [lindex $args 0]]
+        return [::itest::semantic::py_fasthash $value]
+    }
+
     proc md5_command {args} { return [_digest_command md5 {*}$args] }
     proc sha1_command {args} { return [_digest_command sha1 {*}$args] }
     proc sha256_command {args} { return [_digest_command sha256 {*}$args] }
@@ -22738,6 +22744,7 @@ foreach {original replacement} {
     crc32 crc32_command
     decode_uri decode_uri_command
     domain domain_command
+    fasthash fasthash_command
     findclass findclass_command
     findstr findstr_command
     getfield getfield_command

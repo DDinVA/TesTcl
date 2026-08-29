@@ -667,6 +667,14 @@ are rejected. This models procedure dispatch; it does not execute arbitrary
 top-level Tcl beyond installing `proc` declarations. See the F5 [`call` command
 reference](https://clouddocs.f5.com/api/irules/call.html).
 
+### `fasthash`
+
+`fasthash` accepts exactly one string and returns a non-negative integer below
+2^63. The adapter uses Python's standard-library Blake2b implementation to
+provide repeatable off-box results; F5 does not guarantee the same `fasthash`
+value across BIG-IP versions or reboots, so callers must not treat this as a
+bit-compatible TMM hash.
+
 ### AM acceleration metadata
 
 The seven catalogued `AM::*` commands are available with deterministic

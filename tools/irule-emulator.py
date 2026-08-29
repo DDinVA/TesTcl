@@ -1310,6 +1310,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "AES::encrypt",
     "AES::key",
     "call",
+    "fasthash",
     "htonl",
     "htons",
     "http_client_ip",
@@ -4986,6 +4987,7 @@ def _install_runtime_shims(session: Any) -> None:
         """
     )
     _install_python_digest_helper(session)
+    _install_python_fasthash_helper(session)
     _install_python_crypto_helper(session)
     _install_python_crypto_cipher_helper(session)
     _install_python_aes_helper(session)
@@ -5022,6 +5024,36 @@ def _install_python_digest_helper(session: Any) -> None:
     # Keep a strong reference on the session for bridge implementations that
     # do not retain Python callbacks independently of tkinter's command table.
     setattr(session, "_testcl_digest_callback", digest_callback)
+
+
+def _install_python_fasthash_helper(session: Any) -> None:
+    """Expose a deterministic 63-bit fast hash to the Tcl overlay.
+
+    BIG-IP documents ``fasthash`` as high quality and fast, but does not
+    promise values across versions or reboots. Blake2b is available in the
+    Python standard library and provides a stable bounded substitute for
+    off-box tests without claiming bit-for-bit TMM compatibility.
+    """
+    inner = getattr(session, "_session", None)
+    inprocess = getattr(inner, "_inprocess", None)
+    interpreter = getattr(inprocess, "_interp", None)
+    if interpreter is None or not hasattr(interpreter, "createcommand"):
+        raise EmulatorInputError("fasthash support requires the in-process Tcl backend")
+
+    max_value = (1 << 63) - 1
+
+    def fasthash_callback(*args: str) -> str:
+        if len(args) != 1:
+            raise ValueError("fasthash helper requires one value")
+        try:
+            raw_value = base64.b64decode(args[0].encode("ascii"), validate=True)
+        except (UnicodeEncodeError, ValueError, binascii.Error) as exc:
+            raise ValueError("fasthash value is not valid base64") from exc
+        digest = hashlib.blake2b(raw_value, digest_size=8).digest()
+        return str(int.from_bytes(digest, "big") & max_value)
+
+    interpreter.createcommand("::itest::semantic::py_fasthash", fasthash_callback)
+    setattr(session, "_testcl_fasthash_callback", fasthash_callback)
 
 
 def _install_python_crypto_helper(session: Any) -> None:
