@@ -87,6 +87,7 @@ namespace eval ::itest::semantic {
             variable cipher_bits 0
             variable cipher_version ""
             variable cipher_clientlist ""
+            variable clientrandom ""
             variable cert_subject ""
             variable cert_issuer ""
             variable cert_serial ""
@@ -99,6 +100,7 @@ namespace eval ::itest::semantic {
             variable alpn ""
             variable handshake_done 0
             variable session_id ""
+            variable sessionticket ""
             variable handshake_held 0
             variable renegotiation_enabled 1
             variable renegotiation_requested 0
@@ -111,6 +113,8 @@ namespace eval ::itest::semantic {
             variable session_invalidated 0
             variable session_drop 1
             variable unclean_shutdown 0
+            variable authenticate_frequency ""
+            variable authenticate_depth 0
         }
     }
 
@@ -5161,6 +5165,36 @@ namespace eval ::itest::semantic {
         return [_ssl_value renegotiation_secure 0]
     }
 
+    proc ssl_clientrandom_command {args} {
+        if {[llength $args] != 0} { error "SSL::clientrandom takes no arguments" }
+        return [_ssl_value clientrandom]
+    }
+
+    proc ssl_sessionticket_command {args} {
+        if {[llength $args] != 0} { error "SSL::sessionticket takes no arguments" }
+        return [_ssl_value sessionticket]
+    }
+
+    proc ssl_authenticate_command {args} {
+        if {[llength $args] == 1 && [lindex $args 0] in {once always}} {
+            set ns [_ssl_namespace]
+            set ${ns}::authenticate_frequency [lindex $args 0]
+            ::itest::log_decision ssl authenticate_[lindex $args 0] $ns
+            return ""
+        }
+        if {[llength $args] == 2 && [lindex $args 0] eq "depth"} {
+            set depth [lindex $args 1]
+            if {![string is integer -strict $depth] || $depth < 0} {
+                error "SSL::authenticate depth requires a non-negative integer"
+            }
+            set ns [_ssl_namespace]
+            set ${ns}::authenticate_depth $depth
+            ::itest::log_decision ssl authenticate_depth [list $depth $ns]
+            return ""
+        }
+        error "SSL::authenticate requires once, always, or depth followed by a non-negative integer"
+    }
+
     proc ssl_handshake_command {args} {
         if {[llength $args] != 1 || [lindex $args 0] ni {hold resume}} {
             error "SSL::handshake requires hold or resume"
@@ -5300,6 +5334,8 @@ namespace eval ::itest::semantic {
             set ${ns}::session_invalidated 0
             set ${ns}::session_drop 1
             set ${ns}::unclean_shutdown 0
+            set ${ns}::authenticate_frequency ""
+            set ${ns}::authenticate_depth 0
         }
     }
 
@@ -7012,6 +7048,8 @@ foreach {name proc_name} {
     SSL::alpn ::itest::semantic::ssl_alpn_command
     SSL::allow_dynamic_record_sizing ::itest::semantic::ssl_allow_dynamic_record_sizing_command
     SSL::allow_nonssl ::itest::semantic::ssl_allow_nonssl_command
+    SSL::authenticate ::itest::semantic::ssl_authenticate_command
+    SSL::clientrandom ::itest::semantic::ssl_clientrandom_command
     SSL::disable ::itest::semantic::ssl_disable_command
     SSL::enable ::itest::semantic::ssl_enable_command
     SSL::handshake ::itest::semantic::ssl_handshake_command
@@ -7023,6 +7061,7 @@ foreach {name proc_name} {
     SSL::secure_renegotiation ::itest::semantic::ssl_secure_renegotiation_command
     SSL::session ::itest::semantic::ssl_session_command
     SSL::sessionid ::itest::semantic::ssl_sessionid_command
+    SSL::sessionticket ::itest::semantic::ssl_sessionticket_command
     SSL::sni ::itest::semantic::ssl_sni_command
     SSL::verify_result ::itest::semantic::ssl_verify_result_command
     SSL::unclean_shutdown ::itest::semantic::ssl_unclean_shutdown_command
