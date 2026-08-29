@@ -403,6 +403,33 @@ The same distinction is included in each simulation/session
 `fidelity.warnings` report, so callers can fail closed or ask for a
 higher-fidelity test when needed.
 
+The capability response can be narrowed into deterministic implementation
+work slices without changing the catalog order:
+
+```sh
+# First five AUTH commands that are still generated stubs
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --capabilities --namespace AUTH --runtime-status generated-stub \
+  --offset 0 --limit 5
+
+# All commands known to be newer than the target release
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --capabilities --target-status introduced-after-tmos-17.5 \
+  --offset 0 --limit 100
+```
+
+The same filters are available through `GET /v1/capabilities` and the
+`irule_capabilities` MCP tool as `namespace`, `runtime_status`, and
+`target_status`. `summary.filtered_command_count` and `chunk.total` describe
+the filtered view, while the unfiltered summary counts remain available for
+the complete registry. Each command includes its catalog synopsis, return
+description, and source reference so a worker can build a semantic mock from
+the bounded slice without rereading the registry checkout.
+`GET /v1/conformance` and `irule_conformance` additionally return
+`commands.implementation_queue`, grouped by F5 namespace and current runtime
+status. Use that compact queue to choose a work family, then consume that
+family through the filtered capability chunks.
+
 ## Structured packet traces
 
 One-shot scenarios may use `packets` instead of `request`/`requests`. A trace

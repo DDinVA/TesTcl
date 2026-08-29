@@ -332,6 +332,42 @@ when HTTP_RESPONSE_RELEASE {
         self.assertFalse(final["chunk"]["has_more"])
         self.assertEqual(final["commands"], [])
 
+    def test_capability_filters_produce_bounded_implementation_slices(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        auth = self.adapter._build_capabilities(
+            root, 0, 5, namespace="AUTH", runtime_status="generated-stub"
+        )
+        self.assertEqual(auth["filter"], {
+            "namespace": "AUTH",
+            "runtime_status": "generated-stub",
+            "target_status": None,
+        })
+        self.assertEqual(auth["chunk"]["total"], 18)
+        self.assertEqual(auth["summary"]["filtered_command_count"], 18)
+        self.assertEqual(auth["chunk"]["count"], 5)
+        self.assertTrue(auth["chunk"]["has_more"])
+        self.assertTrue(all(entry["namespace"] == "AUTH" for entry in auth["commands"]))
+        self.assertTrue(all(entry["runtime_status"] == "generated-stub" for entry in auth["commands"]))
+        self.assertEqual(auth["commands"][0]["documentation"]["synopsis"], ["AUTH::abort AUTH_ID"])
+        self.assertIn("authentication", auth["commands"][0]["documentation"]["summary"])
+
+        post_target = self.adapter._build_capabilities(
+            root, 0, 100, target_status="introduced-after-tmos-17.5"
+        )
+        self.assertEqual(post_target["chunk"]["total"], 10)
+        self.assertFalse(post_target["chunk"]["has_more"])
+        self.assertTrue(all(
+            entry["target_status"] == "introduced-after-tmos-17.5"
+            for entry in post_target["commands"]
+        ))
+
+        empty = self.adapter._build_capabilities(
+            root, 0, 10, namespace="AUTH", runtime_status="semantic-mock"
+        )
+        self.assertEqual(empty["chunk"]["total"], 0)
+        self.assertFalse(empty["chunk"]["has_more"])
+        self.assertEqual(empty["commands"], [])
+
     def test_common_global_string_and_pool_functions_are_semantic(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -425,6 +461,15 @@ when HTTP_REQUEST {
             report["commands"]["catalog_count"] - 10,
         )
         self.assertIn("JSON::parse", report["commands"]["post_target_commands"])
+        queue = report["commands"]["implementation_queue"]
+        self.assertEqual(queue["candidate_statuses"], ["generated-stub", "no-runtime-handler"])
+        queue_buckets = {
+            (bucket["namespace"], bucket["runtime_status"]): bucket["count"]
+            for bucket in queue["buckets"]
+        }
+        self.assertEqual(queue_buckets[("AUTH", "generated-stub")], 18)
+        self.assertGreater(queue["command_count"], 400)
+        self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
         self.assertEqual(
@@ -5757,6 +5802,25 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             )
             self.assertEqual(initialized["result"]["capabilities"], {"tools": {}})
             server.handle_message({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            filtered = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_capabilities",
+                        "arguments": {
+                            "namespace": "AUTH",
+                            "runtime_status": "generated-stub",
+                            "offset": 0,
+                            "limit": 1,
+                        },
+                    },
+                }
+            )
+            filtered_payload = filtered["result"]["structuredContent"]
+            self.assertEqual(filtered_payload["chunk"]["total"], 18)
+            self.assertEqual(filtered_payload["commands"][0]["name"], "AUTH::abort")
 
             pcap = _pcap_bytes([
                 (4, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(

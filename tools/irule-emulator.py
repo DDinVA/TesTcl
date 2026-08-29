@@ -1100,6 +1100,12 @@ SEMANTIC_MOCK_COMMANDS = {
     "ANTIFRAUD::username",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
+RUNTIME_STATUS_VALUES = frozenset(
+    {"handwritten-mock", "semantic-mock", "generated-stub", "no-runtime-handler"}
+)
+TARGET_STATUS_VALUES = frozenset(
+    {"available-in-tmos-17.5", "introduced-after-tmos-17.5"}
+)
 
 
 def _capability_status(proc_name: str, handwritten: set[str], generated: set[str]) -> str:
@@ -1112,12 +1118,31 @@ def _capability_status(proc_name: str, handwritten: set[str], generated: set[str
     return "no-runtime-handler"
 
 
-def _build_capabilities(root: Path, offset: int, limit: int) -> dict[str, Any]:
+def _build_capabilities(
+    root: Path,
+    offset: int,
+    limit: int,
+    *,
+    namespace: str | None = None,
+    runtime_status: str | None = None,
+    target_status: str | None = None,
+) -> dict[str, Any]:
     """Build a chunked, machine-readable view of the tcl-lsp F5 registry."""
     if offset < 0:
         raise EmulatorInputError("capability offset must be non-negative")
     if not 1 <= limit <= 1000:
         raise EmulatorInputError("capability limit must be between 1 and 1000")
+    for field, value, allowed in (
+        ("namespace", namespace, None),
+        ("runtime_status", runtime_status, RUNTIME_STATUS_VALUES),
+        ("target_status", target_status, TARGET_STATUS_VALUES),
+    ):
+        if value is not None and (not isinstance(value, str) or not value):
+            raise EmulatorInputError(f"capability {field} must be a non-empty string")
+        if value is not None and allowed is not None and value not in allowed:
+            raise EmulatorInputError(
+                f"capability {field} must be one of: {', '.join(sorted(allowed))}"
+            )
 
     _load_session_class(root)
     try:
@@ -1149,20 +1174,27 @@ def _build_capabilities(root: Path, offset: int, limit: int) -> dict[str, Any]:
         if spec is None:  # pragma: no cover - registry contract guard
             continue
         proc_name = _mock_proc_name(name)
-        runtime_status = _capability_status(proc_name, handwritten, generated)
-        status_counts[runtime_status] += 1
-        target_status = _target_status(name, TMOS_17_5_POST_TARGET_COMMANDS)
-        target_status_counts[target_status] += 1
+        command_runtime_status = _capability_status(proc_name, handwritten, generated)
+        status_counts[command_runtime_status] += 1
+        command_target_status = _target_status(name, TMOS_17_5_POST_TARGET_COMMANDS)
+        target_status_counts[command_target_status] += 1
         requirement = spec.event_requires
+        hover = getattr(spec, "hover", None)
         commands.append(
             {
                 "name": name,
                 "namespace": name.split("::", 1)[0] if "::" in name else "",
                 "subcommands": sorted(spec.subcommands),
+                "documentation": {
+                    "summary": getattr(hover, "summary", "") if hover else "",
+                    "synopsis": list(getattr(hover, "synopsis", ()) or ()) if hover else [],
+                    "return_value": getattr(hover, "return_value", "") if hover else "",
+                    "source": getattr(hover, "source", "") if hover else "",
+                },
                 "pure": bool(spec.pure),
                 "unsafe": bool(spec.unsafe),
-                "runtime_status": runtime_status,
-                "target_status": target_status,
+                "runtime_status": command_runtime_status,
+                "target_status": command_target_status,
                 "event_requirements": {
                     "profiles": sorted(requirement.profiles) if requirement else [],
                     "also_in": sorted(requirement.also_in) if requirement else [],
@@ -1209,8 +1241,18 @@ def _build_capabilities(root: Path, offset: int, limit: int) -> dict[str, Any]:
         for name, spec in sorted(PROFILE_SPECS.items())
     ]
 
-    start = min(offset, len(commands))
-    end = min(start + limit, len(commands))
+    filtered_commands = [
+        command
+        for command in commands
+        if (
+            namespace is None
+            or command["namespace"] == namespace
+        )
+        and (runtime_status is None or command["runtime_status"] == runtime_status)
+        and (target_status is None or command["target_status"] == target_status)
+    ]
+    start = min(offset, len(filtered_commands))
+    end = min(start + limit, len(filtered_commands))
     return {
         "status": "ok",
         "schema_version": 1,
@@ -1222,6 +1264,7 @@ def _build_capabilities(root: Path, offset: int, limit: int) -> dict[str, Any]:
         },
         "summary": {
             "command_count": len(commands),
+            "filtered_command_count": len(filtered_commands),
             "event_count": len(events),
             "profile_count": len(profiles),
             "runtime_status_counts": status_counts,
@@ -1231,10 +1274,15 @@ def _build_capabilities(root: Path, offset: int, limit: int) -> dict[str, Any]:
             "offset": offset,
             "limit": limit,
             "count": end - start,
-            "total": len(commands),
-            "has_more": end < len(commands),
+            "total": len(filtered_commands),
+            "has_more": end < len(filtered_commands),
         },
-        "commands": commands[start:end],
+        "filter": {
+            "namespace": namespace,
+            "runtime_status": runtime_status,
+            "target_status": target_status,
+        },
+        "commands": filtered_commands[start:end],
         "events": events,
         "profiles": profiles,
     }
@@ -1268,6 +1316,27 @@ def _build_conformance(root: Path) -> dict[str, Any]:
         for name in event_names
         if name in PACKET_EVENT_ADAPTERS and name not in TMOS_17_5_POST_TARGET_EVENTS
     ]
+    implementation_buckets: dict[tuple[str, str], list[str]] = {}
+    implementation_statuses = {"generated-stub", "no-runtime-handler"}
+    for name, status in status_map.items():
+        if name in TMOS_17_5_POST_TARGET_COMMANDS or status not in implementation_statuses:
+            continue
+        spec = registry.get_any(name)
+        namespace = name.split("::", 1)[0] if "::" in name else ""
+        # F5 command namespaces are conventionally uppercase. Global F5
+        # commands are retained when their registry entry has event metadata;
+        # lower-case Tcl library commands are not implementation work items.
+        is_f5_command = bool(getattr(spec, "event_requires", None)) or namespace.isupper()
+        if is_f5_command:
+            implementation_buckets.setdefault((namespace, status), []).append(name)
+    implementation_queue = [
+        {
+            "namespace": namespace,
+            "runtime_status": status,
+            "count": len(names),
+        }
+        for (namespace, status), names in sorted(implementation_buckets.items())
+    ]
     return {
         "status": "ok",
         "schema_version": 1,
@@ -1283,6 +1352,11 @@ def _build_conformance(root: Path) -> dict[str, Any]:
             "post_target_count": len(post_target_commands),
             "post_target_commands": post_target_commands,
             "runtime_status_counts": command_counts,
+            "implementation_queue": {
+                "candidate_statuses": sorted(implementation_statuses),
+                "command_count": sum(item["count"] for item in implementation_queue),
+                "buckets": implementation_queue,
+            },
             "runtime_status_meaning": {
                 "handwritten-mock": "implemented behavioral mock in the loaded Tcl framework",
                 "semantic-mock": "implemented behavioral mock in the TesTcl adapter overlay",
@@ -10138,6 +10212,15 @@ class McpProtocolServer:
                     {
                         "offset": {"type": "integer", "minimum": 0, "default": 0},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100},
+                        "namespace": {"type": "string", "minLength": 1},
+                        "runtime_status": {
+                            "type": "string",
+                            "enum": sorted(RUNTIME_STATUS_VALUES),
+                        },
+                        "target_status": {
+                            "type": "string",
+                            "enum": sorted(TARGET_STATUS_VALUES),
+                        },
                     }
                 ),
             },
@@ -10288,7 +10371,9 @@ class McpProtocolServer:
             )
 
         if name == "irule_capabilities":
-            unknown = sorted(set(args) - {"offset", "limit"})
+            unknown = sorted(
+                set(args) - {"offset", "limit", "namespace", "runtime_status", "target_status"}
+            )
             if unknown:
                 raise McpProtocolError(-32602, f"unsupported irule_capabilities field(s): {', '.join(unknown)}")
             offset = args.get("offset", 0)
@@ -10297,7 +10382,14 @@ class McpProtocolServer:
                 raise McpProtocolError(-32602, "capability offset must be an integer")
             if isinstance(limit, bool) or not isinstance(limit, int):
                 raise McpProtocolError(-32602, "capability limit must be an integer")
-            return self._tool_success(_build_capabilities(self._root, offset, limit))
+            filters = {
+                field: args[field]
+                for field in ("namespace", "runtime_status", "target_status")
+                if field in args
+            }
+            return self._tool_success(
+                _build_capabilities(self._root, offset, limit, **filters)
+            )
 
         if name == "irule_conformance":
             if args:
@@ -10727,7 +10819,12 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                 try:
                     offset = int(query.get("offset", ["0"])[0])
                     limit = int(query.get("limit", ["100"])[0])
-                    payload = _build_capabilities(root, offset, limit)
+                    filters = {
+                        field: query[field][0]
+                        for field in ("namespace", "runtime_status", "target_status")
+                        if field in query
+                    }
+                    payload = _build_capabilities(root, offset, limit, **filters)
                 except (TypeError, ValueError, EmulatorInputError) as exc:
                     _json_response(self, 400, {"status": "error", "error": str(exc)})
                     return
@@ -11007,6 +11104,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--offset", type=int, default=0, help="capability chunk start")
     parser.add_argument("--limit", type=int, default=100, help="capability chunk size")
+    parser.add_argument("--namespace", help="limit capabilities to one exact command namespace")
+    parser.add_argument(
+        "--runtime-status",
+        choices=sorted(RUNTIME_STATUS_VALUES),
+        help="limit capabilities by runtime implementation status",
+    )
+    parser.add_argument(
+        "--target-status",
+        choices=sorted(TARGET_STATUS_VALUES),
+        help="limit capabilities by TMOS 17.5 target status",
+    )
     parser.add_argument("--host", default="127.0.0.1", help="HTTP API bind address")
     parser.add_argument("--port", type=int, default=8080, help="HTTP API bind port")
     parser.add_argument(
@@ -11030,7 +11138,14 @@ def main(argv: list[str] | None = None) -> int:
             serve_mcp(root)
             return 0
         if args.capabilities:
-            response = _build_capabilities(root, args.offset, args.limit)
+            response = _build_capabilities(
+                root,
+                args.offset,
+                args.limit,
+                namespace=args.namespace,
+                runtime_status=args.runtime_status,
+                target_status=args.target_status,
+            )
         elif args.conformance:
             response = _build_conformance(root)
         else:
