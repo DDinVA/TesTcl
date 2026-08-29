@@ -153,6 +153,15 @@ EVENT_STATE_FIELDS = {
         "alpn",
         "handshake_done",
         "session_id",
+        "handshake_held",
+        "renegotiation_enabled",
+        "renegotiation_requested",
+        "secure_renegotiation",
+        "allow_nonssl",
+        "maximum_record_size",
+        "profile",
+        "session_invalidated",
+        "session_drop",
     },
     "tls_server": {
         "sni",
@@ -173,6 +182,15 @@ EVENT_STATE_FIELDS = {
         "alpn",
         "handshake_done",
         "session_id",
+        "handshake_held",
+        "renegotiation_enabled",
+        "renegotiation_requested",
+        "secure_renegotiation",
+        "allow_nonssl",
+        "maximum_record_size",
+        "profile",
+        "session_invalidated",
+        "session_drop",
     },
     "http2": {
         "active",
@@ -486,6 +504,15 @@ SEMANTIC_MOCK_COMMANDS = {
     "SSL::sessionid",
     "SSL::sni",
     "SSL::verify_result",
+    "SSL::alpn",
+    "SSL::allow_nonssl",
+    "SSL::handshake",
+    "SSL::maximum_record_size",
+    "SSL::mode",
+    "SSL::profile",
+    "SSL::renegotiate",
+    "SSL::secure_renegotiation",
+    "SSL::session",
     "X509::issuer",
     "X509::subject",
     "HTTP2::active",
@@ -5967,6 +5994,7 @@ class EmulatorSession:
         if not self._connection_open:
             self._connection_request_number = 0
             session.eval_tcl("::itest::semantic::psm_reset_connection")
+            session.eval_tcl("::itest::semantic::ssl_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -6062,6 +6090,7 @@ class EmulatorSession:
             session.eval_tcl("set ::orch::_connection_active 0")
             session.eval_tcl("::state::reset_connection_state")
             session.eval_tcl("::itest::semantic::psm_reset_connection")
+            session.eval_tcl("::itest::semantic::ssl_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         result["decisions"] = decision_history
@@ -6256,8 +6285,7 @@ class EmulatorSession:
                     tls_state[field] = _packet_scalar(packet[field], field)
             if packet.get("type") in {"handshake", "server_handshake"}:
                 tls_state["handshake_done"] = "1"
-            if tls_state:
-                state[layer] = tls_state
+            state[layer] = tls_state
         elif protocol == "http" and "http2" in packet:
             http2_state: dict[str, str] = {}
             metadata = packet["http2"]
@@ -6842,6 +6870,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::mr_reset_connection")
         session.eval_tcl("::itest::semantic::gtp_reset_connection")
         session.eval_tcl("::itest::semantic::psm_reset_connection")
+        session.eval_tcl("::itest::semantic::ssl_reset_connection")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
         events.append(
             self._fire_event_on_worker(
@@ -6858,6 +6887,7 @@ class EmulatorSession:
         session.eval_tcl("set ::orch::_connection_active 0")
         session.eval_tcl("::state::reset_connection_state")
         session.eval_tcl("::itest::semantic::psm_reset_connection")
+        session.eval_tcl("::itest::semantic::ssl_reset_connection")
         self._packet_streams.clear()
         self._http2_decoder = None
         self._http2_streams.clear()

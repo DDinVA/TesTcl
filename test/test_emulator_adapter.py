@@ -1379,6 +1379,100 @@ when HTTP_REQUEST {
         self.assertIn("CLIENTSSL_HANDSHAKE", events)
         self.assertIn("CLIENT_CLOSED", events)
 
+    def test_packet_trace_models_client_and_server_ssl_controls(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "CLIENTSSL", "SERVERSSL"],
+                "irule": """
+when CLIENTSSL_CLIENTHELLO {
+    SSL::alpn set h2 http/1.1
+    SSL::handshake hold
+    SSL::renegotiate disable
+    SSL::secure_renegotiation require-strict
+    SSL::allow_nonssl 1
+    SSL::maximum_record_size 1200
+    SSL::profile /Common/clientssl_alt
+    SSL::session invalidate nodrop
+    log local0. "mode=[SSL::mode] alpn=[SSL::alpn] max=[SSL::maximum_record_size]"
+}
+when SERVERSSL_HANDSHAKE {
+    SSL::alpn set http/1.1
+    SSL::handshake resume
+    SSL::renegotiate
+    log local0. "mode=[SSL::mode] alpn=[SSL::alpn]"
+}
+""",
+                "packets": [
+                    {"protocol": "tls", "direction": "client_to_server", "type": "client_hello"},
+                    {"protocol": "tls", "direction": "server_to_client", "type": "server_handshake"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        events = [event for packet in result["trace"] for event in packet["events"]]
+        client_event = next(event for event in events if event["event"] == "CLIENTSSL_CLIENTHELLO")
+        server_event = next(event for event in events if event["event"] == "SERVERSSL_HANDSHAKE")
+        client_tls = client_event["state"]["tls_client"]
+        server_tls = server_event["state"]["tls_server"]
+        self.assertEqual(client_tls["alpn"], "h2 http/1.1")
+        self.assertEqual(client_tls["handshake_held"], "1")
+        self.assertEqual(client_tls["renegotiation_enabled"], "0")
+        self.assertEqual(client_tls["secure_renegotiation"], "2")
+        self.assertEqual(client_tls["allow_nonssl"], "1")
+        self.assertEqual(client_tls["maximum_record_size"], "1200")
+        self.assertEqual(client_tls["profile"], "/Common/clientssl_alt")
+        self.assertEqual(client_tls["session_invalidated"], "1")
+        self.assertEqual(client_tls["session_drop"], "0")
+        self.assertEqual(server_tls["alpn"], "http/1.1")
+        self.assertEqual(server_tls["handshake_held"], "0")
+        self.assertEqual(server_tls["renegotiation_requested"], "1")
+        self.assertTrue(any("mode=1" in entry for entry in client_event["logs"]))
+        self.assertTrue(any("mode=1" in entry for entry in server_event["logs"]))
+        self.assertEqual(
+            {entry["name"]: entry["runtime_status"] for entry in result["fidelity"]["commands"]
+             if entry["name"].startswith("SSL::")},
+            {
+                "SSL::alpn": "semantic-mock",
+                "SSL::allow_nonssl": "semantic-mock",
+                "SSL::handshake": "semantic-mock",
+                "SSL::maximum_record_size": "semantic-mock",
+                "SSL::mode": "semantic-mock",
+                "SSL::profile": "semantic-mock",
+                "SSL::renegotiate": "semantic-mock",
+                "SSL::secure_renegotiation": "semantic-mock",
+                "SSL::session": "semantic-mock",
+            },
+        )
+
+    def test_generic_server_event_uses_server_ssl_state(self) -> None:
+        session = self.adapter.EmulatorSession(
+            Path(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "SERVERSSL"],
+                "irule": """
+when SERVER_CONNECTED {
+    SSL::alpn set h2
+    SSL::session invalidate nodrop
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event(
+                "SERVER_CONNECTED",
+                {"tls_server": {"cipher_name": "TLS_AES_256_GCM_SHA384"}},
+            )
+        finally:
+            session.close()
+
+        self.assertTrue(result["fired"])
+        self.assertEqual(result["state"]["tls_server"]["alpn"], "h2")
+        self.assertEqual(result["state"]["tls_server"]["session_invalidated"], "1")
+        self.assertEqual(result["state"]["tls_server"]["session_drop"], "0")
+
     def test_packet_trace_exposes_directional_tcp_payload_and_mutations(self) -> None:
         result = self.adapter.run_scenario(
             {

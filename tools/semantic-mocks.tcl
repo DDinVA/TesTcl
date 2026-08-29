@@ -99,6 +99,15 @@ namespace eval ::itest::semantic {
             variable alpn ""
             variable handshake_done 0
             variable session_id ""
+            variable handshake_held 0
+            variable renegotiation_enabled 1
+            variable renegotiation_requested 0
+            variable secure_renegotiation 0
+            variable allow_nonssl 0
+            variable maximum_record_size 16384
+            variable profile ""
+            variable session_invalidated 0
+            variable session_drop 1
         }
     }
 
@@ -5088,7 +5097,8 @@ namespace eval ::itest::semantic {
 
     # ── TLS/SSL inspection and control semantics ─────────────────────
     proc _ssl_namespace {{side ""}} {
-        if {$side eq "serverside" || [string match "SERVERSSL_*" $::itest::current_event]} {
+        if {$side eq "serverside" || [string match "SERVERSSL_*" $::itest::current_event] ||
+            [lsearch -exact {SERVER_CONNECTED SERVER_DATA SERVER_CLOSED SERVER_INIT} $::itest::current_event] >= 0} {
             return ::state::tls::server
         }
         return ::state::tls::client
@@ -5118,6 +5128,140 @@ namespace eval ::itest::semantic {
             bits cipher_bits name cipher_name version cipher_version \
             clientlist cipher_clientlist] $field]
         return [_ssl_value $field]
+    }
+
+    proc ssl_alpn_command {args} {
+        set ns [_ssl_namespace]
+        if {[llength $args] == 0} {
+            return [_ssl_value alpn]
+        }
+        if {[lindex $args 0] ne "set" || [llength $args] < 2} {
+            error "SSL::alpn accepts no arguments or set followed by one or more protocols"
+        }
+        foreach protocol [lrange $args 1 end] {
+            if {$protocol eq "" || [string first "\x00" $protocol] >= 0} {
+                error "SSL::alpn protocol names cannot be empty or contain NUL"
+            }
+        }
+        set ${ns}::alpn [join [lrange $args 1 end] " "]
+        ::itest::log_decision ssl alpn_set [set ${ns}::alpn]
+        return ""
+    }
+
+    proc ssl_mode_command {args} {
+        if {[llength $args] != 0} { error "SSL::mode takes no arguments" }
+        return [expr {![_ssl_value disabled 0]}]
+    }
+
+    proc ssl_handshake_command {args} {
+        if {[llength $args] != 1 || [lindex $args 0] ni {hold resume}} {
+            error "SSL::handshake requires hold or resume"
+        }
+        set held [expr {[lindex $args 0] eq "hold"}]
+        set ns [_ssl_namespace]
+        set ${ns}::handshake_held $held
+        ::itest::log_decision ssl handshake_[lindex $args 0] [_ssl_namespace]
+        return ""
+    }
+
+    proc ssl_renegotiate_command {args} {
+        if {[llength $args] > 1 || ([llength $args] == 1 && [lindex $args 0] ni {enable disable})} {
+            error "SSL::renegotiate accepts optional enable or disable"
+        }
+        if {[_ssl_value disabled 0]} {
+            error "SSL::renegotiate requires SSL to be enabled"
+        }
+        set ns [_ssl_namespace]
+        if {[llength $args] == 0} {
+            set ${ns}::renegotiation_requested 1
+            ::itest::log_decision ssl renegotiate $ns
+            return ""
+        }
+        set enabled [expr {[lindex $args 0] eq "enable"}]
+        set ${ns}::renegotiation_enabled $enabled
+        ::itest::log_decision ssl renegotiation_[lindex $args 0] $ns
+        return ""
+    }
+
+    proc ssl_secure_renegotiation_command {args} {
+        if {[llength $args] > 1 || ([llength $args] == 1 && [lindex $args 0] ni {request require require-strict})} {
+            error "SSL::secure_renegotiation accepts request, require, or require-strict"
+        }
+        set ns [_ssl_namespace]
+        if {[llength $args] == 1} {
+            set mode [dict get [dict create request 0 require 1 require-strict 2] [lindex $args 0]]
+            set ${ns}::secure_renegotiation $mode
+            ::itest::log_decision ssl secure_renegotiation_set $mode
+        }
+        return [_ssl_value secure_renegotiation 0]
+    }
+
+    proc ssl_allow_nonssl_command {args} {
+        if {[llength $args] > 1} { error "SSL::allow_nonssl accepts an optional 0 or 1" }
+        set ns [_ssl_namespace]
+        if {[llength $args] == 1} {
+            set value [lindex $args 0]
+            if {![string is integer -strict $value] || $value ni {0 1}} {
+                error "SSL::allow_nonssl requires 0 or 1"
+            }
+            set ${ns}::allow_nonssl $value
+            ::itest::log_decision ssl allow_nonssl_set $value
+            return ""
+        }
+        return [_ssl_value allow_nonssl 0]
+    }
+
+    proc ssl_maximum_record_size_command {args} {
+        if {[llength $args] > 1} { error "SSL::maximum_record_size accepts an optional size" }
+        set ns [_ssl_namespace]
+        if {[llength $args] == 1} {
+            set value [lindex $args 0]
+            if {![string is integer -strict $value] || $value < 1 || $value > 16384} {
+                error "SSL::maximum_record_size must be between 1 and 16384"
+            }
+            set ${ns}::maximum_record_size $value
+            ::itest::log_decision ssl maximum_record_size_set $value
+            return ""
+        }
+        return [_ssl_value maximum_record_size 16384]
+    }
+
+    proc ssl_profile_command {args} {
+        if {[llength $args] != 1 || [lindex $args 0] eq "" || [string first "\x00" [lindex $args 0]] >= 0} {
+            error "SSL::profile requires a non-empty profile name"
+        }
+        set ns [_ssl_namespace]
+        set ${ns}::profile [lindex $args 0]
+        ::itest::log_decision ssl profile_set [list [lindex $args 0] $ns]
+        return ""
+    }
+
+    proc ssl_session_command {args} {
+        if {[llength $args] < 1 || [llength $args] > 2 || [lindex $args 0] ne "invalidate" ||
+            ([llength $args] == 2 && [lindex $args 1] ni {drop nodrop})} {
+            error "SSL::session requires invalidate with optional drop or nodrop"
+        }
+        set ns [_ssl_namespace]
+        set drop [expr {[llength $args] < 2 || [lindex $args 1] eq "drop"}]
+        set ${ns}::session_invalidated 1
+        set ${ns}::session_drop $drop
+        ::itest::log_decision ssl session_invalidate $drop
+        return ""
+    }
+
+    proc ssl_reset_connection {} {
+        foreach side {client server} {
+            set ns ::state::tls::$side
+            set ${ns}::handshake_held 0
+            set ${ns}::renegotiation_enabled 1
+            set ${ns}::renegotiation_requested 0
+            set ${ns}::secure_renegotiation 0
+            set ${ns}::allow_nonssl 0
+            set ${ns}::maximum_record_size 16384
+            set ${ns}::profile ""
+            set ${ns}::session_invalidated 0
+            set ${ns}::session_drop 1
+        }
     }
 
     proc ssl_sessionid_command {args} {
@@ -6826,8 +6970,17 @@ foreach {name proc_name} {
     RESOLVER::summarize ::itest::semantic::resolver_summarize
     SSL::cert ::itest::semantic::ssl_cert_command
     SSL::cipher ::itest::semantic::ssl_cipher_command
+    SSL::alpn ::itest::semantic::ssl_alpn_command
+    SSL::allow_nonssl ::itest::semantic::ssl_allow_nonssl_command
     SSL::disable ::itest::semantic::ssl_disable_command
     SSL::enable ::itest::semantic::ssl_enable_command
+    SSL::handshake ::itest::semantic::ssl_handshake_command
+    SSL::maximum_record_size ::itest::semantic::ssl_maximum_record_size_command
+    SSL::mode ::itest::semantic::ssl_mode_command
+    SSL::profile ::itest::semantic::ssl_profile_command
+    SSL::renegotiate ::itest::semantic::ssl_renegotiate_command
+    SSL::secure_renegotiation ::itest::semantic::ssl_secure_renegotiation_command
+    SSL::session ::itest::semantic::ssl_session_command
     SSL::sessionid ::itest::semantic::ssl_sessionid_command
     SSL::sni ::itest::semantic::ssl_sni_command
     SSL::verify_result ::itest::semantic::ssl_verify_result_command
