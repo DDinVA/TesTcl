@@ -12382,6 +12382,136 @@ namespace eval ::itest::semantic {
         return [list handles $handles calls $ilx_calls notifies $ilx_notifies]
     }
 
+    # Legacy BIG-IP 4.x global variables retained by TMOS for compatibility.
+    # Keep these as narrow read-oriented adapters over the modern scenario
+    # state so old rules and newer HTTP:: commands observe the same request.
+    proc _legacy_http_request_header {name} {
+        return [::state::http::request::header get $name]
+    }
+
+    proc legacy_http_client_ip {args} {
+        if {[llength $args] > 1} { error "http_client_ip accepts an optional header name" }
+        set header_name "X-Forwarded-For"
+        if {[llength $args] == 1} {
+            set header_name [lindex $args 0]
+            if {$header_name eq ""} { error "http_client_ip header name must not be empty" }
+        }
+        set forwarded [_legacy_http_request_header $header_name]
+        if {$forwarded ne ""} {
+            set first [string trim [lindex [split $forwarded ","] 0]]
+            if {$first ne ""} { return $first }
+        }
+        return $::state::connection::client_addr
+    }
+
+    proc legacy_http_content_len_max {args} {
+        if {[llength $args] > 1} { error "http_content_len_max accepts at most one maximum" }
+        set maximum 1024
+        if {[llength $args] == 1} {
+            set maximum [lindex $args 0]
+            if {![string is integer -strict $maximum] || $maximum < 0} {
+                error "http_content_len_max maximum must be a non-negative integer"
+            }
+        }
+        set value [_legacy_http_request_header "Content-Length"]
+        if {$value eq ""} { return 0 }
+        set value [string trim $value]
+        if {![string is integer -strict $value] || $value < 0} {
+            error "http_content_len_max found an invalid Content-Length"
+        }
+        return [expr {min($value, $maximum)}]
+    }
+
+    proc legacy_http_cookie {args} {
+        if {[llength $args] != 1} { error "http_cookie requires a cookie name" }
+        set wanted [lindex $args 0]
+        if {$wanted eq ""} { error "http_cookie cookie name must not be empty" }
+        set raw [_legacy_http_request_header "Cookie"]
+        foreach pair [split $raw ";"] {
+            set separator [string first "=" $pair]
+            if {$separator < 0} { continue }
+            set name [string trim [string range $pair 0 [expr {$separator - 1}]]]
+            if {$name eq $wanted} {
+                return [string trim [string range $pair [expr {$separator + 1}] end]]
+            }
+        }
+        return ""
+    }
+
+    proc legacy_http_header {args} {
+        if {[llength $args] != 1} { error "http_header requires a header tag" }
+        set tag [string trim [lindex $args 0]]
+        set separator [string first ":" $tag]
+        if {$separator >= 0} {
+            set tag [string trim [string range $tag 0 [expr {$separator - 1}]]]
+        }
+        if {$tag eq ""} { error "http_header header tag must not be empty" }
+        return [_legacy_http_request_header $tag]
+    }
+
+    proc legacy_http_host {args} {
+        if {[llength $args] != 0} { error "http_host does not accept arguments" }
+        return [_legacy_http_request_header "Host"]
+    }
+
+    proc legacy_http_method {args} {
+        if {[llength $args] != 0} { error "http_method does not accept arguments" }
+        return $::state::http::request::method
+    }
+
+    proc legacy_http_uri {args} {
+        if {[llength $args] != 0} { error "http_uri does not accept arguments" }
+        return $::state::http::request::uri
+    }
+
+    proc legacy_http_version {args} {
+        if {[llength $args] != 0} { error "http_version does not accept arguments" }
+        return $::state::http::request::version
+    }
+
+    proc legacy_ip_protocol {args} {
+        if {[llength $args] != 0} { error "ip_protocol does not accept arguments" }
+        return $::state::connection::protocol
+    }
+
+    proc legacy_ip_tos {args} {
+        if {[llength $args] != 0} { error "ip_tos does not accept arguments" }
+        return $::state::connection::tos
+    }
+
+    proc legacy_ip_ttl {args} {
+        if {[llength $args] != 0} { error "ip_ttl does not accept arguments" }
+        return $::state::connection::ttl
+    }
+
+    proc _legacy_byte_swap {bits name args} {
+        if {[llength $args] != 1} { error "$name requires exactly one unsigned integer" }
+        set value [lindex $args 0]
+        if {![string is integer -strict $value]} { error "$name requires an unsigned integer" }
+        if {$bits == 16} {
+            if {$value < 0 || $value > 65535} { error "$name value is outside the unsigned 16-bit range" }
+            if {[info exists ::tcl_platform(byteOrder)] && $::tcl_platform(byteOrder) eq "bigEndian"} {
+                return $value
+            }
+            return [expr {(($value & 0xff) << 8) | (($value >> 8) & 0xff)}]
+        }
+        if {$value < 0 || $value > 4294967295} { error "$name value is outside the unsigned 32-bit range" }
+        if {[info exists ::tcl_platform(byteOrder)] && $::tcl_platform(byteOrder) eq "bigEndian"} {
+            return $value
+        }
+        return [expr {
+            (($value & 0xff) << 24) |
+            (($value & 0xff00) << 8) |
+            (($value >> 8) & 0xff00) |
+            (($value >> 24) & 0xff)
+        }]
+    }
+
+    proc legacy_htonl {args} { return [_legacy_byte_swap 32 htonl {*}$args] }
+    proc legacy_htons {args} { return [_legacy_byte_swap 16 htons {*}$args] }
+    proc legacy_ntohl {args} { return [_legacy_byte_swap 32 ntohl {*}$args] }
+    proc legacy_ntohs {args} { return [_legacy_byte_swap 16 ntohs {*}$args] }
+
     proc _adapt_default_record {side} {
         return [dict create \
             handle "static:$side" \
@@ -21452,6 +21582,30 @@ foreach {original replacement} {
     if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
         ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
         proc ::itest::cmd::$original {args} [format {
+            return [eval [linsert $args 0 ::itest::semantic::%s]]
+        } $replacement]
+    }
+}
+foreach {original replacement} {
+    htonl legacy_htonl
+    htons legacy_htons
+    http_client_ip legacy_http_client_ip
+    http_content_len_max legacy_http_content_len_max
+    http_cookie legacy_http_cookie
+    http_header legacy_http_header
+    http_host legacy_http_host
+    http_method legacy_http_method
+    http_uri legacy_http_uri
+    http_version legacy_http_version
+    ip_protocol legacy_ip_protocol
+    ip_tos legacy_ip_tos
+    ip_ttl legacy_ip_ttl
+    ntohl legacy_ntohl
+    ntohs legacy_ntohs
+} {
+    if {[::tmm::_orig_info commands ::itest::cmd::cmd_$original] ne ""} {
+        ::tmm::_orig_rename ::itest::cmd::cmd_$original ::itest::cmd::_testcl_legacy_${original}_orig
+        proc ::itest::cmd::cmd_$original {args} [format {
             return [eval [linsert $args 0 ::itest::semantic::%s]]
         } $replacement]
     }

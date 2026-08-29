@@ -54,6 +54,13 @@ those records. Table entries support subtables, add/set/replace/incr/append,
 key listing, delete-all, and lifetime/timeout expiry. Positive persistence
 timeouts expire records using the emulator clock, while timeout `0` means no
 expiry.
+The legacy global helpers `http_client_ip`, `http_content_len_max`,
+`http_cookie`, `http_header`, `http_host`, `http_method`, `http_uri`,
+`http_version`, `ip_protocol`, `ip_tos`, `ip_ttl`, `htonl`, `htons`, `ntohl`,
+and `ntohs` are also semantic. They read the existing HTTP/connection state,
+validate bounded inputs, and avoid maintaining a parallel compatibility state
+store. `http_client_ip` honors an optional forwarded-address header name;
+`http_content_len_max` defaults to a 1024-byte cap.
 Connection endpoint getters (`client_addr`, `client_port`, `local_addr`,
 `local_port`, `remote_addr`, `remote_port`, `server_addr`, and `server_port`)
 read the configured connection endpoints; server getters switch to the

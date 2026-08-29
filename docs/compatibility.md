@@ -25,6 +25,17 @@ semantics:
 The next compatibility layer should be generated or reviewed from those
 references rather than maintained as an unqualified list of mocked commands.
 
+The legacy global HTTP and IP compatibility commands are modeled as
+read-oriented views over the same request and connection state as their modern
+counterparts. `http_client_ip` selects the first address from
+`X-Forwarded-For` (or a caller-specified header) and falls back to the modeled
+client address; `http_content_len_max` validates and caps Content-Length;
+`http_cookie`, `http_header`, `http_host`, `http_method`, `http_uri`, and
+`http_version` read request metadata. `ip_protocol`, `ip_tos`, and `ip_ttl`
+read connection metadata, while `htonl`/`ntohl` and `htons`/`ntohs` perform
+bounded unsigned byte-order conversion. These retain the old command surface
+without introducing a second source of HTTP/IP state.
+
 The optional TMOS 17.5 emulator exposes the pinned `tcl-lsp` registry in
 bounded chunks and reports static command-handler and packet-event coverage
 through its conformance endpoint. Structured packet traces currently cover

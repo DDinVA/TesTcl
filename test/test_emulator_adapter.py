@@ -1856,7 +1856,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("CRYPTO", "generated-stub"), queue_buckets)
         self.assertNotIn(("ASN1", "generated-stub"), queue_buckets)
         self.assertNotIn(("ILX", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 116)
+        self.assertEqual(queue["command_count"], 101)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -4526,6 +4526,75 @@ when HTTP_REQUEST {
                     },
                     tcl_lsp_root=self.tcl_lsp_root,
                 )
+
+    def test_legacy_global_http_ip_and_byte_order_commands(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    log local0. "ip=[http_client_ip] custom=[http_client_ip X-Real-IP] len=[http_content_len_max 10] cookie=[http_cookie sid] header=[http_header Host:] host=[http_host] method=[http_method] uri=[http_uri] ver=[http_version] proto=[ip_protocol] tos=[ip_tos] ttl=[ip_ttl] n32=[htonl 16909060] n16=[htons 258] h32=[ntohl 67305985] h16=[ntohs 513]"
+}
+""",
+                "request": {
+                    "method": "POST",
+                    "uri": "/legacy?q=1",
+                    "host": "example.test",
+                    "headers": {
+                        "X-Forwarded-For": "198.51.100.2, 198.51.100.3",
+                        "X-Real-IP": "203.0.113.8",
+                        "Content-Length": "20",
+                        "Cookie": "sid=abc=def; other=two",
+                    },
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any(
+            "ip=198.51.100.2 custom=203.0.113.8 len=10 cookie=abc=def "
+            "header=example.test host=example.test method=POST uri=/legacy?q=1 "
+            "ver=1.1 proto=6 tos=0 ttl=64 n32=67305985 n16=513 "
+            "h32=16909060 h16=258" in entry
+            for entry in result["results"][0]["logs"]
+        ))
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in (
+            "htonl", "htons", "http_client_ip", "http_content_len_max",
+            "http_cookie", "http_header", "http_host", "http_method", "http_uri",
+            "http_version", "ip_protocol", "ip_tos", "ip_ttl", "ntohl", "ntohs",
+        ):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+        for irule, message in (
+            (
+                'when HTTP_REQUEST { set x [http_content_len_max 0]; return }',
+                None,
+            ),
+            (
+                'when HTTP_REQUEST { http_content_len_max 10 }',
+                "http_content_len_max found an invalid Content-Length",
+            ),
+            (
+                'when HTTP_REQUEST { htonl -1 }',
+                "htonl value is outside the unsigned 32-bit range",
+            ),
+            (
+                'when HTTP_REQUEST { htons 65536 }',
+                "htons value is outside the unsigned 16-bit range",
+            ),
+        ):
+            with self.subTest(message=message):
+                scenario = {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": irule,
+                    "request": {"uri": "/"},
+                }
+                if message is None:
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+                else:
+                    scenario["request"]["headers"] = {"Content-Length": "bad"}
+                    with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                        self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
 
     def test_aes_key_encrypt_decrypt_round_trip_and_validation(self) -> None:
         result = self.adapter.run_scenario(
