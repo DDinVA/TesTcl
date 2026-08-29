@@ -1853,7 +1853,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("BWC", "generated-stub"), queue_buckets)
         self.assertNotIn(("AES", "generated-stub"), queue_buckets)
         self.assertNotIn(("IPFIX", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 125)
+        self.assertNotIn(("CRYPTO", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 122)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -4328,6 +4329,68 @@ when HTTP_REQUEST {
             with self.subTest(message=message), self.assertRaisesRegex(
                 self.adapter.EmulatorInputError, message
             ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "request": {"uri": "/"},
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+
+    def test_crypto_encrypt_decrypt_keygen_and_validation(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    set keyhex 000102030405060708090a0b0c0d0e0f
+    set ivhex 101112131415161718191a1b1c1d1e1f
+    set encrypted [CRYPTO::encrypt -alg aes-128-cbc -keyhex $keyhex -ivhex $ivhex "hello crypto"]
+    set decrypted [CRYPTO::decrypt -alg aes-128-cbc -keyhex $keyhex -ivhex $ivhex $encrypted]
+    set ecb [CRYPTO::encrypt -alg aes-128-ecb -keyhex $keyhex "ecb"]
+    set ecb_plain [CRYPTO::decrypt -alg aes-128-ecb -keyhex $keyhex $ecb]
+    CRYPTO::encrypt -alg aes-128-cfb -ctx cipher_ctx -keyhex $keyhex -ivhex $ivhex hello
+    set streamed [CRYPTO::encrypt -ctx cipher_ctx -final " crypto"]
+    set rc4 [CRYPTO::encrypt -alg rc4 -key secret "stream data"]
+    set rc4_plain [CRYPTO::decrypt -alg rc4 -key secret $rc4]
+    set random_key [CRYPTO::keygen -alg random -len 128]
+    set derived_one [CRYPTO::keygen -alg pbkdf2-md5 -len 128 -passphrase pass -salthex 73616c74 -rounds 2]
+    set derived_two [CRYPTO::keygen -alg pbkdf2-md5 -len 128 -passphrase pass -salthex 73616c74 -rounds 2]
+    set rsa_keys [CRYPTO::keygen -alg rsa -len 1024]
+    set rsa_cipher [CRYPTO::encrypt -alg rsa-pub -padding oaep -key [lindex $rsa_keys 0] "rsa message"]
+    set rsa_plain [CRYPTO::decrypt -alg rsa-priv -padding oaep -key [lindex $rsa_keys 1] $rsa_cipher]
+    log local0. "plain=$decrypted ecb=$ecb_plain stream=[b64encode $streamed] rc4=$rc4_plain random_len=[string length $random_key] derived_equal=[expr {$derived_one eq $derived_two}] rsa=$rsa_plain"
+}
+""",
+                "request": {"uri": "/"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any(
+            "plain=hello crypto" in entry
+            and "ecb=ecb" in entry
+            and "rc4=stream data" in entry
+            and "random_len=16" in entry
+            and "derived_equal=1" in entry
+            and "rsa=rsa message" in entry
+            for entry in result["results"][0]["logs"]
+        ))
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in ("CRYPTO::decrypt", "CRYPTO::encrypt", "CRYPTO::keygen"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+        for irule in (
+            'when HTTP_REQUEST { CRYPTO::encrypt -alg rc2-mode -key secret hello }',
+            'when HTTP_REQUEST { CRYPTO::encrypt -alg aes-128-cwc -key secret hello }',
+            'when HTTP_REQUEST { CRYPTO::encrypt -alg aes-128-cbc -key short hello }',
+            'when HTTP_REQUEST { CRYPTO::encrypt -alg aes-128-cbc -keyhex 000102030405060708090a0b0c0d0e0f -iv {} hello }',
+            'when HTTP_REQUEST { CRYPTO::decrypt -alg rsa-pub -key invalid hello }',
+            'when HTTP_REQUEST { CRYPTO::keygen -alg random -len 7 }',
+            'when HTTP_REQUEST { CRYPTO::keygen -alg pbkdf2-md5 -len 128 }',
+            'when HTTP_REQUEST { CRYPTO::hash -alg sha256 -ctx collision hello; CRYPTO::encrypt -alg rc4 -ctx collision -key secret hello }',
+        ):
+            with self.subTest(irule=irule), self.assertRaises(self.adapter.EmulatorInputError):
                 self.adapter.run_scenario(
                     {
                         "profiles": ["TCP", "HTTP"],

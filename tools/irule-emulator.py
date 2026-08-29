@@ -1304,6 +1304,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "CRYPTO::hash",
     "CRYPTO::sign",
     "CRYPTO::verify",
+    "CRYPTO::decrypt",
+    "CRYPTO::encrypt",
+    "CRYPTO::keygen",
     "HSL::open",
     "HSL::send",
     "DNS::additional",
@@ -4150,6 +4153,7 @@ def _install_runtime_shims(session: Any) -> None:
     )
     _install_python_digest_helper(session)
     _install_python_crypto_helper(session)
+    _install_python_crypto_cipher_helper(session)
     _install_python_aes_helper(session)
     _install_python_codec_helper(session)
     semantic_path = Path(__file__).with_name("semantic-mocks.tcl")
@@ -4245,6 +4249,260 @@ def _install_python_crypto_helper(session: Any) -> None:
 
     interpreter.createcommand("::itest::semantic::py_crypto", crypto_callback)
     setattr(session, "_testcl_crypto_callback", crypto_callback)
+
+
+def _install_python_crypto_cipher_helper(session: Any) -> None:
+    """Expose bounded CRYPTO cipher and key-generation operations to Tcl."""
+    inner = getattr(session, "_session", None)
+    inprocess = getattr(inner, "_inprocess", None)
+    interpreter = getattr(inprocess, "_interp", None)
+    if interpreter is None or not hasattr(interpreter, "createcommand"):
+        raise EmulatorInputError("CRYPTO cipher support requires the in-process Tcl backend")
+
+    try:
+        from cryptography.hazmat.decrepit.ciphers import algorithms as decrepit_algorithms
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding as asym_padding, rsa
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    except ImportError as exc:  # pragma: no cover - dependency installation failure
+        raise EmulatorInputError(
+            "CRYPTO cipher support requires the cryptography package in the uv environment"
+        ) from exc
+
+    max_bytes = 16 * 1024 * 1024
+    max_keygen_bits = 16 * 1024 * 8
+    max_rsa_bits = 8192
+    max_pbkdf2_rounds = 10_000_000
+
+    def decode(value: str, field: str) -> bytes:
+        try:
+            raw = base64.b64decode(value.encode("ascii"), validate=True)
+        except (UnicodeEncodeError, ValueError, binascii.Error) as exc:
+            raise ValueError(f"CRYPTO {field} is not valid base64") from exc
+        if len(raw) > max_bytes:
+            raise ValueError(f"CRYPTO {field} exceeds the {max_bytes}-byte limit")
+        return raw
+
+    def encode(value: bytes) -> str:
+        if len(value) > max_bytes:
+            raise ValueError(f"CRYPTO result exceeds the {max_bytes}-byte limit")
+        return base64.b64encode(value).decode("ascii")
+
+    def block_cipher(algorithm_name: str, key: bytes, iv: bytes):
+        match = re.fullmatch(r"aes-(128|192|256)-(cbc|cfb|ecb|ofb)", algorithm_name)
+        if match:
+            bits = int(match.group(1))
+            mode_name = match.group(2)
+            if len(key) != bits // 8:
+                raise ValueError(f"{algorithm_name} requires a {bits // 8}-byte key")
+            cipher_algorithm = algorithms.AES(key)
+        else:
+            match = re.fullmatch(r"(bf|des|des-ede|des-ede3|dea)-(cbc|cfb|ecb|ofb)", algorithm_name)
+            if not match:
+                if algorithm_name.endswith("-cwc"):
+                    raise ValueError("CRYPTO CWC mode is not supported by the portable backend")
+                if algorithm_name == "rc2-mode":
+                    raise ValueError("CRYPTO RC2 is not supported by the portable backend")
+                raise ValueError(f"unsupported CRYPTO symmetric algorithm: {algorithm_name}")
+            family, mode_name = match.groups()
+            if family == "bf":
+                if not 4 <= len(key) <= 56:
+                    raise ValueError("bf-* requires a key between 4 and 56 bytes")
+                cipher_algorithm = decrepit_algorithms.Blowfish(key)
+            elif family == "des":
+                if len(key) != 8:
+                    raise ValueError("des-* requires an 8-byte key")
+                cipher_algorithm = decrepit_algorithms.TripleDES(key * 3)
+            elif family == "des-ede":
+                if len(key) != 16:
+                    raise ValueError("des-ede-* requires a 16-byte key")
+                cipher_algorithm = decrepit_algorithms.TripleDES(key + key[:8])
+            elif family == "des-ede3":
+                if len(key) != 24:
+                    raise ValueError("des-ede3-* requires a 24-byte key")
+                cipher_algorithm = decrepit_algorithms.TripleDES(key)
+            else:
+                if len(key) != 16:
+                    raise ValueError("dea-* requires a 16-byte key")
+                cipher_algorithm = decrepit_algorithms.IDEA(key)
+
+        block_size = cipher_algorithm.block_size // 8
+        if mode_name == "ecb":
+            if iv:
+                raise ValueError(f"{algorithm_name} does not accept an IV")
+            cipher_mode = modes.ECB()
+        else:
+            if len(iv) != block_size:
+                raise ValueError(f"{algorithm_name} requires a {block_size}-byte IV")
+            cipher_mode = {"cbc": modes.CBC, "cfb": modes.CFB, "ofb": modes.OFB}[mode_name](iv)
+        return Cipher(cipher_algorithm, cipher_mode), mode_name, block_size
+
+    def pkcs7_pad(data: bytes, block_size: int) -> bytes:
+        pad_length = block_size - (len(data) % block_size)
+        padded = data + bytes([pad_length]) * pad_length
+        if len(padded) > max_bytes:
+            raise ValueError(f"CRYPTO result exceeds the {max_bytes}-byte limit")
+        return padded
+
+    def pkcs7_unpad(data: bytes, block_size: int) -> bytes:
+        if not data or len(data) % block_size:
+            raise ValueError("CRYPTO ciphertext length is not a positive block multiple")
+        pad_length = data[-1]
+        if not 1 <= pad_length <= block_size or data[-pad_length:] != bytes([pad_length]) * pad_length:
+            raise ValueError("CRYPTO ciphertext has invalid PKCS padding")
+        return data[:-pad_length]
+
+    def rsa_key(value: bytes, operation: str):
+        if operation == "rsa-pub":
+            loaders = [(serialization.load_pem_public_key, False), (serialization.load_der_public_key, False)]
+            expected = rsa.RSAPublicKey
+        else:
+            loaders = [(serialization.load_pem_private_key, True), (serialization.load_der_private_key, True)]
+            expected = rsa.RSAPrivateKey
+        last_error = None
+        for loader, private in loaders:
+            try:
+                loaded = loader(value, password=None) if private else loader(value)
+                if not isinstance(loaded, expected):
+                    raise ValueError(f"{operation} requires an RSA key")
+                return loaded
+            except (TypeError, ValueError, NotImplementedError) as exc:
+                last_error = exc
+        raise ValueError(f"{operation} key is not a supported PEM or DER RSA key") from last_error
+
+    def cipher_callback(*args: str) -> str:
+        if len(args) != 8:
+            raise ValueError("CRYPTO cipher helper requires eight arguments")
+        operation, algorithm_name, key_encoded, iv_encoded, padding_name, data_encoded, iv_present_text, _ = args
+        key = decode(key_encoded, "key")
+        iv = decode(iv_encoded, "iv")
+        data = decode(data_encoded, "data")
+        if iv_present_text not in {"0", "1"}:
+            raise ValueError("CRYPTO IV presence flag is invalid")
+        iv_present = iv_present_text == "1"
+        if padding_name not in {"pkcs", "oaep"}:
+            raise ValueError("CRYPTO padding must be pkcs or oaep")
+        if algorithm_name in {"rsa-pub", "rsa-priv"}:
+            if (operation == "encrypt" and algorithm_name != "rsa-pub") or (
+                operation == "decrypt" and algorithm_name != "rsa-priv"
+            ):
+                raise ValueError(
+                    f"CRYPTO {algorithm_name} is not valid for {operation}; use the matching RSA key direction"
+                )
+            key_object = rsa_key(key, algorithm_name)
+            rsa_padding = (
+                asym_padding.OAEP(
+                    mgf=asym_padding.MGF1(algorithm=hashes.SHA1()),
+                    algorithm=hashes.SHA1(),
+                    label=None,
+                )
+                if padding_name == "oaep"
+                else asym_padding.PKCS1v15()
+            )
+            try:
+                output = key_object.encrypt(data, rsa_padding) if operation == "encrypt" else key_object.decrypt(data, rsa_padding)
+            except ValueError as exc:
+                raise ValueError(f"CRYPTO RSA operation failed: {exc}") from exc
+            return encode(output)
+        if padding_name == "oaep":
+            raise ValueError("CRYPTO oaep padding is only valid for RSA")
+        if algorithm_name == "rc4":
+            if not 1 <= len(key) <= 256:
+                raise ValueError("rc4 requires a key between 1 and 256 bytes")
+            # The cryptography backend only accepts a sparse set of RC4 key
+            # sizes. BIG-IP accepts variable-length keys, so use the bounded
+            # reference KSA/PRGA here; this is an emulator primitive, not a
+            # recommendation to deploy RC4.
+            state = list(range(256))
+            j = 0
+            for index in range(256):
+                j = (j + state[index] + key[index % len(key)]) & 0xFF
+                state[index], state[j] = state[j], state[index]
+            output = bytearray()
+            index = 0
+            j = 0
+            for value in data:
+                index = (index + 1) & 0xFF
+                j = (j + state[index]) & 0xFF
+                state[index], state[j] = state[j], state[index]
+                output.append(value ^ state[(state[index] + state[j]) & 0xFF])
+            return encode(bytes(output))
+        if algorithm_name.endswith("-ecb") and iv_present:
+            raise ValueError(f"{algorithm_name} does not accept an IV")
+        if (
+            not iv_present
+            and not algorithm_name.endswith("-ecb")
+            and re.fullmatch(r"(?:aes-(?:128|192|256)|bf|des|des-ede|des-ede3|dea)-.*", algorithm_name)
+        ):
+            iv = bytes(16 if algorithm_name.startswith("aes-") else 8)
+        cipher, mode_name, block_size = block_cipher(algorithm_name, key, iv)
+        uses_block_padding = mode_name in {"cbc", "ecb"}
+        if operation == "encrypt":
+            input_data = pkcs7_pad(data, block_size) if uses_block_padding else data
+            transform = cipher.encryptor()
+            output = transform.update(input_data) + transform.finalize()
+        elif operation == "decrypt":
+            transform = cipher.decryptor()
+            decrypted = transform.update(data) + transform.finalize()
+            output = pkcs7_unpad(decrypted, block_size) if uses_block_padding else decrypted
+        else:
+            raise ValueError(f"unsupported CRYPTO operation: {operation}")
+        return encode(output)
+
+    def keygen_callback(*args: str) -> str:
+        if len(args) != 7:
+            raise ValueError("CRYPTO keygen helper requires seven arguments")
+        algorithm_name, length_text, exponent_text, passphrase_encoded, salt_encoded, rounds_text, _ = args
+        try:
+            length_bits = int(length_text)
+        except ValueError as exc:
+            raise ValueError("CRYPTO keygen length must be an integer") from exc
+        if length_bits <= 0 or length_bits % 8:
+            raise ValueError("CRYPTO keygen length must be a positive multiple of 8")
+        passphrase = decode(passphrase_encoded, "passphrase")
+        salt = decode(salt_encoded, "salt")
+        try:
+            rounds = int(rounds_text) if rounds_text else 1000
+        except ValueError as exc:
+            raise ValueError("CRYPTO keygen rounds must be an integer") from exc
+        if not 1 <= rounds <= max_pbkdf2_rounds:
+            raise ValueError(f"CRYPTO keygen rounds must be between 1 and {max_pbkdf2_rounds}")
+        if algorithm_name == "random":
+            if length_bits > max_keygen_bits:
+                raise ValueError(f"CRYPTO random key length cannot exceed {max_keygen_bits} bits")
+            return "raw|" + encode(secrets.token_bytes(length_bits // 8))
+        if algorithm_name == "pbkdf2-md5":
+            if not passphrase:
+                raise ValueError("CRYPTO pbkdf2-md5 requires -passphrase")
+            if length_bits > max_keygen_bits:
+                raise ValueError(f"CRYPTO pbkdf2-md5 key length cannot exceed {max_keygen_bits} bits")
+            derived = hashlib.pbkdf2_hmac("md5", passphrase, salt, rounds, length_bits // 8)
+            return "raw|" + encode(derived)
+        if algorithm_name == "rsa":
+            if not 1024 <= length_bits <= max_rsa_bits:
+                raise ValueError("CRYPTO RSA key length must be between 1024 and 8192 bits")
+            try:
+                exponent = int(exponent_text) if exponent_text else 65537
+            except ValueError as exc:
+                raise ValueError("CRYPTO RSA exponent must be an integer") from exc
+            if exponent not in {3, 65537}:
+                raise ValueError("CRYPTO RSA exponent must be 3 or 65537")
+            private_key = rsa.generate_private_key(public_exponent=exponent, key_size=length_bits)
+            public_pem = private_key.public_key().public_bytes(
+                serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            private_pem = private_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            )
+            return "rsa|" + encode(public_pem) + "|" + encode(private_pem)
+        raise ValueError(f"unsupported CRYPTO keygen algorithm: {algorithm_name}")
+
+    interpreter.createcommand("::itest::semantic::py_crypto_cipher", cipher_callback)
+    interpreter.createcommand("::itest::semantic::py_crypto_keygen", keygen_callback)
+    setattr(session, "_testcl_crypto_cipher_callback", cipher_callback)
+    setattr(session, "_testcl_crypto_keygen_callback", keygen_callback)
 
 
 def _install_python_aes_helper(session: Any) -> None:

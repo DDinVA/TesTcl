@@ -19,6 +19,7 @@ namespace eval ::itest::semantic {
     variable adapt_current_handle "static:request"
     variable adapt_current_side request
     variable crypto_contexts {}
+    variable crypto_cipher_contexts {}
     variable crypto_context_max_bytes 16777216
     variable hsl_handles
     array set hsl_handles {}
@@ -12254,7 +12255,9 @@ namespace eval ::itest::semantic {
 
     proc crypto_reset_connection {} {
         variable crypto_contexts
+        variable crypto_cipher_contexts
         set crypto_contexts {}
+        set crypto_cipher_contexts {}
     }
 
     proc _adapt_default_record {side} {
@@ -20247,8 +20250,13 @@ namespace eval ::itest::semantic {
 
     proc _crypto_context_execute {parsed command_name operation} {
         variable crypto_contexts
+        variable crypto_cipher_contexts
         variable crypto_context_max_bytes
         set context [dict get $parsed context]
+        if {![dict exists $crypto_contexts $context] &&
+            [dict exists $crypto_cipher_contexts $context]} {
+            error "$command_name context is already used for another CRYPTO command"
+        }
         if {[dict exists $crypto_contexts $context]} {
             set entry [dict get $crypto_contexts $context]
             if {[dict get $entry operation] ne $operation} {
@@ -20325,6 +20333,193 @@ namespace eval ::itest::semantic {
 
     proc crypto_verify_command {args} {
         return [_crypto_command $args CRYPTO::verify verify]
+    }
+}
+
+# CRYPTO::encrypt/decrypt/keygen use the same option and context contract as
+# the hash/sign/verify family. Python supplies standard cipher primitives;
+# this Tcl layer remains responsible for binary-safe argument handling and
+# connection-scoped context lifecycle.
+namespace eval ::itest::semantic {
+    proc _crypto_cipher_parse {args command_name} {
+        set parsed [dict create algorithm "" algorithm_set 0 key "" key_set 0 \
+            iv "" iv_set 0 padding pkcs padding_set 0 data "" has_data 0 \
+            context "" context_set 0 final 0]
+        set index 0
+        set end_options 0
+        while {$index < [llength $args]} {
+            set token [lindex $args $index]
+            if {!$end_options && $token eq "--"} {
+                set end_options 1
+                incr index
+                continue
+            }
+            if {!$end_options && [string match -* $token]} {
+                switch -exact -- $token {
+                    -alg - -key - -keyhex - -iv - -ivhex - -padding - -ctx {
+                        if {$index + 1 >= [llength $args]} { error "$command_name option $token requires a value" }
+                        set value [lindex $args [incr index]]
+                        switch -exact -- $token {
+                            -alg {
+                                if {[dict get $parsed algorithm_set]} { error "$command_name accepts -alg only once" }
+                                dict set parsed algorithm $value
+                                dict set parsed algorithm_set 1
+                            }
+                            -ctx {
+                                if {[dict get $parsed context_set]} { error "$command_name accepts -ctx only once" }
+                                if {$value eq "" || [string first "\x00" $value] >= 0} {
+                                    error "$command_name -ctx requires a non-empty name without NUL bytes"
+                                }
+                                dict set parsed context $value
+                                dict set parsed context_set 1
+                            }
+                            -key - -keyhex {
+                                if {[dict get $parsed key_set]} { error "$command_name accepts only one key option" }
+                                if {$token eq "-keyhex" && [catch {binary decode hex $value} value]} {
+                                    error "$command_name -keyhex requires an even hexadecimal value"
+                                }
+                                dict set parsed key $value
+                                dict set parsed key_set 1
+                            }
+                            -iv - -ivhex {
+                                if {[dict get $parsed iv_set]} { error "$command_name accepts only one IV option" }
+                                if {$token eq "-ivhex" && [catch {binary decode hex $value} value]} {
+                                    error "$command_name -ivhex requires an even hexadecimal value"
+                                }
+                                dict set parsed iv $value
+                                dict set parsed iv_set 1
+                            }
+                            -padding {
+                                if {[dict get $parsed padding_set]} { error "$command_name accepts -padding only once" }
+                                if {$value ni {pkcs oaep}} { error "$command_name -padding must be pkcs or oaep" }
+                                dict set parsed padding $value
+                                dict set parsed padding_set 1
+                            }
+                        }
+                    }
+                    -final { dict set parsed final 1 }
+                    default { error "$command_name does not support option $token" }
+                }
+            } else {
+                if {[dict get $parsed has_data]} { error "$command_name accepts at most one data value" }
+                dict set parsed data $token
+                dict set parsed has_data 1
+            }
+            incr index
+        }
+        if {[dict get $parsed algorithm] eq "" && ![dict get $parsed context_set]} { error "$command_name requires -alg" }
+        if {[dict get $parsed final] && ![dict get $parsed context_set]} { error "$command_name -final requires -ctx" }
+        if {![dict get $parsed context_set] && ![dict get $parsed key_set]} { error "$command_name requires -key or -keyhex" }
+        return $parsed
+    }
+
+    proc _crypto_cipher_execute {operation algorithm key iv iv_set padding data} {
+        set encoded [::itest::semantic::py_crypto_cipher $operation $algorithm \
+            [_crypto_encoded $key] [_crypto_encoded $iv] $padding [_crypto_encoded $data] $iv_set ""]
+        return [binary decode base64 $encoded]
+    }
+
+    proc _crypto_cipher_context_execute {parsed command_name operation} {
+        variable crypto_contexts
+        variable crypto_cipher_contexts
+        variable crypto_context_max_bytes
+        set context [dict get $parsed context]
+        if {[dict exists $crypto_contexts $context]} { error "$command_name context is already used for another CRYPTO command" }
+        if {[dict exists $crypto_cipher_contexts $context]} {
+            set entry [dict get $crypto_cipher_contexts $context]
+            if {[dict get $entry operation] ne $operation} { error "$command_name context is already used for another CRYPTO command" }
+            if {[dict get $parsed algorithm_set] && [dict get $parsed algorithm] ne [dict get $entry algorithm]} {
+                error "$command_name cannot change the context algorithm"
+            }
+            if {[dict get $parsed key_set]} {
+                if {[dict get $entry data_started]} { error "$command_name cannot change the context key after it starts" }
+                dict set entry key [dict get $parsed key]
+            }
+            if {[dict get $parsed iv_set]} {
+                if {[dict get $entry data_started]} { error "$command_name cannot change the context IV after it starts" }
+                dict set entry iv [dict get $parsed iv]
+                dict set entry iv_set 1
+            }
+            if {[dict get $parsed padding_set]} {
+                if {[dict get $entry data_started]} { error "$command_name cannot change the context padding after it starts" }
+                dict set entry padding [dict get $parsed padding]
+            }
+        } else {
+            if {[dict get $parsed algorithm] eq ""} { error "$command_name requires -alg for a new context" }
+            if {![dict get $parsed key_set]} { error "$command_name requires -key or -keyhex for a new context" }
+            set entry [dict create operation $operation algorithm [dict get $parsed algorithm] \
+                key [dict get $parsed key] iv [dict get $parsed iv] iv_set [dict get $parsed iv_set] padding [dict get $parsed padding] \
+                data "" data_started 0]
+        }
+        if {[dict get $parsed has_data]} {
+            set data [string cat [dict get $entry data] [dict get $parsed data]]
+            if {[string bytelength $data] > $crypto_context_max_bytes} { error "$command_name context data exceeds the $crypto_context_max_bytes-byte limit" }
+            dict set entry data $data
+            dict set entry data_started 1
+        }
+        if {![dict get $parsed final]} {
+            dict set crypto_cipher_contexts $context $entry
+            return ""
+        }
+        set result [_crypto_cipher_execute $operation [dict get $entry algorithm] [dict get $entry key] \
+            [dict get $entry iv] [dict get $entry iv_set] [dict get $entry padding] [dict get $entry data]]
+        dict unset crypto_cipher_contexts $context
+        return $result
+    }
+
+    proc _crypto_cipher_command {args command_name operation} {
+        set parsed [_crypto_cipher_parse $args $command_name]
+        if {[dict get $parsed context_set]} { return [_crypto_cipher_context_execute $parsed $command_name $operation] }
+        return [_crypto_cipher_execute $operation [dict get $parsed algorithm] [dict get $parsed key] \
+            [dict get $parsed iv] [dict get $parsed iv_set] [dict get $parsed padding] [dict get $parsed data]]
+    }
+
+    proc crypto_encrypt_command {args} { return [_crypto_cipher_command $args CRYPTO::encrypt encrypt] }
+    proc crypto_decrypt_command {args} { return [_crypto_cipher_command $args CRYPTO::decrypt decrypt] }
+
+    proc crypto_keygen_command {args} {
+        set parsed [dict create algorithm "" length "" exponent "" passphrase "" salt "" rounds "" \
+            algorithm_set 0 length_set 0 exponent_set 0 passphrase_set 0 salt_set 0 rounds_set 0]
+        set index 0
+        set end_options 0
+        while {$index < [llength $args]} {
+            set token [lindex $args $index]
+            if {!$end_options && $token eq "--"} { set end_options 1; incr index; continue }
+            if {!$end_options && [string match -* $token]} {
+                switch -exact -- $token {
+                    -alg - -len - -exp - -passphrase - -salt - -salthex - -rounds {
+                        if {$index + 1 >= [llength $args]} { error "CRYPTO::keygen option $token requires a value" }
+                        set value [lindex $args [incr index]]
+                        switch -exact -- $token {
+                            -alg { if {[dict get $parsed algorithm_set]} { error "CRYPTO::keygen accepts -alg only once" }; dict set parsed algorithm $value; dict set parsed algorithm_set 1 }
+                            -len { if {[dict get $parsed length_set]} { error "CRYPTO::keygen accepts -len only once" }; dict set parsed length $value; dict set parsed length_set 1 }
+                            -exp { if {[dict get $parsed exponent_set]} { error "CRYPTO::keygen accepts -exp only once" }; dict set parsed exponent $value; dict set parsed exponent_set 1 }
+                            -passphrase { if {[dict get $parsed passphrase_set]} { error "CRYPTO::keygen accepts -passphrase only once" }; dict set parsed passphrase $value; dict set parsed passphrase_set 1 }
+                            -salt - -salthex {
+                                if {[dict get $parsed salt_set]} { error "CRYPTO::keygen accepts only one salt option" }
+                                if {$token eq "-salthex" && [catch {binary decode hex $value} value]} { error "CRYPTO::keygen -salthex requires an even hexadecimal value" }
+                                dict set parsed salt $value; dict set parsed salt_set 1
+                            }
+                            -rounds { if {[dict get $parsed rounds_set]} { error "CRYPTO::keygen accepts -rounds only once" }; dict set parsed rounds $value; dict set parsed rounds_set 1 }
+                        }
+                    }
+                    default { error "CRYPTO::keygen does not support option $token" }
+                }
+            } else { error "CRYPTO::keygen does not accept positional data" }
+            incr index
+        }
+        if {[dict get $parsed algorithm] ni {random pbkdf2-md5 rsa}} { error "CRYPTO::keygen requires -alg random, pbkdf2-md5, or rsa" }
+        if {![dict get $parsed length_set] || ![string is integer -strict [dict get $parsed length]]} { error "CRYPTO::keygen requires integer -len" }
+        set encoded [::itest::semantic::py_crypto_keygen [dict get $parsed algorithm] [dict get $parsed length] \
+            [dict get $parsed exponent] [_crypto_encoded [dict get $parsed passphrase]] \
+            [_crypto_encoded [dict get $parsed salt]] [dict get $parsed rounds] ""]
+        set fields [split $encoded |]
+        set kind [lindex $fields 0]
+        if {$kind eq "raw" && [llength $fields] == 2} { return [binary decode base64 [lindex $fields 1]] }
+        if {$kind eq "rsa" && [llength $fields] == 3} {
+            return [list [binary decode base64 [lindex $fields 1]] [binary decode base64 [lindex $fields 2]]]
+        }
+        error "CRYPTO::keygen returned an invalid backend result"
     }
 }
 
@@ -21561,6 +21756,9 @@ foreach {name proc_name} {
     CRYPTO::hash ::itest::semantic::crypto_hash_command
     CRYPTO::sign ::itest::semantic::crypto_sign_command
     CRYPTO::verify ::itest::semantic::crypto_verify_command
+    CRYPTO::decrypt ::itest::semantic::crypto_decrypt_command
+    CRYPTO::encrypt ::itest::semantic::crypto_encrypt_command
+    CRYPTO::keygen ::itest::semantic::crypto_keygen_command
     AES::decrypt ::itest::semantic::aes_decrypt_command
     AES::encrypt ::itest::semantic::aes_encrypt_command
     AES::key ::itest::semantic::aes_key_command

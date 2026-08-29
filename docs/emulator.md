@@ -261,6 +261,23 @@ rule logs or stores them. The adapter validates algorithm, key, signature, and
 data options, supports `-keyhex`, bounds accumulated context data at 16 MiB,
 and clears contexts at connection boundaries.
 
+`CRYPTO::encrypt`, `CRYPTO::decrypt`, and `CRYPTO::keygen` extend the same
+binary-safe semantic layer. The portable backend implements AES
+`cbc`/`cfb`/`ecb`/`ofb`, Blowfish, DES variants, IDEA, RC4, and RSA
+public/private encryption. RSA supports the documented `pkcs` default and
+`oaep` padding; CBC/ECB block operations use PKCS#7-style padding and
+stream-like modes remain unpadded. Omitted IVs are deterministic zero IVs.
+`CRYPTO::keygen` supports bounded random, PBKDF2-MD5, and RSA key generation,
+returning binary keys or a public/private PEM list as appropriate. Contexts
+buffer at most 16 MiB and are released by `-final` or connection reset.
+
+RC2 and AES CWC are retained as catalog entries but return an explicit
+unsupported-backend error. PBKDF2 uses an emulator default of 1,000 rounds
+when omitted; verify derived-key compatibility against a live TMOS 17.5
+device before using it as an interoperability vector. The implementation is
+intended for rule behavior testing, not as a replacement for transport
+security or production cryptography.
+
 The AES layer provides binary-safe `AES::key`, `AES::encrypt`, and
 `AES::decrypt` operations. `AES::key` returns the F5-shaped `AES <bits> <hex>`
 format for 128, 192, or 256 bits; encryption and decryption accept those

@@ -187,6 +187,24 @@ verification cover the corresponding HMAC algorithms. Binary results are
 preserved, including `-keyhex` inputs. Context data is capped at 16 MiB and
 cleared at connection boundaries.
 
+The remaining TMOS 17.5 CRYPTO commands, `CRYPTO::encrypt`,
+`CRYPTO::decrypt`, and `CRYPTO::keygen`, are also semantic mocks. Symmetric
+coverage includes AES CBC/CFB/ECB/OFB, Blowfish, DES/2-key DES/3-key DES,
+IDEA, and variable-length RC4; RSA public/private operations support PKCS#1
+v1.5 and OAEP padding. Block CBC/ECB operations use PKCS#7-style padding,
+while stream-like modes do not add padding. Missing IVs use a deterministic
+zero IV so test vectors are reproducible. Contexts are connection-scoped and
+are evaluated on `-final`. `CRYPTO::keygen` supports bounded random,
+PBKDF2-MD5, and RSA generation; RSA returns a public/private PEM list.
+
+The catalog also names RC2 and AES CWC mode, but the portable Python backend
+does not provide those primitives. The emulator fails explicitly for those
+algorithms rather than substituting a non-equivalent cipher. PBKDF2 defaults
+to 1,000 rounds when `-rounds` is omitted, an emulator compatibility choice
+that should be checked against a live 17.5 device before relying on derived
+key bytes. Standard algorithm interoperability and live-device golden vectors
+remain separate validation work.
+
 The TMOS 17.5 `AES::key`, `AES::encrypt`, and `AES::decrypt` commands are
 implemented as a binary-safe semantic layer. `AES::key` returns the documented
 `AES <bits> <hex>` key shape for 128-, 192-, and 256-bit keys; encrypt/decrypt
