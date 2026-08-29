@@ -655,6 +655,7 @@ EVENT_STATE_FIELDS = {
     "bigproto": {"enable_fix_reset"},
     "bigtcp": {"released"},
     "eca": {"enabled", "selected", "client_machine_name", "domainname", "status", "username"},
+    "avr": {"enabled", "cspm_injection_enabled", "log_requested"},
     "fix": {"tags", "tag_maps"},
     "diameter": {
         "type",
@@ -1041,6 +1042,7 @@ EVENT_STATE_NAMESPACES = {
     "bigproto": "::state::bigproto",
     "bigtcp": "::state::bigtcp",
     "eca": "::state::eca",
+    "avr": "::state::avr",
     "fix": "::state::fix",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
@@ -1234,6 +1236,10 @@ SEMANTIC_MOCK_COMMANDS = {
     "ECA::select",
     "ECA::status",
     "ECA::username",
+    "AVR::disable",
+    "AVR::disable_cspm_injection",
+    "AVR::enable",
+    "AVR::log",
     "CLASSIFY::application",
     "CLASSIFY::category",
     "CLASSIFY::defer",
@@ -10855,6 +10861,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::smtps_reset_connection")
                 session.eval_tcl("::itest::semantic::ntlm_reset_connection")
                 session.eval_tcl("::itest::semantic::eca_reset_connection")
+                session.eval_tcl("::itest::semantic::avr_reset_connection")
                 session.eval_tcl("::itest::semantic::protocol_inspection_reset_connection")
                 session.eval_tcl("::itest::semantic::classification_reset_connection")
                 session.eval_tcl("::itest::semantic::category_reset_connection")
@@ -11532,6 +11539,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::l7check_reset_connection")
                 session.eval_tcl("::itest::semantic::link_reset_connection")
                 session.eval_tcl("::itest::semantic::eca_reset_connection")
+                session.eval_tcl("::itest::semantic::avr_reset_connection")
             return self._fire_event_on_worker(session, event_name, normalised_state)
 
         return self._call(
@@ -12644,6 +12652,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::smtps_reset_connection")
         session.eval_tcl("::itest::semantic::ntlm_reset_connection")
         session.eval_tcl("::itest::semantic::eca_reset_connection")
+        session.eval_tcl("::itest::semantic::avr_reset_connection")
         session.eval_tcl("::itest::semantic::protocol_inspection_reset_connection")
         session.eval_tcl("::itest::semantic::classification_reset_connection")
         session.eval_tcl("::itest::semantic::category_reset_connection")
@@ -12714,6 +12723,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::smtps_reset_connection")
         session.eval_tcl("::itest::semantic::ntlm_reset_connection")
         session.eval_tcl("::itest::semantic::eca_reset_connection")
+        session.eval_tcl("::itest::semantic::avr_reset_connection")
         session.eval_tcl("::itest::semantic::protocol_inspection_reset_connection")
         session.eval_tcl("::itest::semantic::classification_reset_connection")
         session.eval_tcl("::itest::semantic::category_reset_connection")

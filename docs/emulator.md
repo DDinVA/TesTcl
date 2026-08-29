@@ -897,6 +897,14 @@ result handlers without requiring a real domain controller or NTLM exchange.
 The state resets on a new `CLIENT_ACCEPTED` connection. This is a deterministic
 authentication-result model, not an implementation of NTLM cryptography.
 
+### AVR controls
+
+The AVR overlay models the connection-scoped `AVR::enable` and `AVR::disable`
+switches, `AVR::log` as a recorded statistics request, and
+`AVR::disable_cspm_injection` during `AVR_CSPM_INJECTION` or `HTTP_RESPONSE`.
+The `avr` state layer exposes `enabled`, `cspm_injection_enabled`, and
+`log_requested`; it does not generate AVR analytics or JavaScript payloads.
+
 ### FIX tag state
 
 The direct `FIX_MESSAGE` adapter accepts a `fix.tags` object and exposes it to

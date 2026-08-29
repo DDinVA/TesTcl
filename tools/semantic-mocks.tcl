@@ -1115,6 +1115,12 @@ namespace eval ::itest::semantic {
         variable username ""
     }
 
+    namespace eval ::state::avr {
+        variable enabled 1
+        variable cspm_injection_enabled 1
+        variable log_requested 0
+    }
+
     namespace eval ::state::fix {
         variable tags {}
         variable tag_maps {}
@@ -6141,6 +6147,50 @@ namespace eval ::itest::semantic {
 
     proc eca_username_command {args} {
         return [eca_value_command ECA::username username {*}$args]
+    }
+
+    proc avr_reset_connection {} {
+        set ::state::avr::enabled 1
+        set ::state::avr::cspm_injection_enabled 1
+        set ::state::avr::log_requested 0
+    }
+
+    proc avr_no_args {command_name args} {
+        if {[llength $args] != 0} {
+            error "$command_name takes no arguments"
+        }
+    }
+
+    proc avr_toggle_command {command_name enabled args} {
+        avr_no_args $command_name {*}$args
+        set ::state::avr::enabled [expr {$enabled ? 1 : 0}]
+        ::itest::log_decision avr [expr {$enabled ? "enable" : "disable"}]
+        return ""
+    }
+
+    proc avr_enable_command {args} {
+        return [avr_toggle_command AVR::enable 1 {*}$args]
+    }
+
+    proc avr_disable_command {args} {
+        return [avr_toggle_command AVR::disable 0 {*}$args]
+    }
+
+    proc avr_log_command {args} {
+        avr_no_args AVR::log {*}$args
+        set ::state::avr::log_requested 1
+        ::itest::log_decision avr log
+        return ""
+    }
+
+    proc avr_disable_cspm_injection_command {args} {
+        avr_no_args AVR::disable_cspm_injection {*}$args
+        if {$::itest::current_event ni {AVR_CSPM_INJECTION HTTP_RESPONSE}} {
+            error "AVR::disable_cspm_injection is not valid during $::itest::current_event"
+        }
+        set ::state::avr::cspm_injection_enabled 0
+        ::itest::log_decision avr disable_cspm_injection
+        return ""
     }
 
     proc fix_prepare_event {} {
@@ -20348,6 +20398,10 @@ foreach {original replacement} {
     eca_select eca_select_command
     eca_status eca_status_command
     eca_username eca_username_command
+    avr_disable avr_disable_command
+    avr_disable_cspm_injection avr_disable_cspm_injection_command
+    avr_enable avr_enable_command
+    avr_log avr_log_command
     fix_tag fix_tag_command
     psc_aaa_reporting_interval psc_aaa_reporting_interval_command
     psc_attr psc_attr_command
@@ -21028,6 +21082,10 @@ foreach {name proc_name} {
     ECA::select ::itest::semantic::eca_select_command
     ECA::status ::itest::semantic::eca_status_command
     ECA::username ::itest::semantic::eca_username_command
+    AVR::disable ::itest::semantic::avr_disable_command
+    AVR::disable_cspm_injection ::itest::semantic::avr_disable_cspm_injection_command
+    AVR::enable ::itest::semantic::avr_enable_command
+    AVR::log ::itest::semantic::avr_log_command
     FIX::tag ::itest::semantic::fix_tag_command
     PSC::aaa_reporting_interval ::itest::semantic::psc_aaa_reporting_interval_command
     PSC::attr ::itest::semantic::psc_attr_command

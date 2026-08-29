@@ -1144,6 +1144,44 @@ when ECA_REQUEST_DENIED { log local0. "denied=[ECA::username] status=[ECA::statu
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+    def test_avr_connection_and_cspm_controls(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "HTTP", "AVR"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    AVR::disable
+    AVR::enable
+    AVR::log
+}
+when AVR_CSPM_INJECTION {
+    AVR::disable_cspm_injection
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            accepted = session.fire_event("CLIENT_ACCEPTED", {"avr": {}})
+            self.assertEqual(accepted["state"]["avr"]["enabled"], "1")
+            self.assertEqual(accepted["state"]["avr"]["log_requested"], "1")
+
+            injection = session.fire_event("AVR_CSPM_INJECTION", {"avr": {}})
+            self.assertTrue(injection["fired"])
+            self.assertEqual(
+                injection["state"]["avr"]["cspm_injection_enabled"], "0"
+            )
+
+            reset = session.fire_event("CLIENT_ACCEPTED", {"avr": {}})
+            self.assertEqual(reset["state"]["avr"]["enabled"], "1")
+            self.assertEqual(
+                reset["state"]["avr"]["cspm_injection_enabled"], "1"
+            )
+        finally:
+            session.close()
+
     def test_fix_tag_message_lookup_and_persistent_sender_mapping(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1812,7 +1850,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
         self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 143)
+        self.assertEqual(queue["command_count"], 139)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
