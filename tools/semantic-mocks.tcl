@@ -181,6 +181,52 @@ namespace eval ::itest::semantic {
     variable botdefense_default_support_id ""
     variable botdefense_support_id ""
 
+    variable antifraud_default_enabled 1
+    variable antifraud_enabled 1
+    variable antifraud_default_profile ""
+    variable antifraud_profile ""
+    variable antifraud_default_login_requested 0
+    variable antifraud_default_alert_requested 0
+    variable antifraud_default_client_id ""
+    variable antifraud_client_id ""
+    variable antifraud_default_device_id ""
+    variable antifraud_device_id ""
+    variable antifraud_default_fingerprint ""
+    variable antifraud_fingerprint ""
+    variable antifraud_default_geo ""
+    variable antifraud_geo ""
+    variable antifraud_default_guid ""
+    variable antifraud_guid ""
+    variable antifraud_default_result passed
+    variable antifraud_result passed
+    variable antifraud_default_username ""
+    variable antifraud_username ""
+    variable antifraud_default_license_id ""
+    variable antifraud_license_id ""
+    variable antifraud_default_alert_fields [dict create]
+    variable antifraud_alert_fields [dict create]
+    variable antifraud_login_requested 0
+    variable antifraud_alert_requested 0
+    variable antifraud_alert_disabled 0
+    variable antifraud_log_enabled 0
+    variable antifraud_log_level Informational
+    variable antifraud_disabled_features [dict create]
+    foreach field {
+        alert_additional_info alert_bait_signatures alert_component alert_defined_value
+        alert_details alert_device_id alert_expected_value alert_fingerprint
+        alert_forbidden_added_element alert_guid alert_html alert_http_referrer alert_id
+        alert_min alert_origin alert_resolved_value alert_score alert_transaction_data
+        alert_transaction_id alert_type alert_username alert_view_id
+    } {
+        dict set antifraud_default_alert_fields $field ""
+        dict set antifraud_alert_fields $field ""
+    }
+    foreach feature {
+        app_layer_encryption auto_transactions injection malware phishing
+    } {
+        dict set antifraud_disabled_features $feature 0
+    }
+
     variable sip_discarded 0
     variable sip_response_requested 0
     variable sip_response_code ""
@@ -4879,6 +4925,352 @@ namespace eval ::itest::semantic {
             support_id $botdefense_support_id]
     }
 
+    proc antifraud_configure {raw} {
+        variable antifraud_default_enabled
+        variable antifraud_enabled
+        variable antifraud_default_profile
+        variable antifraud_profile
+        variable antifraud_default_login_requested
+        variable antifraud_default_alert_requested
+        variable antifraud_default_client_id
+        variable antifraud_client_id
+        variable antifraud_default_device_id
+        variable antifraud_device_id
+        variable antifraud_default_fingerprint
+        variable antifraud_fingerprint
+        variable antifraud_default_geo
+        variable antifraud_geo
+        variable antifraud_default_guid
+        variable antifraud_guid
+        variable antifraud_default_result
+        variable antifraud_result
+        variable antifraud_default_username
+        variable antifraud_username
+        variable antifraud_default_license_id
+        variable antifraud_license_id
+        if {[llength $raw] != 12} { error "invalid Anti-Fraud configuration" }
+        lassign $raw enabled profile login alert client_id device_id fingerprint geo guid result username license_id
+        if {$enabled ni {0 1} || $login ni {0 1} || $alert ni {0 1}} {
+            error "Anti-Fraud enabled and event triggers must be boolean"
+        }
+        if {$result ni {passed failed}} { error "Anti-Fraud result must be passed or failed" }
+        set antifraud_default_enabled $enabled
+        set antifraud_enabled $enabled
+        set antifraud_default_profile $profile
+        set antifraud_profile $profile
+        set antifraud_default_login_requested $login
+        set antifraud_default_alert_requested $alert
+        set antifraud_default_client_id $client_id
+        set antifraud_client_id $client_id
+        set antifraud_default_device_id $device_id
+        set antifraud_device_id $device_id
+        set antifraud_default_fingerprint $fingerprint
+        set antifraud_fingerprint $fingerprint
+        set antifraud_default_geo $geo
+        set antifraud_geo $geo
+        set antifraud_default_guid $guid
+        set antifraud_guid $guid
+        set antifraud_default_result $result
+        set antifraud_result $result
+        set antifraud_default_username $username
+        set antifraud_username $username
+        set antifraud_default_license_id $license_id
+        set antifraud_license_id $license_id
+    }
+
+    proc antifraud_set_alert_fields {raw} {
+        variable antifraud_default_alert_fields
+        variable antifraud_alert_fields
+        set allowed {
+            alert_additional_info alert_bait_signatures alert_component
+            alert_defined_value alert_details alert_device_id alert_expected_value
+            alert_fingerprint alert_forbidden_added_element alert_guid alert_html
+            alert_http_referrer alert_id alert_min alert_origin alert_resolved_value
+            alert_score alert_transaction_data alert_transaction_id alert_type
+            alert_username alert_view_id
+        }
+        if {[llength $raw] % 2} { error "Anti-Fraud alert fields require key/value pairs" }
+        foreach {field value} $raw {
+            if {$field ni $allowed} { error "unknown Anti-Fraud alert field $field" }
+            dict set antifraud_default_alert_fields $field $value
+            dict set antifraud_alert_fields $field $value
+        }
+    }
+
+    proc antifraud_prepare_request {login alert} {
+        variable antifraud_default_client_id
+        variable antifraud_client_id
+        variable antifraud_default_device_id
+        variable antifraud_device_id
+        variable antifraud_default_fingerprint
+        variable antifraud_fingerprint
+        variable antifraud_default_geo
+        variable antifraud_geo
+        variable antifraud_default_guid
+        variable antifraud_guid
+        variable antifraud_default_result
+        variable antifraud_result
+        variable antifraud_default_username
+        variable antifraud_username
+        variable antifraud_alert_fields
+        variable antifraud_default_alert_fields
+        variable antifraud_login_requested
+        variable antifraud_alert_requested
+        variable antifraud_alert_disabled
+        variable antifraud_log_enabled
+        variable antifraud_log_level
+        variable antifraud_disabled_features
+        if {$login ni {0 1} || $alert ni {0 1}} {
+            error "Anti-Fraud event triggers must be boolean"
+        }
+        set antifraud_client_id $antifraud_default_client_id
+        set antifraud_device_id $antifraud_default_device_id
+        set antifraud_fingerprint $antifraud_default_fingerprint
+        set antifraud_geo $antifraud_default_geo
+        set antifraud_guid $antifraud_default_guid
+        set antifraud_result $antifraud_default_result
+        set antifraud_username $antifraud_default_username
+        set antifraud_alert_fields $antifraud_default_alert_fields
+        set antifraud_login_requested $login
+        set antifraud_alert_requested $alert
+        set antifraud_alert_disabled 0
+        set antifraud_log_enabled 0
+        set antifraud_log_level Informational
+        foreach feature {app_layer_encryption auto_transactions injection malware phishing} {
+            dict set antifraud_disabled_features $feature 0
+        }
+    }
+
+    proc antifraud_reset_connection {} {
+        variable antifraud_default_enabled
+        variable antifraud_enabled
+        variable antifraud_default_profile
+        variable antifraud_profile
+        variable antifraud_default_login_requested
+        variable antifraud_default_alert_requested
+        set antifraud_enabled $antifraud_default_enabled
+        set antifraud_profile $antifraud_default_profile
+        antifraud_prepare_request $antifraud_default_login_requested $antifraud_default_alert_requested
+    }
+
+    proc _antifraud_require_event {event command} {
+        if {$::itest::current_event ne $event} {
+            error "$command is valid only during $event"
+        }
+    }
+
+    proc _antifraud_alert_field {field args} {
+        variable antifraud_alert_fields
+        _antifraud_require_event ANTIFRAUD_ALERT "ANTIFRAUD::$field"
+        if {[llength $args] > 1} { error "ANTIFRAUD::$field accepts an optional value" }
+        if {[llength $args] == 1} {
+            dict set antifraud_alert_fields $field [lindex $args 0]
+            ::itest::log_decision antifraud $field [lindex $args 0]
+            return ""
+        }
+        return [dict get $antifraud_alert_fields $field]
+    }
+
+    proc _antifraud_alert_static {field args} {
+        variable antifraud_alert_fields
+        _antifraud_require_event ANTIFRAUD_ALERT "ANTIFRAUD::$field"
+        if {[llength $args] != 0} { error "ANTIFRAUD::$field takes no arguments" }
+        return [dict get $antifraud_alert_fields $field]
+    }
+
+    proc _antifraud_license_digest {} {
+        variable antifraud_license_id
+        if {$antifraud_license_id eq ""} { return "" }
+        return [format %08x [zlib crc32 $antifraud_license_id]]
+    }
+
+    proc antifraud_alert_additional_info {args} { return [_antifraud_alert_field alert_additional_info {*}$args] }
+    proc antifraud_alert_component {args} { return [_antifraud_alert_field alert_component {*}$args] }
+    proc antifraud_alert_defined_value {args} { return [_antifraud_alert_field alert_defined_value {*}$args] }
+    proc antifraud_alert_details {args} { return [_antifraud_alert_field alert_details {*}$args] }
+    proc antifraud_alert_expected_value {args} { return [_antifraud_alert_field alert_expected_value {*}$args] }
+    proc antifraud_alert_fingerprint {args} { return [_antifraud_alert_field alert_fingerprint {*}$args] }
+    proc antifraud_alert_html {args} { return [_antifraud_alert_field alert_html {*}$args] }
+    proc antifraud_alert_http_referrer {args} { return [_antifraud_alert_field alert_http_referrer {*}$args] }
+    proc antifraud_alert_id {args} { return [_antifraud_alert_field alert_id {*}$args] }
+    proc antifraud_alert_min {args} { return [_antifraud_alert_field alert_min {*}$args] }
+    proc antifraud_alert_origin {args} { return [_antifraud_alert_field alert_origin {*}$args] }
+    proc antifraud_alert_resolved_value {args} { return [_antifraud_alert_field alert_resolved_value {*}$args] }
+    proc antifraud_alert_score {args} { return [_antifraud_alert_field alert_score {*}$args] }
+    proc antifraud_alert_transaction_data {args} { return [_antifraud_alert_field alert_transaction_data {*}$args] }
+    proc antifraud_alert_transaction_id {args} { return [_antifraud_alert_field alert_transaction_id {*}$args] }
+    proc antifraud_alert_type {args} { return [_antifraud_alert_field alert_type {*}$args] }
+    proc antifraud_alert_username {args} { return [_antifraud_alert_field alert_username {*}$args] }
+    proc antifraud_alert_view_id {args} { return [_antifraud_alert_field alert_view_id {*}$args] }
+    proc antifraud_alert_bait_signatures {args} { return [_antifraud_alert_static alert_bait_signatures {*}$args] }
+    proc antifraud_alert_device_id {args} { return [_antifraud_alert_static alert_device_id {*}$args] }
+    proc antifraud_alert_forbidden_added_element {args} { return [_antifraud_alert_static alert_forbidden_added_element {*}$args] }
+    proc antifraud_alert_guid {args} { return [_antifraud_alert_static alert_guid {*}$args] }
+    proc antifraud_alert_license_id {args} {
+        _antifraud_require_event ANTIFRAUD_ALERT "ANTIFRAUD::alert_license_id"
+        if {[llength $args] != 0} { error "ANTIFRAUD::alert_license_id takes no arguments" }
+        return [_antifraud_license_digest]
+    }
+
+    proc antifraud_client_id {args} {
+        variable antifraud_client_id
+        if {[llength $args] != 0} { error "ANTIFRAUD::client_id takes no arguments" }
+        return $antifraud_client_id
+    }
+    proc antifraud_device_id {args} {
+        variable antifraud_device_id
+        if {[llength $args] != 0} { error "ANTIFRAUD::device_id takes no arguments" }
+        return $antifraud_device_id
+    }
+    proc antifraud_fingerprint {args} {
+        variable antifraud_fingerprint
+        _antifraud_require_event ANTIFRAUD_LOGIN "ANTIFRAUD::fingerprint"
+        if {[llength $args] != 0} { error "ANTIFRAUD::fingerprint takes no arguments" }
+        return $antifraud_fingerprint
+    }
+    proc antifraud_geo {args} {
+        variable antifraud_geo
+        if {[llength $args] != 0} { error "ANTIFRAUD::geo takes no arguments" }
+        return $antifraud_geo
+    }
+    proc antifraud_guid {args} {
+        variable antifraud_guid
+        _antifraud_require_event ANTIFRAUD_LOGIN "ANTIFRAUD::guid"
+        if {[llength $args] != 0} { error "ANTIFRAUD::guid takes no arguments" }
+        return $antifraud_guid
+    }
+    proc antifraud_result {args} {
+        variable antifraud_result
+        if {[llength $args] != 0} { error "ANTIFRAUD::result takes no arguments" }
+        return $antifraud_result
+    }
+    proc antifraud_username {args} {
+        variable antifraud_username
+        _antifraud_require_event ANTIFRAUD_LOGIN "ANTIFRAUD::username"
+        if {[llength $args] > 1} { error "ANTIFRAUD::username accepts an optional alias" }
+        if {[llength $args] == 1} {
+            set antifraud_username [lindex $args 0]
+            ::itest::log_decision antifraud username $antifraud_username
+        }
+        return $antifraud_username
+    }
+
+    proc antifraud_disable {args} {
+        variable antifraud_enabled
+        if {[llength $args] != 0} { error "ANTIFRAUD::disable takes no arguments" }
+        set antifraud_enabled 0
+        ::itest::log_decision antifraud disable
+        return ""
+    }
+    proc antifraud_enable {args} {
+        variable antifraud_enabled
+        variable antifraud_default_profile
+        variable antifraud_profile
+        if {[llength $args] > 1} { error "ANTIFRAUD::enable accepts an optional profile" }
+        set antifraud_enabled 1
+        if {[llength $args] == 1} {
+            set antifraud_profile [lindex $args 0]
+        } else {
+            set antifraud_profile $antifraud_default_profile
+        }
+        ::itest::log_decision antifraud enable $antifraud_profile
+        return ""
+    }
+    proc antifraud_enable_log {args} {
+        variable antifraud_log_enabled
+        variable antifraud_log_level
+        if {[llength $args] > 1} { error "ANTIFRAUD::enable_log accepts an optional log level" }
+        set antifraud_log_level Informational
+        if {[llength $args] == 1} { set antifraud_log_level [lindex $args 0] }
+        if {$antifraud_log_level ni {Error Warning Notice Informational Debug}} {
+            error "ANTIFRAUD::enable_log has an invalid log level"
+        }
+        set antifraud_log_enabled 1
+        ::itest::log_decision antifraud enable_log $antifraud_log_level
+        return ""
+    }
+    proc antifraud_disable_alert {args} {
+        variable antifraud_alert_disabled
+        if {[llength $args] != 0} { error "ANTIFRAUD::disable_alert takes no arguments" }
+        set antifraud_alert_disabled 1
+        ::itest::log_decision antifraud disable_alert
+        return ""
+    }
+    proc _antifraud_disable_feature {feature command args} {
+        variable antifraud_disabled_features
+        if {[llength $args] != 0} { error "$command takes no arguments" }
+        if {![_profile_enabled FASTHTTP]} {
+            error "$command requires the FASTHTTP profile"
+        }
+        dict set antifraud_disabled_features $feature 1
+        ::itest::log_decision antifraud $feature disabled
+        return ""
+    }
+    proc antifraud_disable_app_layer_encryption {args} {
+        return [_antifraud_disable_feature app_layer_encryption ANTIFRAUD::disable_app_layer_encryption {*}$args]
+    }
+    proc antifraud_disable_auto_transactions {args} {
+        return [_antifraud_disable_feature auto_transactions ANTIFRAUD::disable_auto_transactions {*}$args]
+    }
+    proc antifraud_disable_injection {args} {
+        return [_antifraud_disable_feature injection ANTIFRAUD::disable_injection {*}$args]
+    }
+    proc antifraud_disable_malware {args} {
+        return [_antifraud_disable_feature malware ANTIFRAUD::disable_malware {*}$args]
+    }
+    proc antifraud_disable_phishing {args} {
+        return [_antifraud_disable_feature phishing ANTIFRAUD::disable_phishing {*}$args]
+    }
+
+    proc antifraud_should_login {} {
+        variable antifraud_enabled
+        variable antifraud_login_requested
+        return [expr {$antifraud_enabled && $antifraud_login_requested}]
+    }
+
+    proc antifraud_should_alert {} {
+        variable antifraud_enabled
+        variable antifraud_alert_requested
+        variable antifraud_alert_disabled
+        return [expr {$antifraud_enabled && $antifraud_alert_requested && !$antifraud_alert_disabled}]
+    }
+
+    proc antifraud_snapshot {} {
+        variable antifraud_enabled
+        variable antifraud_profile
+        variable antifraud_client_id
+        variable antifraud_device_id
+        variable antifraud_fingerprint
+        variable antifraud_geo
+        variable antifraud_guid
+        variable antifraud_result
+        variable antifraud_username
+        variable antifraud_license_id
+        variable antifraud_alert_fields
+        variable antifraud_login_requested
+        variable antifraud_alert_requested
+        variable antifraud_alert_disabled
+        variable antifraud_log_enabled
+        variable antifraud_log_level
+        variable antifraud_disabled_features
+        set result [list \
+            enabled $antifraud_enabled profile $antifraud_profile \
+            client_id $antifraud_client_id device_id $antifraud_device_id \
+            fingerprint $antifraud_fingerprint geo $antifraud_geo guid $antifraud_guid \
+            result $antifraud_result username $antifraud_username \
+            license_id $antifraud_license_id login_requested $antifraud_login_requested \
+            alert_requested $antifraud_alert_requested alert_disabled $antifraud_alert_disabled \
+            log_enabled $antifraud_log_enabled log_level $antifraud_log_level]
+        foreach field [lsort -dictionary [dict keys $antifraud_alert_fields]] {
+            lappend result $field [dict get $antifraud_alert_fields $field]
+        }
+        lappend result alert_license_id [_antifraud_license_digest]
+        foreach feature {app_layer_encryption auto_transactions injection malware phishing} {
+            lappend result disable_$feature [dict get $antifraud_disabled_features $feature]
+        }
+        return $result
+    }
+
     proc profile_clientssl {args} { return [_profile_enabled CLIENTSSL] }
     proc profile_fastL4 {args} { return [_profile_enabled FASTL4] }
     proc profile_fasthttp {args} { return [_profile_enabled FASTHTTP] }
@@ -9496,6 +9888,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::dosl7_reset_connection
             ::itest::semantic::asm_reset_connection
             ::itest::semantic::botdefense_reset_connection
+            ::itest::semantic::antifraud_reset_connection
         }
         if {$gated && $event_name eq "HTTP_REQUEST" && [::itest::semantic::_cache_profile_enabled]} {
             ::itest::semantic::cache_prepare_request
@@ -9505,6 +9898,14 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             if {[::itest::semantic::_profile_enabled BOTDEFENSE]} {
                 uplevel 1 [list ::itest::_testcl_fire_event_orig BOTDEFENSE_REQUEST]
                 uplevel 1 [list ::itest::_testcl_fire_event_orig BOTDEFENSE_ACTION]
+            }
+            if {[::itest::semantic::_profile_enabled ANTIFRAUD] &&
+                [::itest::semantic::antifraud_should_login]} {
+                uplevel 1 [list ::itest::_testcl_fire_event_orig ANTIFRAUD_LOGIN]
+            }
+            if {[::itest::semantic::_profile_enabled ANTIFRAUD] &&
+                [::itest::semantic::antifraud_should_alert]} {
+                uplevel 1 [list ::itest::_testcl_fire_event_orig ANTIFRAUD_ALERT]
             }
             ::itest::semantic::_maybe_fire_lb_failed
             ::itest::semantic::cache_request_event
@@ -9855,6 +10256,45 @@ foreach {name proc_name} {
     BOTDEFENSE::previous_support_id ::itest::semantic::botdefense_previous_support_id
     BOTDEFENSE::reason ::itest::semantic::botdefense_reason
     BOTDEFENSE::support_id ::itest::semantic::botdefense_support_id
+    ANTIFRAUD::alert_additional_info ::itest::semantic::antifraud_alert_additional_info
+    ANTIFRAUD::alert_bait_signatures ::itest::semantic::antifraud_alert_bait_signatures
+    ANTIFRAUD::alert_component ::itest::semantic::antifraud_alert_component
+    ANTIFRAUD::alert_defined_value ::itest::semantic::antifraud_alert_defined_value
+    ANTIFRAUD::alert_details ::itest::semantic::antifraud_alert_details
+    ANTIFRAUD::alert_device_id ::itest::semantic::antifraud_alert_device_id
+    ANTIFRAUD::alert_expected_value ::itest::semantic::antifraud_alert_expected_value
+    ANTIFRAUD::alert_fingerprint ::itest::semantic::antifraud_alert_fingerprint
+    ANTIFRAUD::alert_forbidden_added_element ::itest::semantic::antifraud_alert_forbidden_added_element
+    ANTIFRAUD::alert_guid ::itest::semantic::antifraud_alert_guid
+    ANTIFRAUD::alert_html ::itest::semantic::antifraud_alert_html
+    ANTIFRAUD::alert_http_referrer ::itest::semantic::antifraud_alert_http_referrer
+    ANTIFRAUD::alert_id ::itest::semantic::antifraud_alert_id
+    ANTIFRAUD::alert_license_id ::itest::semantic::antifraud_alert_license_id
+    ANTIFRAUD::alert_min ::itest::semantic::antifraud_alert_min
+    ANTIFRAUD::alert_origin ::itest::semantic::antifraud_alert_origin
+    ANTIFRAUD::alert_resolved_value ::itest::semantic::antifraud_alert_resolved_value
+    ANTIFRAUD::alert_score ::itest::semantic::antifraud_alert_score
+    ANTIFRAUD::alert_transaction_data ::itest::semantic::antifraud_alert_transaction_data
+    ANTIFRAUD::alert_transaction_id ::itest::semantic::antifraud_alert_transaction_id
+    ANTIFRAUD::alert_type ::itest::semantic::antifraud_alert_type
+    ANTIFRAUD::alert_username ::itest::semantic::antifraud_alert_username
+    ANTIFRAUD::alert_view_id ::itest::semantic::antifraud_alert_view_id
+    ANTIFRAUD::client_id ::itest::semantic::antifraud_client_id
+    ANTIFRAUD::device_id ::itest::semantic::antifraud_device_id
+    ANTIFRAUD::disable ::itest::semantic::antifraud_disable
+    ANTIFRAUD::disable_alert ::itest::semantic::antifraud_disable_alert
+    ANTIFRAUD::disable_app_layer_encryption ::itest::semantic::antifraud_disable_app_layer_encryption
+    ANTIFRAUD::disable_auto_transactions ::itest::semantic::antifraud_disable_auto_transactions
+    ANTIFRAUD::disable_injection ::itest::semantic::antifraud_disable_injection
+    ANTIFRAUD::disable_malware ::itest::semantic::antifraud_disable_malware
+    ANTIFRAUD::disable_phishing ::itest::semantic::antifraud_disable_phishing
+    ANTIFRAUD::enable ::itest::semantic::antifraud_enable
+    ANTIFRAUD::enable_log ::itest::semantic::antifraud_enable_log
+    ANTIFRAUD::fingerprint ::itest::semantic::antifraud_fingerprint
+    ANTIFRAUD::geo ::itest::semantic::antifraud_geo
+    ANTIFRAUD::guid ::itest::semantic::antifraud_guid
+    ANTIFRAUD::result ::itest::semantic::antifraud_result
+    ANTIFRAUD::username ::itest::semantic::antifraud_username
     STATS::get ::itest::semantic::stats_get
     STATS::incr ::itest::semantic::stats_incr
     STATS::set ::itest::semantic::stats_set

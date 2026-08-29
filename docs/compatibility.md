@@ -101,6 +101,15 @@ perform Bot Defense detection, browser challenges, CAPTCHA validation, cookie
 cryptography, or ML classification; `BOTDEFENSE_REQUEST` and
 `BOTDEFENSE_ACTION` remain explicit profile-gated events rather than claims of
 a production Bot Defense pipeline.
+The TMOS 17.5 `ANTIFRAUD::` surface is represented by a deterministic policy
+model covering all 39 catalogued commands. Scenario inputs can seed login
+identity, transaction result, alert fields, and license identity. With the
+`ANTIFRAUD` profile attached, configured login and alert triggers cause the
+adapter to emit `ANTIFRAUD_LOGIN` and `ANTIFRAUD_ALERT` after `HTTP_REQUEST`;
+rules can suppress the alert or disable the plugin first. Request context resets
+between transactions, while plugin enable/disable state resets on a new
+connection. This does not implement fraud scoring, fingerprinting, device
+intelligence, alert delivery, or a production Anti-Fraud service.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

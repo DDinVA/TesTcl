@@ -757,6 +757,137 @@ when HTTP_REQUEST {
                 with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
                     self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
 
+    def test_antifraud_policy_state_and_automatic_events(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "FASTHTTP", "ANTIFRAUD"],
+                "antifraud": {
+                    "profile": "/Common/af-profile",
+                    "login": True,
+                    "alert": True,
+                    "client_id": "client-1",
+                    "device_id": "device-1",
+                    "fingerprint": "fp-1",
+                    "geo": "US",
+                    "guid": "guid-1",
+                    "username": "configured-user",
+                    "license_id": "license-7",
+                    "result": "failed",
+                    "fields": {
+                        "alert_type": "credential_stuffing",
+                        "alert_score": "42",
+                        "alert_username": "alice",
+                        "alert_device_id": "device-alert-1",
+                    },
+                },
+                "irule": (
+                    "when HTTP_REQUEST { ANTIFRAUD::disable; ANTIFRAUD::enable; log local0. request }\n"
+                    "when ANTIFRAUD_LOGIN { "
+                    "log local0. \"login=[ANTIFRAUD::username] guid=[ANTIFRAUD::guid] fp=[ANTIFRAUD::fingerprint]\"\n"
+                    "ANTIFRAUD::username alias }\n"
+                    "when ANTIFRAUD_ALERT { "
+                    "log local0. \"alert=[ANTIFRAUD::alert_type] score=[ANTIFRAUD::alert_score] user=[ANTIFRAUD::alert_username]\"\n"
+                    "ANTIFRAUD::alert_score 99 }"
+                ),
+                "request": {"uri": "/login"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        self.assertEqual(
+            item["events_fired"], ["HTTP_REQUEST", "ANTIFRAUD_LOGIN", "ANTIFRAUD_ALERT"]
+        )
+        self.assertTrue(any("login=configured-user guid=guid-1 fp=fp-1" in log for log in item["logs"]))
+        self.assertTrue(any("alert=credential_stuffing score=42 user=alice" in log for log in item["logs"]))
+        antifraud = item["semantic"]["antifraud"]
+        self.assertTrue(antifraud["enabled"])
+        self.assertEqual(antifraud["profile"], "/Common/af-profile")
+        self.assertEqual(antifraud["result"], "failed")
+        self.assertEqual(antifraud["username"], "alias")
+        self.assertEqual(antifraud["alert"]["alert_score"], "99")
+        self.assertEqual(antifraud["alert"]["alert_device_id"], "device-alert-1")
+        self.assertEqual(antifraud["alert_license_id"], "f89e256a")
+
+    def test_antifraud_request_overrides_connection_reset_and_controls(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "FASTHTTP", "ANTIFRAUD"],
+                "antifraud": {"login": False, "alert": False},
+                "irule": (
+                    "when HTTP_REQUEST {\n"
+                    "  if {[HTTP::uri] eq \"/alert-off\"} { ANTIFRAUD::disable_alert }\n"
+                    "  if {[HTTP::uri] eq \"/disable\"} { ANTIFRAUD::disable }\n"
+                    "  if {[HTTP::uri] eq \"/features\"} {\n"
+                    "    ANTIFRAUD::disable_app_layer_encryption\n"
+                    "    ANTIFRAUD::disable_auto_transactions\n"
+                    "    ANTIFRAUD::disable_injection\n"
+                    "    ANTIFRAUD::disable_malware\n"
+                    "    ANTIFRAUD::disable_phishing\n"
+                    "    ANTIFRAUD::enable_log Debug\n"
+                    "  }\n"
+                    "  log local0. \"request=[HTTP::uri]\"\n"
+                    "}\n"
+                    "when ANTIFRAUD_LOGIN { log local0. login }\n"
+                    "when ANTIFRAUD_ALERT { log local0. alert }"
+                ),
+                "requests": [
+                    {"uri": "/alert-off", "antifraud": {"login": True, "alert": True}},
+                    {"uri": "/normal", "antifraud": {"login": True, "alert": True}},
+                    {"uri": "/features", "antifraud": {"login": True, "alert": True}},
+                    {"uri": "/disable", "antifraud": {"login": True, "alert": True}},
+                    {"uri": "/same-connection", "antifraud": {"login": True, "alert": True}},
+                    {
+                        "uri": "/fresh",
+                        "new_connection": True,
+                        "antifraud": {"login": True, "alert": True},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        first, normal, features, disabled, same, fresh = result["results"]
+        self.assertEqual(first["events_fired"], ["HTTP_REQUEST", "ANTIFRAUD_LOGIN"])
+        self.assertEqual(normal["events_fired"], ["HTTP_REQUEST", "ANTIFRAUD_LOGIN", "ANTIFRAUD_ALERT"])
+        self.assertEqual(features["events_fired"], ["HTTP_REQUEST", "ANTIFRAUD_LOGIN", "ANTIFRAUD_ALERT"])
+        self.assertEqual(disabled["events_fired"], ["HTTP_REQUEST"])
+        self.assertEqual(same["events_fired"], ["HTTP_REQUEST"])
+        self.assertEqual(fresh["events_fired"], ["HTTP_REQUEST", "ANTIFRAUD_LOGIN", "ANTIFRAUD_ALERT"])
+        self.assertTrue(all(features["semantic"]["antifraud"]["disabled_features"].values()))
+        self.assertEqual(features["semantic"]["antifraud"]["log_level"], "Debug")
+        self.assertFalse(normal["semantic"]["antifraud"]["alert_disabled"])
+        self.assertTrue(disabled["semantic"]["antifraud"]["enabled"] is False)
+        self.assertTrue(same["semantic"]["antifraud"]["enabled"] is False)
+        self.assertTrue(fresh["semantic"]["antifraud"]["enabled"])
+        self.assertFalse(fresh["semantic"]["antifraud"]["disabled_features"]["malware"])
+
+    def test_antifraud_input_validation(self) -> None:
+        base = {
+            "profiles": ["TCP", "HTTP", "FASTHTTP", "ANTIFRAUD"],
+            "irule": "when HTTP_REQUEST { ANTIFRAUD::result }",
+            "request": {"uri": "/"},
+        }
+        invalid_cases = (
+            ({"enabled": "yes"}, "antifraud.enabled must be a boolean"),
+            ({"result": "unknown"}, "antifraud.result must be one of"),
+            ({"fields": {"alert_score": 7}}, "antifraud.fields.alert_score must be a string without NUL"),
+            ({"fields": {"not_a_field": "x"}}, "unsupported field"),
+        )
+        for antifraud, message in invalid_cases:
+            scenario = dict(base)
+            scenario["antifraud"] = antifraud
+            with self.subTest(antifraud=antifraud):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+        scenario = dict(base)
+        scenario["request"] = {"uri": "/", "antifraud": {"login": "yes"}}
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "request.antifraud.login must be a boolean"
+        ):
+            self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
     def test_semantic_overlay_implements_profiles_auth_uri_stats_and_hsl(self) -> None:
         result = self.adapter.run_scenario(
             {

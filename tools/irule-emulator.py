@@ -114,6 +114,36 @@ BOTDEFENSE_CLIENT_CLASSES = frozenset(
         "suspicious_browser",
     }
 )
+ANTIFRAUD_ALERT_VALUE_FIELDS = (
+    "alert_additional_info",
+    "alert_component",
+    "alert_defined_value",
+    "alert_details",
+    "alert_expected_value",
+    "alert_fingerprint",
+    "alert_html",
+    "alert_http_referrer",
+    "alert_id",
+    "alert_min",
+    "alert_origin",
+    "alert_resolved_value",
+    "alert_score",
+    "alert_transaction_data",
+    "alert_transaction_id",
+    "alert_type",
+    "alert_username",
+    "alert_view_id",
+)
+ANTIFRAUD_ALERT_FLAG_FIELDS = (
+    "alert_bait_signatures",
+    "alert_device_id",
+    "alert_forbidden_added_element",
+    "alert_guid",
+)
+ANTIFRAUD_ALERT_LOG_LEVELS = frozenset(
+    {"Error", "Warning", "Notice", "Informational", "Debug"}
+)
+ANTIFRAUD_RESULTS = frozenset({"passed", "failed"})
 DEFAULT_PROFILES = ["TCP", "HTTP"]
 LB_FAILURE_CAUSES = frozenset(
     {"no_member", "unreachable", "queue_limit", "connection_timeout"}
@@ -1029,6 +1059,45 @@ SEMANTIC_MOCK_COMMANDS = {
     "BOTDEFENSE::previous_support_id",
     "BOTDEFENSE::reason",
     "BOTDEFENSE::support_id",
+    "ANTIFRAUD::alert_additional_info",
+    "ANTIFRAUD::alert_bait_signatures",
+    "ANTIFRAUD::alert_component",
+    "ANTIFRAUD::alert_defined_value",
+    "ANTIFRAUD::alert_details",
+    "ANTIFRAUD::alert_device_id",
+    "ANTIFRAUD::alert_expected_value",
+    "ANTIFRAUD::alert_fingerprint",
+    "ANTIFRAUD::alert_forbidden_added_element",
+    "ANTIFRAUD::alert_guid",
+    "ANTIFRAUD::alert_html",
+    "ANTIFRAUD::alert_http_referrer",
+    "ANTIFRAUD::alert_id",
+    "ANTIFRAUD::alert_license_id",
+    "ANTIFRAUD::alert_min",
+    "ANTIFRAUD::alert_origin",
+    "ANTIFRAUD::alert_resolved_value",
+    "ANTIFRAUD::alert_score",
+    "ANTIFRAUD::alert_transaction_data",
+    "ANTIFRAUD::alert_transaction_id",
+    "ANTIFRAUD::alert_type",
+    "ANTIFRAUD::alert_username",
+    "ANTIFRAUD::alert_view_id",
+    "ANTIFRAUD::client_id",
+    "ANTIFRAUD::device_id",
+    "ANTIFRAUD::disable",
+    "ANTIFRAUD::disable_alert",
+    "ANTIFRAUD::disable_app_layer_encryption",
+    "ANTIFRAUD::disable_auto_transactions",
+    "ANTIFRAUD::disable_injection",
+    "ANTIFRAUD::disable_malware",
+    "ANTIFRAUD::disable_phishing",
+    "ANTIFRAUD::enable",
+    "ANTIFRAUD::enable_log",
+    "ANTIFRAUD::fingerprint",
+    "ANTIFRAUD::geo",
+    "ANTIFRAUD::guid",
+    "ANTIFRAUD::result",
+    "ANTIFRAUD::username",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1543,6 +1612,38 @@ def _configure_botdefense(session: Any, botdefense: dict[str, Any]) -> None:
     session.eval_tcl("::itest::semantic::botdefense_prepare_request")
 
 
+def _configure_antifraud(session: Any, antifraud: dict[str, Any]) -> None:
+    """Install deterministic Anti-Fraud identity, alert, and policy state."""
+    scalar_values = (
+        "1" if antifraud["enabled"] else "0",
+        antifraud["profile"],
+        "1" if antifraud["login"] else "0",
+        "1" if antifraud["alert"] else "0",
+        antifraud["client_id"],
+        antifraud["device_id"],
+        antifraud["fingerprint"],
+        antifraud["geo"],
+        antifraud["guid"],
+        antifraud["result"],
+        antifraud["username"],
+        antifraud["license_id"],
+    )
+    session.eval_tcl(
+        "::itest::semantic::antifraud_configure " + _tcl_list(list(scalar_values))
+    )
+    field_pairs: list[str] = []
+    for field in (*ANTIFRAUD_ALERT_VALUE_FIELDS, *ANTIFRAUD_ALERT_FLAG_FIELDS):
+        field_pairs.extend((field, antifraud["fields"][field]))
+    session.eval_tcl(
+        "::itest::semantic::antifraud_set_alert_fields " + _tcl_list(field_pairs)
+    )
+    session.eval_tcl(
+        "::itest::semantic::antifraud_prepare_request "
+        f"{_tcl_quote('1' if antifraud['login'] else '0')} "
+        f"{_tcl_quote('1' if antifraud['alert'] else '0')}"
+    )
+
+
 def _split_tcl_list(value: Any) -> list[str]:
     """Parse a Tcl list returned by the bridge using a temporary interpreter."""
     try:
@@ -1735,6 +1836,44 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
     botdefense_micro_service = _split_tcl_list(botdefense_values["micro_service"])
     if len(botdefense_micro_service) != 2:
         raise EmulatorInputError("invalid Bot Defense micro-service state")
+    antifraud_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::antifraud_snapshot")
+    )
+    if len(antifraud_parts) % 2:
+        raise EmulatorInputError("invalid Anti-Fraud state")
+    antifraud_keys = antifraud_parts[::2]
+    if len(set(antifraud_keys)) != len(antifraud_keys):
+        raise EmulatorInputError("duplicate Anti-Fraud state field")
+    antifraud_values = dict(zip(antifraud_parts[::2], antifraud_parts[1::2]))
+    expected_antifraud_fields = {
+        "enabled", "profile", "client_id", "device_id", "fingerprint", "geo",
+        "guid", "result", "username", "license_id", "login_requested",
+        "alert_requested", "alert_disabled", "log_enabled", "log_level",
+        "alert_license_id",
+        *ANTIFRAUD_ALERT_VALUE_FIELDS,
+        *ANTIFRAUD_ALERT_FLAG_FIELDS,
+        *(f"disable_{field}" for field in (
+            "app_layer_encryption", "auto_transactions", "injection", "malware", "phishing"
+        )),
+    }
+    if set(antifraud_values) != expected_antifraud_fields:
+        raise EmulatorInputError("invalid Anti-Fraud state fields")
+    antifraud_bool_fields = {
+        "enabled", "login_requested", "alert_requested", "alert_disabled", "log_enabled",
+        *(f"disable_{field}" for field in (
+            "app_layer_encryption", "auto_transactions", "injection", "malware", "phishing"
+        )),
+    }
+    if any(antifraud_values[name] not in {"0", "1"} for name in antifraud_bool_fields):
+        raise EmulatorInputError("invalid Anti-Fraud boolean state")
+    if antifraud_values["result"] not in ANTIFRAUD_RESULTS:
+        raise EmulatorInputError("invalid Anti-Fraud result state")
+    if antifraud_values["log_level"] not in ANTIFRAUD_ALERT_LOG_LEVELS:
+        raise EmulatorInputError("invalid Anti-Fraud log level state")
+    antifraud_alert = {
+        field: antifraud_values[field]
+        for field in (*ANTIFRAUD_ALERT_VALUE_FIELDS, *ANTIFRAUD_ALERT_FLAG_FIELDS)
+    }
     dosl7_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::dosl7_snapshot"))
     if len(dosl7_parts) % 2:
         raise EmulatorInputError("invalid DOSL7 state")
@@ -1825,6 +1964,31 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "previous_support_id": botdefense_values["previous_support_id"],
             "reason": botdefense_values["reason"],
             "support_id": botdefense_values["support_id"],
+        },
+        "antifraud": {
+            "enabled": antifraud_values["enabled"] == "1",
+            "profile": antifraud_values["profile"],
+            "client_id": antifraud_values["client_id"],
+            "device_id": antifraud_values["device_id"],
+            "fingerprint": antifraud_values["fingerprint"],
+            "geo": antifraud_values["geo"],
+            "guid": antifraud_values["guid"],
+            "result": antifraud_values["result"],
+            "username": antifraud_values["username"],
+            "license_id": antifraud_values["license_id"],
+            "login_requested": antifraud_values["login_requested"] == "1",
+            "alert_requested": antifraud_values["alert_requested"] == "1",
+            "alert_disabled": antifraud_values["alert_disabled"] == "1",
+            "log_enabled": antifraud_values["log_enabled"] == "1",
+            "log_level": antifraud_values["log_level"],
+            "alert": antifraud_alert,
+            "alert_license_id": antifraud_values["alert_license_id"],
+            "disabled_features": {
+                field: antifraud_values[f"disable_{field}"] == "1"
+                for field in (
+                    "app_layer_encryption", "auto_transactions", "injection", "malware", "phishing"
+                )
+            },
         },
         "dosl7": {
             "enabled": dosl7_values["enabled"] == "1",
@@ -2398,6 +2562,102 @@ def _normalise_botdefense(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalise_antifraud(raw: Any) -> dict[str, Any]:
+    """Normalize deterministic inputs for the bounded Anti-Fraud model."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("antifraud must be an object")
+    allowed = {
+        "enabled",
+        "profile",
+        "login",
+        "alert",
+        "client_id",
+        "device_id",
+        "fingerprint",
+        "geo",
+        "guid",
+        "result",
+        "username",
+        "license_id",
+        "fields",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            "antifraud unsupported field(s): " + ", ".join(unknown)
+        )
+
+    def string_field(name: str, default: str = "") -> str:
+        return _normalise_asm_string(raw.get(name, default), f"antifraud.{name}")
+
+    def boolean_field(name: str, default: bool) -> bool:
+        value = raw.get(name, default)
+        if not isinstance(value, bool):
+            raise EmulatorInputError(f"antifraud.{name} must be a boolean")
+        return value
+
+    enabled = boolean_field("enabled", True)
+    result = string_field("result", "passed")
+    if result not in ANTIFRAUD_RESULTS:
+        raise EmulatorInputError(
+            "antifraud.result must be one of: "
+            + ", ".join(sorted(ANTIFRAUD_RESULTS))
+        )
+    fields = raw.get("fields", {})
+    if not isinstance(fields, dict):
+        raise EmulatorInputError("antifraud.fields must be an object")
+    allowed_fields = set(ANTIFRAUD_ALERT_VALUE_FIELDS) | set(ANTIFRAUD_ALERT_FLAG_FIELDS)
+    unknown_fields = sorted(set(fields) - allowed_fields)
+    if unknown_fields:
+        raise EmulatorInputError(
+            "antifraud.fields unsupported field(s): " + ", ".join(unknown_fields)
+        )
+    alert_fields = {
+        field: _normalise_asm_string(
+            fields.get(field, ""), f"antifraud.fields.{field}"
+        )
+        for field in allowed_fields
+    }
+    return {
+        "enabled": enabled,
+        "profile": string_field("profile"),
+        "login": boolean_field("login", False),
+        "alert": boolean_field("alert", False),
+        "client_id": string_field("client_id"),
+        "device_id": string_field("device_id"),
+        "fingerprint": string_field("fingerprint"),
+        "geo": string_field("geo"),
+        "guid": string_field("guid"),
+        "result": result,
+        "username": string_field("username"),
+        "license_id": string_field("license_id"),
+        "fields": {
+            field: alert_fields[field]
+            for field in (*ANTIFRAUD_ALERT_VALUE_FIELDS, *ANTIFRAUD_ALERT_FLAG_FIELDS)
+        },
+    }
+
+
+def _normalise_antifraud_request(raw: Any) -> dict[str, bool]:
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("request.antifraud must be an object")
+    unknown = sorted(set(raw) - {"login", "alert"})
+    if unknown:
+        raise EmulatorInputError(
+            "request.antifraud unsupported field(s): " + ", ".join(unknown)
+        )
+    result: dict[str, bool] = {}
+    for field in ("login", "alert"):
+        if field in raw:
+            value = raw[field]
+            if not isinstance(value, bool):
+                raise EmulatorInputError(f"request.antifraud.{field} must be a boolean")
+            result[field] = value
+    return result
+
+
 def _normalise_resolvers(raw: Any) -> dict[str, list[dict[str, Any]]]:
     """Normalize deterministic DNS records used by RESOLVER::name_lookup."""
     if raw is None:
@@ -2465,6 +2725,7 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
         "http2",
         "lb_failure",
         "dosl7",
+        "antifraud",
     }
     unknown = sorted(set(request) - allowed - {"close_before", "close_after", "new_connection"})
     if unknown:
@@ -2508,6 +2769,8 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
         kwargs["lb_failure"] = failure
     if "dosl7" in request:
         kwargs["dosl7"] = _normalise_dosl7_request(request["dosl7"])
+    if "antifraud" in request:
+        kwargs["antifraud"] = _normalise_antifraud_request(request["antifraud"])
     return kwargs
 
 
@@ -2664,6 +2927,7 @@ def _normalise_scenario_config(
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
+    dict[str, Any],
 ]:
     if not isinstance(scenario, dict):
         raise EmulatorInputError("scenario must be a JSON object")
@@ -2680,6 +2944,7 @@ def _normalise_scenario_config(
         "dosl7",
         "asm",
         "botdefense",
+        "antifraud",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -2724,6 +2989,7 @@ def _normalise_scenario_config(
         _normalise_dosl7(scenario.get("dosl7")),
         _normalise_asm(scenario.get("asm")),
         _normalise_botdefense(scenario.get("botdefense")),
+        _normalise_antifraud(scenario.get("antifraud")),
     )
 
 
@@ -6998,6 +7264,7 @@ class EmulatorSession:
             dosl7,
             asm,
             botdefense,
+            antifraud,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -7016,6 +7283,7 @@ class EmulatorSession:
         self._dosl7 = dosl7
         self._asm = asm
         self._botdefense = botdefense
+        self._antifraud = antifraud
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -7124,6 +7392,7 @@ class EmulatorSession:
                 )
                 _configure_asm(session, self._asm)
                 _configure_botdefense(session, self._botdefense)
+                _configure_antifraud(session, self._antifraud)
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
                     for profile in self._profiles
@@ -7184,6 +7453,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::dosl7_reset_connection")
             session.eval_tcl("::itest::semantic::asm_reset_connection")
             session.eval_tcl("::itest::semantic::botdefense_reset_connection")
+            session.eval_tcl("::itest::semantic::antifraud_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
@@ -7192,6 +7462,12 @@ class EmulatorSession:
         kwargs = _request_kwargs(request)
         lb_failure = kwargs.pop("lb_failure", "")
         dosl7_request = kwargs.pop("dosl7", None)
+        antifraud_request = kwargs.pop("antifraud", None)
+        antifraud_login = self._antifraud["login"]
+        antifraud_alert = self._antifraud["alert"]
+        if antifraud_request is not None:
+            antifraud_login = antifraud_request.get("login", antifraud_login)
+            antifraud_alert = antifraud_request.get("alert", antifraud_alert)
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
         original_kwargs = dict(kwargs)
         retry_count = 0
@@ -7217,6 +7493,11 @@ class EmulatorSession:
                     f"{_tcl_quote(kwargs.get('body', ''))}"
                 )
                 session.eval_tcl("::itest::semantic::botdefense_prepare_request")
+                session.eval_tcl(
+                    "::itest::semantic::antifraud_prepare_request "
+                    f"{_tcl_quote('1' if antifraud_login else '0')} "
+                    f"{_tcl_quote('1' if antifraud_alert else '0')}"
+                )
                 session.eval_tcl(
                     f"::itest::semantic::prepare_lb_failure {_tcl_quote(attempt_failure)}"
                 )
@@ -7268,6 +7549,8 @@ class EmulatorSession:
                         retry_kwargs.setdefault(field, original_kwargs[field])
                 if dosl7_request is not None:
                     retry_kwargs["dosl7"] = dosl7_request
+                if antifraud_request is not None:
+                    retry_kwargs["antifraud"] = antifraud_request
                 if "http2" in original_kwargs:
                     retry_kwargs.setdefault("http2", original_kwargs["http2"])
                 kwargs = retry_kwargs
@@ -8117,6 +8400,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::dosl7_reset_connection")
         session.eval_tcl("::itest::semantic::asm_reset_connection")
         session.eval_tcl("::itest::semantic::botdefense_reset_connection")
+        session.eval_tcl("::itest::semantic::antifraud_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
@@ -8148,6 +8432,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::dosl7_reset_connection")
         session.eval_tcl("::itest::semantic::asm_reset_connection")
         session.eval_tcl("::itest::semantic::botdefense_reset_connection")
+        session.eval_tcl("::itest::semantic::antifraud_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")

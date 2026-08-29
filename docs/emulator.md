@@ -178,6 +178,46 @@ connection-scoped. The model does not run Bot Defense detection, browser
 challenges, CAPTCHA verification, cookie cryptography, or machine-learning
 classification. The two Bot Defense events are available through the existing
 event/session interface when the `BOTDEFENSE` profile is attached.
+The `ANTIFRAUD` policy surface can be seeded with deterministic transaction and
+alert context:
+
+```json
+{
+  "profiles": ["TCP", "HTTP", "FASTHTTP", "ANTIFRAUD"],
+  "antifraud": {
+    "profile": "/Common/antifraud-profile",
+    "login": true,
+    "alert": true,
+    "client_id": "client-1",
+    "device_id": "device-1",
+    "fingerprint": "fp-1",
+    "geo": "US",
+    "guid": "guid-1",
+    "username": "configured-user",
+    "result": "failed",
+    "license_id": "license-7",
+    "fields": {
+      "alert_type": "credential_stuffing",
+      "alert_score": "42",
+      "alert_username": "alice"
+    }
+  },
+  "irule": "when ANTIFRAUD_ALERT { log local0. [ANTIFRAUD::alert_type] }"
+}
+```
+
+This models all 39 catalogued TMOS 17.5 `ANTIFRAUD::` commands. The adapter
+exposes login context, alert fields, result and identity getters, deterministic
+license-id hashing, enable/disable controls, alert suppression, logging level,
+and the five FASTHTTP feature-disable commands. When the profile is attached,
+an HTTP request with `login` or `alert` enabled emits `ANTIFRAUD_LOGIN` and
+`ANTIFRAUD_ALERT` after `HTTP_REQUEST`; rules can disable the alert or plugin
+before those automatic events. A request may override only the two event
+triggers with `"antifraud": {"login": true, "alert": false}`. Request fields
+reset between transactions, while plugin enable/disable state resets at a new
+connection. This is a deterministic policy/context model: it does not perform
+fraud scoring, device fingerprinting, bot detection, alert delivery, or a live
+Anti-Fraud service.
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose
