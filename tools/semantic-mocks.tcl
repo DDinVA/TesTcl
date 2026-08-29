@@ -102,12 +102,15 @@ namespace eval ::itest::semantic {
             variable handshake_held 0
             variable renegotiation_enabled 1
             variable renegotiation_requested 0
+            variable renegotiation_secure 0
             variable secure_renegotiation 0
             variable allow_nonssl 0
+            variable dynamic_record_sizing 0
             variable maximum_record_size 16384
             variable profile ""
             variable session_invalidated 0
             variable session_drop 1
+            variable unclean_shutdown 0
         }
     }
 
@@ -5153,6 +5156,11 @@ namespace eval ::itest::semantic {
         return [expr {![_ssl_value disabled 0]}]
     }
 
+    proc ssl_is_renegotiation_secure_command {args} {
+        if {[llength $args] != 0} { error "SSL::is_renegotiation_secure takes no arguments" }
+        return [_ssl_value renegotiation_secure 0]
+    }
+
     proc ssl_handshake_command {args} {
         if {[llength $args] != 1 || [lindex $args 0] ni {hold resume}} {
             error "SSL::handshake requires hold or resume"
@@ -5211,6 +5219,23 @@ namespace eval ::itest::semantic {
         return [_ssl_value allow_nonssl 0]
     }
 
+    proc ssl_allow_dynamic_record_sizing_command {args} {
+        if {[llength $args] > 1} {
+            error "SSL::allow_dynamic_record_sizing accepts an optional 0 or 1"
+        }
+        set ns [_ssl_namespace]
+        if {[llength $args] == 1} {
+            set value [lindex $args 0]
+            if {![string is integer -strict $value] || $value ni {0 1}} {
+                error "SSL::allow_dynamic_record_sizing requires 0 or 1"
+            }
+            set ${ns}::dynamic_record_sizing $value
+            ::itest::log_decision ssl dynamic_record_sizing_set $value
+            return ""
+        }
+        return [_ssl_value dynamic_record_sizing 0]
+    }
+
     proc ssl_maximum_record_size_command {args} {
         if {[llength $args] > 1} { error "SSL::maximum_record_size accepts an optional size" }
         set ns [_ssl_namespace]
@@ -5249,18 +5274,32 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc ssl_unclean_shutdown_command {args} {
+        if {[llength $args] != 1 || [lindex $args 0] ni {enable disable}} {
+            error "SSL::unclean_shutdown requires enable or disable"
+        }
+        set ns [_ssl_namespace]
+        set enabled [expr {[lindex $args 0] eq "enable"}]
+        set ${ns}::unclean_shutdown $enabled
+        ::itest::log_decision ssl unclean_shutdown_[lindex $args 0] $ns
+        return ""
+    }
+
     proc ssl_reset_connection {} {
         foreach side {client server} {
             set ns ::state::tls::$side
             set ${ns}::handshake_held 0
             set ${ns}::renegotiation_enabled 1
             set ${ns}::renegotiation_requested 0
+            set ${ns}::renegotiation_secure 0
             set ${ns}::secure_renegotiation 0
             set ${ns}::allow_nonssl 0
+            set ${ns}::dynamic_record_sizing 0
             set ${ns}::maximum_record_size 16384
             set ${ns}::profile ""
             set ${ns}::session_invalidated 0
             set ${ns}::session_drop 1
+            set ${ns}::unclean_shutdown 0
         }
     }
 
@@ -6971,10 +7010,12 @@ foreach {name proc_name} {
     SSL::cert ::itest::semantic::ssl_cert_command
     SSL::cipher ::itest::semantic::ssl_cipher_command
     SSL::alpn ::itest::semantic::ssl_alpn_command
+    SSL::allow_dynamic_record_sizing ::itest::semantic::ssl_allow_dynamic_record_sizing_command
     SSL::allow_nonssl ::itest::semantic::ssl_allow_nonssl_command
     SSL::disable ::itest::semantic::ssl_disable_command
     SSL::enable ::itest::semantic::ssl_enable_command
     SSL::handshake ::itest::semantic::ssl_handshake_command
+    SSL::is_renegotiation_secure ::itest::semantic::ssl_is_renegotiation_secure_command
     SSL::maximum_record_size ::itest::semantic::ssl_maximum_record_size_command
     SSL::mode ::itest::semantic::ssl_mode_command
     SSL::profile ::itest::semantic::ssl_profile_command
@@ -6984,6 +7025,7 @@ foreach {name proc_name} {
     SSL::sessionid ::itest::semantic::ssl_sessionid_command
     SSL::sni ::itest::semantic::ssl_sni_command
     SSL::verify_result ::itest::semantic::ssl_verify_result_command
+    SSL::unclean_shutdown ::itest::semantic::ssl_unclean_shutdown_command
     X509::issuer ::itest::semantic::x509_issuer_command
     X509::subject ::itest::semantic::x509_subject_command
     HTTP2::active ::itest::semantic::http2_active_command

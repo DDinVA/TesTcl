@@ -62,10 +62,10 @@ TLS packet state supports common SNI, cipher, session, certificate, X509
 subject/issuer, verification-result, and SSL enable/disable inspection paths;
 it does not perform a real TLS handshake or certificate cryptography.
 The SSL control layer also models ALPN, SSL mode, handshake hold/resume,
-renegotiation and secure-renegotiation policy, non-SSL allowance, maximum
-record size, profile selection, and session invalidation as deterministic
-connection state. It does not emit cryptographic renegotiation or switch a
-live TLS profile.
+renegotiation and secure-renegotiation policy/inspection, non-SSL allowance,
+dynamic record sizing, maximum record size, profile selection, session
+invalidation, and unclean-shutdown policy as deterministic connection state.
+It does not emit cryptographic renegotiation or switch a live TLS profile.
 HTTP/2 structured transaction metadata supports pseudo-header lookup and
 mutation, stream ID and priority state, active/version/request/concurrency
 queries, enable/disable, and disconnect decisions through the `HTTP2::*`

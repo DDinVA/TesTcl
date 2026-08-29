@@ -1390,10 +1390,12 @@ when CLIENTSSL_CLIENTHELLO {
     SSL::renegotiate disable
     SSL::secure_renegotiation require-strict
     SSL::allow_nonssl 1
+    SSL::allow_dynamic_record_sizing 1
     SSL::maximum_record_size 1200
+    SSL::unclean_shutdown enable
     SSL::profile /Common/clientssl_alt
     SSL::session invalidate nodrop
-    log local0. "mode=[SSL::mode] alpn=[SSL::alpn] max=[SSL::maximum_record_size]"
+    log local0. "mode=[SSL::mode] alpn=[SSL::alpn] max=[SSL::maximum_record_size] dynamic=[SSL::allow_dynamic_record_sizing] secure=[SSL::is_renegotiation_secure]"
 }
 when SERVERSSL_HANDSHAKE {
     SSL::alpn set http/1.1
@@ -1403,7 +1405,12 @@ when SERVERSSL_HANDSHAKE {
 }
 """,
                 "packets": [
-                    {"protocol": "tls", "direction": "client_to_server", "type": "client_hello"},
+                    {
+                        "protocol": "tls",
+                        "direction": "client_to_server",
+                        "type": "client_hello",
+                        "renegotiation_secure": True,
+                    },
                     {"protocol": "tls", "direction": "server_to_client", "type": "server_handshake"},
                 ],
             },
@@ -1419,29 +1426,35 @@ when SERVERSSL_HANDSHAKE {
         self.assertEqual(client_tls["handshake_held"], "1")
         self.assertEqual(client_tls["renegotiation_enabled"], "0")
         self.assertEqual(client_tls["secure_renegotiation"], "2")
+        self.assertEqual(client_tls["renegotiation_secure"], "1")
         self.assertEqual(client_tls["allow_nonssl"], "1")
+        self.assertEqual(client_tls["dynamic_record_sizing"], "1")
         self.assertEqual(client_tls["maximum_record_size"], "1200")
         self.assertEqual(client_tls["profile"], "/Common/clientssl_alt")
         self.assertEqual(client_tls["session_invalidated"], "1")
         self.assertEqual(client_tls["session_drop"], "0")
+        self.assertEqual(client_tls["unclean_shutdown"], "1")
         self.assertEqual(server_tls["alpn"], "http/1.1")
         self.assertEqual(server_tls["handshake_held"], "0")
         self.assertEqual(server_tls["renegotiation_requested"], "1")
-        self.assertTrue(any("mode=1" in entry for entry in client_event["logs"]))
+        self.assertTrue(any("mode=1" in entry and "dynamic=1" in entry and "secure=1" in entry for entry in client_event["logs"]))
         self.assertTrue(any("mode=1" in entry for entry in server_event["logs"]))
         self.assertEqual(
             {entry["name"]: entry["runtime_status"] for entry in result["fidelity"]["commands"]
              if entry["name"].startswith("SSL::")},
             {
                 "SSL::alpn": "semantic-mock",
+                "SSL::allow_dynamic_record_sizing": "semantic-mock",
                 "SSL::allow_nonssl": "semantic-mock",
                 "SSL::handshake": "semantic-mock",
+                "SSL::is_renegotiation_secure": "semantic-mock",
                 "SSL::maximum_record_size": "semantic-mock",
                 "SSL::mode": "semantic-mock",
                 "SSL::profile": "semantic-mock",
                 "SSL::renegotiate": "semantic-mock",
                 "SSL::secure_renegotiation": "semantic-mock",
                 "SSL::session": "semantic-mock",
+                "SSL::unclean_shutdown": "semantic-mock",
             },
         )
 
