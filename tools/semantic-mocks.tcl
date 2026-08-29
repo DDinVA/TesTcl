@@ -994,6 +994,13 @@ namespace eval ::itest::semantic {
         variable replaced 0
     }
 
+    # ACCESS2::access2_proc exposes the procedure selected by the current
+    # per-request policy-expression evaluation.  The value belongs to one
+    # ACCESS2_POLICY_EXPRESSION_EVAL event, not to the connection.
+    namespace eval ::state::access2 {
+        variable proc ""
+    }
+
     namespace eval ::state::mqtt {
         variable type ""
         variable protocol_name "MQTT"
@@ -12139,6 +12146,24 @@ namespace eval ::itest::semantic {
         set access_perflow $access_default_perflow
     }
 
+    proc access2_prepare_event {} {
+        set ::state::access2::proc ""
+    }
+
+    proc access2_proc_command {args} {
+        if {$::itest::current_event ne "ACCESS2_POLICY_EXPRESSION_EVAL"} {
+            error "ACCESS2::access2_proc is not valid during $::itest::current_event"
+        }
+        if {[llength $args] != 0} {
+            error "ACCESS2::access2_proc takes no arguments"
+        }
+        return $::state::access2::proc
+    }
+
+    proc access2_snapshot {} {
+        return [list proc $::state::access2::proc]
+    }
+
     proc access_reset_connection {} {
         variable access_default_enabled
         variable access_enabled
@@ -23176,6 +23201,7 @@ foreach {name proc_name} {
     AAA::auth_result ::itest::semantic::aaa_auth_result
     AAA::auth_send ::itest::semantic::aaa_auth_send
     ACCESS::acl ::itest::semantic::access_acl
+    ACCESS2::access2_proc ::itest::semantic::access2_proc_command
     ACCESS::disable ::itest::semantic::access_disable
     ACCESS::enable ::itest::semantic::access_enable
     ACCESS::ephemeral-auth ::itest::semantic::access_ephemeral_auth

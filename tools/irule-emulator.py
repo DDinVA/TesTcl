@@ -587,6 +587,7 @@ EVENT_STATE_FIELDS = {
         "l7_aborted",
         "applied_action",
     },
+    "access2": {"proc"},
     "lsn": {
         "address",
         "port",
@@ -1132,6 +1133,7 @@ EVENT_STATE_NAMESPACES = {
     "sip": "::state::sip",
     "sdp": "::state::sdp",
     "acl": "::state::acl",
+    "access2": "::state::access2",
     "lsn": "::state::lsn",
     "xlat": "::state::xlat",
     "pcp": "::state::pcp",
@@ -2077,6 +2079,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "AAA::auth_result",
     "AAA::auth_send",
     "ACCESS::acl",
+    "ACCESS2::access2_proc",
     "ACCESS::disable",
     "ACCESS::enable",
     "ACCESS::ephemeral-auth",
@@ -4444,6 +4447,12 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         })
     if len(access_sessions) != access_session_count:
         raise EmulatorInputError("inconsistent ACCESS session count")
+    access2_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::access2_snapshot")
+    )
+    if len(access2_parts) != 2 or access2_parts[0] != "proc":
+        raise EmulatorInputError("invalid ACCESS2 state")
+    access2 = {"proc": access2_parts[1]}
 
     def parse_access_map(raw: str, label: str) -> dict[str, str]:
         parts = _split_tcl_list(raw)
@@ -4822,6 +4831,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "perflow": access_perflow,
             "saml": access_saml,
         },
+        "access2": access2,
         "flow": {
             "clock": flow_clock,
             "current_side": flow_values["current_side"],
@@ -6981,6 +6991,17 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
                         )
                     encoded[key] = item_text
                 layer_values[field] = _tcl_dict_value(encoded)
+            elif layer == "access2" and field == "proc":
+                procedure = _require_string(value, "event state access2.proc")
+                if "\x00" in procedure:
+                    raise EmulatorInputError(
+                        "event state access2.proc must not contain NUL bytes"
+                    )
+                if len(procedure.encode("utf-8")) > 4096:
+                    raise EmulatorInputError(
+                        "event state access2.proc exceeds 4096 UTF-8 bytes"
+                    )
+                layer_values[field] = procedure
             elif isinstance(value, bool):
                 layer_values[field] = "1" if value else "0"
             elif isinstance(value, (str, int, float)):
@@ -7027,6 +7048,10 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
         )
     if "ike" in normalised and event_name != "IKE_AUTH":
         raise EmulatorInputError("event state ike is only valid during IKE_AUTH")
+    if "access2" in normalised and event_name != "ACCESS2_POLICY_EXPRESSION_EVAL":
+        raise EmulatorInputError(
+            "event state access2 is only valid during ACCESS2_POLICY_EXPRESSION_EVAL"
+        )
     return event_name, normalised
 
 
@@ -12748,6 +12773,8 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::rtsp_prepare_event")
         if "stream" in state or event_name == "STREAM_MATCHED":
             session.eval_tcl("::itest::semantic::stream_prepare_event")
+        if "access2" in state or event_name == "ACCESS2_POLICY_EXPRESSION_EVAL":
+            session.eval_tcl("::itest::semantic::access2_prepare_event")
         required_profiles = self._event_profiles.get(event_name, set())
         attached_profiles = {profile.upper() for profile in self._profiles}
         if required_profiles and not required_profiles.intersection(attached_profiles):
@@ -12924,6 +12951,7 @@ class EmulatorSession:
                 "offbox": semantic_snapshot["offbox"],
                 "tds": semantic_snapshot["tds"],
                 "qoe": semantic_snapshot["qoe"],
+                "access2": semantic_snapshot["access2"],
             },
         }
         if mqtt_forwarded is not None:

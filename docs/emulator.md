@@ -639,6 +639,22 @@ Session snapshots redact values whose keys look like passwords, secrets, or
 tokens. This does not run APM policy evaluation, ACL enforcement, SAML/OAuth
 cryptography, external authentication, or production session expiry.
 
+### ACCESS2 policy-expression procedure
+
+With the `ACCESS` profile attached, the direct event API supports
+`ACCESS2_POLICY_EXPRESSION_EVAL`. Supply the currently selected policy
+procedure as `state.access2.proc`; `ACCESS2::access2_proc` returns that value
+without invoking it. The value is event-scoped and is cleared before the next
+policy-expression event, so this adapter does not execute hidden APM policy
+expressions or reproduce the policy engine:
+
+```json
+{
+  "profiles": ["ACCESS"],
+  "irule": "when ACCESS2_POLICY_EXPRESSION_EVAL { log local0. [ACCESS2::access2_proc] }"
+}
+```
+
 ### FLOW connection handles
 
 With the `FLOW` profile attached, the emulator models the seven catalogued

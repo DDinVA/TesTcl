@@ -1906,7 +1906,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 54)
+        self.assertEqual(queue["command_count"], 53)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -8937,6 +8937,99 @@ when IKE_AUTH {
             result["state"]["ike"]["subjectAltName"],
             "DNS:vpn.example.test,email:vpn@example.test",
         )
+
+    def test_access2_proc_exposes_current_policy_expression_procedure(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["ACCESS"],
+                "irule": """
+when ACCESS2_POLICY_EXPRESSION_EVAL {
+    log local0. "proc=[ACCESS2::access2_proc]"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = session.fire_event(
+                "ACCESS2_POLICY_EXPRESSION_EVAL",
+                {"access2": {"proc": "::policy::evaluate_request"}},
+            )
+            usage = {
+                entry["name"]: entry for entry in session.fidelity["commands"]
+            }
+            self.assertEqual(
+                usage["ACCESS2::access2_proc"]["runtime_status"],
+                "semantic-mock",
+            )
+            self.assertTrue(result["fired"])
+            self.assertEqual(result["state"]["access2"]["proc"], "::policy::evaluate_request")
+            self.assertEqual(result["semantic"]["access2"], {"proc": "::policy::evaluate_request"})
+            self.assertTrue(
+                any("proc=::policy::evaluate_request" in entry for entry in result["logs"])
+            )
+
+            reset = session.fire_event("ACCESS2_POLICY_EXPRESSION_EVAL")
+            self.assertEqual(reset["semantic"]["access2"], {"proc": ""})
+            for bad_state, message in (
+                ({"access2": {"proc": 7}}, "event state access2.proc must be a string"),
+                ({"access2": {"proc": "bad\x00proc"}}, "must not contain NUL bytes"),
+                ({"access2": {"proc": "x" * 4097}}, "exceeds 4096 UTF-8 bytes"),
+            ):
+                with self.subTest(message=message), self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError, message
+                ):
+                    session.fire_event("ACCESS2_POLICY_EXPRESSION_EVAL", bad_state)
+        finally:
+            session.close()
+
+        invalid = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["ACCESS"],
+                "irule": "when ACCESS2_POLICY_EXPRESSION_EVAL { ACCESS2::access2_proc unexpected }",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "ACCESS2::access2_proc takes no arguments",
+            ):
+                invalid.fire_event("ACCESS2_POLICY_EXPRESSION_EVAL")
+        finally:
+            invalid.close()
+
+        event_only = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["ACCESS", "HTTP"],
+                "irule": "when HTTP_REQUEST { ACCESS2::access2_proc }",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "ACCESS2::access2_proc is not valid during HTTP_REQUEST",
+            ):
+                event_only.fire_event("HTTP_REQUEST")
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "event state access2 is only valid during ACCESS2_POLICY_EXPRESSION_EVAL",
+            ):
+                event_only.fire_event(
+                    "HTTP_REQUEST", {"access2": {"proc": "unexpected"}}
+                )
+        finally:
+            event_only.close()
 
     def test_qoe_commands_model_video_metrics_and_connection_control(self) -> None:
         session = self.adapter.EmulatorSession(
