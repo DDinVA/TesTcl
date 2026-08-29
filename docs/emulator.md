@@ -83,8 +83,9 @@ JSON request bodies at 2 MiB, and does not expose arbitrary Tcl evaluation.
 The HTTP API accepts inline `irule` text only; use the CLI's `irule_file` field
 when a rule must be loaded from a local file.
 
-Raw classic PCAP replay is available at `POST /v1/simulations/pcap`. The
-request contains an inline `scenario` and a base64-encoded `pcap_base64` value:
+Raw classic PCAP or pcapng replay is available at `POST /v1/simulations/pcap`.
+The request contains an inline `scenario` and a base64-encoded `pcap_base64`
+value:
 
 ```json
 {
@@ -93,19 +94,21 @@ request contains an inline `scenario` and a base64-encoded `pcap_base64` value:
     "irule": "when HTTP_REQUEST { pool api_pool }",
     "pools": {"api_pool": ["10.0.0.1:80"]}
   },
-  "pcap_base64": "<base64 classic-pcap bytes>",
+  "pcap_base64": "<base64 pcap or pcapng bytes>",
   "direction": "auto",
   "client_addr": "10.0.0.5",
   "server_addr": "192.0.2.10"
 }
 ```
 
-The endpoint accepts classic PCAP with Ethernet (including VLAN tags) or raw
-IPv4 link layers, and preserves each record timestamp in the returned packet
-trace. `direction` defaults to `client_to_server`; `auto` requires both
-endpoint addresses and skips packets that do not match either direction. The
-capture is bounded to 16 MiB, 1,000 records, and 2 MiB per packet. pcapng and
-IPv4 fragments are not supported yet. TCP sequence numbers are honored for
+The endpoint accepts classic PCAP or pcapng with Ethernet (including VLAN
+tags) or raw IPv4 link layers, and preserves each record timestamp in the
+returned packet trace. The pcapng reader supports Section Header, Interface
+Description, Enhanced Packet, and Simple Packet Blocks with bounded interface
+and timestamp-resolution metadata. `direction` defaults to
+`client_to_server`; `auto` requires both endpoint addresses and skips packets
+that do not match either direction. The capture is bounded to 16 MiB, 1,000
+records, and 2 MiB per packet. IPv4 fragments are not supported yet. TCP sequence numbers are honored for
 bounded out-of-order reassembly and retransmission de-duplication. HTTP
 request and response payloads honor `Content-Length` and chunked transfer
 framing, including partial bodies split across TCP packets and response
@@ -150,7 +153,7 @@ After the normal MCP `initialize` and `notifications/initialized` exchange,
 clients can discover these tools with `tools/list`:
 
 - `irule_simulate` runs a bounded one-shot scenario.
-- `irule_pcap_replay` replays a base64-encoded classic PCAP through the same
+- `irule_pcap_replay` replays a base64-encoded classic PCAP or pcapng capture through the same
   packet and Tcl event adapters.
 - `irule_capabilities` returns a chunk of the complete 17.5 catalog.
 - `irule_conformance` reports static catalog/runtime and packet-adapter coverage.
@@ -242,7 +245,7 @@ because there is no protocol-specific event to infer. WebSocket support is a
 structured packet adapter: it models the HTTP upgrade and the eight WebSocket
 frame/data events, and the raw TCP/PCAP path decodes RFC 6455 frames after a
 successful upgrade. Compressed frames using unsupported RSV extensions are
-rejected; pcapng and IPv4 fragment handling remain outside this slice.
+rejected; IPv4 fragment handling remains outside this slice.
 HTTP/2 wire packets use `protocol: "http2"` and a lossless `payload_hex`
 field. Binary TCP captures can instead use `protocol: "tcp"` with
 `payload_hex`; the adapter recognizes a client HTTP/2 prior-knowledge preface
@@ -555,8 +558,8 @@ For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
 performs bounded sequence-aware TCP application reassembly across records and
 persistent session calls, including out-of-order segments and duplicate
-retransmissions. Classic PCAP file/HTTP/MCP ingestion is supported separately;
-pcapng and IPv4 fragment handling remain outside this slice.
+retransmissions. Classic PCAP and pcapng file/HTTP/MCP ingestion is supported
+separately; IPv4 fragment handling remains outside this slice.
 
 ```json
 {
@@ -641,7 +644,7 @@ modeled CLOSE frame result for both endpoints with the RFC 6455 close payload
 bytes in `payload_hex`. The result is intentionally an egress model rather than
 a claim that the adapter is a complete TMM connection teardown.
 
-For a classic PCAP file, keep the iRule scenario in a JSON file and replay it
+For a classic PCAP or pcapng file, keep the iRule scenario in a JSON file and replay it
 through the CLI:
 
 ```sh
@@ -689,7 +692,7 @@ docker run --rm --publish 8080:8080 testcl-irule-emulator:17.5 \
 ## Current boundary
 
 The current slice supports HTTP/TCP request simulation, structured packet
-traces, classic PCAP replay, sequence-aware persistent connection sessions,
+traces, classic PCAP and pcapng replay, sequence-aware persistent connection sessions,
 structured DNS/TLS/SIP/RADIUS event injection, catalog conformance reporting, an MCP
 facade over the same JSON contract, and an adapter-owned semantic overlay for
 selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, table, TCP, and

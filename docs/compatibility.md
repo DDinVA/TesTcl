@@ -29,8 +29,8 @@ The optional TMOS 17.5 emulator exposes the pinned `tcl-lsp` registry in
 bounded chunks and reports static command-handler and packet-event coverage
 through its conformance endpoint. Structured packet traces currently cover
 TCP, TLS, HTTP, UDP/DNS, SIP over TCP or UDP, Diameter over TCP, RADIUS over UDP, GTP over UDP or GTP-Prime over TCP, Message Routing Framework messages over TCP, and raw IPv4 transport records. Fragmented IPv4
-packets and pcapng file ingestion remain outside the current boundary. Classic
-PCAP ingestion is supported, and TCP stream reassembly includes bounded gap,
+packets remain outside the current boundary. Classic PCAP and bounded pcapng
+ingestion are supported, and TCP stream reassembly includes bounded gap,
 overlap, and retransmission de-duplication handling. Diameter validates and
 re-encodes bounded RFC 6733-style headers and AVPs, then exposes the 17.5
 Diameter ingress, egress, and retransmission events. Its routing, retry,

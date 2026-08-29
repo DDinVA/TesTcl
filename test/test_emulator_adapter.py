@@ -140,6 +140,49 @@ def _pcap_bytes(
     return bytes(body)
 
 
+def _pcapng_block(block_type: int, body: bytes) -> bytes:
+    padding = b"\x00" * ((-len(body)) % 4)
+    body += padding
+    block_length = 12 + len(body)
+    return struct.pack("<II", block_type, block_length) + body + struct.pack("<I", block_length)
+
+
+def _pcapng_bytes(
+    records: list[tuple[int, int, bytes]], *, linktype: int = 1, tsresol: int = 6
+) -> bytes:
+    section = _pcapng_block(
+        0x0A0D0D0A,
+        struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1),
+    )
+    interface_options = (
+        struct.pack("<HHB", 9, 1, tsresol)
+        + b"\x00" * 3
+        + struct.pack("<HH", 0, 0)
+    )
+    interface = _pcapng_block(
+        0x00000001,
+        struct.pack("<HHI", linktype, 0, 65535) + interface_options,
+    )
+    packet_blocks = bytearray()
+    for seconds, fraction, frame in records:
+        ticks = seconds * (10**tsresol) + fraction
+        packet_blocks.extend(
+            _pcapng_block(
+                0x00000006,
+                struct.pack(
+                    "<IIIII",
+                    0,
+                    (ticks >> 32) & 0xFFFF_FFFF,
+                    ticks & 0xFFFF_FFFF,
+                    len(frame),
+                    len(frame),
+                )
+                + frame,
+            )
+        )
+    return section + interface + bytes(packet_blocks)
+
+
 def _ethernet_ipv4(raw_hex: str) -> bytes:
     return b"\x00" * 12 + b"\x08\x00" + bytes.fromhex(raw_hex)
 
@@ -4282,6 +4325,44 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         self.assertEqual(result["results"][0]["request"]["uri"], "/health")
         self.assertEqual(result["results"][0]["response"]["body"], "ok")
 
+    def test_pcapng_replay_decodes_ethernet_and_interface_timestamps(self) -> None:
+        request_payload = b"GET /pcapng HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+        response_payload = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        capture = _pcapng_bytes(
+            [
+                (1, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
+                    "10.0.0.5", "192.0.2.10", 51000, 443, 0x02, sequence=1000
+                ))),
+                (1, 500_000, _ethernet_ipv4(_raw_ipv4_tcp_hex(
+                    "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                    request_payload, sequence=1001
+                ))),
+                (2, 125_000, _ethernet_ipv4(_raw_ipv4_tcp_hex(
+                    "192.0.2.10", "10.0.0.5", 443, 51000, 0x18,
+                    response_payload, sequence=2000
+                ))),
+            ]
+        )
+        result = self.adapter.run_pcap_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { log local0. pcapng }",
+            },
+            capture,
+            tcl_lsp_root=self.tcl_lsp_root,
+            direction="auto",
+            client_addr="10.0.0.5",
+            server_addr="192.0.2.10",
+        )
+        self.assertEqual(result["capture"]["format"], "pcapng")
+        self.assertEqual(result["capture"]["record_count"], 3)
+        self.assertEqual(result["capture"]["interface_count"], 1)
+        self.assertEqual(result["capture"]["timestamp_resolution"], "microseconds")
+        self.assertEqual(result["trace"][1]["timestamp"], 1.5)
+        self.assertEqual(result["trace"][2]["timestamp"], 2.125)
+        self.assertEqual(result["results"][0]["request"]["uri"], "/pcapng")
+        self.assertEqual(result["results"][0]["response"]["body"], "ok")
+
     def test_pcap_decoder_rejects_truncated_and_unsupported_captures(self) -> None:
         valid_header = _pcap_bytes([])
         with self.assertRaises(self.adapter.EmulatorInputError):
@@ -4323,6 +4404,39 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         )
         self.assertEqual(nano_capture["timestamp_resolution"], "nanoseconds")
         self.assertAlmostEqual(nano_packets[0]["timestamp"], 7.123456789, places=9)
+
+        pcapng = _pcapng_bytes(
+            [(1, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
+                "10.0.0.5", "192.0.2.10", 51000, 443, 0x02
+            )))]
+        )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "block length"):
+            self.adapter._pcap_packets(
+                pcapng[:-1],
+                direction="client_to_server",
+                client_addr=None,
+                server_addr=None,
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "unknown interface"):
+            bad_interface = bytearray(pcapng)
+            # Enhanced Packet Block interface ID is the first word of its body.
+            packet_offset = len(_pcapng_block(
+                0x0A0D0D0A,
+                struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1),
+            )) + len(_pcapng_block(
+                0x00000001,
+                struct.pack("<HHI", 1, 0, 65535)
+                + struct.pack("<HHB", 9, 1, 6)
+                + b"\x00" * 3
+                + struct.pack("<HH", 0, 0),
+            ))
+            bad_interface[packet_offset + 8 : packet_offset + 12] = (1).to_bytes(4, "little")
+            self.adapter._pcap_packets(
+                bytes(bad_interface),
+                direction="client_to_server",
+                client_addr=None,
+                server_addr=None,
+            )
 
     def test_http_api_replays_base64_classic_pcap(self) -> None:
         dns_payload = (

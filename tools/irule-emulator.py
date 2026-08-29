@@ -2782,8 +2782,284 @@ def _pcap_format(data: bytes) -> tuple[str, float]:
         return formats[magic]
     except KeyError as exc:
         raise EmulatorInputError(
-            "unsupported capture format; classic PCAP (not pcapng) is required"
+            "unsupported capture format; classic PCAP or pcapng is required"
         ) from exc
+
+
+PCAPNG_SECTION_HEADER = b"\x0a\x0d\x0d\x0a"
+PCAPNG_SECTION = 0x0A0D0D0A
+PCAPNG_INTERFACE_DESCRIPTION = 0x00000001
+PCAPNG_SIMPLE_PACKET = 0x00000003
+PCAPNG_ENHANCED_PACKET = 0x00000006
+PCAPNG_MAX_INTERFACES = 256
+PCAPNG_MAX_TIMESTAMP_SCALE = 1 << 63
+
+
+def _pcapng_options(data: bytes, endian: str) -> dict[int, list[bytes]]:
+    options: dict[int, list[bytes]] = {}
+    if not data:
+        return options
+    offset = 0
+    while offset < len(data):
+        if len(data) - offset < 4:
+            raise EmulatorInputError("pcapng interface options are incomplete")
+        option_code, option_length = struct.unpack(
+            endian + "HH", data[offset : offset + 4]
+        )
+        offset += 4
+        if option_code == 0:
+            if option_length:
+                raise EmulatorInputError("pcapng end-of-options has a nonzero length")
+            if offset != len(data):
+                raise EmulatorInputError("pcapng interface options contain trailing bytes")
+            return options
+        padded_length = (option_length + 3) & ~3
+        if offset + padded_length > len(data):
+            raise EmulatorInputError("pcapng interface option exceeds its block")
+        options.setdefault(option_code, []).append(data[offset : offset + option_length])
+        offset += padded_length
+    raise EmulatorInputError("pcapng interface options have no end marker")
+
+
+def _pcapng_block(
+    data: bytes, offset: int, endian: str
+) -> tuple[int, bytes, int]:
+    if len(data) - offset < 12:
+        raise EmulatorInputError("pcapng block header is incomplete")
+    block_type, block_length = struct.unpack(
+        endian + "II", data[offset : offset + 8]
+    )
+    if block_length < 12 or block_length % 4:
+        raise EmulatorInputError("pcapng block has an invalid length")
+    if block_length > len(data) - offset:
+        raise EmulatorInputError("pcapng block length exceeds the capture")
+    (trailing_length,) = struct.unpack(
+        endian + "I", data[offset + block_length - 4 : offset + block_length]
+    )
+    if trailing_length != block_length:
+        raise EmulatorInputError("pcapng block length trailer does not match")
+    body = data[offset + 8 : offset + block_length - 4]
+    return block_type, body, offset + block_length
+
+
+def _pcapng_timestamp_resolution(options: dict[int, list[bytes]]) -> float:
+    values = options.get(9, [])  # if_tsresol
+    if not values:
+        return 1_000_000.0
+    if len(values) != 1 or len(values[0]) != 1:
+        raise EmulatorInputError("pcapng if_tsresol must be one byte")
+    value = values[0][0]
+    scale = 2**(value & 0x7F) if value & 0x80 else 10**value
+    if scale > PCAPNG_MAX_TIMESTAMP_SCALE:
+        raise EmulatorInputError("pcapng if_tsresol is outside the supported range")
+    return float(scale)
+
+
+def _pcapng_packets(
+    data: bytes,
+    *,
+    direction: str,
+    client_addr: str | None,
+    server_addr: str | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if len(data) < 12 or data[:4] != PCAPNG_SECTION_HEADER:
+        raise EmulatorInputError("pcapng section header is incomplete")
+    for field, value in (
+        ("pcap client_addr", client_addr),
+        ("pcap server_addr", server_addr),
+    ):
+        if value is None:
+            continue
+        address = _require_string(value, field)
+        try:
+            parsed_address = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise EmulatorInputError(f"{field} must be an IPv4 address") from exc
+        if parsed_address.version != 4:
+            raise EmulatorInputError(f"{field} must be an IPv4 address")
+        if field.endswith("client_addr"):
+            client_addr = str(parsed_address)
+        else:
+            server_addr = str(parsed_address)
+    if direction == "auto":
+        if not client_addr or not server_addr:
+            raise EmulatorInputError(
+                "pcap direction auto requires both client_addr and server_addr"
+            )
+    else:
+        direction = _packet_direction(direction)
+
+    packets: list[dict[str, Any]] = []
+    interfaces: list[tuple[int, int, float]] = []
+    all_interfaces: list[tuple[int, int, float]] = []
+    offset = 0
+    endian: str | None = None
+    block_count = 0
+    record_count = 0
+    section_count = 0
+    section_end: int | None = None
+    skipped_non_ipv4 = 0
+    skipped_unmatched = 0
+    while offset < len(data):
+        if data[offset : offset + 4] == PCAPNG_SECTION_HEADER:
+            if len(data) - offset < 28:
+                raise EmulatorInputError("pcapng section header is incomplete")
+            byte_order_magic = data[offset + 8 : offset + 12]
+            if byte_order_magic == b"\x1a\x2b\x3c\x4d":
+                endian = ">"
+            elif byte_order_magic == b"\x4d\x3c\x2b\x1a":
+                endian = "<"
+            else:
+                raise EmulatorInputError("pcapng section has an invalid byte-order magic")
+            block_type, body, next_offset = _pcapng_block(data, offset, endian)
+            if block_type != PCAPNG_SECTION:
+                raise EmulatorInputError("pcapng section header block is invalid")
+            if len(body) < 16:
+                raise EmulatorInputError("pcapng section header body is incomplete")
+            major, minor = struct.unpack(endian + "HH", body[4:8])
+            if (major, minor) != (1, 0):
+                raise EmulatorInputError(
+                    f"unsupported pcapng version {major}.{minor}"
+                )
+            (declared_length,) = struct.unpack(endian + "q", body[8:16])
+            if declared_length != -1:
+                if declared_length < 28 or declared_length % 4:
+                    raise EmulatorInputError("pcapng section has an invalid length")
+                section_end = offset + declared_length
+                if section_end > len(data):
+                    raise EmulatorInputError("pcapng section length exceeds the capture")
+            else:
+                section_end = None
+            section_count += 1
+            interfaces = []
+            block_count += 1
+            offset = next_offset
+            continue
+        if endian is None:
+            raise EmulatorInputError("pcapng must begin with a section header")
+        if section_end is not None and offset == section_end:
+            raise EmulatorInputError("pcapng section must be followed by a section header")
+        block_type, body, next_offset = _pcapng_block(data, offset, endian)
+        if section_end is not None and next_offset > section_end:
+            raise EmulatorInputError("pcapng block exceeds its section")
+        block_count += 1
+        frame: bytes | None = None
+        if block_type == PCAPNG_INTERFACE_DESCRIPTION:
+            if len(body) < 8:
+                raise EmulatorInputError("pcapng interface description is incomplete")
+            linktype, reserved, snaplen = struct.unpack(endian + "HHI", body[:8])
+            if reserved != 0:
+                raise EmulatorInputError("pcapng interface reserved field is nonzero")
+            if snaplen < 1 or snaplen > PCAP_MAX_PACKET_BYTES:
+                raise EmulatorInputError(
+                    "pcapng interface snaplen is outside the supported packet-size limit"
+                )
+            options = _pcapng_options(body[8:], endian)
+            interface = (linktype, snaplen, _pcapng_timestamp_resolution(options))
+            if len(interfaces) >= PCAPNG_MAX_INTERFACES:
+                raise EmulatorInputError(
+                    f"pcapng cannot contain more than {PCAPNG_MAX_INTERFACES} interfaces"
+                )
+            interfaces.append(interface)
+            all_interfaces.append(interface)
+        elif block_type == PCAPNG_ENHANCED_PACKET:
+            if len(body) < 20:
+                raise EmulatorInputError("pcapng enhanced packet block is incomplete")
+            interface_id, ts_high, ts_low, included_length, original_length = struct.unpack(
+                endian + "IIIII", body[:20]
+            )
+            if interface_id >= len(interfaces):
+                raise EmulatorInputError("pcapng packet references an unknown interface")
+            linktype, snaplen, timestamp_scale = interfaces[interface_id]
+            if included_length > snaplen or included_length > PCAP_MAX_PACKET_BYTES:
+                raise EmulatorInputError("pcapng packet exceeds the packet-size limit")
+            if original_length < included_length:
+                raise EmulatorInputError("pcapng packet has invalid captured length")
+            padded_length = (included_length + 3) & ~3
+            if 20 + padded_length > len(body):
+                raise EmulatorInputError("pcapng packet payload is incomplete")
+            frame = body[20 : 20 + included_length]
+            timestamp = ((ts_high << 32) | ts_low) / timestamp_scale
+            record_count += 1
+            if record_count > PACKET_MAX_COUNT:
+                raise EmulatorInputError(
+                    f"pcapng cannot contain more than {PACKET_MAX_COUNT} records"
+                )
+        elif block_type == PCAPNG_SIMPLE_PACKET:
+            if len(body) < 4 or not interfaces:
+                raise EmulatorInputError("pcapng simple packet lacks an interface")
+            original_length = int.from_bytes(body[:4], endian)
+            linktype, snaplen, _timestamp_scale = interfaces[0]
+            included_length = min(original_length, snaplen, len(body) - 4)
+            if included_length > PCAP_MAX_PACKET_BYTES:
+                raise EmulatorInputError("pcapng simple packet exceeds the packet-size limit")
+            expected_length = min(original_length, snaplen)
+            if len(body) - 4 < expected_length:
+                raise EmulatorInputError("pcapng simple packet payload is incomplete")
+            frame = body[4 : 4 + included_length]
+            timestamp = 0.0
+            record_count += 1
+            if record_count > PACKET_MAX_COUNT:
+                raise EmulatorInputError(
+                    f"pcapng cannot contain more than {PACKET_MAX_COUNT} records"
+                )
+        else:
+            offset = next_offset
+            continue
+        offset = next_offset
+        if frame is None:
+            continue
+        ipv4 = _extract_pcap_ipv4(frame, linktype, record_count - 1)
+        if ipv4 is None:
+            skipped_non_ipv4 += 1
+            continue
+        source, destination = _wire_ipv4_endpoints(ipv4, record_count - 1)
+        packet_direction = direction
+        if direction == "auto":
+            if source == client_addr and destination == server_addr:
+                packet_direction = "client_to_server"
+            elif source == server_addr and destination == client_addr:
+                packet_direction = "server_to_client"
+            else:
+                skipped_unmatched += 1
+                continue
+        packets.append(
+            {
+                "protocol": "wire",
+                "direction": packet_direction,
+                "network": "ipv4",
+                "raw_hex": ipv4.hex(),
+                "timestamp": timestamp,
+            }
+        )
+    if not packets:
+        raise EmulatorInputError("pcapng contained no usable IPv4 packets")
+    resolutions = {scale for _linktype, _snaplen, scale in all_interfaces}
+    if len(resolutions) == 1:
+        scale = next(iter(resolutions))
+        if scale == 1_000_000.0:
+            timestamp_resolution = "microseconds"
+        elif scale == 1_000_000_000.0:
+            timestamp_resolution = "nanoseconds"
+        else:
+            timestamp_resolution = "custom"
+    else:
+        timestamp_resolution = "mixed"
+    linktypes = sorted({linktype for linktype, _snaplen, _scale in all_interfaces})
+    return packets, {
+        "format": "pcapng",
+        "version": "1.0",
+        "linktype": linktypes[0] if len(linktypes) == 1 else linktypes,
+        "interface_count": len(all_interfaces),
+        "timestamp_resolution": timestamp_resolution,
+        "record_count": record_count,
+        "block_count": block_count,
+        "section_count": section_count,
+        "ipv4_packet_count": len(packets),
+        "skipped_non_ipv4": skipped_non_ipv4,
+        "skipped_unmatched": skipped_unmatched,
+        "direction": direction,
+    }
 
 
 def _pcap_packets(
@@ -2797,6 +3073,13 @@ def _pcap_packets(
         raise EmulatorInputError("pcap data must be bytes")
     if len(data) > PCAP_MAX_BYTES:
         raise EmulatorInputError(f"pcap data exceeds the {PCAP_MAX_BYTES // (1024 * 1024)} MiB limit")
+    if data[:4] == PCAPNG_SECTION_HEADER:
+        return _pcapng_packets(
+            data,
+            direction=direction,
+            client_addr=client_addr,
+            server_addr=server_addr,
+        )
     if len(data) < 24:
         raise EmulatorInputError("pcap global header is incomplete")
     endian, timestamp_scale = _pcap_format(data)
@@ -8073,8 +8356,8 @@ class McpProtocolServer:
             },
             {
                 "name": "irule_pcap_replay",
-                "title": "Replay a PCAP capture",
-                "description": "Replay a bounded classic PCAP capture through the BIG-IP 17.5 packet and Tcl event adapters.",
+                "title": "Replay a PCAP or pcapng capture",
+                "description": "Replay a bounded classic PCAP or pcapng capture through the BIG-IP 17.5 packet and Tcl event adapters.",
                 "inputSchema": _mcp_object_schema(
                     {
                         "scenario": scenario_schema,
@@ -8939,7 +9222,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a BIG-IP 17.5 iRule emulator scenario")
     parser.add_argument("--scenario", default="-", help="JSON scenario path, or - for stdin")
     parser.add_argument("--tcl-lsp-root", help="path to a tcl-lsp checkout")
-    parser.add_argument("--pcap", help="classic PCAP file to replay for the scenario")
+    parser.add_argument("--pcap", help="classic PCAP or pcapng file to replay for the scenario")
     parser.add_argument(
         "--pcap-direction",
         choices=("client_to_server", "server_to_client", "auto"),
