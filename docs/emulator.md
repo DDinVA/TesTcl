@@ -175,6 +175,13 @@ rule logs or stores them. The adapter validates algorithm, key, signature, and
 data options and supports `-keyhex`; context streaming, encryption/decryption,
 and key generation are not claimed as implemented yet.
 
+The ONECONNECT layer models the four TMOS 17.5 rule controls
+`ONECONNECT::detach`, `ONECONNECT::label`, `ONECONNECT::reuse`, and
+`ONECONNECT::select`. Their state is visible under `semantic.oneconnect` and
+persists across keep-alive requests, while a `new_connection` request restores
+the defaults. This exposes the behavior an iRule can observe without claiming
+to reproduce BIG-IP's shared idle server-connection pool or scheduling.
+
 ```json
 {
   "route": {

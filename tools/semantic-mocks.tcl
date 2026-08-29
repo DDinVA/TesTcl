@@ -10,6 +10,10 @@ namespace eval ::itest::semantic {
     array set stats {}
     variable istats
     array set istats {}
+    variable oneconnect_detach_enabled 1
+    variable oneconnect_reuse_enabled 1
+    variable oneconnect_select_mode none
+    variable oneconnect_label ""
     variable hsl_handles
     array set hsl_handles {}
     variable hsl_messages {}
@@ -795,6 +799,15 @@ namespace eval ::itest::semantic {
     proc istats_snapshot {} {
         variable istats
         return [array get istats]
+    }
+
+    proc oneconnect_snapshot {} {
+        variable oneconnect_detach_enabled
+        variable oneconnect_reuse_enabled
+        variable oneconnect_select_mode
+        variable oneconnect_label
+        return [list $oneconnect_detach_enabled $oneconnect_reuse_enabled \
+            $oneconnect_select_mode $oneconnect_label]
     }
 
     proc hsl_snapshot {} {
@@ -8577,6 +8590,78 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc oneconnect_reset_connection {} {
+        variable oneconnect_detach_enabled
+        variable oneconnect_reuse_enabled
+        variable oneconnect_select_mode
+        variable oneconnect_label
+        set oneconnect_detach_enabled 1
+        set oneconnect_reuse_enabled 1
+        set oneconnect_select_mode none
+        set oneconnect_label ""
+    }
+
+    proc _oneconnect_require_profile {command_name} {
+        if {![_profile_enabled ONECONNECT]} {
+            error "$command_name requires a OneConnect profile"
+        }
+    }
+
+    proc oneconnect_detach_command {args} {
+        _oneconnect_require_profile ONECONNECT::detach
+        if {[llength $args] != 1 || [lindex $args 0] ni {enable disable}} {
+            error "ONECONNECT::detach requires enable or disable"
+        }
+        variable oneconnect_detach_enabled
+        set oneconnect_detach_enabled [expr {[lindex $args 0] eq "enable"}]
+        ::itest::log_decision oneconnect detach [lindex $args 0]
+        return ""
+    }
+
+    proc oneconnect_label_command {args} {
+        _oneconnect_require_profile ONECONNECT::label
+        if {[llength $args] != 2 || [lindex $args 0] ne "update"} {
+            error "ONECONNECT::label syntax is update key"
+        }
+        if {[string first "\x00" [lindex $args 1]] >= 0} {
+            error "ONECONNECT::label key cannot contain NUL bytes"
+        }
+        variable oneconnect_label
+        set oneconnect_label [lindex $args 1]
+        ::itest::log_decision oneconnect label $oneconnect_label
+        return ""
+    }
+
+    proc oneconnect_reuse_command {args} {
+        _oneconnect_require_profile ONECONNECT::reuse
+        if {[llength $args] == 0} {
+            variable oneconnect_reuse_enabled
+            return $oneconnect_reuse_enabled
+        }
+        if {[llength $args] != 1 || [lindex $args 0] ni {enable disable}} {
+            error "ONECONNECT::reuse requires enable or disable"
+        }
+        variable oneconnect_reuse_enabled
+        set oneconnect_reuse_enabled [expr {[lindex $args 0] eq "enable"}]
+        ::itest::log_decision oneconnect reuse [lindex $args 0]
+        return ""
+    }
+
+    proc oneconnect_select_command {args} {
+        _oneconnect_require_profile ONECONNECT::select
+        if {[llength $args] == 0} {
+            variable oneconnect_select_mode
+            return $oneconnect_select_mode
+        }
+        if {[llength $args] != 1 || [lindex $args 0] ni {none persist}} {
+            error "ONECONNECT::select requires none or persist"
+        }
+        variable oneconnect_select_mode
+        set oneconnect_select_mode [lindex $args 0]
+        ::itest::log_decision oneconnect select $oneconnect_select_mode
+        return ""
+    }
+
     proc hsl_open {args} {
         variable hsl_handles
         variable next_hsl_handle
@@ -15006,6 +15091,10 @@ foreach {name proc_name} {
     ISTATS::incr ::itest::semantic::istats_incr
     ISTATS::remove ::itest::semantic::istats_remove
     ISTATS::set ::itest::semantic::istats_set
+    ONECONNECT::detach ::itest::semantic::oneconnect_detach_command
+    ONECONNECT::label ::itest::semantic::oneconnect_label_command
+    ONECONNECT::reuse ::itest::semantic::oneconnect_reuse_command
+    ONECONNECT::select ::itest::semantic::oneconnect_select_command
     LB::down ::itest::semantic::lb_down
     LB::persist ::itest::semantic::lb_persist
     LB::reselect ::itest::semantic::lb_reselect

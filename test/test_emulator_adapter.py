@@ -479,7 +479,7 @@ when HTTP_REQUEST {
         }
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
-        self.assertGreaterEqual(queue["command_count"], 340)
+        self.assertGreaterEqual(queue["command_count"], 336)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1514,6 +1514,65 @@ when HTTP_REQUEST {
                     },
                     tcl_lsp_root=self.tcl_lsp_root,
                 )
+
+    def test_oneconnect_controls_persist_until_connection_reset(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ONECONNECT"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::path] eq "/first"} {
+        ONECONNECT::detach disable
+        ONECONNECT::reuse disable
+        ONECONNECT::select persist
+        ONECONNECT::label update tenant-a
+    }
+    log local0. "reuse=[ONECONNECT::reuse] select=[ONECONNECT::select]"
+}
+""",
+                "requests": [
+                    {"uri": "/first"},
+                    {"uri": "/second"},
+                    {"uri": "/new", "new_connection": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        first, second, new_connection = result["results"]
+        self.assertEqual(first["semantic"]["oneconnect"], {
+            "detach_enabled": False,
+            "reuse_enabled": False,
+            "select": "persist",
+            "label": "tenant-a",
+        })
+        self.assertEqual(second["semantic"]["oneconnect"], first["semantic"]["oneconnect"])
+        self.assertEqual(new_connection["semantic"]["oneconnect"], {
+            "detach_enabled": True,
+            "reuse_enabled": True,
+            "select": "none",
+            "label": "",
+        })
+        self.assertTrue(any("reuse=0 select=persist" in entry for entry in first["logs"]))
+        self.assertTrue(any("reuse=1 select=none" in entry for entry in new_connection["logs"]))
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in (
+            "ONECONNECT::detach",
+            "ONECONNECT::label",
+            "ONECONNECT::reuse",
+            "ONECONNECT::select",
+        ):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "requires a OneConnect profile"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when HTTP_REQUEST { ONECONNECT::reuse }",
+                    "request": {"uri": "/"},
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_ip_semantics_record_packet_state_and_seeded_lookups(self) -> None:
         result = self.adapter.run_scenario(

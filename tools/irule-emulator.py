@@ -885,6 +885,10 @@ SEMANTIC_MOCK_COMMANDS = {
     "ISTATS::incr",
     "ISTATS::remove",
     "ISTATS::set",
+    "ONECONNECT::detach",
+    "ONECONNECT::label",
+    "ONECONNECT::reuse",
+    "ONECONNECT::select",
     "COMPRESS::buffer_size",
     "COMPRESS::disable",
     "COMPRESS::enable",
@@ -2166,6 +2170,17 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
     if len(set(istats_keys)) != len(istats_keys):
         raise EmulatorInputError("duplicate ISTATS key")
     istats = dict(zip(istats_keys, istats_parts[1::2]))
+    oneconnect_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::oneconnect_snapshot")
+    )
+    if len(oneconnect_parts) != 4:
+        raise EmulatorInputError("invalid ONECONNECT state")
+    oneconnect = {
+        "detach_enabled": oneconnect_parts[0] == "1",
+        "reuse_enabled": oneconnect_parts[1] == "1",
+        "select": oneconnect_parts[2],
+        "label": oneconnect_parts[3],
+    }
     hsl_messages: list[dict[str, str]] = []
     for raw_message in _split_tcl_list(session.eval_tcl("::itest::semantic::hsl_snapshot")):
         parts = _split_tcl_list(raw_message)
@@ -2937,6 +2952,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "count": len(istats),
             "values": istats,
         },
+        "oneconnect": oneconnect,
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "lb": lb_control,
@@ -9230,6 +9246,7 @@ class EmulatorSession:
                 _install_runtime_shims(session)
                 self._registered_events = session.load_irule(self._source)
                 session.eval_tcl("::itest::semantic::lb_reset_connection")
+                session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
                 session.eval_tcl("::itest::semantic::profile_settings_clear")
                 for profile_name, attributes in self._profile_settings.items():
                     flattened = [
@@ -9267,6 +9284,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::html_reset_connection")
                 session.eval_tcl("::itest::semantic::compression_reset_connection")
                 session.eval_tcl("::itest::semantic::httplog_reset_connection")
+                session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
                 session.eval_tcl("::itest::semantic::flow_reset_connection")
                 if any(str(profile).upper() == "REWRITE" for profile in self._profiles):
                     session.eval_tcl("::itest::semantic::rewrite_install_flow_hooks")
@@ -9334,6 +9352,7 @@ class EmulatorSession:
         if not self._connection_open:
             self._connection_request_number = 0
             session.eval_tcl("::itest::semantic::lb_reset_connection")
+            session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::psm_reset_connection")
             session.eval_tcl("::itest::semantic::dosl7_reset_connection")
             session.eval_tcl("::itest::semantic::asm_reset_connection")
@@ -9511,6 +9530,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::html_reset_connection")
             session.eval_tcl("::itest::semantic::compression_reset_connection")
             session.eval_tcl("::itest::semantic::httplog_reset_connection")
+            session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         result["decisions"] = decision_history
@@ -9531,6 +9551,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::html_reset_connection")
             session.eval_tcl("::itest::semantic::compression_reset_connection")
             session.eval_tcl("::itest::semantic::httplog_reset_connection")
+            session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         return result
@@ -10530,6 +10551,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::html_reset_connection")
         session.eval_tcl("::itest::semantic::compression_reset_connection")
         session.eval_tcl("::itest::semantic::httplog_reset_connection")
+        session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))

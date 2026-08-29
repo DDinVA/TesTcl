@@ -120,6 +120,13 @@ corresponding HMAC algorithms. Binary results are preserved, including
 `-keyhex` inputs. Context streaming (`-ctx`/`-final`), encryption/decryption,
 and key generation remain explicitly queued rather than approximated.
 
+The TMOS 17.5 `ONECONNECT::detach`, `ONECONNECT::label`,
+`ONECONNECT::reuse`, and `ONECONNECT::select` commands model the rule-visible
+connection controls. Detach/reuse flags, selection mode, and the connection
+label persist across keep-alive requests and reset when the emulator starts a
+new connection. The adapter does not simulate a shared multi-client idle
+server-connection pool or perform real load-balancer connection scheduling.
+
 The IP semantic layer models the seven TMOS 17.5 commands `IP::hops`,
 `IP::idle_timeout`, `IP::ingress_drop_rate`, `IP::ingress_rate_limit`,
 `IP::intelligence`, `IP::reputation`, and `IP::stats`. Path hops, directional
