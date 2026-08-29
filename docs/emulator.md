@@ -886,6 +886,17 @@ offload or wire-speed forwarding. See the F5
 [`BIGTCP::release_flow`](https://clouddocs.f5.com/api/irules/BIGTCP__release_flow.html)
 reference.
 
+### ECA / NTLM authentication controls
+
+The ECA overlay models `ECA::enable`, `ECA::disable`, and `ECA::select` as
+connection-scoped controls, and exposes injected identity fields through
+`ECA::username`, `ECA::domainname`, `ECA::client_machine_name`, and
+`ECA::status`. Scenarios can fire `ECA_REQUEST_ALLOWED` or
+`ECA_REQUEST_DENIED` with an `eca` state object to exercise authentication
+result handlers without requiring a real domain controller or NTLM exchange.
+The state resets on a new `CLIENT_ACCEPTED` connection. This is a deterministic
+authentication-result model, not an implementation of NTLM cryptography.
+
 ### FIX tag state
 
 The direct `FIX_MESSAGE` adapter accepts a `fix.tags` object and exposes it to
@@ -1692,6 +1703,13 @@ emissions include byte length; FIN emissions include `control: "FIN"`. Persisten
 same packet array at
 `POST /v1/sessions/{session_id}/packets`, or through the MCP
 `irule_session_trace` tool.
+
+NTLM packet scenarios may include an `eca` object with bounded identity/status
+fields and `eca_result` set to `allowed` or `denied`. When `eca.enabled` is
+true, the packet adapter emits the corresponding `ECA_REQUEST_ALLOWED` or
+`ECA_REQUEST_DENIED` event. This injects an authentication outcome for
+deterministic testing; it does not perform an NTLM exchange or contact a
+domain controller.
 
 HTTP data events are only produced by the high-level request flow after
 `HTTP::collect` has armed the corresponding request or response body and the

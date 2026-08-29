@@ -654,6 +654,7 @@ EVENT_STATE_FIELDS = {
     "ha": {"status"},
     "bigproto": {"enable_fix_reset"},
     "bigtcp": {"released"},
+    "eca": {"enabled", "selected", "client_machine_name", "domainname", "status", "username"},
     "fix": {"tags", "tag_maps"},
     "diameter": {
         "type",
@@ -1039,6 +1040,7 @@ EVENT_STATE_NAMESPACES = {
     "ha": "::state::ha",
     "bigproto": "::state::bigproto",
     "bigtcp": "::state::bigtcp",
+    "eca": "::state::eca",
     "fix": "::state::fix",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
@@ -1225,6 +1227,13 @@ SEMANTIC_MOCK_COMMANDS = {
     "CATEGORY::matchtype",
     "CATEGORY::result",
     "CATEGORY::safesearch",
+    "ECA::client_machine_name",
+    "ECA::disable",
+    "ECA::domainname",
+    "ECA::enable",
+    "ECA::select",
+    "ECA::status",
+    "ECA::username",
     "CLASSIFY::application",
     "CLASSIFY::category",
     "CLASSIFY::defer",
@@ -5843,6 +5852,8 @@ PACKET_PROTOCOL_FIELDS = {
     },
     "ntlm": {
         "payload_hex",
+        "eca",
+        "eca_result",
     },
     "protocol_inspection": {
         "payload_hex",
@@ -6050,6 +6061,8 @@ PACKET_EVENT_ADAPTERS = {
     "CLIENT_CLOSED": "tcp FIN/RST from client",
     "SERVER_CLOSED": "tcp FIN/RST from server",
     "CLIENT_DATA": "client payload (TCP or generic UDP)",
+    "ECA_REQUEST_ALLOWED": "injected NTLM/ECA authentication success",
+    "ECA_REQUEST_DENIED": "injected NTLM/ECA authentication failure",
     "FIX_MESSAGE": "structured FIX message event",
     "SERVER_DATA": "server payload (TCP or generic UDP)",
     "CLIENTSSL_CLIENTHELLO": "TLS client hello",
@@ -9433,6 +9446,41 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = _normalise_http2_state(
                     packet[field], f"packet {index} http2"
                 )
+            elif field == "eca" and protocol == "ntlm":
+                value = packet[field]
+                if not isinstance(value, dict):
+                    raise EmulatorInputError(
+                        f"packet {index} NTLM eca state must be an object"
+                    )
+                unknown_eca_fields = sorted(set(value) - EVENT_STATE_FIELDS["eca"])
+                if unknown_eca_fields:
+                    raise EmulatorInputError(
+                        f"packet {index} unsupported NTLM eca field(s): "
+                        f"{', '.join(unknown_eca_fields)}"
+                    )
+                eca_state: dict[str, str] = {}
+                for eca_field, eca_value in value.items():
+                    if isinstance(eca_value, bool):
+                        eca_text = "1" if eca_value else "0"
+                    elif isinstance(eca_value, (str, int, float)):
+                        eca_text = str(eca_value)
+                    else:
+                        raise EmulatorInputError(
+                            f"packet {index} NTLM eca.{eca_field} must be a string or number"
+                        )
+                    if "\x00" in eca_text:
+                        raise EmulatorInputError(
+                            f"packet {index} NTLM eca.{eca_field} must not contain NUL"
+                        )
+                    eca_state[eca_field] = eca_text
+                normalised[field] = eca_state
+            elif field == "eca_result" and protocol == "ntlm":
+                result = _require_string(packet[field], f"packet {index} eca_result").lower()
+                if result not in {"allowed", "denied"}:
+                    raise EmulatorInputError(
+                        f"packet {index} eca_result must be allowed or denied"
+                    )
+                normalised[field] = result
             elif field == "options" and protocol in {"dhcpv4", "dhcpv6"}:
                 value = packet[field]
                 if not isinstance(value, dict):
@@ -10795,6 +10843,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::ldap_reset_connection")
                 session.eval_tcl("::itest::semantic::smtps_reset_connection")
                 session.eval_tcl("::itest::semantic::ntlm_reset_connection")
+                session.eval_tcl("::itest::semantic::eca_reset_connection")
                 session.eval_tcl("::itest::semantic::protocol_inspection_reset_connection")
                 session.eval_tcl("::itest::semantic::classification_reset_connection")
                 session.eval_tcl("::itest::semantic::category_reset_connection")
@@ -11471,6 +11520,7 @@ class EmulatorSession:
             if event_name == "CLIENT_ACCEPTED":
                 session.eval_tcl("::itest::semantic::l7check_reset_connection")
                 session.eval_tcl("::itest::semantic::link_reset_connection")
+                session.eval_tcl("::itest::semantic::eca_reset_connection")
             return self._fire_event_on_worker(session, event_name, normalised_state)
 
         return self._call(
@@ -11683,6 +11733,11 @@ class EmulatorSession:
             ntlm_state["payload"] = bytes(payload)
             ntlm_state["payload_length"] = str(len(payload))
             state["ntlm"] = ntlm_state
+            if isinstance(packet.get("eca"), dict):
+                state["eca"] = {
+                    field: _packet_scalar(value, f"eca.{field}")
+                    for field, value in packet["eca"].items()
+                }
         elif protocol == "protocol_inspection":
             inspection_state: dict[str, Any] = {}
             for field in ("ids", "matched"):
@@ -12577,6 +12632,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::ldap_reset_connection")
         session.eval_tcl("::itest::semantic::smtps_reset_connection")
         session.eval_tcl("::itest::semantic::ntlm_reset_connection")
+        session.eval_tcl("::itest::semantic::eca_reset_connection")
         session.eval_tcl("::itest::semantic::protocol_inspection_reset_connection")
         session.eval_tcl("::itest::semantic::classification_reset_connection")
         session.eval_tcl("::itest::semantic::category_reset_connection")
@@ -12646,6 +12702,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::ldap_reset_connection")
         session.eval_tcl("::itest::semantic::smtps_reset_connection")
         session.eval_tcl("::itest::semantic::ntlm_reset_connection")
+        session.eval_tcl("::itest::semantic::eca_reset_connection")
         session.eval_tcl("::itest::semantic::protocol_inspection_reset_connection")
         session.eval_tcl("::itest::semantic::classification_reset_connection")
         session.eval_tcl("::itest::semantic::category_reset_connection")
@@ -14100,6 +14157,23 @@ class EmulatorSession:
                     entry["disabled"] = True
                 if "payload" in ntlm_state:
                     entry["payload_after"] = ntlm_state["payload"]
+                eca_result = packet.get("eca_result")
+                if eca_result is not None:
+                    if session.eval_tcl("set ::state::eca::enabled") != "1":
+                        entry["ignored"] = "ECA processing is disabled"
+                    else:
+                        eca_event = (
+                            "ECA_REQUEST_ALLOWED"
+                            if eca_result == "allowed"
+                            else "ECA_REQUEST_DENIED"
+                        )
+                        eca_event_result = self._fire_event_on_worker(
+                            session,
+                            eca_event,
+                            self._packet_event_state(packet),
+                        )
+                        entry["events"].append(eca_event_result)
+                        entry["eca_result"] = eca_result
                 finish_packet_connection(packet, entry, index)
                 continue
             elif protocol == "protocol_inspection":

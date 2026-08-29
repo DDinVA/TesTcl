@@ -1106,6 +1106,15 @@ namespace eval ::itest::semantic {
         variable released 0
     }
 
+    namespace eval ::state::eca {
+        variable enabled 0
+        variable selected ""
+        variable client_machine_name ""
+        variable domainname ""
+        variable status ""
+        variable username ""
+    }
+
     namespace eval ::state::fix {
         variable tags {}
         variable tag_maps {}
@@ -6065,6 +6074,73 @@ namespace eval ::itest::semantic {
         set ::state::bigtcp::released 1
         ::itest::log_decision bigtcp release_flow
         return ""
+    }
+
+    proc eca_reset_connection {} {
+        set ::state::eca::enabled 0
+        set ::state::eca::selected ""
+        set ::state::eca::client_machine_name ""
+        set ::state::eca::domainname ""
+        set ::state::eca::status ""
+        set ::state::eca::username ""
+    }
+
+    proc _eca_require_event {command_name} {
+        if {$::itest::current_event ni {HTTP_REQUEST ECA_REQUEST_ALLOWED ECA_REQUEST_DENIED}} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc eca_toggle_command {command_name enabled args} {
+        _eca_require_event $command_name
+        if {[llength $args] != 0} {
+            error "$command_name takes no arguments"
+        }
+        set ::state::eca::enabled [expr {$enabled ? 1 : 0}]
+        ::itest::log_decision eca [expr {$enabled ? "enable" : "disable"}]
+        return ""
+    }
+
+    proc eca_enable_command {args} {
+        return [eca_toggle_command ECA::enable 1 {*}$args]
+    }
+
+    proc eca_disable_command {args} {
+        return [eca_toggle_command ECA::disable 0 {*}$args]
+    }
+
+    proc eca_select_command {args} {
+        _eca_require_event ECA::select
+        if {[llength $args] != 1 || [lindex $args 0] eq ""} {
+            error "ECA::select requires an authentication configuration name"
+        }
+        set ::state::eca::selected [lindex $args 0]
+        ::itest::log_decision eca select $::state::eca::selected
+        return ""
+    }
+
+    proc eca_value_command {command_name field args} {
+        _eca_require_event $command_name
+        if {[llength $args] != 0} {
+            error "$command_name takes no arguments"
+        }
+        return [set ::state::eca::$field]
+    }
+
+    proc eca_client_machine_name_command {args} {
+        return [eca_value_command ECA::client_machine_name client_machine_name {*}$args]
+    }
+
+    proc eca_domainname_command {args} {
+        return [eca_value_command ECA::domainname domainname {*}$args]
+    }
+
+    proc eca_status_command {args} {
+        return [eca_value_command ECA::status status {*}$args]
+    }
+
+    proc eca_username_command {args} {
+        return [eca_value_command ECA::username username {*}$args]
     }
 
     proc fix_prepare_event {} {
@@ -20265,6 +20341,13 @@ foreach {original replacement} {
     dslite_remote_addr dslite_remote_addr_command
     bigproto_enable_fix_reset bigproto_enable_fix_reset_command
     bigtcp_release_flow bigtcp_release_flow_command
+    eca_client_machine_name eca_client_machine_name_command
+    eca_disable eca_disable_command
+    eca_domainname eca_domainname_command
+    eca_enable eca_enable_command
+    eca_select eca_select_command
+    eca_status eca_status_command
+    eca_username eca_username_command
     fix_tag fix_tag_command
     psc_aaa_reporting_interval psc_aaa_reporting_interval_command
     psc_attr psc_attr_command
@@ -20938,6 +21021,13 @@ foreach {name proc_name} {
     DSLITE::remote_addr ::itest::semantic::dslite_remote_addr_command
     BIGPROTO::enable_fix_reset ::itest::semantic::bigproto_enable_fix_reset_command
     BIGTCP::release_flow ::itest::semantic::bigtcp_release_flow_command
+    ECA::client_machine_name ::itest::semantic::eca_client_machine_name_command
+    ECA::disable ::itest::semantic::eca_disable_command
+    ECA::domainname ::itest::semantic::eca_domainname_command
+    ECA::enable ::itest::semantic::eca_enable_command
+    ECA::select ::itest::semantic::eca_select_command
+    ECA::status ::itest::semantic::eca_status_command
+    ECA::username ::itest::semantic::eca_username_command
     FIX::tag ::itest::semantic::fix_tag_command
     PSC::aaa_reporting_interval ::itest::semantic::psc_aaa_reporting_interval_command
     PSC::attr ::itest::semantic::psc_attr_command

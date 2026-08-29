@@ -1021,6 +1021,108 @@ when CLIENT_DATA {
         finally:
             session.close()
 
+    def test_eca_commands_and_authentication_result_events(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "HTTP", "ECA"],
+                "irule": """
+when HTTP_REQUEST {
+    ECA::enable
+    ECA::select select_ntlm:/Common/exch_ntlm_auth_config
+    log local0. "enabled=[set ::state::eca::enabled] selected=[set ::state::eca::selected]"
+}
+when ECA_REQUEST_ALLOWED {
+    log local0. "allowed=[ECA::username]@[ECA::domainname] machine=[ECA::client_machine_name] status=[ECA::status]"
+}
+when ECA_REQUEST_DENIED {
+    log local0. "denied=[ECA::username] status=[ECA::status]"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            configured = session.fire_event("HTTP_REQUEST", {"eca": {}})
+            self.assertEqual(configured["state"]["eca"]["enabled"], "1")
+            self.assertEqual(
+                configured["state"]["eca"]["selected"],
+                "select_ntlm:/Common/exch_ntlm_auth_config",
+            )
+            self.assertTrue(any("enabled=1" in entry for entry in configured["logs"]))
+
+            allowed = session.fire_event(
+                "ECA_REQUEST_ALLOWED",
+                {
+                    "eca": {
+                        "username": "alice",
+                        "domainname": "EXAMPLE",
+                        "client_machine_name": "WKST-01",
+                        "status": "NTLM_STATUS_OK",
+                    }
+                },
+            )
+            self.assertTrue(allowed["fired"])
+            self.assertTrue(any("allowed=alice@EXAMPLE" in entry for entry in allowed["logs"]))
+
+            denied = session.fire_event(
+                "ECA_REQUEST_DENIED",
+                {"eca": {"username": "mallory", "status": "NTLM_STATUS_WRONG_PASSWORD"}},
+            )
+            self.assertTrue(denied["fired"])
+            self.assertTrue(any("denied=mallory" in entry for entry in denied["logs"]))
+
+            reset = session.fire_event("CLIENT_ACCEPTED", {"eca": {}})
+            self.assertEqual(reset["state"]["eca"]["enabled"], "0")
+            self.assertEqual(reset["state"]["eca"]["selected"], "")
+        finally:
+            session.close()
+
+    def test_eca_ntlm_packet_adapter_emits_authentication_events(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "ECA"],
+                "irule": """
+when ECA_REQUEST_ALLOWED { log local0. "allowed=[ECA::username] status=[ECA::status]" }
+when ECA_REQUEST_DENIED { log local0. "denied=[ECA::username] status=[ECA::status]" }
+""",
+                "packets": [
+                    {
+                        "protocol": "ntlm",
+                        "payload_hex": "4e544c4d",
+                        "eca_result": "allowed",
+                        "eca": {
+                            "enabled": True,
+                            "username": "alice",
+                            "status": "NTLM_STATUS_OK",
+                        },
+                    },
+                    {
+                        "protocol": "ntlm",
+                        "payload": "auth",
+                        "eca_result": "denied",
+                        "eca": {
+                            "enabled": True,
+                            "username": "mallory",
+                            "status": "NTLM_STATUS_WRONG_PASSWORD",
+                        },
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first_event = next(
+            event for event in result["trace"][0]["events"] if event["event"] == "ECA_REQUEST_ALLOWED"
+        )
+        second_event = next(
+            event for event in result["trace"][1]["events"] if event["event"] == "ECA_REQUEST_DENIED"
+        )
+        self.assertTrue(any("allowed=alice" in entry for entry in first_event["logs"]))
+        self.assertTrue(any("denied=mallory" in entry for entry in second_event["logs"]))
+        self.assertEqual(result["trace"][0]["eca_result"], "allowed")
+        self.assertEqual(result["trace"][1]["eca_result"], "denied")
+
     def test_fix_tag_message_lookup_and_persistent_sender_mapping(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1689,7 +1791,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
         self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 150)
+        self.assertEqual(queue["command_count"], 143)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
