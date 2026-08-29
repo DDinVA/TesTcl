@@ -1330,6 +1330,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "http_method",
     "http_uri",
     "http_version",
+    "ip_addr",
     "lasthop",
     "nexthop",
     "redirect",

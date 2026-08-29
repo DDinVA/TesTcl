@@ -1961,7 +1961,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 24)
+        self.assertEqual(queue["command_count"], 23)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -4724,7 +4724,7 @@ when HTTP_REQUEST {
                 "profiles": ["TCP", "HTTP"],
                 "irule": """
 when HTTP_REQUEST {
-    log local0. "ip=[http_client_ip] custom=[http_client_ip X-Real-IP] len=[http_content_len_max 10] cookie=[http_cookie sid] header=[http_header Host:] host=[http_host] method=[http_method] uri=[http_uri] ver=[http_version] proto=[ip_protocol] tos=[ip_tos] ttl=[ip_ttl] n32=[htonl 16909060] n16=[htons 258] h32=[ntohl 67305985] h16=[ntohs 513]"
+    log local0. "ip=[http_client_ip] custom=[http_client_ip X-Real-IP] len=[http_content_len_max 10] cookie=[http_cookie sid] header=[http_header Host:] host=[http_host] method=[http_method] uri=[http_uri] ver=[http_version] proto=[ip_protocol] tos=[ip_tos] ttl=[ip_ttl] addr=[ip_addr 10.0.0.1 equals 10.0.0.0/24] n32=[htonl 16909060] n16=[htons 258] h32=[ntohl 67305985] h16=[ntohs 513]"
 }
 """,
                 "request": {
@@ -4744,7 +4744,7 @@ when HTTP_REQUEST {
         self.assertTrue(any(
             "ip=198.51.100.2 custom=203.0.113.8 len=10 cookie=abc=def "
             "header=example.test host=example.test method=POST uri=/legacy?q=1 "
-            "ver=1.1 proto=6 tos=0 ttl=64 n32=67305985 n16=513 "
+            "ver=1.1 proto=6 tos=0 ttl=64 addr=1 n32=67305985 n16=513 "
             "h32=16909060 h16=258" in entry
             for entry in result["results"][0]["logs"]
         ))
@@ -4752,7 +4752,7 @@ when HTTP_REQUEST {
         for command in (
             "htonl", "htons", "http_client_ip", "http_content_len_max",
             "http_cookie", "http_header", "http_host", "http_method", "http_uri",
-            "http_version", "ip_protocol", "ip_tos", "ip_ttl", "ntohl", "ntohs",
+            "http_version", "ip_addr", "ip_protocol", "ip_tos", "ip_ttl", "ntohl", "ntohs",
         ):
             self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
 

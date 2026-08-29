@@ -31,8 +31,9 @@ counterparts. `http_client_ip` selects the first address from
 `X-Forwarded-For` (or a caller-specified header) and falls back to the modeled
 client address; `http_content_len_max` validates and caps Content-Length;
 `http_cookie`, `http_header`, `http_host`, `http_method`, `http_uri`, and
-`http_version` read request metadata. `ip_protocol`, `ip_tos`, and `ip_ttl`
-read connection metadata, while `htonl`/`ntohl` and `htons`/`ntohs` perform
+`http_version` read request metadata. The legacy `ip_addr` comparison uses the
+same bounded IPv4/IPv6 comparison engine as `IP::addr`. `ip_protocol`,
+`ip_tos`, and `ip_ttl` read connection metadata, while `htonl`/`ntohl` and `htons`/`ntohs` perform
 bounded unsigned byte-order conversion. These retain the old command surface
 without introducing a second source of HTTP/IP state.
 

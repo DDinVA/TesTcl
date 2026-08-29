@@ -23391,6 +23391,7 @@ foreach {original replacement} {
     findclass findclass_command
     findstr findstr_command
     getfield getfield_command
+    ip_addr ip_addr
     lasthop legacy_lasthop_command
     llookup llookup_command
     link_qos legacy_link_qos_command
