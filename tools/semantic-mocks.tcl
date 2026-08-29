@@ -1063,6 +1063,15 @@ namespace eval ::itest::semantic {
         variable cmp_unit 0
     }
 
+    namespace eval ::state::policy {
+        variable controls {}
+        variable targets {}
+        variable active {}
+        variable matched {}
+        variable unmatched {}
+        variable rules {}
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -5644,6 +5653,98 @@ namespace eval ::itest::semantic {
     proc tmm_cmp_unit_command {args} {
         if {[llength $args] != 0} { error "TMM::cmp_unit takes no arguments" }
         return [_tmm_nonnegative_integer $::state::tmm::cmp_unit "TMM::cmp_unit"]
+    }
+
+    proc _policy_require_event {command_name} {
+        if {$::itest::current_event ni {HTTP_REQUEST HTTP_RESPONSE}} {
+            error "$command_name is only valid in HTTP_REQUEST or HTTP_RESPONSE"
+        }
+    }
+
+    proc _policy_text {value field_name} {
+        if {[string first "\x00" $value] >= 0 ||
+            [string first "\r" $value] >= 0 || [string first "\n" $value] >= 0} {
+            error "$field_name must not contain NUL bytes or newlines"
+        }
+        return $value
+    }
+
+    proc _policy_list {value field_name} {
+        if {[catch {llength $value} count]} {
+            error "$field_name must be a Tcl list"
+        }
+        if {$count > 256} { error "$field_name cannot contain more than 256 entries" }
+        set result {}
+        foreach item $value {
+            lappend result [_policy_text $item $field_name]
+        }
+        return $result
+    }
+
+    proc _policy_query {kind args valid_values command_name} {
+        _policy_require_event $command_name
+        if {[llength $args] > 1} { error "$command_name accepts no arguments or one name" }
+        set values [_policy_list [set ::state::policy::$kind] "POLICY::$kind"]
+        foreach value $values {
+            if {$value ni $valid_values} {
+                error "$command_name state contains unsupported name: $value"
+            }
+        }
+        if {[llength $args] == 0} { return $values }
+        set name [lindex $args 0]
+        if {$name ni $valid_values} {
+            error "$command_name name must be one of: [join $valid_values {, }]"
+        }
+        return [expr {[lsearch -exact $values $name] >= 0}]
+    }
+
+    proc policy_controls_command {args} {
+        return [_policy_query controls $args {
+            acceleration asm avr caching classification compression forwarding
+            l7dos request-adaptation response-adaptation server-ssl
+        } POLICY::controls]
+    }
+
+    proc policy_targets_command {args} {
+        return [_policy_query targets $args {
+            wam asm log http-cookie http-header http-host http-referer
+            http-set-cookie http-uri http-reply tcl tcp-nagle
+        } POLICY::targets]
+    }
+
+    proc policy_names_command {args} {
+        _policy_require_event POLICY::names
+        if {[llength $args] > 1} {
+            error "POLICY::names accepts active, matched, or unmatched"
+        }
+        set kind active
+        if {[llength $args] == 1} { set kind [lindex $args 0] }
+        if {$kind ni {active matched unmatched}} {
+            error "POLICY::names argument must be active, matched, or unmatched"
+        }
+        return [_policy_list [set ::state::policy::$kind] "POLICY::names $kind"]
+    }
+
+    proc policy_rules_command {args} {
+        _policy_require_event POLICY::rules
+        if {[llength $args] ni {1 2}} {
+            error "POLICY::rules requires POLICY_NAME or matched POLICY_NAME"
+        }
+        if {[llength $args] == 2} {
+            if {[lindex $args 0] ne "matched"} {
+                error "POLICY::rules only accepts the optional matched keyword"
+            }
+            set policy_name [lindex $args 1]
+        } else {
+            set policy_name [lindex $args 0]
+        }
+        set policy_name [_policy_text $policy_name "POLICY name"]
+        if {$policy_name eq ""} { error "POLICY name must be non-empty" }
+        if {[catch {dict exists $::state::policy::rules $policy_name} exists]} {
+            error "POLICY::rules state must be a policy-to-rules Tcl dictionary"
+        }
+        if {!$exists} { return {} }
+        return [_policy_list [dict get $::state::policy::rules $policy_name] "POLICY::rules $policy_name"]
     }
 
     proc diameter_reset_connection {} {
@@ -19742,6 +19843,10 @@ foreach {original replacement} {
     tmm_cmp_groups tmm_cmp_groups_command
     tmm_cmp_primary_group tmm_cmp_primary_group_command
     tmm_cmp_unit tmm_cmp_unit_command
+    policy_controls policy_controls_command
+    policy_names policy_names_command
+    policy_rules policy_rules_command
+    policy_targets policy_targets_command
     psc_aaa_reporting_interval psc_aaa_reporting_interval_command
     psc_attr psc_attr_command
     psc_calling_id psc_calling_id_command
@@ -20394,6 +20499,10 @@ foreach {name proc_name} {
     TMM::cmp_groups ::itest::semantic::tmm_cmp_groups_command
     TMM::cmp_primary_group ::itest::semantic::tmm_cmp_primary_group_command
     TMM::cmp_unit ::itest::semantic::tmm_cmp_unit_command
+    POLICY::controls ::itest::semantic::policy_controls_command
+    POLICY::names ::itest::semantic::policy_names_command
+    POLICY::rules ::itest::semantic::policy_rules_command
+    POLICY::targets ::itest::semantic::policy_targets_command
     PSC::aaa_reporting_interval ::itest::semantic::psc_aaa_reporting_interval_command
     PSC::attr ::itest::semantic::psc_attr_command
     PSC::calling_id ::itest::semantic::psc_calling_id_command

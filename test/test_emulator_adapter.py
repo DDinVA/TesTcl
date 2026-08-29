@@ -663,6 +663,50 @@ when CLIENT_ACCEPTED {
         finally:
             session.close()
 
+    def test_policy_queries_use_scenario_policy_matching_state(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "irule": """
+when HTTP_REQUEST {
+    set controls "[POLICY::controls]|[POLICY::controls compression]"
+    set targets "[POLICY::targets]|[POLICY::targets log]"
+    set names "[POLICY::names active]|[POLICY::names matched]|[POLICY::names unmatched]"
+    set rules "[POLICY::rules /Common/edge_policy]|[POLICY::rules matched /Common/edge_policy]"
+    log local0. "controls=$controls targets=$targets names=$names rules=$rules"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event(
+                "HTTP_REQUEST",
+                {
+                    "policy": {
+                        "controls": ["compression", "server-ssl"],
+                        "targets": ["log", "http-uri"],
+                        "active": ["/Common/edge_policy", "/Common/fallback"],
+                        "matched": ["/Common/edge_policy"],
+                        "unmatched": ["/Common/fallback"],
+                        "rules": {
+                            "/Common/edge_policy": ["/Common/allow_api", "/Common/route_pool"]
+                        },
+                    }
+                },
+            )
+            self.assertTrue(result["fired"])
+            self.assertTrue(any(
+                "controls=compression server-ssl|1 targets=log http-uri|1"
+                " names=/Common/edge_policy /Common/fallback|/Common/edge_policy|/Common/fallback"
+                " rules=/Common/allow_api /Common/route_pool|/Common/allow_api /Common/route_pool"
+                in entry
+                for entry in result["logs"]
+            ))
+        finally:
+            session.close()
+
     def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1270,7 +1314,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
         self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 171)
+        self.assertEqual(queue["command_count"], 167)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)

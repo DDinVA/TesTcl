@@ -769,6 +769,19 @@ JSON array of non-negative integers. This is topology metadata for deterministic
 rule testing, not a scheduler or multi-TMM execution model. See the F5
 [TMM command family](https://clouddocs.f5.com/api/irules/TMM.html) reference.
 
+### LTM policy matching state
+
+`POLICY::controls`, `POLICY::targets`, `POLICY::names`, and `POLICY::rules`
+are available in `HTTP_REQUEST` and `HTTP_RESPONSE`. Supply a `policy` event
+state layer to model enabled controls/targets, active/matched/unmatched policy
+names, and a mapping from policy names to executed rule names. These fields
+accept JSON arrays (and `rules` accepts a JSON object whose values are arrays),
+or Tcl-list strings at the low-level event boundary. Lists are bounded at 256
+entries. This provides deterministic visibility into a simulated policy
+decision; it does not evaluate LTM policy conditions or execute policy actions.
+See the F5 [POLICY namespace](https://clouddocs.f5.com/api/irules/POLICY.html)
+reference.
+
 ### FLOWTABLE query inputs
 
 The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,

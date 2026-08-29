@@ -632,6 +632,14 @@ EVENT_STATE_FIELDS = {
         "cmp_primary_group",
         "cmp_unit",
     },
+    "policy": {
+        "controls",
+        "targets",
+        "active",
+        "matched",
+        "unmatched",
+        "rules",
+    },
     "diameter": {
         "type",
         "version",
@@ -1008,6 +1016,7 @@ EVENT_STATE_NAMESPACES = {
     "pem": "::state::pem",
     "connector": "::state::connector",
     "tmm": "::state::tmm",
+    "policy": "::state::policy",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
     "message": "::state::message",
@@ -1032,6 +1041,9 @@ EVENT_STATE_NAMESPACES = {
     "rtsp": "::state::rtsp",
     "cache": "::state::cache",
 }
+POLICY_LIST_STATE_FIELDS = frozenset(
+    {"controls", "targets", "active", "matched", "unmatched"}
+)
 
 
 class EmulatorInputError(ValueError):
@@ -1575,6 +1587,10 @@ SEMANTIC_MOCK_COMMANDS = {
     "TMM::cmp_groups",
     "TMM::cmp_primary_group",
     "TMM::cmp_unit",
+    "POLICY::controls",
+    "POLICY::names",
+    "POLICY::rules",
+    "POLICY::targets",
     "DIAMETER::avp",
     "DIAMETER::command",
     "DIAMETER::disconnect",
@@ -2371,6 +2387,11 @@ def _tcl_quote(value: str) -> str:
 
 def _tcl_list(values: list[str]) -> str:
     return "{" + " ".join(_tcl_quote(value) for value in values) + "}"
+
+
+def _tcl_list_value(values: list[str]) -> str:
+    """Encode a Tcl list as a variable value rather than command syntax."""
+    return " ".join(_tcl_quote(value) for value in values)
 
 
 def _configure_asm(session: Any, asm: dict[str, Any]) -> None:
@@ -5377,7 +5398,39 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
         for field, value in values.items():
             if field not in EVENT_STATE_FIELDS[layer]:
                 raise EmulatorInputError(f"unsupported {layer} state field: {field}")
-            if layer == "tmm" and field == "cmp_groups" and isinstance(value, list):
+            if layer == "policy" and field in POLICY_LIST_STATE_FIELDS and isinstance(value, list):
+                if len(value) > 256 or any(
+                    not isinstance(item, str) or not item or "\x00" in item
+                    for item in value
+                ):
+                    raise EmulatorInputError(
+                        f"event state policy.{field} must be an array of at most 256 non-empty strings"
+                    )
+                layer_values[field] = _tcl_list_value(value)
+            elif layer == "policy" and field == "rules" and isinstance(value, dict):
+                if len(value) > 256:
+                    raise EmulatorInputError(
+                        "event state policy.rules must contain at most 256 policies"
+                    )
+                flattened: list[str] = []
+                for policy_name, rules in value.items():
+                    if (
+                        not isinstance(policy_name, str)
+                        or not policy_name
+                        or "\x00" in policy_name
+                        or not isinstance(rules, list)
+                        or len(rules) > 256
+                        or any(
+                            not isinstance(rule, str) or not rule or "\x00" in rule
+                            for rule in rules
+                        )
+                    ):
+                        raise EmulatorInputError(
+                            "event state policy.rules must map policy names to arrays of at most 256 non-empty strings"
+                        )
+                    flattened.extend((policy_name, _tcl_list_value(rules)))
+                layer_values[field] = _tcl_list_value(flattened)
+            elif layer == "tmm" and field == "cmp_groups" and isinstance(value, list):
                 if not value or any(
                     isinstance(item, bool)
                     or not isinstance(item, int)
