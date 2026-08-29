@@ -479,7 +479,8 @@ when HTTP_REQUEST {
         }
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
-        self.assertGreaterEqual(queue["command_count"], 336)
+        self.assertNotIn(("ADAPT", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 324)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -521,6 +522,131 @@ when HTTP_REQUEST {
         self.assertGreater(
             report["events"]["catalog_count"], report["events"]["packet_adapter_count"]
         )
+
+    def test_adapt_dynamic_contexts_and_result_event(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "HTTP", "REQUESTADAPT", "RESPONSEADAPT"],
+                "irule": """
+when HTTP_REQUEST {
+    ADAPT::enable request false
+    set static_ctx [ADAPT::context_static request]
+    set request_ctx [ADAPT::context_create request_ctx]
+    ADAPT::select $request_ctx /Common/request-ivs
+    ADAPT::enable $request_ctx true
+    ADAPT::allow $request_ctx http_v1.0 false
+    ADAPT::preview_size $request_ctx 128
+    ADAPT::service_down_action $request_ctx drop
+    ADAPT::timeout $request_ctx 5000
+    set response_ctx [ADAPT::context_create response response_ctx]
+    ADAPT::select $response_ctx /Common/response-ivs
+    log local0. "static=[ADAPT::context_name $static_ctx] request=[ADAPT::context_name $request_ctx] response=[ADAPT::context_name $response_ctx] enabled=[ADAPT::enable $request_ctx] allow=[ADAPT::allow $request_ctx http_v1.0] preview=[ADAPT::preview_size $request_ctx] action=[ADAPT::service_down_action $request_ctx] timeout=[ADAPT::timeout $request_ctx]"
+}
+when ADAPT_REQUEST_RESULT {
+    set current [ADAPT::context_current]
+    log local0. "current=[ADAPT::context_name $current] result=[ADAPT::result]"
+    ADAPT::result bypass
+    ADAPT::context_delete_all
+}
+""",
+                "request": {"uri": "/"},
+            },
+            allow_irule_file=False,
+            allow_requests=True,
+        )
+        try:
+            request_result = session.run_request({"uri": "/"})
+            contexts = request_result["semantic"]["adapt"]["contexts"]
+            dynamic = [context for context in contexts if context["dynamic"]]
+            self.assertEqual(
+                [context["name"] for context in dynamic],
+                ["request_ctx", "response_ctx"],
+            )
+            request_context = dynamic[0]
+            self.assertFalse(contexts[0]["enabled"])
+            self.assertTrue(request_context["enabled"])
+            self.assertFalse(request_context["allow_http_v1"])
+            self.assertEqual(request_context["preview_size"], 128)
+            self.assertEqual(request_context["service_down_action"], "drop")
+            self.assertEqual(request_context["timeout"], 5000)
+            self.assertTrue(any(
+                "static=REQUESTADAPT request=request_ctx response=response_ctx enabled=1 allow=0 preview=128 action=drop timeout=5000" in entry
+                for entry in request_result["logs"]
+            ))
+
+            reset_result = session.run_request({"uri": "/", "new_connection": True})
+            reset_dynamic = [
+                context
+                for context in reset_result["semantic"]["adapt"]["contexts"]
+                if context["dynamic"]
+            ]
+            self.assertEqual(
+                [context["handle"] for context in reset_dynamic],
+                ["dynamic:request:1", "dynamic:response:2"],
+            )
+
+            adapt_result = session.fire_event("ADAPT_REQUEST_RESULT")
+            self.assertTrue(adapt_result["fired"])
+            self.assertTrue(any("current=request_ctx result=unknown" in entry for entry in adapt_result["logs"]))
+            self.assertEqual(
+                [context["handle"] for context in adapt_result["semantic"]["adapt"]["contexts"]],
+                ["static:request", "static:response"],
+            )
+            self.assertEqual(
+                adapt_result["semantic"]["adapt"]["current_handle"],
+                "static:request",
+            )
+        finally:
+            session.close()
+
+    def test_adapt_context_validation_boundaries(self) -> None:
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "no more than 256 bytes"
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP", "REQUESTADAPT"],
+                    "irule": "when HTTP_REQUEST { ADAPT::context_create [string repeat x 257] }",
+                    "request": {"uri": "/"},
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "HTTP", "REQUESTADAPT", "RESPONSEADAPT"],
+                "irule": """
+when HTTP_REQUEST {
+    set ::response_ctx [ADAPT::context_create response response_ctx]
+    set ::disabled_ctx [ADAPT::context_create disabled_ctx]
+    ADAPT::enable $::disabled_ctx false
+}
+when ADAPT_REQUEST_RESULT {
+    set current [ADAPT::context_current]
+    set rc [catch {ADAPT::select $::response_ctx /Common/not-current-side} message]
+    log local0. "current=[ADAPT::context_name $current] cross_side_rc=$rc"
+}
+""",
+                "request": {"uri": "/"},
+            },
+            allow_irule_file=False,
+            allow_requests=True,
+        )
+        try:
+            session.run_request({"uri": "/"})
+            result = session.fire_event("ADAPT_REQUEST_RESULT")
+            self.assertTrue(any(
+                "current=REQUESTADAPT cross_side_rc=1" in entry
+                for entry in result["logs"]
+            ))
+            self.assertEqual(
+                result["semantic"]["adapt"]["current_handle"],
+                "static:request",
+            )
+        finally:
+            session.close()
 
     def test_post_tmos_17_5_features_are_reported_and_rejected(self) -> None:
         with self.assertRaisesRegex(

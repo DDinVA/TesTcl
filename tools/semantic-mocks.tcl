@@ -14,6 +14,10 @@ namespace eval ::itest::semantic {
     variable oneconnect_reuse_enabled 1
     variable oneconnect_select_mode none
     variable oneconnect_label ""
+    variable adapt_contexts {}
+    variable adapt_context_counter 0
+    variable adapt_current_handle "static:request"
+    variable adapt_current_side request
     variable crypto_contexts {}
     variable crypto_context_max_bytes 16777216
     variable hsl_handles
@@ -8608,6 +8612,423 @@ namespace eval ::itest::semantic {
         set crypto_contexts {}
     }
 
+    proc _adapt_default_record {side} {
+        return [dict create \
+            handle "static:$side" \
+            side $side \
+            name [string toupper "${side}ADAPT"] \
+            dynamic 0 \
+            enabled 1 \
+            allow_http_v1 1 \
+            preview_size 0 \
+            result unknown \
+            select "" \
+            service_down_action ignore \
+            timeout 30000 \
+            order 0]
+    }
+
+    proc adapt_reset_connection {} {
+        variable adapt_contexts
+        variable adapt_context_counter
+        variable adapt_current_handle
+        variable adapt_current_side
+        set adapt_contexts [dict create \
+            static:request [_adapt_default_record request] \
+            static:response [_adapt_default_record response]]
+        set adapt_context_counter 0
+        set adapt_current_side request
+        set adapt_current_handle static:request
+    }
+
+    proc adapt_snapshot {} {
+        variable adapt_contexts
+        variable adapt_current_handle
+        variable adapt_current_side
+        set contexts {}
+        dict for {handle record} $adapt_contexts {
+            lappend contexts [list \
+                [dict get $record handle] \
+                [dict get $record side] \
+                [dict get $record name] \
+                [dict get $record dynamic] \
+                [dict get $record enabled] \
+                [dict get $record allow_http_v1] \
+                [dict get $record preview_size] \
+                [dict get $record result] \
+                [dict get $record select] \
+                [dict get $record service_down_action] \
+                [dict get $record timeout] \
+                [dict get $record order]]
+        }
+        return [list \
+            current_handle $adapt_current_handle \
+            current_side $adapt_current_side \
+            contexts $contexts]
+    }
+
+    proc _adapt_require_profile {side command_name} {
+        if {![_profile_enabled [string toupper "${side}ADAPT"]]} {
+            error "$command_name requires the [string toupper "${side}ADAPT"] profile"
+        }
+    }
+
+    proc _adapt_event_side {} {
+        if {[info exists ::itest::current_event] &&
+            [string match {ADAPT_RESPONSE_*} $::itest::current_event]} {
+            return response
+        }
+        if {[info exists ::itest::current_event] &&
+            $::itest::current_event eq "HTTP_RESPONSE"} {
+            return response
+        }
+        return request
+    }
+
+    proc _adapt_extract_handle {args command_name} {
+        variable adapt_contexts
+        set handle ""
+        set explicit 0
+        if {[llength $args] > 0 &&
+            [dict exists $adapt_contexts [lindex $args 0]]} {
+            set handle [lindex $args 0]
+            set explicit 1
+            set args [lrange $args 1 end]
+        }
+        return [list $handle $explicit $args]
+    }
+
+    proc _adapt_resolve_handle {handle explicit side side_explicit command_name} {
+        variable adapt_contexts
+        variable adapt_current_handle
+        if {$explicit} {
+            if {![dict exists $adapt_contexts $handle]} {
+                error "$command_name references an unknown context"
+            }
+            set record [dict get $adapt_contexts $handle]
+            if {[info exists ::itest::current_event] &&
+                [string match {ADAPT_*} $::itest::current_event] &&
+                [dict get $record side] ne [_adapt_event_side]} {
+                error "$command_name context belongs to the [dict get $record side] side"
+            }
+            if {$side_explicit && [dict get $record side] ne $side} {
+                error "$command_name context belongs to the [dict get $record side] side"
+            }
+            set side [dict get $record side]
+        } elseif {!$side_explicit &&
+                  [dict exists $adapt_contexts $adapt_current_handle] &&
+                  [dict get [dict get $adapt_contexts $adapt_current_handle] side] eq $side &&
+                  [info exists ::itest::current_event] &&
+                  [string match {ADAPT_*} $::itest::current_event]} {
+            set handle $adapt_current_handle
+        } else {
+            set handle "static:$side"
+        }
+        _adapt_require_profile $side $command_name
+        if {![dict exists $adapt_contexts $handle]} {
+            error "$command_name references an unknown context"
+        }
+        return $handle
+    }
+
+    proc _adapt_parse_side_target {args command_name} {
+        variable adapt_current_side
+        set extracted [_adapt_extract_handle $args $command_name]
+        set handle [lindex $extracted 0]
+        set explicit [lindex $extracted 1]
+        set remaining [lindex $extracted 2]
+        set side $adapt_current_side
+        set side_explicit 0
+        if {[llength $remaining] > 0 && [lindex $remaining 0] in {request response}} {
+            set side [lindex $remaining 0]
+            set side_explicit 1
+            set remaining [lrange $remaining 1 end]
+        }
+        set target [_adapt_resolve_handle $handle $explicit $side $side_explicit $command_name]
+        return [list $target $side $remaining]
+    }
+
+    proc _adapt_parse_property_target {args command_name} {
+        variable adapt_current_side
+        set extracted [_adapt_extract_handle $args $command_name]
+        set handle [lindex $extracted 0]
+        set explicit [lindex $extracted 1]
+        set remaining [lindex $extracted 2]
+        if {[llength $remaining] == 0} {
+            error "$command_name requires a property"
+        }
+        set property [lindex $remaining 0]
+        set remaining [lrange $remaining 1 end]
+        set side $adapt_current_side
+        set side_explicit 0
+        if {[llength $remaining] > 0 && [lindex $remaining 0] in {request response}} {
+            set side [lindex $remaining 0]
+            set side_explicit 1
+            set remaining [lrange $remaining 1 end]
+        }
+        set target [_adapt_resolve_handle $handle $explicit $side $side_explicit $command_name]
+        return [list $target $side $property $remaining]
+    }
+
+    proc _adapt_bool {value command_name} {
+        switch -exact -- [string tolower $value] {
+            0 - false - disable - no { return 0 }
+            1 - true - enable - yes { return 1 }
+            default { error "$command_name boolean must be 0/1, false/true, or disable/enable" }
+        }
+    }
+
+    proc _adapt_store {handle record} {
+        variable adapt_contexts
+        dict set adapt_contexts $handle $record
+    }
+
+    proc adapt_allow {args} {
+        set parsed [_adapt_parse_property_target $args ADAPT::allow]
+        set handle [lindex $parsed 0]
+        set property [lindex $parsed 2]
+        set remaining [lindex $parsed 3]
+        if {$property ne "http_v1.0"} {
+            error "ADAPT::allow only supports the http_v1.0 property"
+        }
+        variable adapt_contexts
+        set record [dict get $adapt_contexts $handle]
+        if {[llength $remaining] == 0} {
+            return [dict get $record allow_http_v1]
+        }
+        if {[llength $remaining] != 1} {
+            error "ADAPT::allow accepts one optional boolean"
+        }
+        dict set record allow_http_v1 [_adapt_bool [lindex $remaining 0] ADAPT::allow]
+        _adapt_store $handle $record
+        ::itest::log_decision adapt allow [list $handle [dict get $record allow_http_v1]]
+        return ""
+    }
+
+    proc adapt_enable {args} {
+        set parsed [_adapt_parse_side_target $args ADAPT::enable]
+        set handle [lindex $parsed 0]
+        set remaining [lindex $parsed 2]
+        variable adapt_contexts
+        set record [dict get $adapt_contexts $handle]
+        if {[llength $remaining] == 0} {
+            return [dict get $record enabled]
+        }
+        if {[llength $remaining] != 1} {
+            error "ADAPT::enable accepts one optional boolean"
+        }
+        dict set record enabled [_adapt_bool [lindex $remaining 0] ADAPT::enable]
+        _adapt_store $handle $record
+        ::itest::log_decision adapt enable [list $handle [dict get $record enabled]]
+        return ""
+    }
+
+    proc adapt_select {args} {
+        set parsed [_adapt_parse_side_target $args ADAPT::select]
+        set handle [lindex $parsed 0]
+        set remaining [lindex $parsed 2]
+        variable adapt_contexts
+        set record [dict get $adapt_contexts $handle]
+        if {[llength $remaining] == 0} {
+            return [dict get $record select]
+        }
+        if {[llength $remaining] != 1 || [string first "\x00" [lindex $remaining 0]] >= 0} {
+            error "ADAPT::select accepts one internal virtual name without NUL bytes"
+        }
+        dict set record select [lindex $remaining 0]
+        _adapt_store $handle $record
+        ::itest::log_decision adapt select [list $handle [dict get $record select]]
+        return ""
+    }
+
+    proc adapt_preview_size {args} {
+        set parsed [_adapt_parse_side_target $args ADAPT::preview_size]
+        set handle [lindex $parsed 0]
+        set remaining [lindex $parsed 2]
+        variable adapt_contexts
+        set record [dict get $adapt_contexts $handle]
+        if {[llength $remaining] == 0} {
+            return [dict get $record preview_size]
+        }
+        if {[llength $remaining] != 1 ||
+            ![string is integer -strict [lindex $remaining 0]] ||
+            [lindex $remaining 0] < 0} {
+            error "ADAPT::preview_size requires a non-negative integer"
+        }
+        dict set record preview_size [lindex $remaining 0]
+        _adapt_store $handle $record
+        ::itest::log_decision adapt preview_size [list $handle [dict get $record preview_size]]
+        return ""
+    }
+
+    proc adapt_service_down_action {args} {
+        set parsed [_adapt_parse_side_target $args ADAPT::service_down_action]
+        set handle [lindex $parsed 0]
+        set remaining [lindex $parsed 2]
+        variable adapt_contexts
+        set record [dict get $adapt_contexts $handle]
+        if {[llength $remaining] == 0} {
+            return [dict get $record service_down_action]
+        }
+        if {[llength $remaining] != 1 || [lindex $remaining 0] ni {ignore drop reset}} {
+            error "ADAPT::service_down_action requires ignore, drop, or reset"
+        }
+        dict set record service_down_action [lindex $remaining 0]
+        _adapt_store $handle $record
+        ::itest::log_decision adapt service_down_action [list $handle [dict get $record service_down_action]]
+        return ""
+    }
+
+    proc adapt_timeout {args} {
+        set parsed [_adapt_parse_side_target $args ADAPT::timeout]
+        set handle [lindex $parsed 0]
+        set remaining [lindex $parsed 2]
+        variable adapt_contexts
+        set record [dict get $adapt_contexts $handle]
+        if {[llength $remaining] == 0} {
+            return [dict get $record timeout]
+        }
+        if {[llength $remaining] != 1 ||
+            ![string is integer -strict [lindex $remaining 0]] ||
+            [lindex $remaining 0] < 0} {
+            error "ADAPT::timeout requires a non-negative integer in milliseconds"
+        }
+        dict set record timeout [lindex $remaining 0]
+        _adapt_store $handle $record
+        ::itest::log_decision adapt timeout [list $handle [dict get $record timeout]]
+        return ""
+    }
+
+    proc adapt_result {args} {
+        if {![info exists ::itest::current_event] ||
+            ![string match {ADAPT_*} $::itest::current_event]} {
+            error "ADAPT::result is valid only in an ADAPT event"
+        }
+        set parsed [_adapt_parse_side_target $args ADAPT::result]
+        set handle [lindex $parsed 0]
+        set remaining [lindex $parsed 2]
+        variable adapt_contexts
+        set record [dict get $adapt_contexts $handle]
+        if {[llength $remaining] == 0} {
+            return [dict get $record result]
+        }
+        if {[llength $remaining] != 1 || [lindex $remaining 0] ni {bypass close}} {
+            error "ADAPT::result can set only bypass or close"
+        }
+        dict set record result [lindex $remaining 0]
+        _adapt_store $handle $record
+        ::itest::log_decision adapt result [list $handle [dict get $record result]]
+        return ""
+    }
+
+    proc adapt_context_create {args} {
+        variable adapt_contexts
+        variable adapt_context_counter
+        set side [_adapt_event_side]
+        if {[llength $args] == 2} {
+            set side [lindex $args 0]
+            set name [lindex $args 1]
+        } elseif {[llength $args] == 1} {
+            set name [lindex $args 0]
+        } else {
+            error "ADAPT::context_create accepts a name or side and name"
+        }
+        if {$side ni {request response}} {
+            error "ADAPT::context_create side must be request or response"
+        }
+        _adapt_require_profile $side ADAPT::context_create
+        if {$name eq "" || [string first "\x00" $name] >= 0 ||
+            [string bytelength $name] > 256} {
+            error "ADAPT::context_create requires a non-empty name without NUL bytes and no more than 256 bytes"
+        }
+        set dynamic_count 0
+        dict for {existing_handle existing} $adapt_contexts {
+            if {[dict get $existing dynamic] && [dict get $existing side] eq $side} {
+                incr dynamic_count
+                if {[dict get $existing name] eq $name} {
+                    error "ADAPT::context_create name already exists on the $side side"
+                }
+            }
+        }
+        if {$dynamic_count >= 64} {
+            error "ADAPT::context_create exceeds the 64-context limit"
+        }
+        incr adapt_context_counter
+        set handle "dynamic:$side:$adapt_context_counter"
+        set record [dict get $adapt_contexts "static:$side"]
+        dict set record handle $handle
+        dict set record name $name
+        dict set record dynamic 1
+        dict set record order $adapt_context_counter
+        dict set adapt_contexts $handle $record
+        ::itest::log_decision adapt context_create [list $handle $side $name]
+        return $handle
+    }
+
+    proc adapt_context_current {args} {
+        variable adapt_current_handle
+        if {[llength $args] != 0} {
+            error "ADAPT::context_current takes no arguments"
+        }
+        _adapt_require_profile [_adapt_event_side] ADAPT::context_current
+        return $adapt_current_handle
+    }
+
+    proc adapt_context_delete_all {args} {
+        variable adapt_contexts
+        variable adapt_current_handle
+        variable adapt_current_side
+        if {[llength $args] != 0} {
+            error "ADAPT::context_delete_all takes no arguments"
+        }
+        _adapt_require_profile $adapt_current_side ADAPT::context_delete_all
+        set request [dict get $adapt_contexts static:request]
+        set response [dict get $adapt_contexts static:response]
+        set adapt_contexts [dict create static:request $request static:response $response]
+        set adapt_current_handle "static:$adapt_current_side"
+        ::itest::log_decision adapt context_delete_all
+        return ""
+    }
+
+    proc adapt_context_name {args} {
+        variable adapt_contexts
+        if {[llength $args] != 1 || ![dict exists $adapt_contexts [lindex $args 0]]} {
+            error "ADAPT::context_name requires a known context handle"
+        }
+        return [dict get $adapt_contexts [lindex $args 0] name]
+    }
+
+    proc adapt_context_static {args} {
+        variable adapt_current_side
+        if {[llength $args] > 1 ||
+            ([llength $args] == 1 && [lindex $args 0] ni {request response})} {
+            error "ADAPT::context_static accepts request or response"
+        }
+        set side $adapt_current_side
+        if {[llength $args] == 1} { set side [lindex $args 0] }
+        _adapt_require_profile $side ADAPT::context_static
+        return "static:$side"
+    }
+
+    proc adapt_prepare_event {event_name} {
+        variable adapt_contexts
+        variable adapt_current_handle
+        variable adapt_current_side
+        if {[string match {ADAPT_RESPONSE_*} $event_name] || $event_name eq "HTTP_RESPONSE"} {
+        set adapt_current_side response
+        } else {
+            set adapt_current_side request
+        }
+        set adapt_current_handle "static:$adapt_current_side"
+        dict for {handle record} $adapt_contexts {
+            if {[dict get $record dynamic] && [dict get $record enabled] &&
+                [dict get $record side] eq $adapt_current_side} {
+                set adapt_current_handle $handle
+                break
+            }
+        }
+    }
+
     proc _oneconnect_require_profile {command_name} {
         if {![_profile_enabled ONECONNECT]} {
             error "$command_name requires a OneConnect profile"
@@ -15174,6 +15595,18 @@ foreach {name proc_name} {
     STATS::set ::itest::semantic::stats_set
     STATS::setmax ::itest::semantic::stats_setmax
     STATS::setmin ::itest::semantic::stats_setmin
+    ADAPT::allow ::itest::semantic::adapt_allow
+    ADAPT::context_create ::itest::semantic::adapt_context_create
+    ADAPT::context_current ::itest::semantic::adapt_context_current
+    ADAPT::context_delete_all ::itest::semantic::adapt_context_delete_all
+    ADAPT::context_name ::itest::semantic::adapt_context_name
+    ADAPT::context_static ::itest::semantic::adapt_context_static
+    ADAPT::enable ::itest::semantic::adapt_enable
+    ADAPT::preview_size ::itest::semantic::adapt_preview_size
+    ADAPT::result ::itest::semantic::adapt_result
+    ADAPT::select ::itest::semantic::adapt_select
+    ADAPT::service_down_action ::itest::semantic::adapt_service_down_action
+    ADAPT::timeout ::itest::semantic::adapt_timeout
     CRYPTO::hash ::itest::semantic::crypto_hash_command
     CRYPTO::sign ::itest::semantic::crypto_sign_command
     CRYPTO::verify ::itest::semantic::crypto_verify_command

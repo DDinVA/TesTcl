@@ -751,6 +751,18 @@ def _target_status(name: str, post_target_names: frozenset[str]) -> str:
 
 
 SEMANTIC_MOCK_COMMANDS = {
+    "ADAPT::allow",
+    "ADAPT::context_create",
+    "ADAPT::context_current",
+    "ADAPT::context_delete_all",
+    "ADAPT::context_name",
+    "ADAPT::context_static",
+    "ADAPT::enable",
+    "ADAPT::preview_size",
+    "ADAPT::result",
+    "ADAPT::select",
+    "ADAPT::service_down_action",
+    "ADAPT::timeout",
     "CRYPTO::hash",
     "CRYPTO::sign",
     "CRYPTO::verify",
@@ -2181,6 +2193,58 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "select": oneconnect_parts[2],
         "label": oneconnect_parts[3],
     }
+    adapt_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::adapt_snapshot")
+    )
+    if len(adapt_parts) != 6 or set(adapt_parts[::2]) != {
+        "current_handle", "current_side", "contexts"
+    }:
+        raise EmulatorInputError("invalid ADAPT state")
+    adapt_values = dict(zip(adapt_parts[::2], adapt_parts[1::2]))
+    if adapt_values["current_side"] not in {"request", "response"}:
+        raise EmulatorInputError("invalid ADAPT current side")
+    adapt_contexts: list[dict[str, Any]] = []
+    seen_adapt_handles: set[str] = set()
+    for raw_context in _split_tcl_list(adapt_values["contexts"]):
+        fields = _split_tcl_list(raw_context)
+        if len(fields) != 12 or fields[0] in seen_adapt_handles:
+            raise EmulatorInputError("invalid ADAPT context state")
+        seen_adapt_handles.add(fields[0])
+        if fields[1] not in {"request", "response"} or fields[3] not in {"0", "1"}:
+            raise EmulatorInputError("invalid ADAPT context side or dynamic state")
+        if fields[4] not in {"0", "1"} or fields[5] not in {"0", "1"}:
+            raise EmulatorInputError("invalid ADAPT context boolean state")
+        if fields[7] not in {"unknown", "bypass", "modify", "respond", "close", "reset", "timeout"}:
+            raise EmulatorInputError("invalid ADAPT context result state")
+        if fields[9] not in {"ignore", "drop", "reset"}:
+            raise EmulatorInputError("invalid ADAPT service-down action state")
+        try:
+            preview_size, timeout, order = (int(value) for value in (fields[6], fields[10], fields[11]))
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid ADAPT context numeric state") from None
+        if min(preview_size, timeout, order) < 0:
+            raise EmulatorInputError("invalid ADAPT context numeric state")
+        adapt_contexts.append({
+            "handle": fields[0],
+            "side": fields[1],
+            "name": fields[2],
+            "dynamic": fields[3] == "1",
+            "enabled": fields[4] == "1",
+            "allow_http_v1": fields[5] == "1",
+            "preview_size": preview_size,
+            "result": fields[7],
+            "select": fields[8],
+            "service_down_action": fields[9],
+            "timeout": timeout,
+            "order": order,
+        })
+    if adapt_values["current_handle"] not in seen_adapt_handles:
+        raise EmulatorInputError("invalid ADAPT current context")
+    adapt = {
+        "current_handle": adapt_values["current_handle"],
+        "current_side": adapt_values["current_side"],
+        "contexts": adapt_contexts,
+    }
     hsl_messages: list[dict[str, str]] = []
     for raw_message in _split_tcl_list(session.eval_tcl("::itest::semantic::hsl_snapshot")):
         parts = _split_tcl_list(raw_message)
@@ -2947,6 +3011,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "global_rate": parse_ip_integer("global_rate"),
     }
     return {
+        "adapt": adapt,
         "stats": stats,
         "istats": {
             "count": len(istats),
@@ -9265,6 +9330,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::lb_reset_connection")
                 session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
                 session.eval_tcl("::itest::semantic::crypto_reset_connection")
+                session.eval_tcl("::itest::semantic::adapt_reset_connection")
                 session.eval_tcl("::itest::semantic::profile_settings_clear")
                 for profile_name, attributes in self._profile_settings.items():
                     flattened = [
@@ -9304,6 +9370,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::httplog_reset_connection")
                 session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
                 session.eval_tcl("::itest::semantic::crypto_reset_connection")
+                session.eval_tcl("::itest::semantic::adapt_reset_connection")
                 session.eval_tcl("::itest::semantic::flow_reset_connection")
                 if any(str(profile).upper() == "REWRITE" for profile in self._profiles):
                     session.eval_tcl("::itest::semantic::rewrite_install_flow_hooks")
@@ -9405,6 +9472,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::rewrite_reset_connection")
             session.eval_tcl("::itest::semantic::html_reset_connection")
             session.eval_tcl("::itest::semantic::compression_reset_connection")
+            session.eval_tcl("::itest::semantic::adapt_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -9592,6 +9660,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::httplog_reset_connection")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::crypto_reset_connection")
+            session.eval_tcl("::itest::semantic::adapt_reset_connection")
             self._connection_open = False
             self._server_connection_open = False
             self._server_connection_detached = False
@@ -9616,6 +9685,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::httplog_reset_connection")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::crypto_reset_connection")
+            session.eval_tcl("::itest::semantic::adapt_reset_connection")
             self._connection_open = False
             self._server_connection_open = False
             self._server_connection_detached = False
@@ -9698,6 +9768,10 @@ class EmulatorSession:
                 "decisions": [],
                 "logs": [],
             }
+        session.eval_tcl(
+            "::itest::semantic::adapt_prepare_event "
+            f"{_tcl_quote(event_name)}"
+        )
         for layer, values in state.items():
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
@@ -9795,6 +9869,7 @@ class EmulatorSession:
                 for entry in session.get_logs()
             ],
             "semantic": {
+                "adapt": semantic_snapshot["adapt"],
                 "psm": semantic_snapshot["psm"],
                 "ip": semantic_snapshot["ip"],
                 "http_proxy": semantic_snapshot["http_proxy"],
@@ -10619,6 +10694,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::httplog_reset_connection")
         session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
         session.eval_tcl("::itest::semantic::crypto_reset_connection")
+        session.eval_tcl("::itest::semantic::adapt_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))

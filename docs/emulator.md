@@ -179,6 +179,18 @@ data options, supports `-keyhex`, bounds accumulated context data at 16 MiB,
 and clears contexts at connection boundaries. Encryption/decryption and key
 generation are not claimed as implemented yet.
 
+The ADAPT layer models the 17.5 request/response static and dynamic context
+surface. `ADAPT::context_create` returns deterministic opaque handles whose
+attributes inherit from the static context; the remaining ADAPT commands can
+inspect or update enable/allow, internal-virtual selection, preview size,
+service-down action, timeout, and result state. Direct `ADAPT_REQUEST_*` and
+`ADAPT_RESPONSE_*` events select the first enabled dynamic context on their
+side, or the static context when none is enabled; the complete context list is
+returned under
+`semantic.adapt`. Contexts reset at connection boundaries. This is a
+rule-visible adaptation model only: it does not run an ICAP service, internal
+virtual server, or content transformation.
+
 The ONECONNECT layer models the four TMOS 17.5 rule controls
 `ONECONNECT::detach`, `ONECONNECT::label`, `ONECONNECT::reuse`, and
 `ONECONNECT::select`. Their state is visible under `semantic.oneconnect` and

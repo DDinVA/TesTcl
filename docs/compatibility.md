@@ -123,6 +123,16 @@ preserved, including `-keyhex` inputs. Context data is capped at 16 MiB and
 cleared at connection boundaries. Encryption/decryption and key generation
 remain explicitly queued rather than approximated.
 
+The TMOS 17.5 `ADAPT::*` commands model request/response static and dynamic
+contexts. Context handles inherit deterministic static attributes, support
+enable/allow, internal-virtual selection, preview size, service-down action,
+timeout, and result updates, and are visible in `semantic.adapt`. Direct
+`ADAPT_REQUEST_*` and `ADAPT_RESPONSE_*` events select the first enabled
+dynamic context on their side, or the static context when none is enabled.
+Contexts reset at connection boundaries;
+the adapter does not run an ICAP service, internal virtual server, or real
+content transformation.
+
 The TMOS 17.5 `ONECONNECT::detach`, `ONECONNECT::label`,
 `ONECONNECT::reuse`, and `ONECONNECT::select` commands model the rule-visible
 connection controls. Detach/reuse flags, selection mode, and the connection
