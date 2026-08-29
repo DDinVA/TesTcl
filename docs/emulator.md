@@ -457,6 +457,32 @@ AAAA, CNAME, NS, PTR, MX, SRV, and TXT resource records. See the F5
 [`DNS::scrape`](https://clouddocs.f5.com/api/irules/DNS__scrape.html)
 references for the production command contract.
 
+TLS packet state also drives the common SSL inspection path. In
+`CLIENTSSL_*` and `SERVERSSL_*` events, the semantic overlay supports
+`SSL::sni`, `SSL::cipher`, `SSL::sessionid`, `SSL::cert`,
+`SSL::verify_result`, and side-specific `SSL::disable`/`SSL::enable`.
+Certificate handles can be inspected with `X509::subject` and
+`X509::issuer`. Certificate and cipher values are deterministic packet input;
+the emulator does not perform a TLS handshake, certificate validation, key
+exchange, or cryptographic renegotiation.
+
+```json
+{
+  "profiles": ["TCP", "CLIENTSSL"],
+  "irule": "when CLIENTSSL_CLIENTHELLO { set cert [SSL::cert 0]; log local0. \"[SSL::sni name] [SSL::cipher name] [X509::subject $cert commonName]\" }",
+  "packets": [{
+    "protocol": "tls",
+    "direction": "client_to_server",
+    "type": "client_hello",
+    "sni": "secure.example.com",
+    "cipher_name": "TLS_AES_128_GCM_SHA256",
+    "cipher_bits": 128,
+    "cert_count": 1,
+    "cert_subject": "CN=client.example.com,O=Example"
+  }]
+}
+```
+
 For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
 performs bounded sequence-aware TCP application reassembly across records and

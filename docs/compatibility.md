@@ -54,6 +54,9 @@ disable actions. Structured records are deterministic test data; the emulator
 does not run DNS-Express, recursive resolution, DNSSEC signing, or a live
 nameserver. `RESOLVER::name_lookup` and the `DNSMSG::*` commands can consume
 scenario-supplied resolver records without making network requests.
+TLS packet state supports common SNI, cipher, session, certificate, X509
+subject/issuer, verification-result, and SSL enable/disable inspection paths;
+it does not perform a real TLS handshake or certificate cryptography.
 GTP packets expose bounded GTPv1 and GTPv2 header/IE state, G-PDU payloads,
 GTP signaling/G-PDU/Prime ingress and egress events, and the catalogued
 `GTP::` command family. GTP-C and GTP-U use UDP ports 2123 and 2152; GTP-Prime

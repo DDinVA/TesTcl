@@ -3589,6 +3589,61 @@ when CLIENT_ACCEPTED {
         self.assertTrue(result["fired"])
         self.assertIn("1 0 www.example.com. A 192.0.2.20 1", result["logs"][0])
 
+    def test_tls_semantics_expose_sni_cipher_and_peer_certificate(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "CLIENTSSL"],
+                "irule": """
+when CLIENTSSL_CLIENTHELLO {
+    set cert [SSL::cert 0]
+    log local0. "[SSL::sni name] [SSL::sni required] [SSL::cipher name] [SSL::cipher bits] [SSL::sessionid] [SSL::cert count] [X509::subject $cert commonName] [X509::issuer $cert]"
+    SSL::disable clientside
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tls",
+                        "direction": "client_to_server",
+                        "type": "client_hello",
+                        "sni": "secure.example.com",
+                        "sni_required": True,
+                        "cipher_name": "TLS_AES_128_GCM_SHA256",
+                        "cipher_bits": 128,
+                        "cipher_version": "TLSv1.3",
+                        "session_id": "abc123",
+                        "cert_count": 1,
+                        "cert_subject": "CN=client.example.com,O=Example",
+                        "cert_issuer": "CN=Example Root CA",
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = next(
+            item
+            for item in result["trace"][0]["events"]
+            if item["event"] == "CLIENTSSL_CLIENTHELLO"
+        )
+        self.assertTrue(event["fired"])
+        self.assertIn(
+            "secure.example.com 1 TLS_AES_128_GCM_SHA256 128 abc123 1 client.example.com CN=Example Root CA",
+            event["logs"][0],
+        )
+        self.assertEqual(event["state"]["tls_client"]["disabled"], "1")
+
+    def test_tls_input_rejects_invalid_sni_required_value(self) -> None:
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "sni_required"):
+            self.adapter._normalise_packets(
+                [
+                    {
+                        "protocol": "tls",
+                        "direction": "client_to_server",
+                        "type": "client_hello",
+                        "sni_required": "sometimes",
+                    }
+                ]
+            )
+
     def test_sequence_aware_reassembly_handles_out_of_order_and_retransmission(self) -> None:
         request_payload = b"GET /ordered HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
         first = request_payload[:20]

@@ -119,14 +119,19 @@ EVENT_STATE_FIELDS = {
     },
     "tls_client": {
         "sni",
+        "sni_required",
         "cipher_name",
         "cipher_bits",
         "cipher_version",
+        "cipher_clientlist",
         "cert_subject",
         "cert_issuer",
         "cert_serial",
         "cert_hash",
         "cert_count",
+        "cert_mode",
+        "verify_result",
+        "disabled",
         "extensions",
         "alpn",
         "handshake_done",
@@ -134,14 +139,19 @@ EVENT_STATE_FIELDS = {
     },
     "tls_server": {
         "sni",
+        "sni_required",
         "cipher_name",
         "cipher_bits",
         "cipher_version",
+        "cipher_clientlist",
         "cert_subject",
         "cert_issuer",
         "cert_serial",
         "cert_hash",
         "cert_count",
+        "cert_mode",
+        "verify_result",
+        "disabled",
         "extensions",
         "alpn",
         "handshake_done",
@@ -437,6 +447,15 @@ SEMANTIC_MOCK_COMMANDS = {
     "DNSMSG::section",
     "RESOLVER::name_lookup",
     "RESOLVER::summarize",
+    "SSL::cert",
+    "SSL::cipher",
+    "SSL::disable",
+    "SSL::enable",
+    "SSL::sessionid",
+    "SSL::sni",
+    "SSL::verify_result",
+    "X509::issuer",
+    "X509::subject",
     "event",
     "HTTP::passthrough_reason",
     "HTTP::password",
@@ -1632,14 +1651,19 @@ PACKET_PROTOCOL_FIELDS = {
     "tls": {
         "type",
         "sni",
+        "sni_required",
         "cipher_name",
         "cipher_bits",
         "cipher_version",
+        "cipher_clientlist",
         "cert_subject",
         "cert_issuer",
         "cert_serial",
         "cert_hash",
         "cert_count",
+        "cert_mode",
+        "verify_result",
+        "disabled",
         "extensions",
         "alpn",
         "session_id",
@@ -4626,6 +4650,20 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = _require_string(packet[field], f"packet {index} {field}")
             elif field in {"fin", "masked"}:
                 normalised[field] = _packet_bool(packet[field], f"packet {index} {field}")
+            elif protocol == "tls" and field in {"sni_required", "disabled"}:
+                normalised[field] = _packet_bool(packet[field], f"packet {index} {field}")
+            elif protocol == "tls" and field in {"cipher_bits", "cert_count", "verify_result"}:
+                normalised[field] = _dns_uint(
+                    packet[field], f"packet {index} {field}",
+                    0xFFFF_FFFF if field == "verify_result" else 65535,
+                )
+            elif protocol == "tls" and field == "cert_mode":
+                mode = _require_string(packet[field], f"packet {index} cert_mode").lower()
+                if mode not in {"ignore", "request", "require"}:
+                    raise EmulatorInputError(
+                        f"packet {index} cert_mode must be ignore, request, or require"
+                    )
+                normalised[field] = mode
             elif field == "type":
                 if protocol == "gtp":
                     normalised[field] = _gtp_uint(
@@ -5655,20 +5693,25 @@ class EmulatorSession:
             tls_state: dict[str, str] = {}
             for field in (
                 "sni",
+                "sni_required",
                 "cipher_name",
                 "cipher_bits",
                 "cipher_version",
+                "cipher_clientlist",
                 "cert_subject",
                 "cert_issuer",
                 "cert_serial",
                 "cert_hash",
                 "cert_count",
+                "cert_mode",
+                "verify_result",
+                "disabled",
                 "extensions",
                 "alpn",
                 "session_id",
             ):
                 if field in packet:
-                    tls_state[field] = packet[field]
+                    tls_state[field] = _packet_scalar(packet[field], field)
             if packet.get("type") in {"handshake", "server_handshake"}:
                 tls_state["handshake_done"] = "1"
             if tls_state:

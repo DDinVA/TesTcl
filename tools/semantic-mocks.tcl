@@ -47,6 +47,8 @@ namespace eval ::itest::semantic {
     variable dns_message_counter 0
     variable dns_message_objects [dict create]
     variable resolver_records [dict create]
+    variable ssl_cert_counter 0
+    variable ssl_cert_objects [dict create]
 
     variable sip_discarded 0
     variable sip_response_requested 0
@@ -72,6 +74,29 @@ namespace eval ::itest::semantic {
         variable mask ""
         variable payload ""
         variable payload_length 0
+    }
+
+    foreach tls_side {client server} {
+        namespace eval ::state::tls::$tls_side {
+            variable sni ""
+            variable sni_required 0
+            variable cipher_name ""
+            variable cipher_bits 0
+            variable cipher_version ""
+            variable cipher_clientlist ""
+            variable cert_subject ""
+            variable cert_issuer ""
+            variable cert_serial ""
+            variable cert_hash ""
+            variable cert_count 0
+            variable cert_mode "ignore"
+            variable verify_result 0
+            variable disabled 0
+            variable extensions ""
+            variable alpn ""
+            variable handshake_done 0
+            variable session_id ""
+        }
     }
 
     namespace eval ::state::mqtt {
@@ -4856,6 +4881,174 @@ namespace eval ::itest::semantic {
         return [_uri_encode_value [lindex $args 0] 0]
     }
 
+    # ── TLS/SSL inspection and control semantics ─────────────────────
+    proc _ssl_namespace {{side ""}} {
+        if {$side eq "serverside" || [string match "SERVERSSL_*" $::itest::current_event]} {
+            return ::state::tls::server
+        }
+        return ::state::tls::client
+    }
+
+    proc _ssl_value {field {default ""}} {
+        set variable [_ssl_namespace]::$field
+        if {[info exists $variable]} { return [set $variable] }
+        return $default
+    }
+
+    proc ssl_sni_command {args} {
+        if {[llength $args] != 1 || [lindex $args 0] ni {name required}} {
+            error "SSL::sni requires name or required"
+        }
+        set field [lindex $args 0]
+        if {$field eq "name"} { return [_ssl_value sni] }
+        return [_ssl_value sni_required 0]
+    }
+
+    proc ssl_cipher_command {args} {
+        if {[llength $args] != 1 || [lindex $args 0] ni {bits name version clientlist}} {
+            error "SSL::cipher requires bits, name, version, or clientlist"
+        }
+        set field [lindex $args 0]
+        set field [dict get [dict create \
+            bits cipher_bits name cipher_name version cipher_version \
+            clientlist cipher_clientlist] $field]
+        return [_ssl_value $field]
+    }
+
+    proc ssl_sessionid_command {args} {
+        if {[llength $args] > 1 || ([llength $args] == 1 && [lindex $args 0] ne "desired")} {
+            error "SSL::sessionid accepts an optional desired argument"
+        }
+        return [_ssl_value session_id]
+    }
+
+    proc _ssl_cert_count {ns} {
+        set count_variable ${ns}::cert_count
+        if {[info exists $count_variable] && [string is integer -strict [set $count_variable]]} {
+            set count [set $count_variable]
+            if {$count > 0} { return $count }
+        }
+        set subject_variable ${ns}::cert_subject
+        if {[info exists $subject_variable] && [set $subject_variable] ne ""} { return 1 }
+        return 0
+    }
+
+    proc _ssl_cert_handle {index} {
+        variable ssl_cert_counter
+        variable ssl_cert_objects
+        set ns [_ssl_namespace]
+        set count [_ssl_cert_count $ns]
+        if {![string is integer -strict $index] || $index < 0 || $index >= $count} {
+            error "SSL::cert index is outside the peer certificate chain"
+        }
+        set handle "cert${ssl_cert_counter}_${index}"
+        if {[dict exists $ssl_cert_objects $ns $index]} {
+            return [dict get $ssl_cert_objects $ns $index]
+        }
+        incr ssl_cert_counter
+        set handle "cert$ssl_cert_counter"
+        set subject [_ssl_value cert_subject]
+        set issuer [_ssl_value cert_issuer]
+        set serial [_ssl_value cert_serial]
+        set hash [_ssl_value cert_hash]
+        dict set ssl_cert_objects $ns $index $handle
+        dict set ssl_cert_objects objects $handle [dict create \
+            subject $subject issuer $issuer serial $serial hash $hash]
+        return $handle
+    }
+
+    proc _ssl_cert_get {certificate field} {
+        variable ssl_cert_objects
+        if {![dict exists $ssl_cert_objects objects $certificate $field]} {
+            error "invalid X509 certificate object"
+        }
+        return [dict get $ssl_cert_objects objects $certificate $field]
+    }
+
+    proc ssl_cert_command {args} {
+        if {[llength $args] < 1 || [llength $args] > 2} {
+            error "SSL::cert requires count, issuer, mode, or an index"
+        }
+        set operation [lindex $args 0]
+        if {$operation eq "count"} {
+            if {[llength $args] != 1} { error "SSL::cert count takes no arguments" }
+            return [_ssl_cert_count [_ssl_namespace]]
+        }
+        if {$operation eq "mode"} {
+            if {[llength $args] == 2} {
+                if {[lindex $args 1] ni {ignore request require}} {
+                    error "SSL::cert mode must be ignore, request, or require"
+                }
+                set variable [_ssl_namespace]::cert_mode
+                set $variable [lindex $args 1]
+            }
+            return [_ssl_value cert_mode ignore]
+        }
+        if {$operation eq "issuer"} {
+            if {[llength $args] != 2} { error "SSL::cert issuer requires an index" }
+            return [_ssl_cert_handle [lindex $args 1]]
+        }
+        if {[llength $args] != 1 || ![string is integer -strict $operation]} {
+            error "SSL::cert requires count, issuer, mode, or an index"
+        }
+        return [_ssl_cert_handle $operation]
+    }
+
+    proc ssl_verify_result_command {args} {
+        if {[llength $args] > 1} { error "SSL::verify_result accepts one optional result code" }
+        set variable [_ssl_namespace]::verify_result
+        if {[llength $args] == 1} {
+            set value [lindex $args 0]
+            if {![string is integer -strict $value] || $value < 0} {
+                error "SSL::verify_result requires a non-negative integer"
+            }
+            set $variable $value
+        }
+        if {[info exists $variable]} { return [set $variable] }
+        return 0
+    }
+
+    proc _ssl_set_disabled {side value} {
+        set variable [_ssl_namespace $side]::disabled
+        set $variable $value
+        ::itest::log_decision ssl [expr {$value ? "disable" : "enable"}] $side
+        return ""
+    }
+
+    proc ssl_disable_command {args} {
+        if {[llength $args] > 1 || ([llength $args] == 1 && [lindex $args 0] ni {clientside serverside})} {
+            error "SSL::disable accepts optional clientside or serverside"
+        }
+        return [_ssl_set_disabled [expr {[llength $args] ? [lindex $args 0] : ""}] 1]
+    }
+
+    proc ssl_enable_command {args} {
+        if {[llength $args] > 1 || ([llength $args] == 1 && [lindex $args 0] ni {clientside serverside})} {
+            error "SSL::enable accepts optional clientside or serverside"
+        }
+        return [_ssl_set_disabled [expr {[llength $args] ? [lindex $args 0] : ""}] 0]
+    }
+
+    proc x509_subject_command {args} {
+        if {[llength $args] < 1 || [llength $args] > 2} {
+            error "X509::subject requires a certificate and optional commonName"
+        }
+        set subject [_ssl_cert_get [lindex $args 0] subject]
+        if {[llength $args] == 2} {
+            if {[lindex $args 1] ne "commonName"} { error "X509::subject supports commonName" }
+            if {[regexp -nocase {(?:^|[,/])(?:cn|commonname)=([^,/]+)} $subject -> common_name]} {
+                return $common_name
+            }
+            return ""
+        }
+        return $subject
+    }
+
+    proc x509_issuer_command {args} {
+        if {[llength $args] != 1} { error "X509::issuer requires a certificate" }
+        return [_ssl_cert_get [lindex $args 0] issuer]
+    }
+
     # ── DNS message and resource-record semantics ────────────────────
     #
     # The upstream harness recognizes the DNS namespace, but its older
@@ -6426,6 +6619,15 @@ foreach {name proc_name} {
     DNSMSG::section ::itest::semantic::dnsmsg_section_command
     RESOLVER::name_lookup ::itest::semantic::resolver_name_lookup
     RESOLVER::summarize ::itest::semantic::resolver_summarize
+    SSL::cert ::itest::semantic::ssl_cert_command
+    SSL::cipher ::itest::semantic::ssl_cipher_command
+    SSL::disable ::itest::semantic::ssl_disable_command
+    SSL::enable ::itest::semantic::ssl_enable_command
+    SSL::sessionid ::itest::semantic::ssl_sessionid_command
+    SSL::sni ::itest::semantic::ssl_sni_command
+    SSL::verify_result ::itest::semantic::ssl_verify_result_command
+    X509::issuer ::itest::semantic::x509_issuer_command
+    X509::subject ::itest::semantic::x509_subject_command
     class ::itest::cmd::cmd_class
     MQTT::clean_session ::itest::cmd::mqtt_clean_session
     MQTT::client_id ::itest::cmd::mqtt_client_id
