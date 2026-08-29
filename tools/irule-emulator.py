@@ -1064,6 +1064,8 @@ SEMANTIC_MOCK_COMMANDS = {
     "CLASSIFY::disable",
     "CLASSIFY::urlcat",
     "CLASSIFY::username",
+    "FLOWTABLE::count",
+    "FLOWTABLE::limit",
     "ICAP::header",
     "ICAP::method",
     "ICAP::status",
@@ -2435,6 +2437,25 @@ def _configure_http_proxy(session: Any, proxy_config: dict[str, Any]) -> None:
     session.eval_tcl(
         "::itest::semantic::http_proxy_configure "
         + " ".join(_tcl_quote(value) for value in values)
+    )
+
+
+def _configure_flowtable(session: Any, flowtable_config: dict[str, Any]) -> None:
+    """Install deterministic FLOWTABLE counts and limits."""
+    def flatten_pairs(values: dict[str, int]) -> list[str]:
+        return [
+            item
+            for key, value in values.items()
+            for item in (key, str(value))
+        ]
+
+    session.eval_tcl(
+        "::itest::semantic::flowtable_configure "
+        f"{_tcl_quote(str(flowtable_config['count_global']))} "
+        f"{_tcl_list(flatten_pairs(flowtable_config['count_virtual']))} "
+        f"{_tcl_list(flatten_pairs(flowtable_config['count_route_domain']))} "
+        f"{_tcl_list(flatten_pairs(flowtable_config['limit_virtual']))} "
+        f"{_tcl_list(flatten_pairs(flowtable_config['limit_route_domain']))}"
     )
 
 
@@ -4649,6 +4670,75 @@ def _normalise_http_proxy(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalise_flowtable(raw: Any) -> dict[str, Any]:
+    """Normalize bounded flow-table counts and configured limits."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("flowtable must be an object")
+    unknown = sorted(
+        (str(key) for key in set(raw) - {"count", "limit"}),
+    )
+    if unknown:
+        raise EmulatorInputError(
+            "flowtable unsupported field(s): " + ", ".join(unknown)
+        )
+
+    def groups(container: dict[str, Any], name: str) -> dict[str, int]:
+        value = container.get(name, {})
+        if not isinstance(value, dict):
+            raise EmulatorInputError(f"flowtable.{name} must be an object")
+        result: dict[str, int] = {}
+        for key, count in value.items():
+            if not isinstance(key, str) or not key or "\x00" in key:
+                raise EmulatorInputError(
+                    f"flowtable.{name} keys must be non-empty strings without NUL"
+                )
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise EmulatorInputError(
+                    f"flowtable.{name}.{key} must be a non-negative integer"
+                )
+            result[key] = count
+        return result
+
+    count = raw.get("count", {})
+    if not isinstance(count, dict):
+        raise EmulatorInputError("flowtable.count must be an object")
+    unknown_count = sorted(
+        (str(key) for key in set(count) - {"global", "virtual", "route_domain"}),
+    )
+    if unknown_count:
+        raise EmulatorInputError(
+            "flowtable.count unsupported field(s): " + ", ".join(unknown_count)
+        )
+    global_count = count.get("global", 0)
+    if (
+        isinstance(global_count, bool)
+        or not isinstance(global_count, int)
+        or global_count < 0
+    ):
+        raise EmulatorInputError(
+            "flowtable.count.global must be a non-negative integer"
+        )
+    limit = raw.get("limit", {})
+    if not isinstance(limit, dict):
+        raise EmulatorInputError("flowtable.limit must be an object")
+    unknown_limit = sorted(
+        (str(key) for key in set(limit) - {"virtual", "route_domain"}),
+    )
+    if unknown_limit:
+        raise EmulatorInputError(
+            "flowtable.limit unsupported field(s): " + ", ".join(unknown_limit)
+        )
+    return {
+        "count_global": global_count,
+        "count_virtual": groups(count, "virtual"),
+        "count_route_domain": groups(count, "route_domain"),
+        "limit_virtual": groups(limit, "virtual"),
+        "limit_route_domain": groups(limit, "route_domain"),
+    }
+
+
 def _normalise_ip(raw: Any) -> dict[str, Any]:
     """Normalize deterministic inputs for the bounded IP command model."""
     if raw is None:
@@ -4982,6 +5072,7 @@ def _normalise_scenario_config(
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
+    dict[str, Any],
 ]:
     if not isinstance(scenario, dict):
         raise EmulatorInputError("scenario must be a JSON object")
@@ -5005,6 +5096,7 @@ def _normalise_scenario_config(
         "ip",
         "route",
         "http_proxy",
+        "flowtable",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -5056,6 +5148,7 @@ def _normalise_scenario_config(
         _normalise_ip(scenario.get("ip")),
         _normalise_route(scenario.get("route")),
         _normalise_http_proxy(scenario.get("http_proxy")),
+        _normalise_flowtable(scenario.get("flowtable")),
     )
 
 
@@ -10134,6 +10227,7 @@ class EmulatorSession:
             ip_config,
             route_config,
             http_proxy_config,
+            flowtable_config,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -10160,6 +10254,7 @@ class EmulatorSession:
         self._route_config = route_config
         self._route_visible = bool(route_config["metrics"]) or "ROUTE::" in source
         self._http_proxy_config = http_proxy_config
+        self._flowtable_config = flowtable_config
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -10299,6 +10394,7 @@ class EmulatorSession:
                 _configure_ip(session, self._ip_config)
                 _configure_route(session, self._route_config)
                 _configure_http_proxy(session, self._http_proxy_config)
+                _configure_flowtable(session, self._flowtable_config)
                 session.eval_tcl("::itest::semantic::rewrite_reset_connection")
                 session.eval_tcl("::itest::semantic::html_reset_connection")
                 session.eval_tcl("::itest::semantic::compression_reset_connection")

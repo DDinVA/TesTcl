@@ -496,7 +496,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("CLASSIFICATION", "generated-stub"), queue_buckets)
         self.assertNotIn(("CATEGORY", "generated-stub"), queue_buckets)
         self.assertNotIn(("CLASSIFY", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 233)
+        self.assertNotIn(("FLOWTABLE", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 231)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -10070,6 +10071,96 @@ when HTTP_REQUEST { pool app }
 when HTTP_RESPONSE { HTTP::close }
 when CLIENT_CLOSED { FLOW::priority 8 }
 """,
+                    "requests": [{"uri": "/"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_flowtable_counts_and_limits_use_deterministic_scopes(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "flowtable": {
+                    "count": {
+                        "global": 42,
+                        "virtual": {"/Common/app": 7, "default": 8},
+                        "route_domain": {"0": 9, "default": 10},
+                    },
+                    "limit": {
+                        "virtual": {"/Common/app": 100, "default": 101},
+                        "route_domain": {"0": 1000, "default": 1001},
+                    },
+                },
+                "irule": """
+when HTTP_REQUEST {
+    set global [FLOWTABLE::count]
+    set virtual [FLOWTABLE::count virtual /Common/app]
+    set current_virtual [FLOWTABLE::count virtual]
+    set route [FLOWTABLE::count route_domain 0]
+    set current_route [FLOWTABLE::count route_domain]
+    set virtual_limit [FLOWTABLE::limit virtual /Common/app]
+    set current_virtual_limit [FLOWTABLE::limit virtual]
+    set route_limit [FLOWTABLE::limit route_domain 0]
+    set current_route_limit [FLOWTABLE::limit route_domain]
+    log local0. "global=$global virtual=$virtual current_virtual=$current_virtual route=$route current_route=$current_route virtual_limit=$virtual_limit current_virtual_limit=$current_virtual_limit route_limit=$route_limit current_route_limit=$current_route_limit"
+}
+""",
+                "requests": [{"uri": "/health"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        logs = result["results"][0]["logs"]
+        self.assertTrue(any(
+            "global=42 virtual=7 current_virtual=8 route=9 current_route=10 "
+            "virtual_limit=100 current_virtual_limit=101 route_limit=1000 "
+            "current_route_limit=1001" in entry
+            for entry in logs
+        ))
+        statuses = {
+            entry["name"]: entry["runtime_status"]
+            for entry in result["fidelity"]["commands"]
+            if entry["name"].startswith("FLOWTABLE::")
+        }
+        self.assertEqual(set(statuses), {"FLOWTABLE::count", "FLOWTABLE::limit"})
+        self.assertTrue(all(value == "semantic-mock" for value in statuses.values()))
+
+    def test_flowtable_missing_values_and_invalid_configuration_are_bounded(self) -> None:
+        missing = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "flowtable": {"count": {"global": 1}},
+                "irule": "when HTTP_REQUEST { log local0. \"count=[FLOWTABLE::count virtual /Common/missing] limit=[FLOWTABLE::limit route_domain 99]\" }",
+                "requests": [{"uri": "/"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any("count=0 limit=0" in entry for entry in missing["results"][0]["logs"]))
+
+        invalid_scenarios = (
+            ({"count": {"global": True}}, "flowtable.count.global"),
+            ({"count": {"virtual": {"/Common/app": -1}}}, "flowtable.virtual./Common/app"),
+            ({"limit": {"virtual": []}}, "flowtable.virtual must be an object"),
+            ({"count": {"unexpected": {}}}, "flowtable.count unsupported field"),
+            ({1: {}}, "flowtable unsupported field"),
+        )
+        for flowtable, message in invalid_scenarios:
+            with self.subTest(flowtable=flowtable):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(
+                        {
+                            "profiles": ["TCP", "HTTP"],
+                            "flowtable": flowtable,
+                            "irule": "when HTTP_REQUEST { return }",
+                            "requests": [{"uri": "/"}],
+                        },
+                        tcl_lsp_root=self.tcl_lsp_root,
+                    )
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "scope must be virtual or route_domain"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when HTTP_REQUEST { FLOWTABLE::count pool /Common/app }",
                     "requests": [{"uri": "/"}],
                 },
                 tcl_lsp_root=self.tcl_lsp_root,

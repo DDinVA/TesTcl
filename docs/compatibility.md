@@ -309,6 +309,13 @@ timeout, idle duration, refresh, and validated related-flow creation update a
 deterministic connection snapshot; a virtual event clock avoids wall-clock
 flakiness. This does not create sockets, perform source translation, schedule
 packets, or reproduce live TMM flow state.
+The two catalogued TMOS 17.5 `FLOWTABLE::` commands are represented by
+scenario-seeded counters and limits. A scenario may provide `flowtable.count`
+with `global`, `virtual`, and `route_domain` maps, plus `flowtable.limit` with
+`virtual` and `route_domain` maps. Missing entries return zero; when a scope
+name is omitted, the deterministic lookup key is `default`. This models the
+query and validation surface, not live flow creation, multi-TMM replication,
+aging, or enforcement of a configured limit.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

@@ -401,6 +401,11 @@ namespace eval ::itest::semantic {
     variable flow_next_related 0
     variable flow_handles [dict create]
     variable event_errors {}
+    variable flowtable_global_count 0
+    variable flowtable_virtual_counts [dict create]
+    variable flowtable_route_domain_counts [dict create]
+    variable flowtable_virtual_limits [dict create]
+    variable flowtable_route_domain_limits [dict create]
 
     variable sip_discarded 0
     variable sip_response_requested 0
@@ -5735,6 +5740,109 @@ namespace eval ::itest::semantic {
                 [dict get $flow hairpin] [dict get $flow inherit_vs]]
         }
         lappend result flows $flows
+        return $result
+    }
+
+    proc _flowtable_validate_pairs {pairs field_name} {
+        if {[llength $pairs] % 2 != 0} {
+            error "$field_name must contain NAME VALUE pairs"
+        }
+        set result [dict create]
+        foreach {name value} $pairs {
+            if {$name eq "" || [string first "\x00" $name] >= 0} {
+                error "$field_name names must be non-empty and must not contain NUL"
+            }
+            if {[dict exists $result $name]} {
+                error "$field_name contains duplicate name $name"
+            }
+            if {![string is integer -strict $value] || $value < 0} {
+                error "$field_name value for $name must be a non-negative integer"
+            }
+            dict set result $name $value
+        }
+        return $result
+    }
+
+    proc flowtable_configure {global_count virtual_counts route_counts virtual_limits route_limits} {
+        variable flowtable_global_count
+        variable flowtable_virtual_counts
+        variable flowtable_route_domain_counts
+        variable flowtable_virtual_limits
+        variable flowtable_route_domain_limits
+        if {![string is integer -strict $global_count] || $global_count < 0} {
+            error "FLOWTABLE global count must be a non-negative integer"
+        }
+        set flowtable_global_count $global_count
+        set flowtable_virtual_counts [_flowtable_validate_pairs $virtual_counts FLOWTABLE::count\ virtual]
+        set flowtable_route_domain_counts [_flowtable_validate_pairs $route_counts FLOWTABLE::count\ route_domain]
+        set flowtable_virtual_limits [_flowtable_validate_pairs $virtual_limits FLOWTABLE::limit\ virtual]
+        set flowtable_route_domain_limits [_flowtable_validate_pairs $route_limits FLOWTABLE::limit\ route_domain]
+    }
+
+    proc _flowtable_lookup {kind name command_name} {
+        variable flowtable_virtual_counts
+        variable flowtable_route_domain_counts
+        variable flowtable_virtual_limits
+        variable flowtable_route_domain_limits
+        if {$name eq "" || [string first "\x00" $name] >= 0} {
+            error "$command_name name must be non-empty and must not contain NUL"
+        }
+        switch -- $kind {
+            virtual {
+                if {$command_name eq "FLOWTABLE::limit"} {
+                    set table $flowtable_virtual_limits
+                } else {
+                    set table $flowtable_virtual_counts
+                }
+            }
+            route_domain {
+                if {$command_name eq "FLOWTABLE::limit"} {
+                    set table $flowtable_route_domain_limits
+                } else {
+                    set table $flowtable_route_domain_counts
+                }
+            }
+            default {
+                error "$command_name scope must be virtual or route_domain"
+            }
+        }
+        if {[dict exists $table $name]} {
+            return [dict get $table $name]
+        }
+        return 0
+    }
+
+    proc flowtable_count_command {args} {
+        variable flowtable_global_count
+        if {[llength $args] == 0} {
+            set scope global
+            set name ""
+            set result $flowtable_global_count
+        } elseif {[llength $args] in {1 2}} {
+            set scope [lindex $args 0]
+            set name default
+            if {[llength $args] == 2} {
+                set name [lindex $args 1]
+            }
+            set result [_flowtable_lookup $scope $name FLOWTABLE::count]
+        } else {
+            error "FLOWTABLE::count accepts no arguments or SCOPE and optional NAME"
+        }
+        ::itest::log_decision flowtable count [list $scope $name $result]
+        return $result
+    }
+
+    proc flowtable_limit_command {args} {
+        if {[llength $args] ni {1 2}} {
+            error "FLOWTABLE::limit requires SCOPE and optional NAME"
+        }
+        set scope [lindex $args 0]
+        set name default
+        if {[llength $args] == 2} {
+            set name [lindex $args 1]
+        }
+        set result [_flowtable_lookup $scope $name FLOWTABLE::limit]
+        ::itest::log_decision flowtable limit [list $scope $name $result]
         return $result
     }
 
@@ -17450,6 +17558,8 @@ foreach {name proc_name} {
     FLOW::priority ::itest::semantic::flow_priority
     FLOW::refresh ::itest::semantic::flow_refresh
     FLOW::this ::itest::semantic::flow_this
+    FLOWTABLE::count ::itest::semantic::flowtable_count_command
+    FLOWTABLE::limit ::itest::semantic::flowtable_limit_command
     STATS::get ::itest::semantic::stats_get
     STATS::incr ::itest::semantic::stats_incr
     STATS::set ::itest::semantic::stats_set

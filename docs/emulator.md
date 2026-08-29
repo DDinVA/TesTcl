@@ -584,6 +584,35 @@ dependence. Related handles are state records only: the adapter does not
 open sockets, inject packets, perform source translation, or create a live
 TMM connection.
 
+### FLOWTABLE query inputs
+
+The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,
+scenario-provided data so rules can test branching and logging without a live
+TMM. For example:
+
+```json
+{
+  "flowtable": {
+    "count": {
+      "global": 42,
+      "virtual": {"/Common/app": 7, "default": 8},
+      "route_domain": {"0": 9}
+    },
+    "limit": {
+      "virtual": {"/Common/app": 100},
+      "route_domain": {"0": 1000}
+    }
+  }
+}
+```
+
+`FLOWTABLE::count` accepts no arguments for the global count, or
+`virtual [NAME]` and `route_domain [NAME]`. `FLOWTABLE::limit` accepts
+`virtual [NAME]` and `route_domain [NAME]`. An omitted name looks up the
+`default` key; an absent entry returns `0`. This is intentionally a query
+model: it does not create or age flows, replicate state between TMMs, or
+enforce limits against traffic.
+
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose
