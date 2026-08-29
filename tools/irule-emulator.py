@@ -654,6 +654,29 @@ EVENT_STATE_FIELDS = {
     "ha": {"status"},
     "bigproto": {"enable_fix_reset"},
     "bigtcp": {"released"},
+    "bwc": {
+        "attached",
+        "policy",
+        "session_id",
+        "rate",
+        "rate_category",
+        "pps",
+        "color_policy",
+        "color_category",
+        "color_set",
+        "mark_scope",
+        "mark_category",
+        "mark_tos",
+        "mark_qos",
+        "priority",
+        "measure_enabled",
+        "measure_scope",
+        "measure_session",
+        "measure_identifier",
+        "measure_rate",
+        "measure_bytes",
+        "debug_enabled",
+    },
     "eca": {"enabled", "selected", "client_machine_name", "domainname", "status", "username"},
     "avr": {"enabled", "cspm_injection_enabled", "log_requested"},
     "fix": {"tags", "tag_maps"},
@@ -1041,6 +1064,7 @@ EVENT_STATE_NAMESPACES = {
     "ha": "::state::ha",
     "bigproto": "::state::bigproto",
     "bigtcp": "::state::bigtcp",
+    "bwc": "::state::bwc",
     "eca": "::state::eca",
     "avr": "::state::avr",
     "fix": "::state::fix",
@@ -1240,6 +1264,14 @@ SEMANTIC_MOCK_COMMANDS = {
     "AVR::disable_cspm_injection",
     "AVR::enable",
     "AVR::log",
+    "BWC::color",
+    "BWC::debug",
+    "BWC::mark",
+    "BWC::measure",
+    "BWC::policy",
+    "BWC::pps",
+    "BWC::priority",
+    "BWC::rate",
     "CLASSIFY::application",
     "CLASSIFY::category",
     "CLASSIFY::defer",
@@ -2793,6 +2825,100 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "select": oneconnect_parts[2],
         "label": oneconnect_parts[3],
     }
+    bwc_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::bwc_snapshot")
+    )
+    if len(bwc_parts) % 2:
+        raise EmulatorInputError("invalid BWC state")
+    bwc_keys = bwc_parts[::2]
+    if len(set(bwc_keys)) != len(bwc_keys):
+        raise EmulatorInputError("duplicate BWC state field")
+    bwc_values = dict(zip(bwc_parts[::2], bwc_parts[1::2]))
+    expected_bwc_fields = {
+        "attached", "policy", "session_id", "rate", "rate_category", "pps",
+        "color_policy", "color_category", "color_set", "mark_scope",
+        "mark_category", "mark_tos", "mark_qos", "priority", "measure_enabled",
+        "measure_scope", "measure_session", "measure_identifier", "measure_rate",
+        "measure_bytes", "debug_enabled",
+    }
+    if set(bwc_values) != expected_bwc_fields:
+        raise EmulatorInputError("invalid BWC state fields")
+    if any(
+        bwc_values[name] not in {"0", "1"}
+        for name in ("attached", "color_set", "measure_enabled", "debug_enabled")
+    ):
+        raise EmulatorInputError("invalid BWC boolean state")
+    if bwc_values["measure_scope"] not in {"", "flow", "session"}:
+        raise EmulatorInputError("invalid BWC measurement scope")
+    if bwc_values["mark_scope"] not in {"", "policy", "category"}:
+        raise EmulatorInputError("invalid BWC mark scope")
+    if bwc_values["color_set"] == "1" and not (
+        bwc_values["color_policy"] and bwc_values["color_category"]
+    ):
+        raise EmulatorInputError("invalid BWC color state")
+    bwc_ints: dict[str, int] = {}
+    for name in ("measure_rate", "measure_bytes"):
+        try:
+            value = int(bwc_values[name])
+        except (KeyError, TypeError, ValueError):
+            raise EmulatorInputError(f"invalid BWC {name} state") from None
+        if value < 0:
+            raise EmulatorInputError(f"invalid BWC {name} state")
+        bwc_ints[name] = value
+    if bwc_values["pps"] == "":
+        bwc_pps: int | None = None
+    else:
+        try:
+            bwc_pps = int(bwc_values["pps"])
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid BWC PPS state") from None
+        if bwc_pps < 0:
+            raise EmulatorInputError("invalid BWC PPS state")
+    priority_parts = _split_tcl_list(bwc_values["priority"])
+    if len(priority_parts) % 2:
+        raise EmulatorInputError("invalid BWC priority state")
+    priority: dict[str, int] = {}
+    for name, raw_weight in zip(priority_parts[::2], priority_parts[1::2]):
+        if not name or name in priority:
+            raise EmulatorInputError("invalid BWC priority class state")
+        try:
+            weight = int(raw_weight)
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid BWC priority weight state") from None
+        if not 0 <= weight <= 100:
+            raise EmulatorInputError("invalid BWC priority weight state")
+        priority[name] = weight
+    bwc = {
+        "attached": bwc_values["attached"] == "1",
+        "policy": bwc_values["policy"],
+        "session_id": bwc_values["session_id"],
+        "rate": {
+            "value": bwc_values["rate"],
+            "category": bwc_values["rate_category"],
+        },
+        "pps": bwc_pps,
+        "color": {
+            "set": bwc_values["color_set"] == "1",
+            "policy": bwc_values["color_policy"],
+            "category": bwc_values["color_category"],
+        },
+        "mark": {
+            "scope": bwc_values["mark_scope"],
+            "category": bwc_values["mark_category"],
+            "tos": bwc_values["mark_tos"],
+            "qos": bwc_values["mark_qos"],
+        },
+        "priority": priority,
+        "measurement": {
+            "enabled": bwc_values["measure_enabled"] == "1",
+            "scope": bwc_values["measure_scope"],
+            "session_id": bwc_values["measure_session"],
+            "identifier": bwc_values["measure_identifier"],
+            "rate": bwc_ints["measure_rate"],
+            "bytes": bwc_ints["measure_bytes"],
+        },
+        "debug": bwc_values["debug_enabled"] == "1",
+    }
     adapt_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::adapt_snapshot")
     )
@@ -3618,6 +3744,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "values": istats,
         },
         "oneconnect": oneconnect,
+        "bwc": bwc,
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "lb": lb_control,
@@ -10845,6 +10972,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::lb_reset_connection")
                 session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
                 session.eval_tcl("::itest::semantic::crypto_reset_connection")
+                session.eval_tcl("::itest::semantic::bwc_reset_connection")
                 session.eval_tcl("::itest::semantic::adapt_reset_connection")
                 session.eval_tcl("::itest::semantic::datagram_reset_connection")
                 session.eval_tcl("::itest::semantic::sctp_reset_connection")
@@ -10906,6 +11034,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::httplog_reset_connection")
                 session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
                 session.eval_tcl("::itest::semantic::crypto_reset_connection")
+                session.eval_tcl("::itest::semantic::bwc_reset_connection")
                 session.eval_tcl("::itest::semantic::adapt_reset_connection")
                 session.eval_tcl("::itest::semantic::datagram_reset_connection")
                 session.eval_tcl("::itest::semantic::sctp_reset_connection")
@@ -11221,6 +11350,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::httplog_reset_connection")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::crypto_reset_connection")
+            session.eval_tcl("::itest::semantic::bwc_reset_connection")
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
             session.eval_tcl("::itest::semantic::datagram_reset_connection")
             session.eval_tcl("::itest::semantic::sctp_reset_connection")
@@ -11253,6 +11383,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::httplog_reset_connection")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::crypto_reset_connection")
+            session.eval_tcl("::itest::semantic::bwc_reset_connection")
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
             session.eval_tcl("::itest::semantic::datagram_reset_connection")
             session.eval_tcl("::itest::semantic::sctp_reset_connection")
@@ -11538,6 +11669,7 @@ class EmulatorSession:
             if event_name == "CLIENT_ACCEPTED":
                 session.eval_tcl("::itest::semantic::l7check_reset_connection")
                 session.eval_tcl("::itest::semantic::link_reset_connection")
+                session.eval_tcl("::itest::semantic::bwc_reset_connection")
                 session.eval_tcl("::itest::semantic::eca_reset_connection")
                 session.eval_tcl("::itest::semantic::avr_reset_connection")
             return self._fire_event_on_worker(session, event_name, normalised_state)
@@ -12636,6 +12768,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::httplog_reset_connection")
         session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
         session.eval_tcl("::itest::semantic::crypto_reset_connection")
+        session.eval_tcl("::itest::semantic::bwc_reset_connection")
         session.eval_tcl("::itest::semantic::adapt_reset_connection")
         session.eval_tcl("::itest::semantic::datagram_reset_connection")
         session.eval_tcl("::itest::semantic::sctp_reset_connection")

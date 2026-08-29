@@ -1106,6 +1106,30 @@ namespace eval ::itest::semantic {
         variable released 0
     }
 
+    namespace eval ::state::bwc {
+        variable attached 0
+        variable policy ""
+        variable session_id ""
+        variable rate ""
+        variable rate_category ""
+        variable pps ""
+        variable color_policy ""
+        variable color_category ""
+        variable color_set 0
+        variable mark_scope ""
+        variable mark_category ""
+        variable mark_tos ""
+        variable mark_qos ""
+        variable priority ""
+        variable measure_enabled 0
+        variable measure_scope ""
+        variable measure_session ""
+        variable measure_identifier ""
+        variable measure_rate 0
+        variable measure_bytes 0
+        variable debug_enabled 0
+    }
+
     namespace eval ::state::eca {
         variable enabled 0
         variable selected ""
@@ -6190,6 +6214,400 @@ namespace eval ::itest::semantic {
         }
         set ::state::avr::cspm_injection_enabled 0
         ::itest::log_decision avr disable_cspm_injection
+        return ""
+    }
+
+    proc bwc_reset_connection {} {
+        set ::state::bwc::attached 0
+        set ::state::bwc::policy ""
+        set ::state::bwc::session_id ""
+        set ::state::bwc::rate ""
+        set ::state::bwc::rate_category ""
+        set ::state::bwc::pps ""
+        set ::state::bwc::color_policy ""
+        set ::state::bwc::color_category ""
+        set ::state::bwc::color_set 0
+        set ::state::bwc::mark_scope ""
+        set ::state::bwc::mark_category ""
+        set ::state::bwc::mark_tos ""
+        set ::state::bwc::mark_qos ""
+        set ::state::bwc::priority ""
+        set ::state::bwc::measure_enabled 0
+        set ::state::bwc::measure_scope ""
+        set ::state::bwc::measure_session ""
+        set ::state::bwc::measure_identifier ""
+        set ::state::bwc::measure_rate 0
+        set ::state::bwc::measure_bytes 0
+        set ::state::bwc::debug_enabled 0
+    }
+
+    proc bwc_snapshot {} {
+        return [list \
+            attached $::state::bwc::attached policy $::state::bwc::policy \
+            session_id $::state::bwc::session_id rate $::state::bwc::rate \
+            rate_category $::state::bwc::rate_category pps $::state::bwc::pps \
+            color_policy $::state::bwc::color_policy \
+            color_category $::state::bwc::color_category \
+            color_set $::state::bwc::color_set mark_scope $::state::bwc::mark_scope \
+            mark_category $::state::bwc::mark_category mark_tos $::state::bwc::mark_tos \
+            mark_qos $::state::bwc::mark_qos priority $::state::bwc::priority \
+            measure_enabled $::state::bwc::measure_enabled \
+            measure_scope $::state::bwc::measure_scope \
+            measure_session $::state::bwc::measure_session \
+            measure_identifier $::state::bwc::measure_identifier \
+            measure_rate $::state::bwc::measure_rate \
+            measure_bytes $::state::bwc::measure_bytes \
+            debug_enabled $::state::bwc::debug_enabled]
+    }
+
+    proc _bwc_require_attached {command_name} {
+        if {$::state::bwc::attached ne "1"} {
+            error "$command_name requires an attached BWC policy"
+        }
+    }
+
+    proc _bwc_text {value field_name} {
+        if {$value eq "" || [string first "\x00" $value] >= 0 ||
+            [string first "\r" $value] >= 0 || [string first "\n" $value] >= 0} {
+            error "$field_name must be a non-empty value without NUL bytes or newlines"
+        }
+        return $value
+    }
+
+    proc _bwc_session_matches {session} {
+        if {$session eq ""} { return 0 }
+        if {$::state::bwc::session_id eq ""} { return 1 }
+        return [expr {$session eq $::state::bwc::session_id}]
+    }
+
+    proc bwc_policy_command {args} {
+        if {[llength $args] < 2 || [llength $args] > 3} {
+            error "BWC::policy requires attach or detach, a policy name, and an optional session id"
+        }
+        set operation [string tolower [lindex $args 0]]
+        if {$operation ni {attach detach}} {
+            error "BWC::policy operation must be attach or detach"
+        }
+        set policy [_bwc_text [lindex $args 1] "BWC policy name"]
+        set session ""
+        if {[llength $args] == 3} {
+            set session [_bwc_text [lindex $args 2] "BWC session id"]
+        }
+        if {$operation eq "attach"} {
+            set ::state::bwc::attached 1
+            set ::state::bwc::policy $policy
+            set ::state::bwc::session_id $session
+            set ::state::bwc::rate ""
+            set ::state::bwc::rate_category ""
+            set ::state::bwc::pps ""
+            set ::state::bwc::color_policy ""
+            set ::state::bwc::color_category ""
+            set ::state::bwc::color_set 0
+            set ::state::bwc::mark_scope ""
+            set ::state::bwc::mark_category ""
+            set ::state::bwc::mark_tos ""
+            set ::state::bwc::mark_qos ""
+            set ::state::bwc::priority ""
+            set ::state::bwc::measure_enabled 0
+            set ::state::bwc::measure_scope ""
+            set ::state::bwc::measure_session ""
+            set ::state::bwc::measure_identifier ""
+            set ::state::bwc::measure_rate 0
+            set ::state::bwc::measure_bytes 0
+            set ::state::bwc::debug_enabled 0
+            ::itest::log_decision bwc policy [list attach $policy $session]
+            return ""
+        }
+        _bwc_require_attached BWC::policy
+        if {$policy ne $::state::bwc::policy ||
+            ($session ne "" && ![_bwc_session_matches $session])} {
+            error "BWC::policy detach does not match the attached policy or session"
+        }
+        bwc_reset_connection
+        ::itest::log_decision bwc policy [list detach $policy $session]
+        return ""
+    }
+
+    proc _bwc_rate_value {args} {
+        if {[llength $args] ni {1 2}} {
+            error "BWC bandwidth value requires a number with an optional bps multiplier"
+        }
+        set number [lindex $args 0]
+        set unit "bps"
+        if {[llength $args] == 2} {
+            set unit [lindex $args 1]
+        } elseif {[regexp -nocase {^([0-9]+(?:\.[0-9]+)?)([kmgt]?bps)?$} $number -> parsed_number parsed_unit]} {
+            set number $parsed_number
+            if {$parsed_unit ne ""} { set unit $parsed_unit }
+        } else {
+            error "BWC bandwidth value must be a non-negative number with bps, Kbps, Mbps, or Gbps"
+        }
+        if {![regexp {^[0-9]+(?:\.[0-9]+)?$} $number]} {
+            error "BWC bandwidth value must be a non-negative number"
+        }
+        set unit [string tolower $unit]
+        if {$unit ni {bps kbps mbps gbps tbps}} {
+            error "BWC bandwidth multiplier must be bps, Kbps, Mbps, Gbps, or Tbps"
+        }
+        return "$number $unit"
+    }
+
+    proc bwc_rate_command {args} {
+        _bwc_require_attached BWC::rate
+        if {[llength $args] < 2 || [llength $args] > 4} {
+            error "BWC::rate requires session, optional category, and bandwidth value"
+        }
+        set session [_bwc_text [lindex $args 0] "BWC session id"]
+        if {![_bwc_session_matches $session]} {
+            error "BWC::rate session does not match the attached policy"
+        }
+        set rate_category ""
+        set value_args [lrange $args 1 end]
+        if {[llength $value_args] >= 2 &&
+            ![regexp -nocase {^[0-9]+(?:\.[0-9]+)?(?:[kmgt]?bps)?$} [lindex $value_args 0]]} {
+            set rate_category [_bwc_text [lindex $value_args 0] "BWC category"]
+            set value_args [lrange $value_args 1 end]
+        }
+        set ::state::bwc::rate [_bwc_rate_value {*}$value_args]
+        set ::state::bwc::rate_category $rate_category
+        ::itest::log_decision bwc rate [list $session $rate_category $::state::bwc::rate]
+        return ""
+    }
+
+    proc bwc_pps_command {args} {
+        _bwc_require_attached BWC::pps
+        if {[llength $args] != 1 || ![string is integer -strict [lindex $args 0]] ||
+            [lindex $args 0] < 0} {
+            error "BWC::pps requires a non-negative integer"
+        }
+        set ::state::bwc::pps [lindex $args 0]
+        ::itest::log_decision bwc pps $::state::bwc::pps
+        return ""
+    }
+
+    proc bwc_color_command {args} {
+        _bwc_require_attached BWC::color
+        set operation [string tolower [lindex $args 0]]
+        if {$operation ni {set unset}} {
+            error "BWC::color operation must be set or unset"
+        }
+        if {$operation eq "set" && [llength $args] != 3} {
+            error "BWC::color set requires a policy name and a category name"
+        }
+        if {$operation eq "unset" && [llength $args] ni {2 3}} {
+            error "BWC::color unset requires a policy name and an optional category name"
+        }
+        set policy [_bwc_text [lindex $args 1] "BWC policy name"]
+        set category ""
+        if {[llength $args] == 3} {
+            set category [_bwc_text [lindex $args 2] "BWC category name"]
+        }
+        if {$policy ne $::state::bwc::policy} {
+            error "BWC::color policy does not match the attached policy"
+        }
+        set ::state::bwc::color_policy $policy
+        set ::state::bwc::color_category $category
+        set ::state::bwc::color_set [expr {$operation eq "set"}]
+        ::itest::log_decision bwc color [list $operation $policy $category]
+        return ""
+    }
+
+    proc bwc_mark_command {args} {
+        _bwc_require_attached BWC::mark
+        if {[llength $args] ni {3 4}} {
+            error "BWC::mark requires session, optional category, tos or qos, and value"
+        }
+        set session [_bwc_text [lindex $args 0] "BWC session id"]
+        if {![_bwc_session_matches $session]} {
+            error "BWC::mark session does not match the attached policy"
+        }
+        set scope policy
+        set category ""
+        if {[llength $args] == 4} {
+            set scope category
+            set category [_bwc_text [lindex $args 1] "BWC category name"]
+            set kind [string tolower [lindex $args 2]]
+            set value [lindex $args 3]
+        } else {
+            set kind [string tolower [lindex $args 1]]
+            set value [lindex $args 2]
+        }
+        if {$kind ni {tos qos}} {
+            error "BWC::mark kind must be tos or qos"
+        }
+        if {$value ne "passthrough"} {
+            if {![string is integer -strict $value] || [lindex [list $value] 0] < 0 ||
+                ($kind eq "qos" && $value > 7) || ($kind eq "tos" && $value > 255)} {
+                error "BWC::mark value must be passthrough or an integer in the valid tos/qos range"
+            }
+        }
+        set ::state::bwc::mark_scope $scope
+        set ::state::bwc::mark_category $category
+        if {$kind eq "tos"} {
+            set ::state::bwc::mark_tos $value
+            set ::state::bwc::mark_qos ""
+        } else {
+            set ::state::bwc::mark_qos $value
+            set ::state::bwc::mark_tos ""
+        }
+        ::itest::log_decision bwc mark [list $session $category $kind $value]
+        return ""
+    }
+
+    proc bwc_priority_command {args} {
+        _bwc_require_attached BWC::priority
+        if {[llength $args] < 2 || [llength $args] % 2} {
+            error "BWC::priority requires priority class and percentage pairs"
+        }
+        set pairs [list]
+        foreach {name weight} $args {
+            set name [_bwc_text $name "BWC priority class"]
+            if {![string is integer -strict $weight] || $weight < 0 || $weight > 100} {
+                error "BWC priority weight must be an integer from 0 through 100"
+            }
+            lappend pairs $name $weight
+        }
+        set seen [list]
+        foreach {name weight} $pairs {
+            if {[lsearch -exact $seen $name] >= 0} {
+                error "BWC priority class names must be unique"
+            }
+            lappend seen $name
+        }
+        set ::state::bwc::priority $pairs
+        ::itest::log_decision bwc priority $pairs
+        return ""
+    }
+
+    proc _bwc_event_payload_bytes {{event_name ""}} {
+        if {$event_name eq ""} { set event_name $::itest::current_event }
+        if {$event_name eq "HTTP_REQUEST" &&
+            [info exists ::state::http::request::payload]} {
+            return [string bytelength $::state::http::request::payload]
+        }
+        if {$event_name eq "HTTP_RESPONSE" &&
+            [info exists ::state::http::response::payload]} {
+            return [string bytelength $::state::http::response::payload]
+        }
+        set connection_total 0
+        foreach variable_name {
+            ::state::connection::client_payload ::state::connection::server_payload
+        } {
+            if {[info exists $variable_name]} {
+                incr connection_total [string bytelength [set $variable_name]]
+            }
+        }
+        if {$connection_total > 0} { return $connection_total }
+        foreach variable_name {
+            ::state::tcp::payload ::state::udp::payload ::state::sctp::payload
+            ::state::http2::payload ::state::websocket::payload ::state::mqtt::payload
+            ::state::sip::payload ::state::diameter::payload ::state::radius::payload
+            ::state::gtp::payload ::state::mr::payload ::state::rtsp::payload
+        } {
+            if {[info exists $variable_name] && [string bytelength [set $variable_name]] > 0} {
+                return [string bytelength [set $variable_name]]
+            }
+        }
+        return 0
+    }
+
+    proc bwc_prepare_event {event_name} {
+        if {$::state::bwc::measure_enabled ne "1"} { return }
+        set event_bytes [_bwc_event_payload_bytes $event_name]
+        if {$event_bytes > 0} {
+            incr ::state::bwc::measure_bytes $event_bytes
+            set ::state::bwc::measure_rate $::state::bwc::measure_bytes
+        }
+    }
+
+    proc bwc_measure_command {args} {
+        _bwc_require_attached BWC::measure
+        if {[llength $args] < 2} {
+            error "BWC::measure requires start, stop, identifier, or get and a flow/session scope"
+        }
+        set operation [string tolower [lindex $args 0]]
+        switch -exact -- $operation {
+            start - stop {
+                if {[llength $args] < 2 || [llength $args] > 3} {
+                    error "BWC::measure $operation requires flow or session and an optional session id"
+                }
+                set scope [string tolower [lindex $args 1]]
+                if {$scope ni {flow session}} { error "BWC measurement scope must be flow or session" }
+                set session ""
+                if {[llength $args] == 3} {
+                    set session [_bwc_text [lindex $args 2] "BWC session id"]
+                    if {![_bwc_session_matches $session]} {
+                        error "BWC measurement session does not match the attached policy"
+                    }
+                }
+                set was_enabled $::state::bwc::measure_enabled
+                set ::state::bwc::measure_enabled [expr {$operation eq "start"}]
+                set ::state::bwc::measure_scope $scope
+                set ::state::bwc::measure_session $session
+                if {$operation eq "start" && !$was_enabled} {
+                    set event_bytes [_bwc_event_payload_bytes]
+                    if {$event_bytes > 0} {
+                        incr ::state::bwc::measure_bytes $event_bytes
+                        set ::state::bwc::measure_rate $::state::bwc::measure_bytes
+                    }
+                }
+                if {$operation eq "stop"} {
+                    set ::state::bwc::measure_rate 0
+                    set ::state::bwc::measure_bytes 0
+                }
+                ::itest::log_decision bwc measure [list $operation $scope $session]
+                return ""
+            }
+            identifier {
+                if {[llength $args] < 3 || [llength $args] > 4} {
+                    error "BWC::measure identifier requires id, flow or session, and optional session id"
+                }
+                set identifier [_bwc_text [lindex $args 1] "BWC measurement identifier"]
+                set scope [string tolower [lindex $args 2]]
+                if {$scope ni {flow session}} { error "BWC measurement scope must be flow or session" }
+                set session ""
+                if {[llength $args] == 4} {
+                    set session [_bwc_text [lindex $args 3] "BWC session id"]
+                    if {![_bwc_session_matches $session]} {
+                        error "BWC measurement session does not match the attached policy"
+                    }
+                }
+                set ::state::bwc::measure_identifier $identifier
+                set ::state::bwc::measure_scope $scope
+                set ::state::bwc::measure_session $session
+                ::itest::log_decision bwc measure_identifier [list $identifier $scope $session]
+                return ""
+            }
+            get {
+                if {[llength $args] < 3 || [llength $args] > 4} {
+                    error "BWC::measure get requires rate or bytes, flow or session, and optional session id"
+                }
+                set metric [string tolower [lindex $args 1]]
+                if {$metric ni {rate bytes}} { error "BWC measurement metric must be rate or bytes" }
+                set scope [string tolower [lindex $args 2]]
+                if {$scope ni {flow session}} { error "BWC measurement scope must be flow or session" }
+                if {[llength $args] == 4} {
+                    set requested_session [_bwc_text [lindex $args 3] "BWC session id"]
+                    if {![_bwc_session_matches $requested_session]} {
+                        error "BWC measurement session does not match the attached policy"
+                    }
+                }
+                if {!$::state::bwc::measure_enabled} {
+                    error "BWC::measure get requires measurement to be started"
+                }
+                if {$metric eq "rate"} { return $::state::bwc::measure_rate }
+                return $::state::bwc::measure_bytes
+            }
+            default { error "unsupported BWC::measure operation $operation" }
+        }
+    }
+
+    proc bwc_debug_command {args} {
+        if {[llength $args] != 1 || [string tolower [lindex $args 0]] ni {start stop}} {
+            error "BWC::debug requires start or stop"
+        }
+        set ::state::bwc::debug_enabled [expr {[string tolower [lindex $args 0]] eq "start"}]
+        ::itest::log_decision bwc debug [lindex $args 0]
         return ""
     }
 
@@ -20122,6 +20540,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
         } elseif {$gated && $event_name eq "HTTP_RESPONSE"} {
             ::itest::semantic::compression_process_decompress response
         }
+        ::itest::semantic::bwc_prepare_event $event_name
         set result [uplevel 1 [list ::itest::_testcl_fire_event_orig $event_name]]
         if {$gated && $event_name eq "HTTP_REQUEST"} {
             if {$rewrite_auto &&
@@ -20402,6 +20821,14 @@ foreach {original replacement} {
     avr_disable_cspm_injection avr_disable_cspm_injection_command
     avr_enable avr_enable_command
     avr_log avr_log_command
+    bwc_color bwc_color_command
+    bwc_debug bwc_debug_command
+    bwc_mark bwc_mark_command
+    bwc_measure bwc_measure_command
+    bwc_policy bwc_policy_command
+    bwc_pps bwc_pps_command
+    bwc_priority bwc_priority_command
+    bwc_rate bwc_rate_command
     fix_tag fix_tag_command
     psc_aaa_reporting_interval psc_aaa_reporting_interval_command
     psc_attr psc_attr_command

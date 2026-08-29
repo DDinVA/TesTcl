@@ -1850,7 +1850,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
         self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 139)
+        self.assertNotIn(("BWC", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 131)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -4964,6 +4965,102 @@ when HTTP_REQUEST {
         self.assertEqual(entry["node"], "192.0.2.10")
         self.assertTrue(any("mode=roundrobin snat=automap" in log for log in entry["logs"]))
         self.assertTrue(any("queued=0" in log and "limit=limit 10 key tenant-a" in log for log in entry["logs"]))
+
+    def test_semantic_overlay_models_bwc_flow_controls_and_measurement(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    set ::bwc_session "[IP::remote_addr]:[TCP::remote_port]"
+    BWC::policy attach video_policy $::bwc_session
+    BWC::color set video_policy streaming
+    BWC::mark $::bwc_session tos 33
+    log local0. "policy_mark=[set ::state::bwc::mark_tos]"
+    BWC::mark $::bwc_session streaming qos 4
+    BWC::rate $::bwc_session streaming 200 Mbps
+    BWC::pps 77
+    BWC::priority tc1 60 tc2 40
+    BWC::measure identifier video_measure session $::bwc_session
+    BWC::measure start session $::bwc_session
+    BWC::debug start
+}
+when HTTP_REQUEST {
+    if {[HTTP::path] eq "/detach"} {
+        BWC::color unset video_policy
+        BWC::measure stop session $::bwc_session
+        BWC::policy detach video_policy $::bwc_session
+    }
+}
+when HTTP_RESPONSE {
+    if {[HTTP::path] eq "/measure"} {
+        set measured_bytes [BWC::measure get bytes session $::bwc_session]
+        set measured_rate [BWC::measure get rate session $::bwc_session]
+        log local0. "measure=$measured_rate/$measured_bytes"
+    }
+}
+""",
+                "requests": [
+                    {"uri": "/measure", "response_body": "hello"},
+                    {"uri": "/detach"},
+                    {"uri": "/fresh", "new_connection": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        measured, detached, fresh = result["results"]
+        bwc = measured["semantic"]["bwc"]
+        self.assertTrue(bwc["attached"])
+        self.assertEqual(bwc["policy"], "video_policy")
+        self.assertEqual(bwc["rate"], {"value": "200 mbps", "category": "streaming"})
+        self.assertEqual(bwc["pps"], 77)
+        self.assertEqual(
+            bwc["color"],
+            {"set": True, "policy": "video_policy", "category": "streaming"},
+        )
+        self.assertEqual(
+            bwc["mark"],
+            {"scope": "category", "category": "streaming", "tos": "", "qos": "4"},
+        )
+        self.assertEqual(bwc["priority"], {"tc1": 60, "tc2": 40})
+        self.assertEqual(
+            bwc["measurement"]["identifier"],
+            "video_measure",
+        )
+        self.assertTrue(bwc["measurement"]["enabled"])
+        self.assertGreaterEqual(bwc["measurement"]["bytes"], 5)
+        self.assertEqual(
+            bwc["measurement"]["rate"],
+            bwc["measurement"]["bytes"],
+        )
+        self.assertTrue(bwc["debug"])
+        self.assertTrue(any("policy_mark=33" in log for log in measured["logs"]))
+        self.assertTrue(any("measure=" in log for log in measured["logs"]))
+
+        self.assertFalse(detached["semantic"]["bwc"]["attached"])
+        self.assertEqual(detached["semantic"]["bwc"]["policy"], "")
+        self.assertTrue(fresh["semantic"]["bwc"]["attached"])
+        self.assertEqual(fresh["semantic"]["bwc"]["policy"], "video_policy")
+        self.assertEqual(
+            fresh["semantic"]["bwc"]["rate"],
+            {"value": "200 mbps", "category": "streaming"},
+        )
+
+        invalid_rules = (
+            ("when CLIENT_ACCEPTED { BWC::pps -1 }", "BWC::pps"),
+            ("when CLIENT_ACCEPTED { BWC::policy attach p; BWC::mark s qos 8 }", "BWC::mark value"),
+            ("when CLIENT_ACCEPTED { BWC::policy attach p; BWC::priority tc1 50 tc1 50 }", "unique"),
+            ("when CLIENT_ACCEPTED { BWC::policy attach p; BWC::measure get bytes flow }", "measurement to be started"),
+        )
+        for irule, message in invalid_rules:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, message
+            ):
+                self.adapter.run_scenario(
+                    {"profiles": ["TCP", "HTTP"], "irule": irule, "request": {"uri": "/"}},
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
 
     def test_semantic_overlay_models_connection_scoped_psm_controls(self) -> None:
         result = self.adapter.run_scenario(

@@ -188,6 +188,14 @@ preserved, including `-keyhex` inputs. Context data is capped at 16 MiB and
 cleared at connection boundaries. Encryption/decryption and key generation
 remain explicitly queued rather than approximated.
 
+The complete TMOS 17.5 `BWC::` family is represented by deterministic
+connection-scoped flow state. Policy attachment, category assignment, rate and
+PPS overrides, TOS/QoS marks, priority weights, debug state, and measurement
+start/stop/identifier/get operations are validated and exposed in
+`semantic.bwc`. Measurement values are bounded samples from event-visible
+payload bytes; the adapter does not enforce bandwidth, schedule queues, query
+live BWC policy configuration, or publish external measurement logs.
+
 The TMOS 17.5 `ADAPT::*` commands model request/response static and dynamic
 contexts. Context handles inherit deterministic static attributes, support
 enable/allow, internal-virtual selection, preview size, service-down action,

@@ -905,6 +905,23 @@ switches, `AVR::log` as a recorded statistics request, and
 The `avr` state layer exposes `enabled`, `cspm_injection_enabled`, and
 `log_requested`; it does not generate AVR analytics or JavaScript payloads.
 
+### BWC flow controls
+
+The BWC overlay models the complete TMOS 17.5 command family as deterministic
+flow state. `BWC::policy attach` and `BWC::policy detach` manage the attached
+policy and optional session identifier; `BWC::rate`, `BWC::pps`,
+`BWC::color`, `BWC::mark`, and `BWC::priority` record the corresponding
+per-flow controls. `BWC::measure` supports start/stop, identifiers, and
+`get rate|bytes`; because the emulator has no scheduler or wall-clock traffic
+shaper, the reported rate is a deterministic bytes-per-second sample based on
+the visible event payload. `BWC::debug start|stop` is recorded as a diagnostic
+toggle. Control state resets at connection boundaries and is exposed under
+`semantic.bwc`. The adapter does not implement TMM bandwidth enforcement,
+queue scheduling, dynamic policy lookup, or external log publishers. See the
+F5 [`BWC::policy`](https://clouddocs.f5.com/api/irules/BWC__policy.html),
+[`BWC::measure`](https://clouddocs.f5.com/api/irules/BWC__measure.html), and
+[`BWC::mark`](https://clouddocs.f5.com/api/irules/BWC__mark.html) references.
+
 ### FIX tag state
 
 The direct `FIX_MESSAGE` adapter accepts a `fix.tags` object and exposes it to
