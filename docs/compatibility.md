@@ -47,6 +47,11 @@ maximum match size, connection enable/disable, and one-shot replacement intent
 are deterministic state; the adapter does not scan/reassemble raw stream
 matches, enforce the production buffer/connection lifecycle, or rewrite wire
 payloads.
+The WebSocket payload-processing controls `WS::payload_ivs` and
+`WS::payload_processing` are modeled as connection-scoped state on the existing
+structured WebSocket upgrade/frame adapter. They record the requested IVS and
+enable/disable decision, but do not execute an IVS or a payload protocol
+inspection engine.
 Generic UDP traces expose datagram payload bytes, client/server/local/remote
 ports, and the `CLIENT_DATA`/`SERVER_DATA` path. The UDP semantic layer models
 payload replacement, drop, hold/release, response emission, and bounded buffer,

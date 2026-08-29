@@ -578,6 +578,11 @@ structured packet adapter: it models the HTTP upgrade and the eight WebSocket
 frame/data events, and the raw TCP/PCAP path decodes RFC 6455 frames after a
 successful upgrade. Compressed frames using unsupported RSV extensions are
 rejected; IPv4 fragment handling remains outside this slice.
+The WebSocket payload-processing controls are also modeled: `WS::payload_ivs`
+records the selected internal virtual server and `WS::payload_processing` tracks
+whether payload protocol processing is enabled or disabled. These are
+connection-scoped decisions returned in WebSocket event state; the emulator
+does not execute an IVS or a payload protocol inspection engine.
 HTTP/2 wire packets use `protocol: "http2"` and a lossless `payload_hex`
 field. Binary TCP captures can instead use `protocol: "tcp"` with
 `payload_hex`; the adapter recognizes a client HTTP/2 prior-knowledge preface

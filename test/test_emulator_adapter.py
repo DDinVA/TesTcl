@@ -478,7 +478,7 @@ when HTTP_REQUEST {
         }
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
-        self.assertGreaterEqual(queue["command_count"], 378)
+        self.assertGreaterEqual(queue["command_count"], 376)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -3059,6 +3059,9 @@ when SERVER_DATA {
                 "profiles": ["TCP", "HTTP", "WS"],
                 "irule": """
 when WS_REQUEST {
+    WS::payload_processing disable
+    WS::payload_ivs /Common/mqtt_ivs
+    log local0. "payload-processing=[set ::state::websocket::payload_processing] ivs=[set ::state::websocket::payload_ivs]"
     log local0. "request=[WS::request key]"
 }
 when WS_RESPONSE {
@@ -3167,6 +3170,17 @@ when WS_SERVER_FRAME_DONE { log local0. server-done }
         self.assertTrue(
             any("request=abc" in entry for entry in request_event["logs"])
         )
+        self.assertTrue(
+            any(
+                "payload-processing=disable ivs=/Common/mqtt_ivs" in entry
+                for entry in request_event["logs"]
+            )
+        )
+        self.assertEqual(request_event["state"]["websocket"]["payload_processing"], "disable")
+        self.assertEqual(request_event["state"]["websocket"]["payload_ivs"], "/Common/mqtt_ivs")
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in ("WS::payload_ivs", "WS::payload_processing"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
         self.assertTrue(
             any(
                 "response=xyz valid=1" in entry

@@ -349,6 +349,8 @@ namespace eval ::itest::semantic {
         variable mask ""
         variable payload ""
         variable payload_length 0
+        variable payload_ivs ""
+        variable payload_processing enable
     }
 
     namespace eval ::state::udp {
@@ -850,6 +852,8 @@ namespace eval ::itest::semantic {
             variable mask ""
             variable payload ""
             variable payload_length 0
+            variable payload_ivs ""
+            variable payload_processing enable
         }
     }
 
@@ -1087,6 +1091,25 @@ namespace eval ::itest::semantic {
         set ws_enabled 0
         ::itest::log_decision ws enabled false
         return $ws_enabled
+    }
+
+    proc ws_payload_ivs_command {args} {
+        if {[llength $args] != 1 || [lindex $args 0] eq "" ||
+            [string first "\x00" [lindex $args 0]] >= 0} {
+            error "WS::payload_ivs requires one non-empty IVS name without NUL bytes"
+        }
+        set ::state::websocket::payload_ivs [lindex $args 0]
+        ::itest::log_decision ws payload_ivs $::state::websocket::payload_ivs
+        return ""
+    }
+
+    proc ws_payload_processing_command {args} {
+        if {[llength $args] != 1 || [lindex $args 0] ni {enable disable}} {
+            error "WS::payload_processing requires enable or disable"
+        }
+        set ::state::websocket::payload_processing [lindex $args 0]
+        ::itest::log_decision ws payload_processing $::state::websocket::payload_processing
+        return ""
     }
 
     proc ws_masking_command {args} {
@@ -13072,6 +13095,8 @@ foreach {original replacement} {
     ws_masking ws_masking_command
     ws_message ws_message_command
     ws_payload ws_payload_command
+    ws_payload_ivs ws_payload_ivs_command
+    ws_payload_processing ws_payload_processing_command
     ws_release ws_release_command
     ws_request ws_request_command
     ws_response ws_response_command

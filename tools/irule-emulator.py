@@ -420,6 +420,8 @@ EVENT_STATE_FIELDS = {
         "mask",
         "payload",
         "payload_length",
+        "payload_ivs",
+        "payload_processing",
     },
     "mqtt": {
         "type",
@@ -856,6 +858,8 @@ SEMANTIC_MOCK_COMMANDS = {
     "WS::masking",
     "WS::message",
     "WS::payload",
+    "WS::payload_ivs",
+    "WS::payload_processing",
     "WS::release",
     "WS::request",
     "WS::response",
