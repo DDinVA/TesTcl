@@ -92,6 +92,11 @@ selection. It dispatches the client-accepted, client-data, server-connected,
 and server-data path and preserves those controls across messages on one
 connection. It does not parse FTP commands, negotiate TLS, create a data
 channel, or allocate live passive ports.
+The ICAP adapter models the four 17.5 `ICAP::*` commands and dispatches
+`ICAP_REQUEST`/`ICAP_RESPONSE` for structured messages with an `ICAP` profile.
+It supports method, URI, status, and case-insensitive header reads and
+mutations, including complete header replacement. It does not implement an
+ICAP server, encapsulated HTTP-body parsing, or license/control-plane behavior.
 The TMOS 17.5 `ROUTE::*` surface uses scenario-seeded route-domain and
 congestion-metric entries. Metric getters return deterministic values and
 `ROUTE::clear` removes a matching entry for the session; connection lifecycle

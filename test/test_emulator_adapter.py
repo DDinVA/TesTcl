@@ -486,7 +486,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("DHCPV4", "generated-stub"), queue_buckets)
         self.assertNotIn(("DHCPV6", "generated-stub"), queue_buckets)
         self.assertNotIn(("FTP", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 273)
+        self.assertNotIn(("ICAP", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 269)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1125,6 +1126,66 @@ when SERVER_DATA {
                 },
                 tcl_lsp_root=self.tcl_lsp_root,
             )
+
+    def test_icap_request_response_events_and_headers(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "ICAP"],
+                "irule": """
+when ICAP_REQUEST {
+    log local0. "method=[ICAP::method] uri=[ICAP::uri] host=[ICAP::header value Host] count=[ICAP::header count]"
+    ICAP::header replace Host icap.internal
+    ICAP::header add X-Trace enabled
+    ICAP::uri icap://icap.internal/reqmod
+}
+when ICAP_RESPONSE {
+    log local0. "status=[ICAP::status] trace=[ICAP::header value X-Trace]"
+    ICAP::header remove X-Trace
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "icap",
+                        "source": {"address": "192.0.2.10", "port": 41000},
+                        "destination": {"address": "198.51.100.20", "port": 1344},
+                        "type": "request",
+                        "method": "REQMOD",
+                        "uri": "icap://icap.example.net/reqmod",
+                        "headers": {"Host": "icap.example.net", "Allow": "204"},
+                        "payload": "REQMOD body",
+                    },
+                    {
+                        "protocol": "icap",
+                        "direction": "server_to_client",
+                        "source": {"address": "198.51.100.20", "port": 1344},
+                        "destination": {"address": "192.0.2.10", "port": 41000},
+                        "type": "response",
+                        "status": 204,
+                        "headers": {"X-Trace": "enabled", "ISTag": "v1"},
+                        "payload_hex": "",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_event = next(
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] == "ICAP_REQUEST"
+        )
+        response_event = next(
+            event
+            for event in result["trace"][1]["events"]
+            if event["event"] == "ICAP_RESPONSE"
+        )
+        self.assertTrue(any("method=REQMOD" in line and "count=2" in line
+                            for line in request_event["logs"]))
+        self.assertEqual(request_event["state"]["icap"]["uri"], "icap://icap.internal/reqmod")
+        self.assertIn("X-Trace", request_event["state"]["icap"]["headers"])
+        self.assertTrue(any("status=204 trace=enabled" in line for line in response_event["logs"]))
+        self.assertNotIn("X-Trace", response_event["state"]["icap"]["headers"])
+        self.assertIn("ICAP_REQUEST", result["registered_events"])
+        self.assertIn("ICAP_RESPONSE", result["registered_events"])
 
     def test_post_tmos_17_5_features_are_reported_and_rejected(self) -> None:
         with self.assertRaisesRegex(

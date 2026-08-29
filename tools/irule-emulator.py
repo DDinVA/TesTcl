@@ -688,6 +688,15 @@ EVENT_STATE_FIELDS = {
         "dropped",
         "rejected",
     },
+    "icap": {
+        "headers",
+        "method",
+        "payload",
+        "payload_length",
+        "status",
+        "type",
+        "uri",
+    },
     "tcp": {
         "abc",
         "analytics",
@@ -785,6 +794,7 @@ EVENT_STATE_NAMESPACES = {
     "dhcpv4": "::state::dhcpv4",
     "dhcpv6": "::state::dhcpv6",
     "ftp": "::state::ftp",
+    "icap": "::state::icap",
     "tcp": "::state::tcp",
     "rtsp": "::state::rtsp",
     "cache": "::state::cache",
@@ -917,6 +927,10 @@ SEMANTIC_MOCK_COMMANDS = {
     "FTP::enforce_tls_session_reuse",
     "FTP::ftps_mode",
     "FTP::port",
+    "ICAP::header",
+    "ICAP::method",
+    "ICAP::status",
+    "ICAP::uri",
     "CRYPTO::hash",
     "CRYPTO::sign",
     "CRYPTO::verify",
@@ -5061,7 +5075,7 @@ TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "wire"}
+PACKET_PROTOCOLS = {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -5131,6 +5145,14 @@ PACKET_PROTOCOL_FIELDS = {
         "response_code",
         "tls_active",
         "tls_session_reused",
+    },
+    "icap": {
+        "payload_hex",
+        "type",
+        "method",
+        "uri",
+        "status",
+        "headers",
     },
     "tls": {"type"}
     | (EVENT_STATE_FIELDS["tls_client"] | EVENT_STATE_FIELDS["tls_server"])
@@ -5327,6 +5349,8 @@ PACKET_EVENT_ADAPTERS = {
     "HTTP_RESPONSE_RELEASE": "HTTP response transaction release phase",
     "DNS_REQUEST": "DNS request packet",
     "DNS_RESPONSE": "DNS response packet",
+    "ICAP_REQUEST": "ICAP request before adaptation-server send",
+    "ICAP_RESPONSE": "ICAP response before adaptation result delivery",
     "WS_REQUEST": "WebSocket upgrade request",
     "WS_RESPONSE": "WebSocket upgrade response",
     "WS_CLIENT_FRAME": "WebSocket client frame start",
@@ -8863,6 +8887,11 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                         raise EmulatorInputError(
                             f"unsupported FTP packet type: {packet_type}"
                         )
+                elif protocol == "icap":
+                    if packet_type not in {"request", "response"}:
+                        raise EmulatorInputError(
+                            f"unsupported ICAP packet type: {packet_type}"
+                        )
                 normalised[field] = packet_type
             elif protocol == "ftp" and field == "command":
                 normalised[field] = _require_string(packet[field], f"packet {index} command")
@@ -8875,6 +8904,13 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = value
             elif protocol == "ftp" and field in {"tls_active", "tls_session_reused"}:
                 normalised[field] = _packet_bool(packet[field], f"packet {index} {field}")
+            elif protocol == "icap" and field == "status":
+                value = packet[field]
+                if isinstance(value, bool) or not isinstance(value, int) or not 100 <= value <= 999:
+                    raise EmulatorInputError(
+                        f"packet {index} ICAP status must be an integer from 100 to 999"
+                    )
+                normalised[field] = value
             elif protocol == "diameter" and field in {
                 "version",
                 "command_code",
@@ -8967,6 +9003,24 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             normalised.setdefault("response_code", 0)
             normalised.setdefault("tls_active", "0")
             normalised.setdefault("tls_session_reused", "0")
+        if protocol == "icap":
+            normalised.setdefault(
+                "type", "request" if direction == "client_to_server" else "response"
+            )
+            expected_type = "request" if direction == "client_to_server" else "response"
+            if normalised["type"] != expected_type:
+                raise EmulatorInputError(
+                    f"packet {index} ICAP {expected_type}s must be {direction}"
+                )
+            normalised.setdefault("method", "REQMOD")
+            normalised["method"] = str(normalised["method"]).upper()
+            if normalised["method"] not in {"REQMOD", "RESPMOD"}:
+                raise EmulatorInputError(
+                    f"packet {index} ICAP method must be REQMOD or RESPMOD"
+                )
+            normalised.setdefault("uri", "icap://icap.example.net/reqmod")
+            normalised.setdefault("status", 200)
+            normalised.setdefault("headers", {})
         if protocol == "http" and direction == "client_to_server" and "status" in normalised:
             raise EmulatorInputError(f"packet {index} HTTP requests cannot specify status")
         if protocol == "http" and direction == "server_to_client" and "method" in normalised:
@@ -9792,6 +9846,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::sctp_reset_connection")
                 session.eval_tcl("::itest::semantic::dhcp_reset_connection")
                 session.eval_tcl("::itest::semantic::ftp_reset_connection")
+                session.eval_tcl("::itest::semantic::icap_reset_connection")
                 session.eval_tcl("::itest::semantic::profile_settings_clear")
                 for profile_name, attributes in self._profile_settings.items():
                     flattened = [
@@ -10251,7 +10306,7 @@ class EmulatorSession:
         def install_state_layer(layer: str, values: dict[str, str]) -> None:
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "rtsp", "cache", "datagram", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "rtsp", "cache", "datagram", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -10397,7 +10452,7 @@ class EmulatorSession:
         protocol = packet["protocol"]
         if protocol == "sip" and packet.get("transport", "tcp") == "udp":
             connection.update({"protocol": "17", "transport": "udp"})
-        elif protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "rtsp", "ftp"}:
+        elif protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "rtsp", "ftp", "icap"}:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol == "sctp":
             connection.update({"protocol": "132", "transport": "sctp"})
@@ -10544,6 +10599,23 @@ class EmulatorSession:
                 "remote_port": str(remote.get("port", 0)),
             }
             state["udp"] = udp_state
+        elif protocol == "icap":
+            icap_state: dict[str, Any] = {}
+            for field in EVENT_STATE_FIELDS["icap"] - {"headers", "payload"}:
+                if field in packet:
+                    icap_state[field] = _packet_scalar(packet[field], field)
+            headers = packet.get("headers", {})
+            icap_state["headers"] = " ".join(
+                _tcl_quote(item)
+                for name, value in headers.items()
+                for item in (name, value)
+            )
+            payload = packet.get("_wire_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                payload = str(packet.get("payload", "")).encode("utf-8")
+            icap_state["payload"] = bytes(payload)
+            icap_state["payload_length"] = str(len(payload))
+            state["icap"] = icap_state
         elif protocol == "ftp":
             ftp_state: dict[str, Any] = {}
             for field in EVENT_STATE_FIELDS["ftp"] - {"payload"}:
@@ -10877,7 +10949,7 @@ class EmulatorSession:
             mr_state["payload_length"] = str(len(payload))
             state["mr"] = mr_state
         if (
-            protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp", "ftp"}
+            protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp", "ftp", "icap"}
             or (protocol == "sip" and packet.get("transport", "tcp") == "tcp")
         ):
             state["tcp"] = {}
@@ -11243,7 +11315,7 @@ class EmulatorSession:
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
-        if packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp", "ftp"}:
+        if packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp", "ftp", "icap"}:
             return
         source = packet["source"]
         destination = packet["destination"]
@@ -11321,7 +11393,7 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
@@ -11355,6 +11427,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::sctp_reset_connection")
         session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::ftp_reset_connection")
+        session.eval_tcl("::itest::semantic::icap_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
@@ -11398,6 +11471,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::sctp_reset_connection")
         session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::ftp_reset_connection")
+        session.eval_tcl("::itest::semantic::icap_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
@@ -12862,6 +12936,17 @@ class EmulatorSession:
                     entry["disabled"] = True
                 if "payload" in ftp_state:
                     entry["payload_after"] = ftp_state["payload"]
+                continue
+            elif protocol == "icap":
+                self._activate_packet_connection(session, packet, entry["events"])
+                event_name = "ICAP_REQUEST" if direction == "client_to_server" else "ICAP_RESPONSE"
+                event_result = self._fire_event_on_worker(
+                    session, event_name, self._packet_event_state(packet)
+                )
+                entry["events"].append(event_result)
+                icap_state = event_result.get("state", {}).get("icap", {})
+                if "payload" in icap_state:
+                    entry["payload_after"] = icap_state["payload"]
                 continue
             elif protocol == "sctp":
                 self._activate_packet_connection(session, packet, entry["events"])

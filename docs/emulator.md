@@ -108,6 +108,13 @@ response code, TLS flags, and text or hexadecimal payload; the adapter keeps
 the controls connection-scoped and records disabled processing in the trace.
 It does not parse FTP commands, open a data-channel socket, negotiate TLS, or
 allocate real passive ports.
+Structured ICAP packet traces dispatch `ICAP_REQUEST` and `ICAP_RESPONSE` when
+the `ICAP` profile is attached. The four TMOS 17.5 `ICAP::*` commands expose
+request method and URI, response status, and case-insensitive ICAP header
+lookup, enumeration, insertion, replacement, removal, and replacement of
+the complete header block. Header and URI mutations are retained in the event
+trace. This is a deterministic adaptation-message model; it does not run an
+ICAP server, parse encapsulated HTTP bodies, or require an LTM/PEM license.
 The ROUTE layer accepts scenario-seeded route-domain and congestion-metric
 entries. `ROUTE::age`, `ROUTE::bandwidth`, `ROUTE::cwnd`, `ROUTE::expiration`,
 `ROUTE::mtu`, `ROUTE::rtt`, and `ROUTE::rttvar` read deterministic entries, and

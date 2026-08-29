@@ -543,6 +543,16 @@ namespace eval ::itest::semantic {
         variable rejected 0
     }
 
+    namespace eval ::state::icap {
+        variable headers {Host icap.example.net}
+        variable method REQMOD
+        variable payload ""
+        variable payload_length 0
+        variable status 200
+        variable type request
+        variable uri icap://icap.example.net/reqmod
+    }
+
     namespace eval ::state::datagram {
         variable ip_version 4
         variable ip_tos 0
@@ -11765,6 +11775,188 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc icap_reset_connection {} {
+        set ::state::icap::headers [list Host icap.example.net]
+        set ::state::icap::method REQMOD
+        set ::state::icap::payload ""
+        set ::state::icap::payload_length 0
+        set ::state::icap::status 200
+        set ::state::icap::type request
+        set ::state::icap::uri icap://icap.example.net/reqmod
+    }
+
+    proc icap_prepare_event {} {}
+
+    proc _icap_require_event {allowed command_name} {
+        if {$::itest::current_event ni $allowed} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc _icap_header_matches {actual wanted} {
+        return [string equal -nocase $actual $wanted]
+    }
+
+    proc _icap_header_names {headers} {
+        set names {}
+        foreach {name value} $headers {
+            lappend names $name
+        }
+        return $names
+    }
+
+    proc icap_header_parse_text {text} {
+        set headers {}
+        set normalised [string map {\r\n \n \r \n} $text]
+        foreach line [split $normalised \n] {
+            if {$line eq ""} { continue }
+            set colon [string first : $line]
+            if {$colon <= 0} {
+                error "ICAP header text must contain name/value lines"
+            }
+            set name [string trim [string range $line 0 [expr {$colon - 1}]]]
+            set value [string trim [string range $line [expr {$colon + 1}] end]]
+            if {$name eq ""} { error "ICAP header name cannot be empty" }
+            lappend headers $name $value
+        }
+        return $headers
+    }
+
+    proc icap_header_command {args} {
+        _icap_require_event {ICAP_REQUEST ICAP_RESPONSE} ICAP::header
+        if {[llength $args] == 0} {
+            error "ICAP::header requires a subcommand"
+        }
+        set subcommand [string tolower [lindex $args 0]]
+        set headers $::state::icap::headers
+        switch -exact -- $subcommand {
+            names {
+                if {[llength $args] != 1} { error "ICAP::header names takes no arguments" }
+                return [_icap_header_names $headers]
+            }
+            at {
+                if {[llength $args] != 2 || ![string is integer -strict [lindex $args 1]] || [lindex $args 1] < 0} {
+                    error "ICAP::header at requires a non-negative index"
+                }
+                set names [_icap_header_names $headers]
+                set index [lindex $args 1]
+                if {$index >= [llength $names]} { return "" }
+                return [lindex $names $index]
+            }
+            count {
+                if {[llength $args] > 2} { error "ICAP::header count accepts an optional name" }
+                if {[llength $args] == 1} { return [expr {[llength $headers] / 2}] }
+                set count 0
+                foreach {name value} $headers {
+                    if {[_icap_header_matches $name [lindex $args 1]]} { incr count }
+                }
+                return $count
+            }
+            exists {
+                if {[llength $args] != 2} { error "ICAP::header exists requires a name" }
+                foreach {name value} $headers {
+                    if {[_icap_header_matches $name [lindex $args 1]] && $value ne ""} {
+                        return 1
+                    }
+                }
+                return 0
+            }
+            values {
+                if {[llength $args] != 2} { error "ICAP::header values requires a name" }
+                set values {}
+                foreach {name value} $headers {
+                    if {[_icap_header_matches $name [lindex $args 1]]} { lappend values $value }
+                }
+                if {[llength $values] == 1} { return [lindex $values 0] }
+                return $values
+            }
+            value {
+                if {[llength $args] ni {2 3}} { error "ICAP::header value requires a name and optional value" }
+                set wanted [lindex $args 1]
+                set matches {}
+                set position 0
+                foreach {name item} $headers {
+                    if {[_icap_header_matches $name $wanted]} { lappend matches $position }
+                    incr position 2
+                }
+                if {[llength $args] == 2} {
+                    if {[llength $matches] == 0} { return "" }
+                    return [lindex $headers [expr {[lindex $matches end] + 1}]]
+                }
+                set replacement [lindex $args 2]
+                if {[llength $matches] == 0} {
+                    lappend headers $wanted $replacement
+                } else {
+                    set pair [lindex $matches end]
+                    lset headers [expr {$pair + 1}] $replacement
+                }
+                set ::state::icap::headers $headers
+            }
+            add {
+                if {[llength $args] != 3} { error "ICAP::header add requires name and value" }
+                set name [lindex $args 1]
+                if {$name eq ""} { error "ICAP header name cannot be empty" }
+                lappend headers $name [lindex $args 2]
+                set ::state::icap::headers $headers
+            }
+            replace {
+                if {[llength $args] != 3} { error "ICAP::header replace requires name and value" }
+                set wanted [lindex $args 1]
+                set replacement [lindex $args 2]
+                set position 0
+                set last -1
+                foreach {name value} $headers {
+                    if {[_icap_header_matches $name $wanted]} { set last $position }
+                    incr position 2
+                }
+                if {$last < 0} {
+                    lappend headers $wanted $replacement
+                } else {
+                    lset headers [expr {$last + 1}] $replacement
+                }
+                set ::state::icap::headers $headers
+            }
+            remove {
+                if {[llength $args] != 2} { error "ICAP::header remove requires a name" }
+                set wanted [lindex $args 1]
+                set updated {}
+                foreach {name value} $headers {
+                    if {![_icap_header_matches $name $wanted]} { lappend updated $name $value }
+                }
+                set ::state::icap::headers $updated
+            }
+            replace-all {
+                if {[llength $args] != 2} { error "ICAP::header replace-all requires header text" }
+                set ::state::icap::headers [icap_header_parse_text [lindex $args 1]]
+            }
+            default { error "unsupported ICAP::header subcommand $subcommand" }
+        }
+        ::itest::log_decision icap header [list $subcommand]
+        return ""
+    }
+
+    proc icap_method_command {args} {
+        _icap_require_event {ICAP_REQUEST} ICAP::method
+        if {[llength $args] != 0} { error "ICAP::method takes no arguments" }
+        return $::state::icap::method
+    }
+
+    proc icap_status_command {args} {
+        _icap_require_event {ICAP_RESPONSE} ICAP::status
+        if {[llength $args] != 0} { error "ICAP::status takes no arguments" }
+        return $::state::icap::status
+    }
+
+    proc icap_uri_command {args} {
+        _icap_require_event {ICAP_REQUEST} ICAP::uri
+        if {[llength $args] > 1} { error "ICAP::uri accepts an optional URI" }
+        if {[llength $args] == 1} {
+            set ::state::icap::uri [lindex $args 0]
+            ::itest::log_decision icap uri $::state::icap::uri
+        }
+        return $::state::icap::uri
+    }
+
     proc tcp_reset_transport {} {
         namespace eval ::state::tcp {
             set abc enable
@@ -16344,6 +16536,10 @@ foreach {name proc_name} {
     FTP::enforce_tls_session_reuse ::itest::semantic::ftp_enforce_tls_session_reuse_command
     FTP::ftps_mode ::itest::semantic::ftp_ftps_mode_command
     FTP::port ::itest::semantic::ftp_port_command
+    ICAP::header ::itest::semantic::icap_header_command
+    ICAP::method ::itest::semantic::icap_method_command
+    ICAP::status ::itest::semantic::icap_status_command
+    ICAP::uri ::itest::semantic::icap_uri_command
     peer ::itest::cmd::cmd_peer
     clientside ::itest::cmd::cmd_clientside
     serverside ::itest::cmd::cmd_serverside
