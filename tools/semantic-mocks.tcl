@@ -467,7 +467,31 @@ namespace eval ::itest::semantic {
             variable alpn ""
             variable handshake_done 0
             variable session_id ""
+            variable initial_session_id ""
             variable sessionticket ""
+            variable nextproto ""
+            variable session_secret ""
+            variable tls13_client_app_secret ""
+            variable tls13_client_hs_secret ""
+            variable tls13_client_early_secret ""
+            variable tls13_server_app_secret ""
+            variable tls13_server_hs_secret ""
+            variable c3d_cert ""
+            variable c3d_subject_cn ""
+            variable c3d_extensions [dict create]
+            variable cert_constraints [list]
+            variable collect_requested 0
+            variable collect_length 0
+            variable payload ""
+            variable payload_length 0
+            variable release_requested 0
+            variable released_length 0
+            variable forward_proxy_policy bypass
+            variable forward_proxy_cert ""
+            variable forward_proxy_extensions [dict create]
+            variable forward_proxy_verified_handshake 0
+            variable forward_proxy_response_control ignore
+            variable forward_proxy_cert_status ""
             variable handshake_held 0
             variable renegotiation_enabled 1
             variable renegotiation_requested 0
@@ -10834,6 +10858,30 @@ namespace eval ::itest::semantic {
             set ${ns}::unclean_shutdown 0
             set ${ns}::authenticate_frequency ""
             set ${ns}::authenticate_depth 0
+            set ${ns}::initial_session_id ""
+            set ${ns}::nextproto ""
+            set ${ns}::session_secret ""
+            set ${ns}::tls13_client_app_secret ""
+            set ${ns}::tls13_client_hs_secret ""
+            set ${ns}::tls13_client_early_secret ""
+            set ${ns}::tls13_server_app_secret ""
+            set ${ns}::tls13_server_hs_secret ""
+            set ${ns}::c3d_cert ""
+            set ${ns}::c3d_subject_cn ""
+            set ${ns}::c3d_extensions [dict create]
+            set ${ns}::cert_constraints [list]
+            set ${ns}::collect_requested 0
+            set ${ns}::collect_length 0
+            set ${ns}::payload ""
+            set ${ns}::payload_length 0
+            set ${ns}::release_requested 0
+            set ${ns}::released_length 0
+            set ${ns}::forward_proxy_policy bypass
+            set ${ns}::forward_proxy_cert ""
+            set ${ns}::forward_proxy_extensions [dict create]
+            set ${ns}::forward_proxy_verified_handshake 0
+            set ${ns}::forward_proxy_response_control ignore
+            set ${ns}::forward_proxy_cert_status ""
         }
     }
 
@@ -10928,6 +10976,259 @@ namespace eval ::itest::semantic {
         }
         if {[info exists $variable]} { return [set $variable] }
         return 0
+    }
+
+    proc _ssl_require_text {value field} {
+        if {$value eq "" || [string first "\x00" $value] >= 0} {
+            error "$field requires a non-empty value without NUL bytes"
+        }
+        return $value
+    }
+
+    proc _ssl_set_payload {ns value} {
+        set ${ns}::payload $value
+        set ${ns}::payload_length [string bytelength $value]
+        return $value
+    }
+
+    proc ssl_c3d_command {args} {
+        set ns [_ssl_namespace]
+        if {[llength $args] < 1 || [llength $args] > 3} {
+            error "SSL::c3d requires extension, cert, or subject"
+        }
+        set operation [lindex $args 0]
+        switch -exact -- $operation {
+            extension {
+                if {[llength $args] != 3} {
+                    error "SSL::c3d extension requires an OID and value"
+                }
+                set oid [_ssl_require_text [lindex $args 1] "SSL::c3d extension OID"]
+                set value [lindex $args 2]
+                if {[string first "\x00" $value] >= 0} {
+                    error "SSL::c3d extension value cannot contain NUL bytes"
+                }
+                dict set ${ns}::c3d_extensions $oid $value
+                ::itest::log_decision ssl c3d_extension [list $oid $value]
+            }
+            cert {
+                if {[llength $args] != 2} {
+                    error "SSL::c3d cert requires a certificate"
+                }
+                set ${ns}::c3d_cert [_ssl_require_text [lindex $args 1] "SSL::c3d cert"]
+                ::itest::log_decision ssl c3d_cert $ns
+            }
+            subject {
+                if {[llength $args] != 3 || [lindex $args 1] ne "commonName"} {
+                    error "SSL::c3d subject requires commonName and a value"
+                }
+                set value [_ssl_require_text [lindex $args 2] "SSL::c3d subject commonName"]
+                set ${ns}::c3d_subject_cn $value
+                ::itest::log_decision ssl c3d_subject [list commonName $value]
+            }
+            default {
+                error "SSL::c3d requires extension, cert, or subject"
+            }
+        }
+        return ""
+    }
+
+    proc ssl_cert_constraint_command {args} {
+        if {[llength $args] != 2} {
+            error "SSL::cert_constraint requires an OID and value"
+        }
+        set oid [_ssl_require_text [lindex $args 0] "SSL::cert_constraint OID"]
+        set value [lindex $args 1]
+        if {[string first "\x00" $value] >= 0} {
+            error "SSL::cert_constraint value cannot contain NUL bytes"
+        }
+        set ns [_ssl_namespace]
+        lappend ${ns}::cert_constraints [list $oid $value]
+        ::itest::log_decision ssl cert_constraint [list $oid $value]
+        return ""
+    }
+
+    proc ssl_collect_command {args} {
+        if {[llength $args] > 1} {
+            error "SSL::collect accepts an optional positive length"
+        }
+        set length 0
+        if {[llength $args] == 1} {
+            set length [lindex $args 0]
+            if {![string is integer -strict $length] || $length <= 0} {
+                error "SSL::collect length must be a positive integer"
+            }
+        }
+        set ns [_ssl_namespace]
+        set ${ns}::collect_requested 1
+        set ${ns}::collect_length $length
+        _ssl_set_payload $ns ""
+        set ${ns}::release_requested 0
+        set ${ns}::released_length 0
+        ::itest::log_decision ssl collect [list $ns $length]
+        return ""
+    }
+
+    proc ssl_payload_command {args} {
+        set ns [_ssl_namespace]
+        set payload [set ${ns}::payload]
+        if {[llength $args] == 0} { return $payload }
+        set operation [lindex $args 0]
+        if {$operation eq "length"} {
+            if {[llength $args] != 1} { error "SSL::payload length takes no arguments" }
+            return [string bytelength $payload]
+        }
+        if {$operation eq "replace"} {
+            if {[llength $args] != 4} {
+                error "SSL::payload replace requires offset, length, and data"
+            }
+            set offset [lindex $args 1]
+            set length [lindex $args 2]
+            if {![string is integer -strict $offset] || $offset < 0 ||
+                ![string is integer -strict $length] || $length < 0} {
+                error "SSL::payload replace offsets must be non-negative integers"
+            }
+            set value [lindex $args 3]
+            if {[string first "\x00" $value] >= 0} {
+                error "SSL::payload replacement cannot contain NUL bytes"
+            }
+            _ssl_set_payload $ns [::itest::cmd::_payload_splice $payload $offset $length $value]
+            ::itest::log_decision ssl payload_replace [list $ns $offset $length $value]
+            return ""
+        }
+        if {![string is integer -strict $operation] || $operation < 0 ||
+            [llength $args] != 1} {
+            error "SSL::payload accepts length, replace, or an optional size"
+        }
+        return [::itest::cmd::_payload_first $payload $operation]
+    }
+
+    proc ssl_release_command {args} {
+        if {[llength $args] > 1} { error "SSL::release accepts an optional length" }
+        set ns [_ssl_namespace]
+        set payload [set ${ns}::payload]
+        set available [string bytelength $payload]
+        set length $available
+        if {[llength $args] == 1} { set length [lindex $args 0] }
+        if {![string is integer -strict $length] || $length < 0} {
+            error "SSL::release length must be a non-negative integer"
+        }
+        if {$length > $available} { set length $available }
+        _ssl_set_payload $ns [::itest::cmd::_payload_splice $payload 0 $length ""]
+        set ${ns}::collect_requested 0
+        set ${ns}::release_requested 1
+        set ${ns}::released_length $length
+        ::itest::log_decision ssl release [list $ns $length]
+        return $length
+    }
+
+    proc ssl_forward_proxy_command {args} {
+        set ns [_ssl_namespace]
+        if {[llength $args] == 0} { return [set ${ns}::forward_proxy_policy] }
+        set operation [lindex $args 0]
+        switch -exact -- $operation {
+            policy {
+                if {[llength $args] > 2} { error "SSL::forward_proxy policy accepts an optional value" }
+                if {[llength $args] == 2} {
+                    set value [lindex $args 1]
+                    if {$value ni {bypass intercept}} {
+                        error "SSL::forward_proxy policy must be bypass or intercept"
+                    }
+                    set ${ns}::forward_proxy_policy $value
+                    ::itest::log_decision ssl forward_proxy_policy $value
+                    return ""
+                }
+                return [set ${ns}::forward_proxy_policy]
+            }
+            cert {
+                if {[llength $args] == 1} { return [set ${ns}::forward_proxy_cert] }
+                set selector [lindex $args 1]
+                if {$selector eq "response_control"} {
+                    if {[llength $args] > 3} { error "SSL::forward_proxy cert response_control accepts an optional value" }
+                    if {[llength $args] == 3} {
+                        set value [lindex $args 2]
+                        if {$value ni {ignore mask}} { error "response_control must be ignore or mask" }
+                        set ${ns}::forward_proxy_response_control $value
+                        ::itest::log_decision ssl forward_proxy_response_control $value
+                        return ""
+                    }
+                    return [set ${ns}::forward_proxy_response_control]
+                }
+                if {$selector eq "status"} {
+                    if {[llength $args] > 3} { error "SSL::forward_proxy cert status accepts an optional value" }
+                    if {[llength $args] == 3} {
+                        set value [lindex $args 2]
+                        if {[string first "\x00" $value] >= 0} { error "certificate status cannot contain NUL bytes" }
+                        set ${ns}::forward_proxy_cert_status $value
+                        ::itest::log_decision ssl forward_proxy_cert_status $value
+                        return ""
+                    }
+                    return [set ${ns}::forward_proxy_cert_status]
+                }
+                error "SSL::forward_proxy cert supports response_control or status"
+            }
+            verified_handshake {
+                if {[llength $args] > 2} { error "SSL::forward_proxy verified_handshake accepts an optional value" }
+                if {[llength $args] == 2} {
+                    set value [lindex $args 1]
+                    if {$value ni {enable disable}} { error "verified_handshake must be enable or disable" }
+                    set ${ns}::forward_proxy_verified_handshake [expr {$value eq "enable"}]
+                    ::itest::log_decision ssl forward_proxy_verified_handshake $value
+                    return ""
+                }
+                return [set ${ns}::forward_proxy_verified_handshake]
+            }
+            extension {
+                if {[llength $args] != 3} { error "SSL::forward_proxy extension requires an OID and value" }
+                set oid [_ssl_require_text [lindex $args 1] "SSL::forward_proxy extension OID"]
+                set value [lindex $args 2]
+                if {[string first "\x00" $value] >= 0} { error "certificate extension value cannot contain NUL bytes" }
+                dict set ${ns}::forward_proxy_extensions $oid $value
+                ::itest::log_decision ssl forward_proxy_extension [list $oid $value]
+                return ""
+            }
+            default { error "SSL::forward_proxy requires policy, cert, verified_handshake, or extension" }
+        }
+    }
+
+    proc ssl_modssl_sessionid_headers_command {args} {
+        if {[llength $args] > 1 || ([llength $args] == 1 && [lindex $args 0] ni {initial current})} {
+            error "SSL::modssl_sessionid_headers accepts initial or current"
+        }
+        set ns [_ssl_namespace]
+        set selector [expr {[llength $args] == 1 ? [lindex $args 0] : "current"}]
+        set field [expr {$selector eq "initial" ? "initial_session_id" : "session_id"}]
+        return [list SSLClientSessionId [set ${ns}::$field]]
+    }
+
+    proc ssl_nextproto_command {args} {
+        if {[llength $args] > 1} { error "SSL::nextproto accepts an optional protocol string" }
+        set ns [_ssl_namespace]
+        if {[llength $args] == 1} {
+            set value [_ssl_require_text [lindex $args 0] "SSL::nextproto"]
+            set ${ns}::nextproto $value
+            ::itest::log_decision ssl nextproto_set $value
+            return ""
+        }
+        return [set ${ns}::nextproto]
+    }
+
+    proc ssl_sessionsecret_command {args} {
+        if {[llength $args] != 0} { error "SSL::sessionsecret takes no arguments" }
+        return [_ssl_value session_secret]
+    }
+
+    proc ssl_tls13_secret_command {args} {
+        if {[llength $args] != 2} { error "SSL::tls13_secret requires a side and secret type" }
+        set side [lindex $args 0]
+        set secret [lindex $args 1]
+        if {$side ni {client server}} { error "SSL::tls13_secret side must be client or server" }
+        if {$side eq "server" && $secret eq "early"} {
+            error "SSL::tls13_secret server does not support early"
+        }
+        if {$secret ni {app hs early}} { error "unsupported TLS 1.3 secret type" }
+        set field tls13_${side}_${secret}_secret
+        set ns ::state::tls::$side
+        return [set ${ns}::$field]
     }
 
     proc _ssl_set_disabled {side value} {
@@ -12823,6 +13124,9 @@ foreach {name proc_name} {
     RESOLVER::name_lookup ::itest::semantic::resolver_name_lookup
     RESOLVER::summarize ::itest::semantic::resolver_summarize
     SSL::cert ::itest::semantic::ssl_cert_command
+    SSL::c3d ::itest::semantic::ssl_c3d_command
+    SSL::cert_constraint ::itest::semantic::ssl_cert_constraint_command
+    SSL::collect ::itest::semantic::ssl_collect_command
     SSL::cipher ::itest::semantic::ssl_cipher_command
     SSL::alpn ::itest::semantic::ssl_alpn_command
     SSL::allow_dynamic_record_sizing ::itest::semantic::ssl_allow_dynamic_record_sizing_command
@@ -12834,15 +13138,22 @@ foreach {name proc_name} {
     SSL::handshake ::itest::semantic::ssl_handshake_command
     SSL::is_renegotiation_secure ::itest::semantic::ssl_is_renegotiation_secure_command
     SSL::maximum_record_size ::itest::semantic::ssl_maximum_record_size_command
+    SSL::modssl_sessionid_headers ::itest::semantic::ssl_modssl_sessionid_headers_command
     SSL::mode ::itest::semantic::ssl_mode_command
+    SSL::nextproto ::itest::semantic::ssl_nextproto_command
+    SSL::payload ::itest::semantic::ssl_payload_command
     SSL::profile ::itest::semantic::ssl_profile_command
     SSL::renegotiate ::itest::semantic::ssl_renegotiate_command
+    SSL::release ::itest::semantic::ssl_release_command
     SSL::secure_renegotiation ::itest::semantic::ssl_secure_renegotiation_command
     SSL::session ::itest::semantic::ssl_session_command
+    SSL::sessionsecret ::itest::semantic::ssl_sessionsecret_command
     SSL::sessionid ::itest::semantic::ssl_sessionid_command
     SSL::sessionticket ::itest::semantic::ssl_sessionticket_command
     SSL::sni ::itest::semantic::ssl_sni_command
+    SSL::tls13_secret ::itest::semantic::ssl_tls13_secret_command
     SSL::verify_result ::itest::semantic::ssl_verify_result_command
+    SSL::forward_proxy ::itest::semantic::ssl_forward_proxy_command
     SSL::unclean_shutdown ::itest::semantic::ssl_unclean_shutdown_command
     X509::issuer ::itest::semantic::x509_issuer_command
     X509::subject ::itest::semantic::x509_subject_command

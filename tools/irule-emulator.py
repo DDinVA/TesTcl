@@ -225,7 +225,31 @@ EVENT_STATE_FIELDS = {
         "alpn",
         "handshake_done",
         "session_id",
+        "initial_session_id",
         "sessionticket",
+        "nextproto",
+        "session_secret",
+        "tls13_client_app_secret",
+        "tls13_client_hs_secret",
+        "tls13_client_early_secret",
+        "tls13_server_app_secret",
+        "tls13_server_hs_secret",
+        "c3d_cert",
+        "c3d_subject_cn",
+        "c3d_extensions",
+        "cert_constraints",
+        "collect_requested",
+        "collect_length",
+        "payload",
+        "payload_length",
+        "release_requested",
+        "released_length",
+        "forward_proxy_policy",
+        "forward_proxy_cert",
+        "forward_proxy_extensions",
+        "forward_proxy_verified_handshake",
+        "forward_proxy_response_control",
+        "forward_proxy_cert_status",
         "handshake_held",
         "renegotiation_enabled",
         "renegotiation_requested",
@@ -261,7 +285,31 @@ EVENT_STATE_FIELDS = {
         "alpn",
         "handshake_done",
         "session_id",
+        "initial_session_id",
         "sessionticket",
+        "nextproto",
+        "session_secret",
+        "tls13_client_app_secret",
+        "tls13_client_hs_secret",
+        "tls13_client_early_secret",
+        "tls13_server_app_secret",
+        "tls13_server_hs_secret",
+        "c3d_cert",
+        "c3d_subject_cn",
+        "c3d_extensions",
+        "cert_constraints",
+        "collect_requested",
+        "collect_length",
+        "payload",
+        "payload_length",
+        "release_requested",
+        "released_length",
+        "forward_proxy_policy",
+        "forward_proxy_cert",
+        "forward_proxy_extensions",
+        "forward_proxy_verified_handshake",
+        "forward_proxy_response_control",
+        "forward_proxy_cert_status",
         "handshake_held",
         "renegotiation_enabled",
         "renegotiation_requested",
@@ -682,6 +730,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "RESOLVER::name_lookup",
     "RESOLVER::summarize",
     "SSL::cert",
+    "SSL::c3d",
+    "SSL::cert_constraint",
+    "SSL::collect",
     "SSL::cipher",
     "SSL::disable",
     "SSL::enable",
@@ -696,13 +747,20 @@ SEMANTIC_MOCK_COMMANDS = {
     "SSL::handshake",
     "SSL::is_renegotiation_secure",
     "SSL::maximum_record_size",
+    "SSL::modssl_sessionid_headers",
     "SSL::mode",
+    "SSL::nextproto",
+    "SSL::payload",
     "SSL::profile",
     "SSL::renegotiate",
+    "SSL::release",
     "SSL::secure_renegotiation",
     "SSL::session",
+    "SSL::sessionsecret",
     "SSL::sessionticket",
     "SSL::unclean_shutdown",
+    "SSL::tls13_secret",
+    "SSL::forward_proxy",
     "X509::issuer",
     "X509::subject",
     "HTTP2::active",
@@ -3881,6 +3939,12 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
                 raise EmulatorInputError(
                     f"event state value {layer}.{field} must be a string or number"
                 )
+            if (
+                layer in {"tls_client", "tls_server"}
+                and field == "payload"
+                and "\x00" in layer_values[field]
+            ):
+                raise EmulatorInputError("TLS payload must not contain NUL bytes")
         normalised[layer] = layer_values
     return event_name, normalised
 
@@ -7356,6 +7420,14 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             normalised["flags"] = [flag.upper() for flag in flags]
         if "payload" in packet:
             normalised["payload"] = _require_string(packet["payload"], f"packet {index} payload")
+            if protocol == "tls" and "\x00" in normalised["payload"]:
+                raise EmulatorInputError(
+                    f"packet {index} TLS payload cannot contain NUL bytes"
+                )
+            if protocol == "tls" and len(normalised["payload"].encode("utf-8")) > STREAM_MAX_BYTES:
+                raise EmulatorInputError(
+                    f"packet {index} TLS payload exceeds {STREAM_MAX_BYTES // (1024 * 1024)} MiB"
+                )
         for field in ("seq", "ack"):
             if field not in packet:
                 continue
@@ -8309,6 +8381,7 @@ class EmulatorSession:
         self._connection_open = False
         self._server_connection_open = False
         self._tcp_buffers = {"client": "", "server": ""}
+        self._ssl_buffers = {"client": b"", "server": b""}
         self._packet_streams: dict[tuple[Any, ...], _TcpStream] = {}
         self._http2_decoder: Http2ConnectionDecoder | None = None
         self._http2_streams: dict[int, dict[str, Any]] = {}
@@ -8703,7 +8776,7 @@ class EmulatorSession:
         for layer, values in state.items():
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "rtsp", "cache"} and field in {"payload", "message", "authenticator"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "rtsp", "cache", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -8871,6 +8944,10 @@ class EmulatorSession:
             for field in EVENT_STATE_FIELDS[layer] - {"handshake_done"}:
                 if field in packet:
                     tls_state[field] = _packet_scalar(packet[field], field)
+            if "payload" in packet:
+                payload = packet["payload"].encode("utf-8")
+                tls_state["payload"] = payload
+                tls_state["payload_length"] = str(len(payload))
             if packet.get("type") in {"handshake", "server_handshake"}:
                 tls_state["handshake_done"] = "1"
             state[layer] = tls_state
@@ -9222,6 +9299,29 @@ class EmulatorSession:
         }
         events = client_events if packet["direction"] == "client_to_server" else server_events
         return events[packet["type"]]
+
+    @staticmethod
+    def _tls_plaintext_payload(packet: dict[str, Any]) -> bytes:
+        """Return structured TLS plaintext supplied by the test scenario."""
+        payload = packet.get("payload", "")
+        if not isinstance(payload, str):  # pragma: no cover - normalizer guard
+            raise EmulatorInputError("TLS plaintext payload must be a string")
+        try:
+            return payload.encode("utf-8")
+        except UnicodeEncodeError as exc:  # pragma: no cover - normalizer guard
+            raise EmulatorInputError("TLS plaintext payload must be valid UTF-8") from exc
+
+    @staticmethod
+    def _ssl_payload_from_tcl(session: Any, side: str) -> bytes:
+        if side not in {"client", "server"}:
+            raise EmulatorInputError("SSL payload side must be client or server")
+        encoded = session.eval_tcl(
+            f"binary encode hex $::state::tls::{side}::payload"
+        )
+        try:
+            return bytes.fromhex(str(encoded))
+        except ValueError as exc:  # pragma: no cover - Tcl binary contract guard
+            raise EmulatorInputError("invalid SSL payload state") from exc
 
     @staticmethod
     def _tcp_emissions(session: Any) -> list[dict[str, Any]]:
@@ -9620,6 +9720,7 @@ class EmulatorSession:
         self._http2_streams.clear()
         self._http2_tcp_active = False
         self._tcp_buffers = {"client": "", "server": ""}
+        self._ssl_buffers = {"client": b"", "server": b""}
         self._websocket_raw_active = False
         self._ip_connection_initialized = False
         self._ip_connection_start_timestamp = None
@@ -10197,6 +10298,29 @@ class EmulatorSession:
                 "status",
                 "response_headers",
                 "sni",
+                "initial_session_id",
+                "nextproto",
+                "session_secret",
+                "tls13_client_app_secret",
+                "tls13_client_hs_secret",
+                "tls13_client_early_secret",
+                "tls13_server_app_secret",
+                "tls13_server_hs_secret",
+                "c3d_cert",
+                "c3d_subject_cn",
+                "c3d_extensions",
+                "cert_constraints",
+                "collect_requested",
+                "collect_length",
+                "payload_length",
+                "release_requested",
+                "released_length",
+                "forward_proxy_policy",
+                "forward_proxy_cert",
+                "forward_proxy_extensions",
+                "forward_proxy_verified_handshake",
+                "forward_proxy_response_control",
+                "forward_proxy_cert_status",
                 "qname",
                 "qtype",
                 "frame_type",
@@ -11016,11 +11140,74 @@ class EmulatorSession:
                 continue
 
             if protocol == "tls":
-                entry["events"].append(
-                    self._fire_event_on_worker(
-                        session, self._packet_tls_event(packet), self._packet_event_state(packet)
+                event_name = self._packet_tls_event(packet)
+                side = "client" if direction == "client_to_server" else "server"
+                data_event = event_name in {"CLIENTSSL_DATA", "SERVERSSL_DATA"}
+                event_packet = packet
+                event_payload = b""
+                remainder = b""
+                collection_requested = False
+                if data_event:
+                    collection_requested = session.eval_tcl(
+                        f"set ::state::tls::{side}::collect_requested"
+                    ) == "1"
+                    if collection_requested:
+                        requested_length_raw = session.eval_tcl(
+                            f"set ::state::tls::{side}::collect_length"
+                        )
+                        try:
+                            requested_length = int(requested_length_raw)
+                        except (TypeError, ValueError):
+                            raise EmulatorInputError("invalid SSL collection length") from None
+                        if requested_length < 0:
+                            raise EmulatorInputError("invalid SSL collection length")
+                        incoming = self._tls_plaintext_payload(packet)
+                        buffered = self._ssl_buffers[side] + incoming
+                        if len(buffered) > STREAM_MAX_BYTES:
+                            raise EmulatorInputError(
+                                f"SSL collection exceeds {STREAM_MAX_BYTES // (1024 * 1024)} MiB"
+                            )
+                        if requested_length and len(buffered) < requested_length:
+                            self._ssl_buffers[side] = buffered
+                            entry["buffered"] = True
+                            entry["buffered_bytes"] = len(buffered)
+                            continue
+                        event_payload = (
+                            buffered
+                            if requested_length == 0
+                            else buffered[:requested_length]
+                        )
+                        remainder = buffered[len(event_payload):]
+                        self._ssl_buffers[side] = remainder
+                        session.eval_tcl(
+                            f"set ::state::tls::{side}::collect_requested 0"
+                        )
+                        event_packet = dict(packet)
+                        event_packet["payload"] = _decode_wire_text(event_payload)
+                event_state = self._packet_event_state(event_packet)
+                if data_event and collection_requested:
+                    tls_layer = (
+                        "tls_client" if direction == "client_to_server" else "tls_server"
                     )
+                    event_state.setdefault(tls_layer, {})["payload"] = event_payload
+                    event_state[tls_layer]["payload_length"] = str(len(event_payload))
+                event_result = self._fire_event_on_worker(
+                    session, event_name, event_state
                 )
+                entry["events"].append(event_result)
+                if data_event and collection_requested:
+                    after_event = self._ssl_payload_from_tcl(session, side)
+                    self._ssl_buffers[side] = after_event + remainder
+                    if session.eval_tcl(
+                        f"set ::state::tls::{side}::release_requested"
+                    ) == "1":
+                        entry["released"] = True
+                        entry["released_length"] = int(
+                            session.eval_tcl(
+                                f"set ::state::tls::{side}::released_length"
+                            )
+                        )
+                    entry["payload_after"] = _decode_wire_text(after_event)
             else:  # TCP
                 flags = set(packet.get("flags", []))
                 if packet.get("payload"):

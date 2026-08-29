@@ -2741,6 +2741,140 @@ when SERVERSSL_HANDSHAKE {
             },
         )
 
+    def test_ssl_remaining_175_commands_and_plaintext_collection(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "CLIENTSSL", "SERVERSSL"],
+                "irule": """
+when CLIENTSSL_HANDSHAKE {
+    SSL::c3d extension 1.2.3.4 extension-value
+    SSL::c3d cert forged-client-cert
+    SSL::c3d subject commonName forged.example
+    SSL::cert_constraint 1.2.3.4 constraint-value
+    SSL::forward_proxy policy intercept
+    SSL::forward_proxy cert response_control mask
+    SSL::forward_proxy cert status verified
+    SSL::forward_proxy extension 1.2.3.5 proxy-extension
+    SSL::forward_proxy verified_handshake enable
+    SSL::nextproto http/1.1
+    log local0. "c3d=[set ::state::tls::client::c3d_subject_cn] proxy=[SSL::forward_proxy policy] cert=[SSL::forward_proxy cert] control=[SSL::forward_proxy cert response_control] verified=[SSL::forward_proxy verified_handshake] next=[SSL::nextproto] modssl=[SSL::modssl_sessionid_headers initial] secret=[SSL::sessionsecret] tls13=[SSL::tls13_secret client hs]"
+    SSL::collect 4
+}
+when CLIENTSSL_DATA {
+    log local0. "client=[SSL::payload] length=[SSL::payload length] first=[SSL::payload 2]"
+    SSL::payload replace 0 2 XY
+    SSL::release 2
+}
+when SERVERSSL_HANDSHAKE {
+    log local0. "server-tls13=[SSL::tls13_secret server hs]"
+    SSL::collect 3
+}
+when SERVERSSL_DATA {
+    log local0. "server=[SSL::payload]"
+    SSL::release
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tls",
+                        "direction": "client_to_server",
+                        "type": "handshake",
+                        "session_id": "current-session",
+                        "initial_session_id": "initial-session",
+                        "forward_proxy_cert": "forged-cert",
+                        "session_secret": "master-secret",
+                        "tls13_client_hs_secret": "client-hs-secret",
+                    },
+                    {
+                        "protocol": "tls",
+                        "direction": "client_to_server",
+                        "type": "client_data",
+                        "payload": "ab",
+                    },
+                    {
+                        "protocol": "tls",
+                        "direction": "client_to_server",
+                        "type": "client_data",
+                        "payload": "cd",
+                    },
+                    {
+                        "protocol": "tls",
+                        "direction": "server_to_client",
+                        "type": "server_handshake",
+                        "tls13_server_hs_secret": "server-hs-secret",
+                    },
+                    {
+                        "protocol": "tls",
+                        "direction": "server_to_client",
+                        "type": "server_data",
+                        "payload": "xyz",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        client_data = next(
+            packet for packet in result["trace"]
+            if packet.get("buffered") and packet["direction"] == "client_to_server"
+        )
+        client_event_packet = next(
+            packet for packet in result["trace"]
+            if any(event["event"] == "CLIENTSSL_DATA" for event in packet["events"])
+        )
+        server_data = next(
+            packet for packet in result["trace"]
+            if any(event["event"] == "SERVERSSL_DATA" for event in packet["events"])
+        )
+        self.assertTrue(client_data["buffered"])
+        client_event = next(
+            event for event in client_event_packet["events"]
+            if event["event"] == "CLIENTSSL_DATA"
+        )
+        self.assertTrue(any("client=abcd length=4 first=ab" in entry for entry in client_event["logs"]))
+        self.assertEqual(client_event["state"]["tls_client"]["payload"], "cd")
+        self.assertEqual(client_event["state"]["tls_client"]["released_length"], "2")
+        self.assertTrue(server_data["events"])
+        self.assertTrue(any("server=xyz" in entry for entry in server_data["events"][0]["logs"]))
+        self.assertEqual(server_data["events"][0]["state"]["tls_server"]["payload"], "")
+
+        handshake = next(
+            event for packet in result["trace"] for event in packet["events"]
+            if event["event"] == "CLIENTSSL_HANDSHAKE"
+        )
+        self.assertTrue(any("c3d=forged.example" in entry for entry in handshake["logs"]))
+        self.assertTrue(any("proxy=intercept" in entry for entry in handshake["logs"]))
+        self.assertTrue(any("cert=forged-cert" in entry for entry in handshake["logs"]))
+        self.assertTrue(any("control=mask" in entry for entry in handshake["logs"]))
+        self.assertTrue(any("verified=1" in entry for entry in handshake["logs"]))
+        self.assertTrue(any("next=http/1.1" in entry for entry in handshake["logs"]))
+        self.assertTrue(any("SSLClientSessionId initial-session" in entry for entry in handshake["logs"]))
+        self.assertTrue(any("secret=master-secret" in entry and "tls13=client-hs-secret" in entry for entry in handshake["logs"]))
+        server_handshake = next(
+            event for packet in result["trace"] for event in packet["events"]
+            if event["event"] == "SERVERSSL_HANDSHAKE"
+        )
+        self.assertTrue(any("server-tls13=server-hs-secret" in entry for entry in server_handshake["logs"]))
+
+        ssl_statuses = {
+            entry["name"]: entry["runtime_status"]
+            for entry in result["fidelity"]["commands"]
+            if entry["name"].startswith("SSL::")
+        }
+        for command in {
+            "SSL::c3d",
+            "SSL::cert_constraint",
+            "SSL::collect",
+            "SSL::forward_proxy",
+            "SSL::modssl_sessionid_headers",
+            "SSL::nextproto",
+            "SSL::payload",
+            "SSL::release",
+            "SSL::sessionsecret",
+            "SSL::tls13_secret",
+        }:
+            self.assertEqual(ssl_statuses[command], "semantic-mock")
+
     def test_generic_server_event_uses_server_ssl_state(self) -> None:
         session = self.adapter.EmulatorSession(
             Path(self.tcl_lsp_root),

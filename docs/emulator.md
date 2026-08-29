@@ -836,11 +836,22 @@ references for the production command contract.
 TLS packet state also drives the common SSL inspection path. In
 `CLIENTSSL_*` and `SERVERSSL_*` events, the semantic overlay supports
 `SSL::sni`, `SSL::cipher`, `SSL::sessionid`, `SSL::cert`,
-`SSL::verify_result`, and side-specific `SSL::disable`/`SSL::enable`.
-Certificate handles can be inspected with `X509::subject` and
-`X509::issuer`. Certificate and cipher values are deterministic packet input;
-the emulator does not perform a TLS handshake, certificate validation, key
-exchange, or cryptographic renegotiation.
+`SSL::verify_result`, and side-specific `SSL::disable`/`SSL::enable`. The
+remaining high-value 17.5 SSL controls are modeled as deterministic state:
+client-cert-on-demand (`SSL::c3d`), certificate constraints, forward-proxy
+policy/certificate controls, session-ID headers, ALPN/next-protocol, session
+secrets, TLS 1.3 secret inspection, and bounded plaintext collection through
+`SSL::collect`, `SSL::payload`, and `SSL::release`. Certificate handles can be
+inspected with `X509::subject` and `X509::issuer`.
+
+For structured TLS packet traces, `SSL::collect` holds a `CLIENTSSL_DATA` or
+`SERVERSSL_DATA` event until the requested plaintext length is available.
+`SSL::payload` can inspect or replace the collected bytes, and `SSL::release`
+returns a bounded prefix to the modeled stream. The adapter intentionally
+accepts structured plaintext rather than decrypting TLS records. Certificate,
+secret, and cipher values are deterministic packet input; the emulator does
+not perform a TLS handshake, certificate validation, key exchange, or
+cryptographic renegotiation.
 
 ```json
 {
@@ -858,6 +869,12 @@ exchange, or cryptographic renegotiation.
   }]
 }
 ```
+
+Additional SSL state can be supplied on the TLS packet when a rule needs to
+exercise those inspection paths, for example `initial_session_id`,
+`nextproto`, `session_secret`, `tls13_client_hs_secret`, `c3d_cert`,
+`forward_proxy_cert`, and `forward_proxy_cert_status`. Values are test
+fixtures, not material extracted from a live TLS connection.
 
 HTTP/2 metadata can be attached to a structured HTTP transaction with an
 `http2` object. This drives the reusable `tcl-lsp` pseudo-header and stream

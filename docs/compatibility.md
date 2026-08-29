@@ -182,7 +182,13 @@ nameserver. `RESOLVER::name_lookup` and the `DNSMSG::*` commands can consume
 scenario-supplied resolver records without making network requests.
 TLS packet state supports common SNI, cipher, session, certificate, X509
 subject/issuer, verification-result, and SSL enable/disable inspection paths;
-it does not perform a real TLS handshake or certificate cryptography.
+the remaining high-value TMOS 17.5 SSL paths include client-cert-on-demand,
+certificate constraints, forward-proxy controls, session-ID headers, ALPN,
+session-secret/TLS 1.3 secret inspection, and bounded plaintext collection,
+payload mutation, and release. Structured TLS data is deterministic fixture
+input; the adapter does not perform a real TLS handshake, decrypt encrypted
+records, validate certificates, or expose cryptographic key material from a
+live connection.
 The SSL control layer also models ALPN, SSL mode, handshake hold/resume,
 renegotiation and secure-renegotiation policy/inspection, non-SSL allowance,
 dynamic record sizing, maximum record size, profile selection, session
