@@ -429,6 +429,85 @@ when PCP_RESPONSE {
         finally:
             session.close()
 
+    def test_psc_subscriber_identity_policy_address_and_attribute_state(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["PSC"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    PSC::subscriber_id 310150123456789
+    PSC::calling_id +15551212
+    PSC::imeisv 356789012345678
+    PSC::imsi 310150123456789
+    PSC::tower_id tower-a
+    PSC::user_name alice
+    PSC::aaa_reporting_interval 600
+    PSC::ip_address 192.0.2.10 2001:db8::10%10
+    PSC::ip_address add 192.0.2.11
+    PSC::policy /Common/data /Common/voice
+    PSC::policy add /Common/video
+    PSC::attr plan premium
+    PSC::attr region east
+    PSC::lease_time 192.0.2.10 3600
+    log local0. "id=[PSC::subscriber_id] calling=[PSC::calling_id] imsi=[PSC::imsi] user=[PSC::user_name] interval=[PSC::aaa_reporting_interval] ips=[PSC::ip_address] policies=[PSC::policy] plan=[PSC::attr plan] lease=[PSC::lease_time 192.0.2.10]"
+    PSC::attr remove region
+    PSC::policy remove /Common/voice
+    PSC::ip_address remove 192.0.2.11
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event("CLIENT_ACCEPTED", {"psc": {}})
+            self.assertTrue(result["fired"])
+            psc_state = result["state"]["psc"]
+            self.assertEqual(psc_state["subscriber_id"], "310150123456789")
+            self.assertEqual(psc_state["aaa_reporting_interval"], "600")
+            self.assertIn("192.0.2.10", psc_state["ip_addresses"])
+            self.assertIn("2001:db8::10%10", psc_state["ip_addresses"])
+            self.assertEqual(psc_state["policies"], "/Common/data /Common/video")
+            self.assertEqual(psc_state["attrs"], "plan premium")
+            self.assertEqual(psc_state["lease_times"], "192.0.2.10 3600")
+            self.assertTrue(any(
+                "id=310150123456789 calling=+15551212 imsi=310150123456789 user=alice interval=600"
+                " ips=192.0.2.10 2001:db8::10%10 192.0.2.11"
+                " policies=/Common/data /Common/voice /Common/video plan=premium lease=3600" in entry
+                for entry in result["logs"]
+            ))
+        finally:
+            session.close()
+
+    def test_psc_state_limits_and_injected_address_validation(self) -> None:
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "event PSC state exceeds"):
+            self.adapter._normalise_event(
+                "CLIENT_ACCEPTED",
+                {"psc": {"subscriber_id": "x" * (64 * 1024 + 1)}},
+            )
+
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["PSC"],
+                "irule": "when CLIENT_ACCEPTED { log local0. \"ips=[PSC::ip_address]\" }",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "PSC IPv4 address octets must be between 0 and 255",
+            ):
+                session.fire_event(
+                    "CLIENT_ACCEPTED",
+                    {"psc": {"ip_addresses": "999.0.0.1"}},
+                )
+        finally:
+            session.close()
+
     def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1033,8 +1112,9 @@ when HTTP_REQUEST {
         self.assertNotIn(("LSN", "generated-stub"), queue_buckets)
         self.assertNotIn(("XLAT", "generated-stub"), queue_buckets)
         self.assertNotIn(("PCP", "generated-stub"), queue_buckets)
+        self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 196)
+        self.assertEqual(queue["command_count"], 185)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)

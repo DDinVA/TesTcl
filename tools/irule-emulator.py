@@ -582,6 +582,19 @@ EVENT_STATE_FIELDS = {
         "rejected",
         "reject_result",
     },
+    "psc": {
+        "aaa_reporting_interval",
+        "attrs",
+        "calling_id",
+        "imeisv",
+        "imsi",
+        "ip_addresses",
+        "lease_times",
+        "policies",
+        "subscriber_id",
+        "tower_id",
+        "user_name",
+    },
     "diameter": {
         "type",
         "version",
@@ -954,6 +967,7 @@ EVENT_STATE_NAMESPACES = {
     "lsn": "::state::lsn",
     "xlat": "::state::xlat",
     "pcp": "::state::pcp",
+    "psc": "::state::psc",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
     "message": "::state::message",
@@ -1496,6 +1510,17 @@ SEMANTIC_MOCK_COMMANDS = {
     "PCP::reject",
     "PCP::request",
     "PCP::response",
+    "PSC::aaa_reporting_interval",
+    "PSC::attr",
+    "PSC::calling_id",
+    "PSC::imeisv",
+    "PSC::imsi",
+    "PSC::ip_address",
+    "PSC::lease_time",
+    "PSC::policy",
+    "PSC::subscriber_id",
+    "PSC::tower_id",
+    "PSC::user_name",
     "DIAMETER::avp",
     "DIAMETER::command",
     "DIAMETER::disconnect",
@@ -5318,6 +5343,12 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
                 raise EmulatorInputError(
                     f"event SDP state exceeds {SDP_MAX_STATE_BYTES} bytes"
                 )
+        if layer == "psc":
+            state_bytes = sum(len(value.encode("utf-8")) for value in layer_values.values())
+            if state_bytes > PSC_MAX_STATE_BYTES:
+                raise EmulatorInputError(
+                    f"event PSC state exceeds {PSC_MAX_STATE_BYTES} bytes"
+                )
         normalised[layer] = layer_values
     supplied_version = normalised.get("dhcp", {}).get("version")
     if supplied_version is not None and supplied_version not in {"4", "6"}:
@@ -5341,6 +5372,7 @@ WEBSOCKET_MAX_FRAME_BYTES = STREAM_MAX_BYTES
 MQTT_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 SIP_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 SDP_MAX_STATE_BYTES = 64 * 1024
+PSC_MAX_STATE_BYTES = 64 * 1024
 DIAMETER_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 RADIUS_MAX_MESSAGE_BYTES = 4096
 RADIUS_AUTHENTICATOR_BYTES = 16
@@ -10535,6 +10567,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::lsn_reset_connection")
                 session.eval_tcl("::itest::semantic::xlat_reset_connection")
                 session.eval_tcl("::itest::semantic::pcp_reset_connection")
+                session.eval_tcl("::itest::semantic::psc_reset_connection")
                 if any(str(profile).upper() == "REWRITE" for profile in self._profiles):
                     session.eval_tcl("::itest::semantic::rewrite_install_flow_hooks")
                 if any(
@@ -10820,6 +10853,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::lsn_reset_connection")
             session.eval_tcl("::itest::semantic::xlat_reset_connection")
             session.eval_tcl("::itest::semantic::pcp_reset_connection")
+            session.eval_tcl("::itest::semantic::psc_reset_connection")
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::route_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
@@ -12194,6 +12228,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::lsn_reset_connection")
         session.eval_tcl("::itest::semantic::xlat_reset_connection")
         session.eval_tcl("::itest::semantic::pcp_reset_connection")
+        session.eval_tcl("::itest::semantic::psc_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::stream_reset_connection")
         session.eval_tcl("::itest::semantic::route_reset_connection")
@@ -12264,6 +12299,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::lsn_reset_connection")
         session.eval_tcl("::itest::semantic::xlat_reset_connection")
         session.eval_tcl("::itest::semantic::pcp_reset_connection")
+        session.eval_tcl("::itest::semantic::psc_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::datagram_reset_connection")

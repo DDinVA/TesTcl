@@ -1007,6 +1007,20 @@ namespace eval ::itest::semantic {
         variable reject_result 0
     }
 
+    namespace eval ::state::psc {
+        variable aaa_reporting_interval 0
+        variable attrs {}
+        variable calling_id ""
+        variable imeisv ""
+        variable imsi ""
+        variable ip_addresses {}
+        variable lease_times {}
+        variable policies {}
+        variable subscriber_id ""
+        variable tower_id ""
+        variable user_name ""
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -4709,6 +4723,222 @@ namespace eval ::itest::semantic {
         set ::state::pcp::reject_result $result
         ::itest::log_decision pcp reject $result
         return ""
+    }
+
+    proc psc_reset_connection {} {
+        foreach {name value} {
+            aaa_reporting_interval 0
+            attrs {}
+            calling_id ""
+            imeisv ""
+            imsi ""
+            ip_addresses {}
+            lease_times {}
+            policies {}
+            subscriber_id ""
+            tower_id ""
+            user_name ""
+        } {
+            set ::state::psc::$name $value
+        }
+    }
+
+    proc _psc_text {value field_name} {
+        if {[string first "\x00" $value] >= 0 ||
+            [string first "\r" $value] >= 0 || [string first "\n" $value] >= 0} {
+            error "$field_name must not contain NUL bytes or newlines"
+        }
+        return $value
+    }
+
+    proc _psc_required_text {value field_name} {
+        set value [_psc_text $value $field_name]
+        if {$value eq ""} { error "$field_name must be non-empty" }
+        return $value
+    }
+
+    proc _psc_integer {value field_name minimum maximum} {
+        if {![string is integer -strict $value] || $value < $minimum || $value > $maximum} {
+            error "$field_name must be an integer from $minimum to $maximum"
+        }
+        return $value
+    }
+
+    proc _psc_ip_address {value} {
+        set value [_psc_required_text $value "PSC IP address"]
+        set parts [split $value %]
+        if {[llength $parts] > 2 || [lindex $parts 0] eq ""} {
+            error "PSC IP address must be an IPv4 or IPv6 address with optional route domain"
+        }
+        set address [lindex $parts 0]
+        if {[string first : $address] >= 0} {
+            if {![regexp {^[0-9A-Fa-f:]+$} $address]} {
+                error "PSC IP address must contain a valid IPv6-shaped address"
+            }
+        } elseif {![regexp {^[0-9]+(\.[0-9]+){3}$} $address]} {
+            error "PSC IP address must contain a valid IPv4 or IPv6 address"
+        } else {
+            foreach octet [split $address .] {
+                if {![string is integer -strict $octet] || $octet < 0 || $octet > 255} {
+                    error "PSC IPv4 address octets must be between 0 and 255"
+                }
+            }
+        }
+        if {[llength $parts] == 2} {
+            _psc_integer [lindex $parts 1] "PSC route domain" 0 65535
+        }
+        return $value
+    }
+
+    proc _psc_list_limit {values field_name} {
+        if {[llength $values] > 256} { error "$field_name cannot contain more than 256 entries" }
+        return $values
+    }
+
+    proc _psc_ip_list {values} {
+        set addresses {}
+        foreach address $values { lappend addresses [_psc_ip_address $address] }
+        return [_psc_list_limit $addresses "PSC IP address list"]
+    }
+
+    proc _psc_policy_list {values} {
+        set policies {}
+        foreach policy $values { lappend policies [_psc_required_text $policy "PSC policy"] }
+        return [_psc_list_limit $policies "PSC policy list"]
+    }
+
+    proc _psc_scalar_command {state_name command_name args} {
+        if {[llength $args] > 1} { error "$command_name accepts zero or one value" }
+        if {[llength $args] == 1} {
+            set ::state::psc::$state_name [_psc_text [lindex $args 0] $command_name]
+            ::itest::log_decision psc set [list $state_name [lindex $args 0]]
+        }
+        return [_psc_text [set ::state::psc::$state_name] $command_name]
+    }
+
+    proc psc_aaa_reporting_interval_command {args} {
+        if {[llength $args] > 1} { error "PSC::aaa_reporting_interval accepts zero or one interval" }
+        if {[llength $args] == 1} {
+            set ::state::psc::aaa_reporting_interval [_psc_integer [lindex $args 0] "PSC AAA reporting interval" 0 0xffffffff]
+            ::itest::log_decision psc aaa_reporting_interval $::state::psc::aaa_reporting_interval
+        }
+        return [_psc_integer $::state::psc::aaa_reporting_interval "PSC AAA reporting interval" 0 0xffffffff]
+    }
+
+    proc psc_attr_command {args} {
+        if {[llength $args] == 0} {
+            if {[dict size $::state::psc::attrs] > 256} { error "PSC custom attributes cannot contain more than 256 entries" }
+            foreach {name value} $::state::psc::attrs {
+                _psc_required_text $name "PSC attribute name"
+                _psc_text $value "PSC attribute value"
+            }
+            return [dict keys $::state::psc::attrs]
+        }
+        if {[lindex $args 0] eq "remove"} {
+            if {[llength $args] > 2} { error "PSC::attr remove accepts an optional name" }
+            if {[llength $args] == 1} {
+                set ::state::psc::attrs {}
+            } else {
+                set name [_psc_required_text [lindex $args 1] "PSC attribute name"]
+                dict unset ::state::psc::attrs $name
+            }
+            ::itest::log_decision psc attr_remove [lrange $args 1 end]
+            return ""
+        }
+        if {[llength $args] > 2} { error "PSC::attr accepts a name and optional value" }
+        set name [_psc_required_text [lindex $args 0] "PSC attribute name"]
+        if {[llength $args] == 1} {
+            if {![dict exists $::state::psc::attrs $name]} { return "" }
+            return [_psc_text [dict get $::state::psc::attrs $name] "PSC attribute value"]
+        }
+        if {![dict exists $::state::psc::attrs $name] && [dict size $::state::psc::attrs] >= 256} {
+            error "PSC custom attributes cannot contain more than 256 entries"
+        }
+        dict set ::state::psc::attrs $name [_psc_text [lindex $args 1] "PSC attribute value"]
+        ::itest::log_decision psc attr_set [list $name [lindex $args 1]]
+        return ""
+    }
+
+    proc psc_calling_id_command {args} { return [_psc_scalar_command calling_id PSC::calling_id {*}$args] }
+    proc psc_imeisv_command {args} { return [_psc_scalar_command imeisv PSC::imeisv {*}$args] }
+    proc psc_imsi_command {args} { return [_psc_scalar_command imsi PSC::imsi {*}$args] }
+    proc psc_tower_id_command {args} { return [_psc_scalar_command tower_id PSC::tower_id {*}$args] }
+    proc psc_user_name_command {args} { return [_psc_scalar_command user_name PSC::user_name {*}$args] }
+    proc psc_subscriber_id_command {args} { return [_psc_scalar_command subscriber_id PSC::subscriber_id {*}$args] }
+
+    proc psc_ip_address_command {args} {
+        if {[llength $args] == 0} {
+            return [_psc_ip_list $::state::psc::ip_addresses]
+        }
+        set operation [lindex $args 0]
+        if {$operation eq "add"} {
+            if {[llength $args] != 2} { error "PSC::ip_address add requires an address" }
+            set address [_psc_ip_address [lindex $args 1]]
+            set addresses [_psc_ip_list $::state::psc::ip_addresses]
+            if {[lsearch -exact $addresses $address] < 0} {
+                lappend addresses $address
+                set ::state::psc::ip_addresses [_psc_list_limit $addresses "PSC IP address list"]
+            }
+        } elseif {$operation eq "remove"} {
+            if {[llength $args] > 2} { error "PSC::ip_address remove accepts an optional address" }
+            if {[llength $args] == 1} {
+                set ::state::psc::ip_addresses {}
+            } else {
+                set address [_psc_ip_address [lindex $args 1]]
+                set remaining {}
+                foreach item [_psc_ip_list $::state::psc::ip_addresses] {
+                    if {$item ne $address} { lappend remaining $item }
+                }
+                set ::state::psc::ip_addresses $remaining
+            }
+        } else {
+            set ::state::psc::ip_addresses [_psc_ip_list $args]
+        }
+        ::itest::log_decision psc ip_address $::state::psc::ip_addresses
+        return $::state::psc::ip_addresses
+    }
+
+    proc psc_policy_command {args} {
+        if {[llength $args] == 0} {
+            return [_psc_policy_list $::state::psc::policies]
+        }
+        set operation [lindex $args 0]
+        if {$operation eq "add"} {
+            if {[llength $args] != 2} { error "PSC::policy add requires a policy" }
+            set policy [_psc_required_text [lindex $args 1] "PSC policy"]
+            set policies [_psc_policy_list $::state::psc::policies]
+            if {[lsearch -exact $policies $policy] < 0} {
+                lappend policies $policy
+                set ::state::psc::policies [_psc_list_limit $policies "PSC policy list"]
+            }
+        } elseif {$operation eq "remove"} {
+            if {[llength $args] > 2} { error "PSC::policy remove accepts an optional policy" }
+            if {[llength $args] == 1} {
+                set ::state::psc::policies {}
+            } else {
+                set policy [_psc_required_text [lindex $args 1] "PSC policy"]
+                set remaining {}
+                foreach item [_psc_policy_list $::state::psc::policies] { if {$item ne $policy} { lappend remaining $item } }
+                set ::state::psc::policies $remaining
+            }
+        } else {
+            set ::state::psc::policies [_psc_policy_list $args]
+        }
+        ::itest::log_decision psc policy $::state::psc::policies
+        return $::state::psc::policies
+    }
+
+    proc psc_lease_time_command {args} {
+        if {[llength $args] < 1 || [llength $args] > 2} { error "PSC::lease_time requires an address and optional lease time" }
+        set address [_psc_ip_address [lindex $args 0]]
+        if {[llength $args] == 1} {
+            if {![dict exists $::state::psc::lease_times $address]} { return 0 }
+            return [_psc_integer [dict get $::state::psc::lease_times $address] "PSC lease time" 0 0xffffffff]
+        }
+        set lease [_psc_integer [lindex $args 1] "PSC lease time" 0 0xffffffff]
+        dict set ::state::psc::lease_times $address $lease
+        ::itest::log_decision psc lease_time [list $address $lease]
+        return $lease
     }
 
     proc diameter_reset_connection {} {
@@ -18793,6 +19023,17 @@ foreach {original replacement} {
     pcp_reject pcp_reject_command
     pcp_request pcp_request_command
     pcp_response pcp_response_command
+    psc_aaa_reporting_interval psc_aaa_reporting_interval_command
+    psc_attr psc_attr_command
+    psc_calling_id psc_calling_id_command
+    psc_imeisv psc_imeisv_command
+    psc_imsi psc_imsi_command
+    psc_ip_address psc_ip_address_command
+    psc_lease_time psc_lease_time_command
+    psc_policy psc_policy_command
+    psc_subscriber_id psc_subscriber_id_command
+    psc_tower_id psc_tower_id_command
+    psc_user_name psc_user_name_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
         ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
@@ -19420,6 +19661,17 @@ foreach {name proc_name} {
     PCP::reject ::itest::semantic::pcp_reject_command
     PCP::request ::itest::semantic::pcp_request_command
     PCP::response ::itest::semantic::pcp_response_command
+    PSC::aaa_reporting_interval ::itest::semantic::psc_aaa_reporting_interval_command
+    PSC::attr ::itest::semantic::psc_attr_command
+    PSC::calling_id ::itest::semantic::psc_calling_id_command
+    PSC::imeisv ::itest::semantic::psc_imeisv_command
+    PSC::imsi ::itest::semantic::psc_imsi_command
+    PSC::ip_address ::itest::semantic::psc_ip_address_command
+    PSC::lease_time ::itest::semantic::psc_lease_time_command
+    PSC::policy ::itest::semantic::psc_policy_command
+    PSC::subscriber_id ::itest::semantic::psc_subscriber_id_command
+    PSC::tower_id ::itest::semantic::psc_tower_id_command
+    PSC::user_name ::itest::semantic::psc_user_name_command
     DIAMETER::avp ::itest::semantic::diameter_avp_command
     DIAMETER::command ::itest::semantic::diameter_command_command
     DIAMETER::disconnect ::itest::semantic::diameter_disconnect_command

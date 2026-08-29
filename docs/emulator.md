@@ -698,6 +698,25 @@ rejection for a request and validates the result code from 0 through 255. This
 slice does not parse PCP wire payloads, perform proxying, allocate mappings, or
 emit a packet-level PCP adapter; those remain separate emulator work.
 
+### PSC subscriber/session state
+
+With the `PSC` profile attached, the event API accepts a bounded `psc` state layer
+for subscriber/session-oriented rules. The overlay covers all eleven TMOS 17.5
+`PSC::*` catalog commands: scalar subscriber identity fields, AAA reporting
+interval, custom attributes, IP addresses, policies, and per-address lease times.
+The command contracts are based on the [PSC::attr](https://clouddocs.f5.com/api/irules/PSC__attr.html),
+[PSC::ip_address](https://clouddocs.f5.com/api/irules/PSC__ip_address.html),
+[PSC::policy](https://clouddocs.f5.com/api/irules/PSC__policy.html), and
+[PSC::subscriber_id](https://clouddocs.f5.com/api/irules/PSC-subscriber-id.html)
+references.
+
+`PSC::attr`, `PSC::ip_address`, and `PSC::policy` support their documented
+get/set/remove forms, including `add` and `remove`; IP addresses accept IPv4,
+IPv6, and optional route-domain suffixes such as `%10`. State is capped at 256
+entries per collection and 64 KiB per supplied PSC state layer. Values reset at
+connection teardown. This is deterministic test state: it does not connect to a
+live PEM/PSC session database, AAA system, policy engine, or mobile network.
+
 ### FLOWTABLE query inputs
 
 The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,
