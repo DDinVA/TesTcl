@@ -1021,6 +1021,30 @@ namespace eval ::itest::semantic {
         variable user_name ""
     }
 
+    namespace eval ::state::pem {
+        variable flow_enabled 1
+        variable transactional_enabled 1
+        variable eval_count 0
+        variable session_ip ""
+        variable subscriber_id ""
+        variable subscriber_type "imsi"
+        variable state ""
+        variable imsi ""
+        variable imeisv ""
+        variable tower_id ""
+        variable rat_type ""
+        variable user_name ""
+        variable provision "yes"
+        variable ip_addresses {}
+        variable policies {}
+        variable attrs {}
+        variable policy ""
+        variable action ""
+        variable result ""
+        variable sessions {}
+        variable subscribers {}
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -4939,6 +4963,567 @@ namespace eval ::itest::semantic {
         dict set ::state::psc::lease_times $address $lease
         ::itest::log_decision psc lease_time [list $address $lease]
         return $lease
+    }
+
+    proc pem_reset_connection {} {
+        foreach {name value} {
+            flow_enabled 1
+            transactional_enabled 1
+            eval_count 0
+            session_ip ""
+            subscriber_id ""
+            subscriber_type imsi
+            state ""
+            imsi ""
+            imeisv ""
+            tower_id ""
+            rat_type ""
+            user_name ""
+            provision yes
+            ip_addresses {}
+            policies {}
+            attrs {}
+            policy ""
+            action ""
+            result ""
+            sessions {}
+            subscribers {}
+        } {
+            set ::state::pem::$name $value
+        }
+    }
+
+    proc _pem_text {value field_name} {
+        if {[string first "\x00" $value] >= 0 ||
+            [string first "\r" $value] >= 0 || [string first "\n" $value] >= 0} {
+            error "$field_name must not contain NUL bytes or newlines"
+        }
+        return $value
+    }
+
+    proc _pem_required_text {value field_name} {
+        set value [_pem_text $value $field_name]
+        if {$value eq ""} { error "$field_name must be non-empty" }
+        return $value
+    }
+
+    proc _pem_ip {value} {
+        set value [_pem_required_text $value "PEM IP address"]
+        if {[catch {set normalized [_psc_ip_address $value]} error]} {
+            error "PEM IP address $value is invalid: $error"
+        }
+        return $normalized
+    }
+
+    proc _pem_type {value} {
+        set value [string tolower [_pem_required_text $value "PEM subscriber type"]]
+        if {$value ni {e164 imsi nai private mac-address dhcp mac-dhcp dhcp-custom sip-uri}} {
+            error "PEM subscriber type must be e164, imsi, nai, private, mac-address, dhcp, mac-dhcp, dhcp-custom, or sip-uri"
+        }
+        return $value
+    }
+
+    proc _pem_provision {value} {
+        set value [string tolower [_pem_required_text $value "PEM provision"]]
+        if {$value in {yes 1 true}} { return yes }
+        if {$value in {no 0 false}} { return no }
+        error "PEM provision must be yes or no"
+    }
+
+    proc _pem_policy_list {values} {
+        if {[llength $values] == 1 && [llength [lindex $values 0]] > 1} {
+            set values [lindex $values 0]
+        }
+        return [_psc_policy_list $values]
+    }
+
+    proc _pem_ip_list {values} {
+        if {[llength $values] == 1 && [llength [lindex $values 0]] > 1} {
+            set values [lindex $values 0]
+        }
+        set addresses {}
+        foreach address $values { lappend addresses [_pem_ip $address] }
+        if {[llength $addresses] > 256} { error "PEM IP address list cannot contain more than 256 entries" }
+        return $addresses
+    }
+
+    proc _pem_attr_set {attrs name value} {
+        set name [_pem_required_text $name "PEM custom attribute name"]
+        if {![dict exists $attrs $name] && [dict size $attrs] >= 256} {
+            error "PEM custom attributes cannot contain more than 256 entries"
+        }
+        dict set attrs $name [_pem_text $value "PEM custom attribute value"]
+        return $attrs
+    }
+
+    proc _pem_record_defaults {} {
+        return [dict create \
+            subscriber_id "" subscriber_type imsi state init imsi "" imeisv "" \
+            tower_id "" rat_type "" user_name "" provision yes \
+            aaa_reporting_interval 0 ip_addresses {} policies {} attrs {}]
+    }
+
+    proc _pem_record_get {record field} {
+        if {[dict exists $record $field]} { return [dict get $record $field] }
+        return ""
+    }
+
+    proc _pem_set_current {ip record} {
+        set ::state::pem::session_ip $ip
+        foreach field {
+            subscriber_id subscriber_type state imsi imeisv tower_id rat_type
+            user_name provision ip_addresses policies attrs
+        } {
+            set ::state::pem::$field [_pem_record_get $record $field]
+        }
+        set ::state::pem::policy [join [_pem_record_get $record policies] " "]
+    }
+
+    proc _pem_require_session {ip command_name} {
+        if {![dict exists $::state::pem::sessions $ip]} {
+            error "$command_name could not find PEM session $ip"
+        }
+        return [dict get $::state::pem::sessions $ip]
+    }
+
+    proc _pem_subscriber_key {subscriber_id subscriber_type} {
+        return [list $subscriber_type $subscriber_id]
+    }
+
+    proc _pem_require_subscriber {subscriber_id subscriber_type command_name} {
+        set key [_pem_subscriber_key $subscriber_id $subscriber_type]
+        if {![dict exists $::state::pem::subscribers $key]} {
+            error "$command_name could not find PEM subscriber $subscriber_id/$subscriber_type"
+        }
+        return [dict get $::state::pem::subscribers $key]
+    }
+
+    proc _pem_record_field {field} {
+        set field [string map {- _} [string tolower $field]]
+        if {$field eq "subscriber_type"} { return subscriber_type }
+        if {$field eq "subscriber_id_type" || $field eq "subs_type"} { return subscriber_type }
+        if {$field eq "subs_id"} { return subscriber_id }
+        if {$field eq "aaa_reporting_interval"} { return aaa_reporting_interval }
+        if {$field in {subscriber_id state imsi imeisv tower_id rat_type user_name provision ip_addresses policies attrs}} {
+            return $field
+        }
+        error "unsupported PEM session information field $field"
+    }
+
+    proc pem_disable_command {args} {
+        if {[llength $args] != 0} { error "PEM::disable takes no arguments" }
+        set ::state::pem::flow_enabled 0
+        set ::state::pem::action disable
+        ::itest::log_decision pem disable
+        return ""
+    }
+
+    proc pem_enable_command {args} {
+        if {[llength $args] != 0} { error "PEM::enable takes no arguments" }
+        set ::state::pem::flow_enabled 1
+        set ::state::pem::action enable
+        ::itest::log_decision pem enable
+        return ""
+    }
+
+    proc pem_flow_command {args} {
+        if {[llength $args] == 2 && [lindex $args 0] eq "transactional" && [lindex $args 1] eq "disable"} {
+            set ::state::pem::transactional_enabled 0
+            set ::state::pem::action transactional_disable
+            ::itest::log_decision pem transactional_disable
+            return ""
+        }
+        if {[llength $args] == 1 && [lindex $args 0] eq "eval"} {
+            incr ::state::pem::eval_count
+            set ::state::pem::action eval
+            ::itest::log_decision pem eval $::state::pem::eval_count
+            return ""
+        }
+        error "PEM::flow supports transactional disable or eval"
+    }
+
+    proc _pem_session_create {args} {
+        if {[llength $args] < 1} { error "PEM::session create requires a framed IP address" }
+        set ip [_pem_ip [lindex $args 0]]
+        if {[dict exists $::state::pem::sessions $ip]} { error "PEM session $ip already exists" }
+        if {[dict size $::state::pem::sessions] >= 256} { error "PEM session database cannot contain more than 256 sessions" }
+        set record [_pem_record_defaults]
+        set index 1
+        while {$index < [llength $args]} {
+            set option [lindex $args $index]
+            switch -exact -- $option {
+                subscriber-id {
+                    if {$index + 1 >= [llength $args]} { error "PEM::session create subscriber-id requires a value" }
+                    dict set record subscriber_id [_pem_required_text [lindex $args [incr index]] "PEM subscriber id"]
+                    incr index
+                }
+                subscriber-type - subscriber-id-type {
+                    if {$index + 1 >= [llength $args]} { error "PEM::session create subscriber type requires a value" }
+                    dict set record subscriber_type [_pem_type [lindex $args [incr index]]]
+                    incr index
+                }
+                imsi - imeisv - tower-id - rat-type - user-name {
+                    if {$index + 1 >= [llength $args]} { error "PEM::session create $option requires a value" }
+                    set field [string map {- _} $option]
+                    dict set record $field [_pem_text [lindex $args [incr index]] "PEM $option"]
+                    incr index
+                }
+                provision {
+                    if {$index + 1 >= [llength $args]} { error "PEM::session create provision requires yes or no" }
+                    dict set record provision [_pem_provision [lindex $args [incr index]]]
+                    incr index
+                }
+                policy {
+                    if {$index + 1 >= [llength $args]} { error "PEM::session create policy requires at least one policy" }
+                    dict set record policies [_pem_policy_list [lrange $args [incr index] end]]
+                    set index [llength $args]
+                }
+                default {
+                    if {$index + 1 >= [llength $args]} { error "PEM custom attribute $option requires a value" }
+                    set attrs [dict get $record attrs]
+                    set attrs [_pem_attr_set $attrs $option [lindex $args [incr index]]]
+                    dict set record attrs $attrs
+                    incr index
+                }
+            }
+        }
+        if {[dict get $record provision] eq "yes"} { dict set record state provisioned }
+        dict set ::state::pem::sessions $ip $record
+        _pem_set_current $ip $record
+        ::itest::log_decision pem session_create $ip
+        return ""
+    }
+
+    proc _pem_session_info {args} {
+        if {[llength $args] < 1} { error "PEM::session info requires a session IP address" }
+        if {[lindex $args 0] eq "attr"} {
+            if {[llength $args] >= 2 && [lindex $args 1] eq "delete"} {
+                if {[llength $args] != 4} { error "PEM::session info attr delete requires IP and attribute" }
+                set ip [_pem_ip [lindex $args 2]]
+                set name [_pem_required_text [lindex $args 3] "PEM custom attribute name"]
+                set record [_pem_require_session $ip PEM::session]
+                set attrs [dict get $record attrs]
+                if {[dict exists $attrs $name]} { dict unset attrs $name }
+                dict set record attrs $attrs
+                dict set ::state::pem::sessions $ip $record
+                _pem_set_current $ip $record
+                ::itest::log_decision pem session_attr_delete [list $ip $name]
+                return ""
+            }
+            if {[llength $args] < 3 || [llength $args] > 4} { error "PEM::session info attr requires IP, attribute, and optional value" }
+            set ip [_pem_ip [lindex $args 1]]
+            set name [_pem_required_text [lindex $args 2] "PEM custom attribute name"]
+            set record [_pem_require_session $ip PEM::session]
+            set attrs [dict get $record attrs]
+            if {[llength $args] == 3} {
+                if {![dict exists $attrs $name]} { return "" }
+                return [_pem_text [dict get $attrs $name] "PEM custom attribute value"]
+            }
+            set attrs [_pem_attr_set $attrs $name [lindex $args 3]]
+            dict set record attrs $attrs
+            dict set ::state::pem::sessions $ip $record
+            _pem_set_current $ip $record
+            return [dict get $attrs $name]
+        }
+        if {[llength $args] < 2 || [llength $args] > 3} { error "PEM::session info requires IP, field, and optional value" }
+        set ip [_pem_ip [lindex $args 0]]
+        set field [_pem_record_field [lindex $args 1]]
+        set record [_pem_require_session $ip PEM::session]
+        if {[llength $args] == 3} {
+            set value [lindex $args 2]
+            if {$field eq "subscriber_type"} { set value [_pem_type $value] }
+            if {$field eq "provision"} { set value [_pem_provision $value] }
+            if {$field eq "ip_addresses"} { set value [_pem_ip_list $value] }
+            if {$field eq "policies"} { set value [_pem_policy_list $value] }
+            if {$field eq "attrs"} { error "PEM session attrs must use PEM::session info attr" }
+            dict set record $field [_pem_text $value "PEM session $field"]
+            dict set ::state::pem::sessions $ip $record
+            _pem_set_current $ip $record
+        }
+        return [_pem_record_get $record $field]
+    }
+
+    proc _pem_policy_update {record operation args} {
+        if {$operation ni {set update}} { error "PEM policy supports get, set, or update" }
+        if {$operation eq "set"} {
+            if {[llength $args] < 1} { error "PEM policy set requires at least one policy" }
+            dict set record policies [_pem_policy_list $args]
+            return $record
+        }
+        if {$operation ne "update"} { error "PEM policy supports get, set, or update" }
+        set policies [_pem_policy_list [dict get $record policies]]
+        set index 0
+        set changed 0
+        while {$index < [llength $args]} {
+            set action [lindex $args $index]
+            if {$action ni {add delete}} { error "PEM policy update expects add or delete" }
+            incr index
+            set start $index
+            while {$index < [llength $args] && [lindex $args $index] ni {add delete}} { incr index }
+            if {$start == $index} { error "PEM policy update $action requires at least one policy" }
+            set values [_pem_policy_list [lrange $args $start [expr {$index - 1}]]]
+            if {$action eq "add"} {
+                foreach policy $values { if {[lsearch -exact $policies $policy] < 0} { lappend policies $policy } }
+            } else {
+                set remaining {}
+                foreach policy $policies { if {[lsearch -exact $values $policy] < 0} { lappend remaining $policy } }
+                set policies $remaining
+            }
+            set changed 1
+        }
+        if {!$changed} { error "PEM policy update requires add or delete" }
+        if {[llength $policies] > 256} { error "PEM policy list cannot contain more than 256 entries" }
+        dict set record policies $policies
+        return $record
+    }
+
+    proc _pem_session_config {args} {
+        if {[llength $args] < 2 || [lindex $args 0] ne "policy"} { error "PEM::session config policy requires an operation" }
+        set operation [lindex $args 1]
+        if {$operation eq "get"} {
+            if {[llength $args] != 3} { error "PEM::session config policy get requires an IP" }
+            set ip [_pem_ip [lindex $args 2]]
+            set record [_pem_require_session $ip PEM::session]
+            return [dict get $record policies]
+        }
+        if {$operation ne "referential" || [llength $args] < 4} { error "PEM::session config policy supports get or referential set/update" }
+        set action [lindex $args 2]
+        if {$action eq "get"} {
+            if {[llength $args] != 4} { error "PEM::session config policy referential get requires an IP" }
+            set ip [_pem_ip [lindex $args 3]]
+            set record [_pem_require_session $ip PEM::session]
+            return [dict get $record policies]
+        }
+        if {$action ni {set update}} { error "PEM::session config policy supports get or referential set/update" }
+        set ip [_pem_ip [lindex $args 3]]
+        set record [_pem_require_session $ip PEM::session]
+        set record [_pem_policy_update $record $action {*}[lrange $args 4 end]]
+        dict set ::state::pem::sessions $ip $record
+        _pem_set_current $ip $record
+        ::itest::log_decision pem session_policy [list $ip $action]
+        return [dict get $record policies]
+    }
+
+    proc _pem_session_ip {args} {
+        if {[llength $args] < 1 || [llength $args] > 2} { error "PEM::session ip requires subscriber id and optional type" }
+        set subscriber_id [_pem_required_text [lindex $args 0] "PEM subscriber id"]
+        set subscriber_type ""
+        if {[llength $args] == 2} { set subscriber_type [_pem_type [lindex $args 1]] }
+        set addresses {}
+        foreach ip [dict keys $::state::pem::sessions] {
+            set record [dict get $::state::pem::sessions $ip]
+            if {[_pem_record_get $record subscriber_id] eq $subscriber_id &&
+                ($subscriber_type eq "" || [_pem_record_get $record subscriber_type] eq $subscriber_type)} {
+                lappend addresses $ip
+            }
+        }
+        return $addresses
+    }
+
+    proc pem_session_command {args} {
+        if {[llength $args] < 1} { error "PEM::session requires a subcommand" }
+        switch -exact -- [lindex $args 0] {
+            create { return [_pem_session_create {*}[lrange $args 1 end]] }
+            delete {
+                if {[llength $args] != 2} { error "PEM::session delete requires an IP" }
+                set ip [_pem_ip [lindex $args 1]]
+                _pem_require_session $ip PEM::session
+                dict unset ::state::pem::sessions $ip
+                if {$::state::pem::session_ip eq $ip} { set ::state::pem::session_ip "" }
+                ::itest::log_decision pem session_delete $ip
+                return ""
+            }
+            info { return [_pem_session_info {*}[lrange $args 1 end]] }
+            config { return [_pem_session_config {*}[lrange $args 1 end]] }
+            ip { return [_pem_session_ip {*}[lrange $args 1 end]] }
+            default { error "PEM::session supports create, delete, info, config, or ip" }
+        }
+    }
+
+    proc _pem_subscriber_create {args} {
+        if {[llength $args] < 1} { error "PEM::subscriber create requires a subscriber id" }
+        set subscriber_id [_pem_required_text [lindex $args 0] "PEM subscriber id"]
+        set subscriber_type imsi
+        set record [_pem_record_defaults]
+        dict set record subscriber_id $subscriber_id
+        set addresses {}
+        set index 1
+        while {$index < [llength $args]} {
+            set option [lindex $args $index]
+            switch -exact -- $option {
+                subscriber-type - subscriber-id-type {
+                    if {$index + 1 >= [llength $args]} { error "PEM::subscriber create subscriber type requires a value" }
+                    set subscriber_type [_pem_type [lindex $args [incr index]]]
+                    dict set record subscriber_type $subscriber_type
+                    incr index
+                }
+                ip-address {
+                    if {$index + 1 >= [llength $args]} { error "PEM::subscriber create ip-address requires a value" }
+                    lappend addresses [_pem_ip [lindex $args [incr index]]]
+                    incr index
+                }
+                imsi - imeisv - tower-id - rat-type - user-name {
+                    if {$index + 1 >= [llength $args]} { error "PEM::subscriber create $option requires a value" }
+                    dict set record [string map {- _} $option] [_pem_text [lindex $args [incr index]] "PEM $option"]
+                    incr index
+                }
+                provision {
+                    if {$index + 1 >= [llength $args]} { error "PEM::subscriber create provision requires yes or no" }
+                    dict set record provision [_pem_provision [lindex $args [incr index]]]
+                    incr index
+                }
+                policy {
+                    if {$index + 1 >= [llength $args]} { error "PEM::subscriber create policy requires at least one policy" }
+                    dict set record policies [_pem_policy_list [lrange $args [incr index] end]]
+                    set index [llength $args]
+                }
+                default {
+                    if {$index + 1 >= [llength $args]} { error "PEM custom attribute $option requires a value" }
+                    set attrs [dict get $record attrs]
+                    dict set attrs [_pem_required_text $option "PEM custom attribute name"] [_pem_text [lindex $args [incr index]] "PEM custom attribute value"]
+                    dict set record attrs $attrs
+                    incr index
+                }
+            }
+        }
+        set addresses [_pem_ip_list $addresses]
+        if {[llength $addresses] == 0} { error "PEM::subscriber create requires at least one ip-address" }
+        dict set record ip_addresses $addresses
+        if {[dict get $record provision] eq "yes"} { dict set record state provisioned }
+        set key [_pem_subscriber_key $subscriber_id $subscriber_type]
+        if {[dict exists $::state::pem::subscribers $key]} { error "PEM subscriber $subscriber_id/$subscriber_type already exists" }
+        if {[dict size $::state::pem::subscribers] >= 256} { error "PEM subscriber database cannot contain more than 256 subscribers" }
+        dict set ::state::pem::subscribers $key $record
+        _pem_set_current [lindex $addresses 0] $record
+        ::itest::log_decision pem subscriber_create [list $subscriber_id $subscriber_type]
+        return ""
+    }
+
+    proc _pem_subscriber_info {args} {
+        if {[llength $args] >= 1 && [lindex $args 0] eq "attr"} {
+            set delete_mode [expr {[llength $args] >= 2 && [lindex $args 1] eq "delete"}]
+            set start [expr {$delete_mode ? 2 : 1}]
+            if {$delete_mode && [llength $args] != 5} { error "PEM::subscriber info attr delete requires id, type, and attribute" }
+            if {!$delete_mode && ([llength $args] < 4 || [llength $args] > 5)} { error "PEM::subscriber info attr requires id, type, attribute, and optional value" }
+            set subscriber_id [_pem_required_text [lindex $args $start] "PEM subscriber id"]
+            set subscriber_type [_pem_type [lindex $args [incr start]]]
+            set name [_pem_required_text [lindex $args [incr start]] "PEM custom attribute name"]
+            set key [_pem_subscriber_key $subscriber_id $subscriber_type]
+            set record [_pem_require_subscriber $subscriber_id $subscriber_type PEM::subscriber]
+            set attrs [dict get $record attrs]
+            if {$delete_mode} {
+                if {[dict exists $attrs $name]} { dict unset attrs $name }
+                dict set record attrs $attrs
+                dict set ::state::pem::subscribers $key $record
+                _pem_set_current [lindex [dict get $record ip_addresses] 0] $record
+                return ""
+            }
+            if {[llength $args] == $start + 1} {
+                if {![dict exists $attrs $name]} { return "" }
+                return [_pem_text [dict get $attrs $name] "PEM custom attribute value"]
+            }
+            set attrs [_pem_attr_set $attrs $name [lindex $args [incr start]]]
+            dict set record attrs $attrs
+            dict set ::state::pem::subscribers $key $record
+            _pem_set_current [lindex [dict get $record ip_addresses] 0] $record
+            return [dict get $attrs $name]
+        }
+        if {[llength $args] < 3 || [llength $args] > 4} { error "PEM::subscriber info requires id, type, field, and optional value" }
+        set subscriber_id [_pem_required_text [lindex $args 0] "PEM subscriber id"]
+        set subscriber_type [_pem_type [lindex $args 1]]
+        set field [_pem_record_field [lindex $args 2]]
+        set key [_pem_subscriber_key $subscriber_id $subscriber_type]
+        set record [_pem_require_subscriber $subscriber_id $subscriber_type PEM::subscriber]
+        if {[llength $args] == 4} {
+            set value [lindex $args 3]
+            if {$field eq "subscriber_type"} { set value [_pem_type $value] }
+            if {$field eq "provision"} { set value [_pem_provision $value] }
+            if {$field eq "ip_addresses"} { set value [_pem_ip_list $value] }
+            if {$field eq "policies"} { set value [_pem_policy_list $value] }
+            if {$field eq "attrs"} { error "PEM subscriber attrs must use PEM::subscriber info attr" }
+            dict set record $field [_pem_text $value "PEM subscriber $field"]
+            dict set ::state::pem::subscribers $key $record
+        }
+        _pem_set_current [lindex [dict get $record ip_addresses] 0] $record
+        return [_pem_record_get $record $field]
+    }
+
+    proc _pem_subscriber_config {args} {
+        if {[llength $args] >= 2 && [lindex $args 0] eq "policy" && [lindex $args 1] eq "get"} {
+            if {[llength $args] != 4} { error "PEM::subscriber config policy get requires id and type" }
+            set subscriber_id [_pem_required_text [lindex $args 2] "PEM subscriber id"]
+            set subscriber_type [_pem_type [lindex $args 3]]
+            set record [_pem_require_subscriber $subscriber_id $subscriber_type PEM::subscriber]
+            return [dict get $record policies]
+        }
+        if {[llength $args] < 5 || [lindex $args 0] ne "policy" || [lindex $args 1] ne "referential"} {
+            error "PEM::subscriber config policy supports get or referential set/update"
+        }
+        set action [lindex $args 2]
+        if {$action eq "get"} {
+            if {[llength $args] != 5} { error "PEM::subscriber config policy referential get requires id and type" }
+            set subscriber_id [_pem_required_text [lindex $args 3] "PEM subscriber id"]
+            set subscriber_type [_pem_type [lindex $args 4]]
+            set record [_pem_require_subscriber $subscriber_id $subscriber_type PEM::subscriber]
+            return [dict get $record policies]
+        }
+        if {$action ni {set update}} { error "PEM::subscriber config policy supports get or referential set/update" }
+        set subscriber_id [_pem_required_text [lindex $args 3] "PEM subscriber id"]
+        set subscriber_type [_pem_type [lindex $args 4]]
+        set key [_pem_subscriber_key $subscriber_id $subscriber_type]
+        set record [_pem_require_subscriber $subscriber_id $subscriber_type PEM::subscriber]
+        if {$action eq "get"} {
+            if {[llength $args] != 5} { error "PEM::subscriber config policy get requires id and type" }
+            return [dict get $record policies]
+        }
+        set record [_pem_policy_update $record $action {*}[lrange $args 5 end]]
+        dict set ::state::pem::subscribers $key $record
+        _pem_set_current [lindex [dict get $record ip_addresses] 0] $record
+        return [dict get $record policies]
+    }
+
+    proc _pem_subscriber_ip {args} {
+        if {[llength $args] < 1} { error "PEM::subscriber ip requires a subscriber id" }
+        set subscriber_id [_pem_required_text [lindex $args 0] "PEM subscriber id"]
+        set index 1
+        set subscriber_type imsi
+        if {$index < [llength $args] && [lindex $args $index] ni {all}} {
+            set subscriber_type [_pem_type [lindex $args $index]]
+            incr index
+        }
+        set record [_pem_require_subscriber $subscriber_id $subscriber_type PEM::subscriber]
+        if {$index == [llength $args] || ([llength $args] == $index + 1 && [lindex $args $index] eq "all")} {
+            _pem_set_current [lindex [dict get $record ip_addresses] 0] $record
+            return [dict get $record ip_addresses]
+        }
+        set addresses [_pem_ip_list [lrange $args $index end]]
+        if {[llength $addresses] == 0} { error "PEM::subscriber ip requires at least one IP address" }
+        dict set record ip_addresses $addresses
+        set key [_pem_subscriber_key $subscriber_id $subscriber_type]
+        dict set ::state::pem::subscribers $key $record
+        _pem_set_current [lindex $addresses 0] $record
+        return $addresses
+    }
+
+    proc pem_subscriber_command {args} {
+        if {[llength $args] < 1} { error "PEM::subscriber requires a subcommand" }
+        switch -exact -- [lindex $args 0] {
+            create { return [_pem_subscriber_create {*}[lrange $args 1 end]] }
+            delete {
+                if {[llength $args] != 3} { error "PEM::subscriber delete requires id and type" }
+                set subscriber_id [_pem_required_text [lindex $args 1] "PEM subscriber id"]
+                set subscriber_type [_pem_type [lindex $args 2]]
+                set key [_pem_subscriber_key $subscriber_id $subscriber_type]
+                _pem_require_subscriber $subscriber_id $subscriber_type PEM::subscriber
+                dict unset ::state::pem::subscribers $key
+                ::itest::log_decision pem subscriber_delete [list $subscriber_id $subscriber_type]
+                return ""
+            }
+            info { return [_pem_subscriber_info {*}[lrange $args 1 end]] }
+            config { return [_pem_subscriber_config {*}[lrange $args 1 end]] }
+            ip { return [_pem_subscriber_ip {*}[lrange $args 1 end]] }
+            default { error "PEM::subscriber supports create, delete, info, config, or ip" }
+        }
     }
 
     proc diameter_reset_connection {} {
@@ -19023,6 +19608,11 @@ foreach {original replacement} {
     pcp_reject pcp_reject_command
     pcp_request pcp_request_command
     pcp_response pcp_response_command
+    pem_disable pem_disable_command
+    pem_enable pem_enable_command
+    pem_flow pem_flow_command
+    pem_session pem_session_command
+    pem_subscriber pem_subscriber_command
     psc_aaa_reporting_interval psc_aaa_reporting_interval_command
     psc_attr psc_attr_command
     psc_calling_id psc_calling_id_command
@@ -19661,6 +20251,11 @@ foreach {name proc_name} {
     PCP::reject ::itest::semantic::pcp_reject_command
     PCP::request ::itest::semantic::pcp_request_command
     PCP::response ::itest::semantic::pcp_response_command
+    PEM::disable ::itest::semantic::pem_disable_command
+    PEM::enable ::itest::semantic::pem_enable_command
+    PEM::flow ::itest::semantic::pem_flow_command
+    PEM::session ::itest::semantic::pem_session_command
+    PEM::subscriber ::itest::semantic::pem_subscriber_command
     PSC::aaa_reporting_interval ::itest::semantic::psc_aaa_reporting_interval_command
     PSC::attr ::itest::semantic::psc_attr_command
     PSC::calling_id ::itest::semantic::psc_calling_id_command

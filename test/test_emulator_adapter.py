@@ -508,6 +508,67 @@ when CLIENT_ACCEPTED {
         finally:
             session.close()
 
+    def test_pem_flow_session_and_subscriber_database_state(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["PEM"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    PEM::disable
+    PEM::flow transactional disable
+    PEM::flow eval
+    PEM::session create 192.0.2.30 subscriber-id 4086007577 subscriber-type e164 imsi 310150123456789 user-name alice tower-id tower-a provision yes plan premium policy {/Common/data /Common/voice}
+    PEM::session info attr 192.0.2.30 region east
+    PEM::session config policy referential update 192.0.2.30 add /Common/video delete /Common/voice
+    set session_info "[PEM::session info 192.0.2.30 subscriber-id]/[PEM::session info 192.0.2.30 state]/[PEM::session info attr 192.0.2.30 region]/[PEM::session config policy get 192.0.2.30]/[PEM::session ip 4086007577 e164]"
+    PEM::subscriber create 310150999 subscriber-type imsi ip-address 198.51.100.30 ip-address 2001:db8::30 imsi 310150999 user-name bob policy {/Common/mobile /Common/data}
+    PEM::subscriber info attr 310150999 imsi tier gold
+    PEM::subscriber config policy referential update 310150999 imsi add /Common/premium delete /Common/data
+    set subscriber_info "[PEM::subscriber info 310150999 imsi user-name]/[PEM::subscriber info attr 310150999 imsi tier]/[PEM::subscriber config policy get 310150999 imsi]/[PEM::subscriber ip 310150999 imsi all]"
+    PEM::enable
+    log local0. "session=$session_info subscriber=$subscriber_info flow=[set ::state::pem::flow_enabled]/[set ::state::pem::transactional_enabled]/[set ::state::pem::eval_count]"
+}
+when PEM_SUBS_SESS_CREATED { log local0. "pem-event=[set ::state::pem::action]" }
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event("CLIENT_ACCEPTED", {"pem": {}})
+            self.assertTrue(result["fired"])
+            pem_state = result["state"]["pem"]
+            self.assertEqual(pem_state["flow_enabled"], "1")
+            self.assertEqual(pem_state["transactional_enabled"], "0")
+            self.assertEqual(pem_state["eval_count"], "1")
+            self.assertEqual(pem_state["subscriber_id"], "310150999")
+            self.assertEqual(pem_state["subscriber_type"], "imsi")
+            self.assertEqual(pem_state["ip_addresses"], "198.51.100.30 2001:db8::30")
+            self.assertEqual(pem_state["policies"], "/Common/mobile /Common/premium")
+            self.assertEqual(pem_state["attrs"], "tier gold")
+            self.assertTrue(any(
+                "session=4086007577/provisioned/east//Common/data /Common/video/192.0.2.30"
+                " subscriber=bob/gold//Common/mobile /Common/premium/198.51.100.30 2001:db8::30"
+                " flow=1/0/1" in entry
+                for entry in result["logs"]
+            ))
+            event_result = session.fire_event(
+                "PEM_SUBS_SESS_CREATED",
+                {
+                    "pem": {
+                        "session_ip": "192.0.2.30",
+                        "subscriber_id": "4086007577",
+                        "subscriber_type": "e164",
+                        "action": "created",
+                    }
+                },
+            )
+            self.assertTrue(event_result["fired"])
+            self.assertEqual(event_result["state"]["pem"]["action"], "created")
+        finally:
+            session.close()
+
     def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1113,8 +1174,9 @@ when HTTP_REQUEST {
         self.assertNotIn(("XLAT", "generated-stub"), queue_buckets)
         self.assertNotIn(("PCP", "generated-stub"), queue_buckets)
         self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
+        self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 185)
+        self.assertEqual(queue["command_count"], 180)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1130,6 +1192,10 @@ when HTTP_REQUEST {
             entry["name"]: entry["adapter"]
             for entry in report["events"]["packet_adapter_events"]
         }
+        self.assertIn("PEM_POLICY", packet_adapters)
+        self.assertIn("PEM_SUBS_SESS_CREATED", packet_adapters)
+        self.assertIn("PEM_SUBS_SESS_UPDATED", packet_adapters)
+        self.assertIn("PEM_SUBS_SESS_DELETED", packet_adapters)
         self.assertEqual(
             packet_adapters["HTTP_REQUEST_RELEASE"],
             "HTTP request transaction release phase",

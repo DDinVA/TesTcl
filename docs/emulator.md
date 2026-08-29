@@ -717,6 +717,27 @@ entries per collection and 64 KiB per supplied PSC state layer. Values reset at
 connection teardown. This is deterministic test state: it does not connect to a
 live PEM/PSC session database, AAA system, policy engine, or mobile network.
 
+### PEM flow and subscriber-session state
+
+With the `PEM` profile attached, the emulator models the five TMOS 17.5 PEM
+commands over deterministic connection-scoped state. `PEM::enable` and
+`PEM::disable` toggle enforcement for the current flow; `PEM::flow transactional
+disable` and `PEM::flow eval` record flow controls and evaluation requests.
+`PEM::session` and `PEM::subscriber` provide bounded in-memory session/subscriber
+records with identity fields, provisioning state, custom attributes, policies,
+and IP bindings. Both expanded Tcl arguments and braced Tcl lists are accepted
+for policy and IP collections. The command contracts follow the [PEM::flow](https://clouddocs.f5.com/api/irules/PEM__flow.html),
+[PEM::session](https://clouddocs.f5.com/api/irules/PEM__session.html), and
+[PEM::subscriber](https://clouddocs.f5.com/api/irules/PEM__subscriber.html)
+references.
+
+The direct event API also supports `PEM_POLICY`, `PEM_SUBS_SESS_CREATED`,
+`PEM_SUBS_SESS_UPDATED`, and `PEM_SUBS_SESS_DELETED` with caller-supplied PEM
+event fields. Records are limited to 256 sessions, 256 subscribers, 256
+attributes, 256 policies, and 256 IP bindings per record. This is an emulator
+of rule-visible state and lifecycle signals; it does not run the PEM policy
+engine, Gx/AAA provisioning, or a live PEM Session DB.
+
 ### FLOWTABLE query inputs
 
 The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,
