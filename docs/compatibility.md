@@ -45,6 +45,12 @@ state plus sent, received, and buffered byte counts. The model validates the
 documented options and status-variable forms, including `recv -peek` and
 `recv -eol`, but does not claim to reproduce DNS, TLS, socket scheduling,
 upstream protocol behavior, or real sideband timing.
+The related legacy connection controls are deterministic as well: `forward`
+records strict-forwarding intent, `translate` tracks address/port/service
+translation toggles, `rateclass` records the selected rate class, and
+`link_qos` reads or sets the modeled QoS value. `redirect to HOST_URI` maps to
+the existing HTTP 302 response path. These outputs describe iRule-visible
+decisions only and are not a claim of live routing, QoS, or packet behavior.
 
 The optional TMOS 17.5 emulator exposes the pinned `tcl-lsp` registry in
 bounded chunks and reports static command-handler and packet-event coverage

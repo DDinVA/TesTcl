@@ -247,6 +247,11 @@ EVENT_STATE_FIELDS = {
         "client_payload",
         "server_payload",
         "state",
+        "forwarded",
+        "rateclass",
+        "translate_address_enabled",
+        "translate_port_enabled",
+        "translate_service_enabled",
     },
     "traffic_group": {
         "name",
@@ -1325,6 +1330,11 @@ SEMANTIC_MOCK_COMMANDS = {
     "http_method",
     "http_uri",
     "http_version",
+    "redirect",
+    "forward",
+    "link_qos",
+    "rateclass",
+    "translate",
     "IPFIX::destination",
     "IPFIX::msg",
     "IPFIX::template",
@@ -3207,6 +3217,41 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "select": oneconnect_parts[2],
         "label": oneconnect_parts[3],
     }
+    legacy_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::legacy_connection_snapshot")
+    )
+    if len(legacy_parts) != 12 or legacy_parts[::2] != [
+        "forwarded",
+        "rateclass",
+        "translate_address_enabled",
+        "translate_port_enabled",
+        "translate_service_enabled",
+        "link_qos",
+    ]:
+        raise EmulatorInputError("invalid legacy connection state")
+    legacy_values = dict(zip(legacy_parts[::2], legacy_parts[1::2]))
+    for name in (
+        "forwarded",
+        "translate_address_enabled",
+        "translate_port_enabled",
+        "translate_service_enabled",
+    ):
+        if legacy_values[name] not in {"0", "1"}:
+            raise EmulatorInputError(f"invalid legacy {name} state")
+    try:
+        legacy_qos = int(legacy_values["link_qos"])
+    except (KeyError, TypeError, ValueError):
+        raise EmulatorInputError("invalid legacy link QoS state") from None
+    if not 0 <= legacy_qos <= 7:
+        raise EmulatorInputError("invalid legacy link QoS state")
+    legacy = {
+        "forwarded": legacy_values["forwarded"] == "1",
+        "rateclass": legacy_values["rateclass"],
+        "translate_address_enabled": legacy_values["translate_address_enabled"] == "1",
+        "translate_port_enabled": legacy_values["translate_port_enabled"] == "1",
+        "translate_service_enabled": legacy_values["translate_service_enabled"] == "1",
+        "link_qos": legacy_qos,
+    }
     sideband_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::sideband_snapshot")
     )
@@ -4807,6 +4852,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "values": istats,
         },
         "oneconnect": oneconnect,
+        "legacy": legacy,
         "sideband": sideband,
         "bwc": bwc,
         "ipfix": ipfix,
@@ -12849,6 +12895,7 @@ class EmulatorSession:
             self._connection_request_number = 0
             self._server_connection_open = False
             self._server_connection_detached = False
+            session.eval_tcl("::state::reset_connection_state")
             session.eval_tcl("::itest::semantic::lb_reset_connection")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::psm_reset_connection")
@@ -12871,6 +12918,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::datagram_reset_connection")
             session.eval_tcl("::itest::semantic::sctp_reset_connection")
             session.eval_tcl("::itest::semantic::feature_controls_reset_connection")
+            session.eval_tcl("::itest::semantic::link_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -13369,6 +13417,7 @@ class EmulatorSession:
                 for entry in session.get_logs()
             ],
             "semantic": {
+                "legacy": semantic_snapshot["legacy"],
                 "sideband": semantic_snapshot["sideband"],
                 "adapt": semantic_snapshot["adapt"],
                 "psm": semantic_snapshot["psm"],

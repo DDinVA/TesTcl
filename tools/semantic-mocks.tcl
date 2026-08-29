@@ -1403,6 +1403,16 @@ namespace eval ::itest::semantic {
             $oneconnect_select_mode $oneconnect_label]
     }
 
+    proc legacy_connection_snapshot {} {
+        return [list \
+            forwarded $::state::connection::forwarded \
+            rateclass $::state::connection::rateclass \
+            translate_address_enabled $::state::connection::translate_address_enabled \
+            translate_port_enabled $::state::connection::translate_port_enabled \
+            translate_service_enabled $::state::connection::translate_service_enabled \
+            link_qos $::state::link::qos]
+    }
+
     proc hsl_snapshot {} {
         variable hsl_messages
         return $hsl_messages
@@ -9218,6 +9228,11 @@ namespace eval ::itest::semantic {
         set ::state::link::nexthop_id ""
         set ::state::link::nexthop_type ""
         set ::state::link::nexthop_name ""
+        set ::state::connection::forwarded 0
+        set ::state::connection::rateclass ""
+        set ::state::connection::translate_address_enabled 1
+        set ::state::connection::translate_port_enabled 1
+        set ::state::connection::translate_service_enabled 1
     }
 
     proc _link_selector {command args} {
@@ -9266,6 +9281,85 @@ namespace eval ::itest::semantic {
         }
         set result $::state::link::vlan_id
         ::itest::log_decision link vlan_id $result
+        return $result
+    }
+
+    proc legacy_forward_command {args} {
+        if {[llength $args] != 0} {
+            error "forward takes no arguments"
+        }
+        set ::state::connection::forwarded 1
+        ::itest::log_decision legacy forward
+        return ""
+    }
+
+    proc legacy_redirect_command {args} {
+        if {[llength $args] != 2 || [lindex $args 0] ne "to"} {
+            error "redirect syntax is: redirect to HOST_URI"
+        }
+        set location [lindex $args 1]
+        if {$location eq "" || [string first "\x00" $location] >= 0} {
+            error "redirect destination must be non-empty and free of NUL bytes"
+        }
+        if {[string bytelength $location] > 8192} {
+            error "redirect destination exceeds the 8192-byte limit"
+        }
+        ::itest::semantic::http_redirect_command $location
+        ::itest::log_decision legacy redirect $location
+        return ""
+    }
+
+    proc legacy_link_qos_command {args} {
+        if {[llength $args] > 1} {
+            error "link_qos accepts an optional QoS level"
+        }
+        if {[llength $args] == 1} {
+            set value [lindex $args 0]
+            if {![string is integer -strict $value] || $value < 0 || $value > 7} {
+                error "link_qos level must be an integer from 0 to 7"
+            }
+            set ::state::link::qos $value
+        }
+        ::itest::log_decision legacy link_qos $::state::link::qos
+        return $::state::link::qos
+    }
+
+    proc legacy_rateclass_command {args} {
+        if {[llength $args] != 1} {
+            error "rateclass requires one rate class"
+        }
+        set value [lindex $args 0]
+        if {$value eq "" || [string first "\x00" $value] >= 0} {
+            error "rateclass must be non-empty and free of NUL bytes"
+        }
+        if {[string bytelength $value] > 4096} {
+            error "rateclass exceeds the 4096-byte limit"
+        }
+        set ::state::connection::rateclass $value
+        ::itest::log_decision legacy rateclass $value
+        return ""
+    }
+
+    proc legacy_translate_command {args} {
+        if {[llength $args] < 1 || [llength $args] > 2} {
+            error "translate requires address, port, or service and optional enable/disable"
+        }
+        set target [lindex $args 0]
+        if {$target ni {address port service}} {
+            error "translate target must be address, port, or service"
+        }
+        set field "::state::connection::translate_${target}_enabled"
+        if {[llength $args] == 1} {
+            set result [set $field]
+        } else {
+            set operation [lindex $args 1]
+            if {$operation ni {enable disable}} {
+                error "translate operation must be enable or disable"
+            }
+            set result [expr {$operation eq "enable"}]
+            set $field $result
+        }
+        ::itest::log_decision legacy translate [list $target $result]
         return $result
     }
 
@@ -23207,10 +23301,12 @@ foreach {original replacement} {
     decode_uri decode_uri_command
     domain domain_command
     fasthash fasthash_command
+    forward legacy_forward_command
     findclass findclass_command
     findstr findstr_command
     getfield getfield_command
     llookup llookup_command
+    link_qos legacy_link_qos_command
     matchclass matchclass_command
     md4 md4_command
     md5 md5_command
@@ -23223,7 +23319,9 @@ foreach {original replacement} {
     remote_addr remote_addr_command
     remote_port remote_port_command
     rmd160 rmd160_command
+    rateclass legacy_rateclass_command
     recv sideband_recv_command
+    redirect legacy_redirect_command
     send sideband_send_command
     serverside serverside_command
     server_addr server_addr_command
@@ -23234,6 +23332,7 @@ foreach {original replacement} {
     sha512 sha512_command
     substr substr_command
     traffic_group traffic_group_command
+    translate legacy_translate_command
     uniq_ordered_ip_list uniq_ordered_ip_list_command
     uniq_sorted_ip_list uniq_sorted_ip_list_command
     vlan_id vlan_id_command

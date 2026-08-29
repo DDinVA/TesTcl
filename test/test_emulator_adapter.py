@@ -1907,7 +1907,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 31)
+        self.assertEqual(queue["command_count"], 26)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -9679,6 +9679,88 @@ when HTTP_REQUEST {
             )
         finally:
             output_session.close()
+
+    def test_legacy_connection_controls_update_visible_routing_state(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    set qos_before [link_qos]
+    set qos_after [link_qos 5]
+    translate address disable
+    set address_state [translate address]
+    set port_state [translate port]
+    rateclass premium
+    forward
+    redirect to https://example.com/login
+    log local0. "qos=$qos_before/$qos_after translation=$address_state/$port_state"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=True,
+            allow_packets=False,
+        )
+        try:
+            result = session.run_request({"uri": "/"})
+            self.assertTrue(
+                any("qos=0/5 translation=0/1" in entry for entry in result["logs"])
+            )
+            legacy = result["semantic"]["legacy"]
+            self.assertTrue(legacy["forwarded"])
+            self.assertEqual(legacy["rateclass"], "premium")
+            self.assertFalse(legacy["translate_address_enabled"])
+            self.assertTrue(legacy["translate_port_enabled"])
+            self.assertTrue(legacy["translate_service_enabled"])
+            self.assertEqual(legacy["link_qos"], 5)
+            self.assertEqual(result["response"]["status"], 302)
+            self.assertEqual(result["response"]["headers"]["location"], "https://example.com/login")
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            for command_name in ("forward", "link_qos", "rateclass", "redirect", "translate"):
+                self.assertEqual(usage[command_name]["runtime_status"], "semantic-mock")
+        finally:
+            session.close()
+
+    def test_legacy_connection_controls_reset_on_new_connection(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::path] eq "/first"} {
+        link_qos 5
+        translate address disable
+        rateclass premium
+        forward
+    }
+    log local0. "forwarded=[expr {[translate address] == 0}] qos=[link_qos] rate=[translate service]"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=True,
+            allow_packets=False,
+        )
+        try:
+            first = session.run_request({"uri": "/first"})
+            self.assertTrue(first["semantic"]["legacy"]["forwarded"])
+            self.assertEqual(first["semantic"]["legacy"]["link_qos"], 5)
+            self.assertFalse(first["semantic"]["legacy"]["translate_address_enabled"])
+
+            second = session.run_request({"uri": "/second", "new_connection": True})
+            legacy = second["semantic"]["legacy"]
+            self.assertFalse(legacy["forwarded"])
+            self.assertEqual(legacy["rateclass"], "")
+            self.assertTrue(legacy["translate_address_enabled"])
+            self.assertTrue(legacy["translate_port_enabled"])
+            self.assertTrue(legacy["translate_service_enabled"])
+            self.assertEqual(legacy["link_qos"], 0)
+            self.assertTrue(any("forwarded=0 qos=0 rate=1" in entry for entry in second["logs"]))
+        finally:
+            session.close()
 
     def test_qoe_commands_model_video_metrics_and_connection_control(self) -> None:
         session = self.adapter.EmulatorSession(

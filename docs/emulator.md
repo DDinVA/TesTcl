@@ -94,6 +94,15 @@ are capped at 32 destinations and 1 MiB per response, and sideband operations
 are intentionally connection-scoped and repeatable. This models iRule
 control flow and failure handling, not DNS, TLS, upstream protocol parsing,
 socket timing, or real network I/O.
+The legacy top-level connection controls `forward`, `translate`, `rateclass`,
+and `link_qos` are also modeled against the current connection state. `forward`
+records strict forwarding intent, `translate address|port|service` supports
+bounded enable/disable state and reads, `rateclass` stores the selected class,
+and `link_qos` reads or sets a QoS level from 0 through 7. The legacy
+`redirect to HOST_URI` form uses the same HTTP 302/Location response model as
+`HTTP::redirect`. Their current values are returned under
+`result.semantic.legacy`. These controls expose decisions and state for rule testing;
+they do not change real routing, QoS scheduling, or packet forwarding.
 Generic UDP packet traces fire `CLIENT_ACCEPTED`, `CLIENT_DATA`,
 `SERVER_CONNECTED`, and `SERVER_DATA` as applicable. `UDP::payload` is mutable
 by wire-byte offset, and the adapter records UDP drop, hold/release, respond,
