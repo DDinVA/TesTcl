@@ -1648,6 +1648,12 @@ SEMANTIC_MOCK_COMMANDS = {
     "SIPALG::hairpin",
     "SIPALG::hairpin_default",
     "SIPALG::nonregister_subscriber_listener",
+    "DEMANGLE::disable",
+    "DEMANGLE::enable",
+    "ISESSION::deduplication",
+    "IVS_ENTRY::result",
+    "PLUGIN::disable",
+    "PLUGIN::enable",
     "SDP::field",
     "SDP::media",
     "SDP::session_id",
@@ -3280,6 +3286,63 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             sipalg_values["nonregister_subscriber_listener"] == "1"
         ),
     }
+    feature_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::feature_controls_snapshot")
+    )
+    if len(feature_parts) % 2:
+        raise EmulatorInputError("invalid feature-control state")
+    feature_keys = feature_parts[::2]
+    if len(set(feature_keys)) != len(feature_keys):
+        raise EmulatorInputError("duplicate feature-control state field")
+    feature_values = dict(zip(feature_keys, feature_parts[1::2]))
+    expected_feature_fields = {
+        "demangle_enabled",
+        "isession_deduplication_enabled",
+        "ivs_entry_result",
+        "ivs_entry_results",
+        "plugin_all_disabled",
+        "plugin_states",
+    }
+    if set(feature_values) != expected_feature_fields:
+        raise EmulatorInputError("invalid feature-control state fields")
+
+    def parse_feature_bool(name: str) -> bool:
+        if feature_values[name] not in {"0", "1"}:
+            raise EmulatorInputError(f"invalid feature-control boolean: {name}")
+        return feature_values[name] == "1"
+
+    ivs_results: list[dict[str, str]] = []
+    for raw_result in _split_tcl_list(feature_values["ivs_entry_results"]):
+        result_parts = _split_tcl_list(raw_result)
+        if len(result_parts) != 2 or not result_parts[0] or result_parts[1] not in {
+            "noop", "modified", "response"
+        }:
+            raise EmulatorInputError("invalid IVS_ENTRY result history")
+        ivs_results.append({"event": result_parts[0], "result": result_parts[1]})
+
+    if feature_values["ivs_entry_result"] not in {"", "noop", "modified", "response"}:
+        raise EmulatorInputError("invalid IVS_ENTRY result state")
+    if len(ivs_results) > 1024:
+        raise EmulatorInputError("IVS_ENTRY result history exceeds its limit")
+
+    plugin_parts = _split_tcl_list(feature_values["plugin_states"])
+    if len(plugin_parts) % 2:
+        raise EmulatorInputError("invalid plugin state")
+    plugin_states: dict[str, bool] = {}
+    for plugin, enabled in zip(plugin_parts[::2], plugin_parts[1::2]):
+        if not plugin or plugin in plugin_states or enabled not in {"0", "1"}:
+            raise EmulatorInputError("invalid plugin state")
+        plugin_states[plugin] = enabled == "1"
+    feature_controls = {
+        "demangle_enabled": parse_feature_bool("demangle_enabled"),
+        "isession_deduplication_enabled": parse_feature_bool(
+            "isession_deduplication_enabled"
+        ),
+        "ivs_entry_result": feature_values["ivs_entry_result"],
+        "ivs_entry_results": ivs_results,
+        "plugin_all_disabled": parse_feature_bool("plugin_all_disabled"),
+        "plugin_states": plugin_states,
+    }
     adapt_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::adapt_snapshot")
     )
@@ -4110,6 +4173,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "ilx": ilx,
         "nsh": nsh,
         "sipalg": sipalg,
+        "feature_controls": feature_controls,
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "lb": lb_control,
@@ -11689,6 +11753,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::adapt_reset_connection")
                 session.eval_tcl("::itest::semantic::datagram_reset_connection")
                 session.eval_tcl("::itest::semantic::sctp_reset_connection")
+                session.eval_tcl("::itest::semantic::feature_controls_reset_connection")
                 session.eval_tcl("::itest::semantic::l7check_reset_connection")
                 session.eval_tcl("::itest::semantic::link_reset_connection")
                 session.eval_tcl("::itest::semantic::name_reset_connection")
@@ -11842,6 +11907,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::httplog_reset_connection")
             session.eval_tcl("::itest::semantic::ilx_reset_connection")
             session.eval_tcl("::itest::semantic::nsh_reset_connection")
+            session.eval_tcl("::itest::semantic::feature_controls_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         if not self._connection_open:
@@ -11868,6 +11934,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
             session.eval_tcl("::itest::semantic::datagram_reset_connection")
             session.eval_tcl("::itest::semantic::sctp_reset_connection")
+            session.eval_tcl("::itest::semantic::feature_controls_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -12071,6 +12138,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
             session.eval_tcl("::itest::semantic::datagram_reset_connection")
             session.eval_tcl("::itest::semantic::sctp_reset_connection")
+            session.eval_tcl("::itest::semantic::feature_controls_reset_connection")
             session.eval_tcl("::itest::semantic::l7check_reset_connection")
             session.eval_tcl("::itest::semantic::link_reset_connection")
             session.eval_tcl("::itest::semantic::name_reset_connection")
@@ -12105,6 +12173,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
             session.eval_tcl("::itest::semantic::datagram_reset_connection")
             session.eval_tcl("::itest::semantic::sctp_reset_connection")
+            session.eval_tcl("::itest::semantic::feature_controls_reset_connection")
             self._connection_open = False
             self._server_connection_open = False
             self._server_connection_detached = False
@@ -12366,6 +12435,7 @@ class EmulatorSession:
                 "html": semantic_snapshot["html"],
                 "nsh": semantic_snapshot["nsh"],
                 "sipalg": semantic_snapshot["sipalg"],
+                "feature_controls": semantic_snapshot["feature_controls"],
             },
         }
         if mqtt_forwarded is not None:
@@ -13456,6 +13526,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::ws_reset_connection")
         session.eval_tcl("::itest::semantic::mqtt_reset_connection")
         session.eval_tcl("::itest::semantic::sip_reset_connection")
+        session.eval_tcl("::itest::semantic::feature_controls_reset_connection")
         session.eval_tcl("::itest::semantic::diameter_reset_connection")
         session.eval_tcl("::itest::semantic::mr_reset_connection")
         session.eval_tcl("::itest::semantic::gtp_reset_connection")
@@ -13570,6 +13641,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::name_reset_connection")
         session.eval_tcl("::itest::semantic::socks_reset_connection")
         session.eval_tcl("::itest::semantic::sdp_reset_connection")
+        session.eval_tcl("::itest::semantic::feature_controls_reset_connection")
         session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::ftp_reset_connection")
         session.eval_tcl("::itest::semantic::icap_reset_connection")

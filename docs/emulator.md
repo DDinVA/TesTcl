@@ -1471,6 +1471,22 @@ hairpin routing, or ephemeral listener creation. See the F5
 [`SIPALG::hairpin_default`](https://clouddocs.f5.com/api/irules/SIPALG__hairpin_default.html),
 and [`SIPALG::nonregister_subscriber_listener`](https://clouddocs.f5.com/api/irules/SIPALG__nonregister_subscriber_listener.html)
 references for the command contract.
+
+The emulator also models the legacy connection controls
+`DEMANGLE::enable`/`DEMANGLE::disable`,
+`ISESSION::deduplication enable|disable`,
+`PLUGIN::enable <plugin>`, and `PLUGIN::disable [<plugin>]`. Their current
+state is exposed under `semantic.feature_controls`, and
+`IVS_ENTRY::result noop|modified|response` records a bounded result history
+when fired during `IVS_ENTRY_REQUEST`, `IVS_ENTRY_RESPONSE`, `ICAP_REQUEST`,
+or `ICAP_RESPONSE`. These controls preserve iRule-visible state only: the
+emulator does not implement the underlying demangler, iSession compression or
+deduplication engine, plugin pipeline, or an internal virtual-server transport.
+The command contracts are documented by F5 for
+[`ISESSION::deduplication`](https://clouddocs.f5.com/api/irules/ISESSION__deduplication.html),
+[`IVS_ENTRY::result`](https://clouddocs.f5.com/api/irules/IVS_ENTRY__result.html),
+[`PLUGIN::enable`](https://clouddocs.f5.com/api/irules/PLUGIN__enable.html), and
+[`PLUGIN::disable`](https://clouddocs.f5.com/api/irules/PLUGIN__disable.html).
 Diameter support is pinned to the 17.5 catalog. Structured
 `protocol: "diameter"` packets and raw Diameter-over-TCP packets drive
 `DIAMETER_INGRESS` or `DIAMETER_EGRESS`; a packet with the retransmit flag also

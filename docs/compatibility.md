@@ -264,6 +264,13 @@ exposed under `semantic.sipalg`. This records the iRule controls without
 implementing SIP ALG address translation, hairpin routing, or ephemeral
 listener creation.
 
+The legacy connection controls `DEMANGLE::enable`, `DEMANGLE::disable`,
+`ISESSION::deduplication`, `PLUGIN::enable`, and `PLUGIN::disable` are modeled
+as bounded connection state under `semantic.feature_controls`. The emulator
+does not perform URL demangling, iSession deduplication, or plugin processing;
+it records the rule-visible toggles and validates their documented argument
+forms.
+
 The six catalogued TMOS 17.5 `NSH::*` commands are modeled as connection-
 scoped rule state. `NSH::chain` records a direction-specific chain name;
 `NSH::context`, `NSH::path_id`, and `NSH::service_index` validate and retain

@@ -456,6 +456,12 @@ namespace eval ::itest::semantic {
     variable sipalg_hairpin "detect"
     variable sipalg_hairpin_default "detect"
     variable sipalg_nonregister_subscriber_listener 0
+    variable demangle_enabled 1
+    variable isession_deduplication_enabled 1
+    variable ivs_entry_result ""
+    variable ivs_entry_results {}
+    variable plugin_all_disabled 0
+    variable plugin_states [dict create]
 
     namespace eval ::state::websocket {
         variable request_headers {}
@@ -3490,6 +3496,122 @@ namespace eval ::itest::semantic {
             hairpin $sipalg_hairpin \
             hairpin_default $sipalg_hairpin_default \
             nonregister_subscriber_listener $sipalg_nonregister_subscriber_listener]
+    }
+
+    proc feature_controls_reset_connection {} {
+        variable demangle_enabled
+        variable isession_deduplication_enabled
+        variable ivs_entry_result
+        variable ivs_entry_results
+        variable plugin_all_disabled
+        variable plugin_states
+        set demangle_enabled 1
+        set isession_deduplication_enabled 1
+        set ivs_entry_result ""
+        set ivs_entry_results {}
+        set plugin_all_disabled 0
+        set plugin_states [dict create]
+    }
+
+    proc _feature_toggle_command {command_name variable_name enabled args} {
+        if {[llength $args] != 0} {
+            error "$command_name takes no arguments"
+        }
+        set value [expr {$enabled ? 1 : 0}]
+        set ::itest::semantic::$variable_name $value
+        ::itest::log_decision feature_controls [string tolower [lindex [split $command_name ::] end]] $value
+        return ""
+    }
+
+    proc demangle_enable_command {args} {
+        return [_feature_toggle_command DEMANGLE::enable demangle_enabled 1 {*}$args]
+    }
+
+    proc demangle_disable_command {args} {
+        return [_feature_toggle_command DEMANGLE::disable demangle_enabled 0 {*}$args]
+    }
+
+    proc isession_deduplication_command {args} {
+        variable isession_deduplication_enabled
+        if {[llength $args] != 1 || [lindex $args 0] ni {enable disable}} {
+            error "ISESSION::deduplication requires enable or disable"
+        }
+        set isession_deduplication_enabled [expr {[lindex $args 0] eq "enable"}]
+        ::itest::log_decision isession deduplication $isession_deduplication_enabled
+        return ""
+    }
+
+    proc ivs_entry_result_command {args} {
+        variable ivs_entry_result
+        variable ivs_entry_results
+        if {$::itest::current_event ni {IVS_ENTRY_REQUEST IVS_ENTRY_RESPONSE ICAP_REQUEST ICAP_RESPONSE}} {
+            error "IVS_ENTRY::result is not valid during $::itest::current_event"
+        }
+        if {[llength $args] > 1 || ([llength $args] == 1 && [lindex $args 0] ni {noop modified response})} {
+            error "IVS_ENTRY::result accepts noop, modified, or response"
+        }
+        if {[llength $args] == 0} {
+            return $ivs_entry_result
+        }
+        set ivs_entry_result [lindex $args 0]
+        lappend ivs_entry_results [list $::itest::current_event $ivs_entry_result]
+        if {[llength $ivs_entry_results] > 1024} {
+            set ivs_entry_results [lrange $ivs_entry_results end-1023 end]
+        }
+        ::itest::log_decision ivs_entry result [list $::itest::current_event $ivs_entry_result]
+        return ""
+    }
+
+    proc _plugin_name {value command_name} {
+        if {$value eq "" || [string first "\x00" $value] >= 0} {
+            error "$command_name requires a non-empty plugin name without NUL bytes"
+        }
+        return $value
+    }
+
+    proc plugin_enable_command {args} {
+        variable plugin_all_disabled
+        variable plugin_states
+        if {[llength $args] != 1} {
+            error "PLUGIN::enable requires a plugin name"
+        }
+        set plugin [_plugin_name [lindex $args 0] PLUGIN::enable]
+        dict set plugin_states $plugin 1
+        ::itest::log_decision plugin enable $plugin
+        return ""
+    }
+
+    proc plugin_disable_command {args} {
+        variable plugin_all_disabled
+        variable plugin_states
+        if {[llength $args] > 1} {
+            error "PLUGIN::disable accepts zero or one plugin name"
+        }
+        if {[llength $args] == 0} {
+            set plugin_all_disabled 1
+            ::itest::log_decision plugin disable all
+            return ""
+        }
+        set plugin [_plugin_name [lindex $args 0] PLUGIN::disable]
+        dict set plugin_states $plugin 0
+        ::itest::log_decision plugin disable $plugin
+        return ""
+    }
+
+    proc feature_controls_snapshot {} {
+        variable demangle_enabled
+        variable isession_deduplication_enabled
+        variable ivs_entry_result
+        variable ivs_entry_results
+        variable plugin_all_disabled
+        variable plugin_states
+        return [list \
+            demangle_enabled $demangle_enabled \
+            isession_deduplication_enabled $isession_deduplication_enabled \
+            ivs_entry_result $ivs_entry_result \
+            ivs_entry_results $ivs_entry_results \
+            plugin_all_disabled $plugin_all_disabled \
+            plugin_states $plugin_states]
     }
 
     proc sip_flags_snapshot {} {
@@ -22890,6 +23012,12 @@ foreach {name proc_name} {
     SIPALG::hairpin ::itest::semantic::sipalg_hairpin_command
     SIPALG::hairpin_default ::itest::semantic::sipalg_hairpin_default_command
     SIPALG::nonregister_subscriber_listener ::itest::semantic::sipalg_nonregister_subscriber_listener_command
+    DEMANGLE::disable ::itest::semantic::demangle_disable_command
+    DEMANGLE::enable ::itest::semantic::demangle_enable_command
+    ISESSION::deduplication ::itest::semantic::isession_deduplication_command
+    IVS_ENTRY::result ::itest::semantic::ivs_entry_result_command
+    PLUGIN::disable ::itest::semantic::plugin_disable_command
+    PLUGIN::enable ::itest::semantic::plugin_enable_command
     SDP::field ::itest::semantic::sdp_field_command
     SDP::media ::itest::semantic::sdp_media_command
     SDP::session_id ::itest::semantic::sdp_session_id_command

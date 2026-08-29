@@ -1858,7 +1858,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("ILX", "generated-stub"), queue_buckets)
         self.assertNotIn(("NSH", "generated-stub"), queue_buckets)
         self.assertNotIn(("SIPALG", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 92)
+        self.assertEqual(queue["command_count"], 86)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -8400,6 +8400,108 @@ when SIP_REQUEST {
                 },
                 tcl_lsp_root=self.tcl_lsp_root,
             )
+
+    def test_feature_control_commands_and_connection_scope(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/first"} {
+        DEMANGLE::enable
+        DEMANGLE::disable
+        ISESSION::deduplication disable
+        PLUGIN::disable
+        PLUGIN::enable ASM
+        PLUGIN::disable WAM
+    }
+    log local0. "controls-set"
+}
+""",
+                "requests": [
+                    {"uri": "/first"},
+                    {"uri": "/second"},
+                    {"uri": "/third", "close_before": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first = result["results"][0]["semantic"]["feature_controls"]
+        second = result["results"][1]["semantic"]["feature_controls"]
+        third = result["results"][2]["semantic"]["feature_controls"]
+        self.assertFalse(first["demangle_enabled"])
+        self.assertFalse(first["isession_deduplication_enabled"])
+        self.assertTrue(first["plugin_all_disabled"])
+        self.assertEqual(first["plugin_states"], {"ASM": True, "WAM": False})
+        self.assertEqual(second, first)
+        self.assertEqual(third["demangle_enabled"], True)
+        self.assertEqual(third["isession_deduplication_enabled"], True)
+        self.assertEqual(third["plugin_states"], {})
+        self.assertTrue(any("controls-set" in entry for entry in result["results"][0]["logs"]))
+
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in (
+            "DEMANGLE::disable",
+            "DEMANGLE::enable",
+            "ISESSION::deduplication",
+            "PLUGIN::disable",
+            "PLUGIN::enable",
+        ):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+        ivs_session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["IVS_ENTRY"],
+                "irule": """
+when IVS_ENTRY_REQUEST {
+    IVS_ENTRY::result modified
+    log local0. "ivs=[IVS_ENTRY::result]"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            ivs_result = ivs_session.fire_event("IVS_ENTRY_REQUEST")
+            self.assertTrue(any("ivs=modified" in entry for entry in ivs_result["logs"]))
+            self.assertEqual(
+                ivs_result["semantic"]["feature_controls"]["ivs_entry_result"],
+                "modified",
+            )
+            self.assertEqual(
+                ivs_result["semantic"]["feature_controls"]["ivs_entry_results"],
+                [{"event": "IVS_ENTRY_REQUEST", "result": "modified"}],
+            )
+        finally:
+            ivs_session.close()
+
+        for irule, message in (
+            (
+                "when HTTP_REQUEST { ISESSION::deduplication maybe }",
+                "ISESSION::deduplication requires enable or disable",
+            ),
+            (
+                "when HTTP_REQUEST { PLUGIN::enable }",
+                "PLUGIN::enable requires a plugin name",
+            ),
+            (
+                "when HTTP_REQUEST { IVS_ENTRY::result noop }",
+                "IVS_ENTRY::result is not valid during HTTP_REQUEST",
+            ),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, message
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "request": {"uri": "/"},
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
 
     def test_sdp_commands_model_fields_media_and_session_id(self) -> None:
         session = self.adapter.EmulatorSession(
