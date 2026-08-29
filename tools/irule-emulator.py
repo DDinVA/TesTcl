@@ -1750,8 +1750,13 @@ SEMANTIC_MOCK_COMMANDS = {
     "sha512",
     "rmd160",
     "traffic_group",
+    "uniq_ordered_ip_list",
+    "uniq_sorted_ip_list",
     "vlan_id",
     "substr",
+    "xff_list",
+    "xff_uniq_ordered_ip_list",
+    "xff_uniq_sorted_ip_list",
     "URI::basename",
     "URI::compare",
     "URI::decode",
@@ -5000,6 +5005,7 @@ def _install_runtime_shims(session: Any) -> None:
     _install_python_crypto_cipher_helper(session)
     _install_python_aes_helper(session)
     _install_python_codec_helper(session)
+    _install_python_ip_helper(session)
     semantic_path = Path(__file__).with_name("semantic-mocks.tcl")
     if not semantic_path.exists():
         raise EmulatorInputError(f"missing adapter semantic mock file: {semantic_path}")
@@ -5619,6 +5625,57 @@ def _install_python_codec_helper(session: Any) -> None:
 
     interpreter.createcommand("::itest::semantic::py_codec", codec_callback)
     setattr(session, "_testcl_codec_callback", codec_callback)
+
+
+def _install_python_ip_helper(session: Any) -> None:
+    """Expose bounded IP normalization and ordering primitives to Tcl helpers."""
+    inner = getattr(session, "_session", None)
+    inprocess = getattr(inner, "_inprocess", None)
+    interpreter = getattr(inprocess, "_interp", None)
+    if interpreter is None or not hasattr(interpreter, "createcommand"):
+        raise EmulatorInputError("IP-list support requires the in-process Tcl backend")
+
+    max_address_bytes = 4096
+
+    def parse_address(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+        candidate = value.strip()
+        if not candidate or "\x00" in candidate:
+            return None
+        try:
+            if len(candidate.encode("utf-8")) > max_address_bytes:
+                return None
+        except UnicodeEncodeError:
+            return None
+        try:
+            return ipaddress.ip_address(candidate)
+        except ValueError:
+            return None
+
+    def ip_callback(*args: str) -> str:
+        if not args or args[0] not in {"normalize", "non_loopback", "compare"}:
+            raise ValueError("IP helper requires normalize, non_loopback, or compare")
+        operation = args[0]
+        if operation == "compare":
+            if len(args) != 3:
+                raise ValueError("IP compare helper requires two addresses")
+            first = parse_address(args[1])
+            second = parse_address(args[2])
+            if first is None or second is None:
+                raise ValueError("IP compare helper received an invalid address")
+            first_key = (first.version, int(first))
+            second_key = (second.version, int(second))
+            return str((first_key > second_key) - (first_key < second_key))
+        if len(args) != 2:
+            raise ValueError(f"IP {operation} helper requires one address")
+        address = parse_address(args[1])
+        if address is None:
+            return "" if operation == "normalize" else "0"
+        if operation == "normalize":
+            return str(address)
+        return "0" if address.is_loopback or address.is_unspecified else "1"
+
+    interpreter.createcommand("::itest::semantic::py_ip", ip_callback)
+    setattr(session, "_testcl_ip_callback", ip_callback)
 
 
 def _normalise_pools(raw: Any) -> dict[str, list[str]]:

@@ -690,6 +690,23 @@ empty string when no value is provided and does not invent traffic-group
 membership or inspect live BIG-IP configuration. See the F5 [`traffic_group`
 reference](https://clouddocs.f5.com/api/irules/traffic_group.html).
 
+### IP-list utilities
+
+The curated global helpers `uniq_ordered_ip_list`, `uniq_sorted_ip_list`,
+`xff_list`, `xff_uniq_ordered_ip_list`, and `xff_uniq_sorted_ip_list` are
+available for rules that need bounded client-address normalization. Arguments
+may contain comma- or whitespace-separated IPv4 and IPv6 values. Invalid
+values are discarded, valid values are canonicalized, and duplicates are
+removed. The ordered variants retain first-seen order; sorted variants use a
+deterministic numeric order with IPv4 values before IPv6 values.
+
+The `xff_*` variants read all values of `X-Forwarded-For` by default, or all
+values of one optional header name. They discard loopback and unspecified
+addresses before deduplication; `xff_list` is the sorted XFF form. The
+helpers accept at most 256 candidate addresses per call and do not resolve
+hostnames or model BIG-IP's trust policy for forwarded headers. These helpers
+are curated `tcl-lsp` community utilities rather than native TMM primitives.
+
 ### `rmd160`
 
 `rmd160` accepts exactly one value and returns the binary RIPEMD-160 digest,

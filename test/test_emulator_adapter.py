@@ -1907,7 +1907,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 40)
+        self.assertEqual(queue["command_count"], 35)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -9443,6 +9443,111 @@ when HTTP_REQUEST {
                 invalid.fire_event("HTTP_REQUEST")
         finally:
             invalid.close()
+
+    def test_ip_list_utilities_normalize_order_and_filter_xff_headers(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    set candidates {192.0.2.10 {2001:0DB8::1, 192.0.2.10 invalid 0.0.0.0} 127.0.0.1}
+    set ordered [uniq_ordered_ip_list {*}$candidates]
+    set sorted [uniq_sorted_ip_list {*}$candidates]
+    set xff_ordered [xff_uniq_ordered_ip_list]
+    set xff_sorted [xff_list]
+    set custom [xff_uniq_sorted_ip_list X-Real-IP]
+    log local0. "ordered=[join $ordered |] sorted=[join $sorted |] xff_ordered=[join $xff_ordered |] xff_sorted=[join $xff_sorted |] custom=[join $custom |] empty=[llength [uniq_sorted_ip_list]]"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=True,
+            allow_packets=False,
+        )
+        try:
+            result = session.run_request(
+                {
+                    "uri": "/",
+                    "headers": {
+                        "X-Forwarded-For": (
+                            "127.0.0.1, 192.0.2.10, 2001:0db8::1, "
+                            "192.0.2.10, 0.0.0.0"
+                        ),
+                        "X-Real-IP": "2001:0DB8::2, 203.0.113.4, 203.0.113.4",
+                    },
+                }
+            )
+            message = next(entry for entry in result["logs"] if "ordered=" in entry)
+            self.assertIn(
+                "ordered=192.0.2.10|2001:db8::1|0.0.0.0|127.0.0.1",
+                message,
+            )
+            self.assertIn(
+                "sorted=0.0.0.0|127.0.0.1|192.0.2.10|2001:db8::1",
+                message,
+            )
+            self.assertIn("xff_ordered=192.0.2.10|2001:db8::1", message)
+            self.assertIn("xff_sorted=192.0.2.10|2001:db8::1", message)
+            self.assertIn("custom=203.0.113.4|2001:db8::2", message)
+            self.assertIn("empty=0", message)
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            for command_name in (
+                "uniq_ordered_ip_list",
+                "uniq_sorted_ip_list",
+                "xff_list",
+                "xff_uniq_ordered_ip_list",
+                "xff_uniq_sorted_ip_list",
+            ):
+                self.assertEqual(usage[command_name]["runtime_status"], "semantic-mock")
+        finally:
+            session.close()
+
+    def test_ip_list_utilities_reject_invalid_shape_and_excessive_candidates(self) -> None:
+        invalid_rules = (
+            (
+                "when HTTP_REQUEST { xff_list X-Forwarded-For X-Real-IP }",
+                "xff_list accepts an optional header name",
+            ),
+            (
+                "when HTTP_REQUEST { xff_list {} }",
+                "xff_list header name must be non-empty",
+            ),
+            (
+                "when HTTP_REQUEST { uniq_sorted_ip_list [lrepeat 257 192.0.2.1] }",
+                "IP list cannot contain more than 256 candidates",
+            ),
+        )
+        for irule, message in invalid_rules:
+            session = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {"profiles": ["HTTP"], "irule": irule},
+                allow_irule_file=True,
+                allow_requests=False,
+                allow_packets=False,
+            )
+            try:
+                with self.subTest(message=message), self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError, message
+                ):
+                    session.fire_event("HTTP_REQUEST")
+            finally:
+                session.close()
+
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {"profiles": ["TCP"], "irule": "when CLIENT_ACCEPTED { xff_list }"},
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, "xff_list requires the HTTP profile"
+            ):
+                session.fire_event("CLIENT_ACCEPTED")
+        finally:
+            session.close()
 
     def test_qoe_commands_model_video_metrics_and_connection_control(self) -> None:
         session = self.adapter.EmulatorSession(

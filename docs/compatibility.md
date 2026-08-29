@@ -456,6 +456,15 @@ The legacy global `traffic_group` command is modeled as a no-argument getter
 over caller-supplied `traffic_group.name` event state. It returns an empty
 string when no value is supplied and does not model BIG-IP traffic-group
 configuration or failover behavior.
+The curated global helpers `uniq_ordered_ip_list`, `uniq_sorted_ip_list`,
+`xff_list`, `xff_uniq_ordered_ip_list`, and `xff_uniq_sorted_ip_list` provide
+bounded IPv4/IPv6 normalization, deduplication, and deterministic ordering.
+The `xff_*` helpers read repeated values from `X-Forwarded-For` or an
+optional caller-selected header and remove loopback and unspecified addresses;
+they do not resolve hostnames, apply a trusted-proxy policy, or reproduce a
+live TMM header-processing pipeline. Each call is capped at 256 candidates.
+These are curated community utilities from the pinned `tcl-lsp` registry, not
+native BIG-IP primitives.
 The global `rmd160` command is modeled as a one-value binary RIPEMD-160 digest
 using the existing bounded digest bridge. It does not add BIG-IP-specific
 digest behavior beyond the documented hash operation.

@@ -13359,6 +13359,90 @@ namespace eval ::itest::semantic {
         return $::state::http::request::uri
     }
 
+    proc _ip_list_tokens {args} {
+        set tokens {}
+        foreach argument $args {
+            foreach token [regexp -all -inline {[^,[:space:]]+} $argument] {
+                lappend tokens $token
+                if {[llength $tokens] > 256} {
+                    error "IP list cannot contain more than 256 candidates"
+                }
+            }
+        }
+        return $tokens
+    }
+
+    proc _ip_compare {first second} {
+        return [::itest::semantic::py_ip compare $first $second]
+    }
+
+    proc _ip_list_result {ordered filter_special args} {
+        set values {}
+        set seen [dict create]
+        foreach token [_ip_list_tokens {*}$args] {
+            set normalized [::itest::semantic::py_ip normalize $token]
+            if {$normalized eq ""} { continue }
+            if {$filter_special &&
+                [::itest::semantic::py_ip non_loopback $normalized] ne "1"} {
+                continue
+            }
+            if {[dict exists $seen $normalized]} { continue }
+            dict set seen $normalized 1
+            lappend values $normalized
+        }
+        if {!$ordered} {
+            set values [lsort -command ::itest::semantic::_ip_compare $values]
+        }
+        return $values
+    }
+
+    proc uniq_ordered_ip_list_command {args} {
+        set result [_ip_list_result 1 0 {*}$args]
+        ::itest::log_decision ip_list uniq_ordered $result
+        return $result
+    }
+
+    proc uniq_sorted_ip_list_command {args} {
+        set result [_ip_list_result 0 0 {*}$args]
+        ::itest::log_decision ip_list uniq_sorted $result
+        return $result
+    }
+
+    proc _xff_ip_list_command {command_name ordered args} {
+        if {![_profile_enabled HTTP]} {
+            error "$command_name requires the HTTP profile"
+        }
+        if {[llength $args] > 1} {
+            error "$command_name accepts an optional header name"
+        }
+        set header_name "X-Forwarded-For"
+        if {[llength $args] == 1} {
+            set header_name [lindex $args 0]
+            if {$header_name eq "" || [string first "\x00" $header_name] >= 0} {
+                error "$command_name header name must be non-empty and free of NUL bytes"
+            }
+            if {[string bytelength $header_name] > 4096} {
+                error "$command_name header name exceeds the 4096-byte limit"
+            }
+        }
+        set header_values [::state::http::request::header values $header_name]
+        set result [_ip_list_result $ordered 1 {*}$header_values]
+        ::itest::log_decision ip_list $command_name [list $header_name $result]
+        return $result
+    }
+
+    proc xff_list_command {args} {
+        return [_xff_ip_list_command xff_list 0 {*}$args]
+    }
+
+    proc xff_uniq_ordered_ip_list_command {args} {
+        return [_xff_ip_list_command xff_uniq_ordered_ip_list 1 {*}$args]
+    }
+
+    proc xff_uniq_sorted_ip_list_command {args} {
+        return [_xff_ip_list_command xff_uniq_sorted_ip_list 0 {*}$args]
+    }
+
     proc legacy_http_version {args} {
         if {[llength $args] != 0} { error "http_version does not accept arguments" }
         return $::state::http::request::version
@@ -22790,7 +22874,12 @@ foreach {original replacement} {
     sha512 sha512_command
     substr substr_command
     traffic_group traffic_group_command
+    uniq_ordered_ip_list uniq_ordered_ip_list_command
+    uniq_sorted_ip_list uniq_sorted_ip_list_command
     vlan_id vlan_id_command
+    xff_list xff_list_command
+    xff_uniq_ordered_ip_list xff_uniq_ordered_ip_list_command
+    xff_uniq_sorted_ip_list xff_uniq_sorted_ip_list_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::cmd_$original] ne ""} {
         ::tmm::_orig_rename ::itest::cmd::cmd_$original ::itest::cmd::_testcl_${original}_orig
