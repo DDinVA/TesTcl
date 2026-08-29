@@ -590,6 +590,65 @@ when HTTP_REQUEST {
             },
         )
 
+    def test_semantic_overlay_models_lb_connection_controls(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["192.0.2.10:80"]},
+                "irule": """
+when CLIENT_ACCEPTED {
+    LB::context_id context-a
+    LB::src_tag source-a
+    LB::dst_tag destination-a
+    LB::bias 3
+    LB::enable_decisionlog
+}
+when HTTP_REQUEST {
+    pool api_pool
+    LB::mode roundrobin
+    LB::connlimit virtual limit 10 key tenant-a
+    LB::connect
+    snat automap
+    LB::command transparent_port
+    LB::prime
+    log local0. "mode=[LB::mode] snat=[LB::snat] class=[LB::class] queued=[LB::queue queued] limit=[LB::connlimit virtual]"
+}
+""",
+                "requests": [{"uri": "/health"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        entry = result["results"][0]
+        self.assertEqual(
+            entry["semantic"]["lb"],
+            {
+                "bias": "3",
+                "class": "",
+                "command": "transparent_port",
+                "context_id": "context-a",
+                "dst_tag": "destination-a",
+                "src_tag": "source-a",
+                "decisionlog_enabled": "1",
+                "connect_requested": "1",
+                "prime_requested": "1",
+                "connlimits": "virtual {limit 10 key tenant-a}",
+                "queue_on": "0",
+                "queue_queued": "0",
+                "queue_depth": "0",
+                "queue_limit_depth": "0",
+                "queue_limit_time": "0",
+                "queue_age_head": "0",
+                "queue_age_max": "0",
+                "queue_age_edm": "0",
+                "queue_age_ema": "0",
+            },
+        )
+        self.assertEqual(entry["pool"], "api_pool")
+        self.assertEqual(entry["node"], "192.0.2.10")
+        self.assertTrue(any("mode=roundrobin snat=automap" in log for log in entry["logs"]))
+        self.assertTrue(any("queued=0" in log and "limit=limit 10 key tenant-a" in log for log in entry["logs"]))
+
     def test_semantic_overlay_models_connection_scoped_psm_controls(self) -> None:
         result = self.adapter.run_scenario(
             {

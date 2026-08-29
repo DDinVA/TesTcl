@@ -656,10 +656,23 @@ SEMANTIC_MOCK_COMMANDS = {
     "IP::addr",
     "IP::version",
     "LB::down",
+    "LB::bias",
+    "LB::class",
+    "LB::command",
+    "LB::connect",
+    "LB::connlimit",
+    "LB::context_id",
+    "LB::dst_tag",
+    "LB::enable_decisionlog",
+    "LB::mode",
     "LB::persist",
+    "LB::prime",
+    "LB::queue",
     "LB::reselect",
     "LB::server",
+    "LB::snat",
     "LB::status",
+    "LB::src_tag",
     "LB::up",
     "class",
     "PROFILE::clientssl",
@@ -1361,6 +1374,15 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         target: status
         for target, status in zip(lb_parts[::2], lb_parts[1::2])
     }
+    lb_control_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::lb_control_snapshot")
+    )
+    if len(lb_control_parts) % 2:
+        raise EmulatorInputError("invalid LB control state")
+    lb_control = {
+        name: value
+        for name, value in zip(lb_control_parts[::2], lb_control_parts[1::2])
+    }
     table_entries: list[dict[str, str]] = []
     for raw_entry in _split_tcl_list(session.eval_tcl("::itest::semantic::table_snapshot")):
         parts = _split_tcl_list(raw_entry)
@@ -1393,6 +1415,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "stats": stats,
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
+        "lb": lb_control,
         "table": table_entries,
         "psm": psm,
         "cache": cache,
@@ -6169,6 +6192,7 @@ class EmulatorSession:
             with backend_session as session:
                 _install_runtime_shims(session)
                 self._registered_events = session.load_irule(self._source)
+                session.eval_tcl("::itest::semantic::lb_reset_connection")
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
                     for profile in self._profiles
@@ -6224,6 +6248,7 @@ class EmulatorSession:
             self._connection_request_number = 0
         if not self._connection_open:
             self._connection_request_number = 0
+            session.eval_tcl("::itest::semantic::lb_reset_connection")
             session.eval_tcl("::itest::semantic::psm_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
         request_number = self._connection_request_number + 1

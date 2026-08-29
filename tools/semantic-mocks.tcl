@@ -61,6 +61,27 @@ namespace eval ::itest::semantic {
     variable cache_objects
     array set cache_objects {}
 
+    variable lb_bias 0
+    variable lb_class ""
+    variable lb_command ""
+    variable lb_context_id ""
+    variable lb_dst_tag ""
+    variable lb_src_tag ""
+    variable lb_decisionlog_enabled 0
+    variable lb_connect_requested 0
+    variable lb_prime_requested 0
+    variable lb_connlimits
+    variable lb_queue_on 0
+    variable lb_queue_queued 0
+    variable lb_queue_depth 0
+    variable lb_queue_limit_depth 0
+    variable lb_queue_limit_time 0
+    variable lb_queue_age_head 0
+    variable lb_queue_age_max 0
+    variable lb_queue_age_edm 0
+    variable lb_queue_age_ema 0
+    set lb_connlimits [dict create]
+
     variable sip_discarded 0
     variable sip_response_requested 0
     variable sip_response_code ""
@@ -3112,6 +3133,288 @@ namespace eval ::itest::semantic {
             return [array get ::state::lb::node_status]
         }
         return [list]
+    }
+
+    proc lb_reset_connection {} {
+        variable lb_bias
+        variable lb_class
+        variable lb_command
+        variable lb_context_id
+        variable lb_dst_tag
+        variable lb_src_tag
+        variable lb_decisionlog_enabled
+        variable lb_connect_requested
+        variable lb_prime_requested
+        variable lb_connlimits
+        variable lb_queue_on
+        variable lb_queue_queued
+        variable lb_queue_depth
+        variable lb_queue_limit_depth
+        variable lb_queue_limit_time
+        variable lb_queue_age_head
+        variable lb_queue_age_max
+        variable lb_queue_age_edm
+        variable lb_queue_age_ema
+        set lb_bias 0
+        set lb_class ""
+        set lb_command ""
+        set lb_context_id ""
+        set lb_dst_tag ""
+        set lb_src_tag ""
+        set lb_decisionlog_enabled 0
+        set lb_connect_requested 0
+        set lb_prime_requested 0
+        set lb_connlimits [dict create]
+        set lb_queue_on 0
+        set lb_queue_queued 0
+        set lb_queue_depth 0
+        set lb_queue_limit_depth 0
+        set lb_queue_limit_time 0
+        set lb_queue_age_head 0
+        set lb_queue_age_max 0
+        set lb_queue_age_edm 0
+        set lb_queue_age_ema 0
+    }
+
+    proc lb_control_snapshot {} {
+        variable lb_bias
+        variable lb_class
+        variable lb_command
+        variable lb_context_id
+        variable lb_dst_tag
+        variable lb_src_tag
+        variable lb_decisionlog_enabled
+        variable lb_connect_requested
+        variable lb_prime_requested
+        variable lb_connlimits
+        variable lb_queue_on
+        variable lb_queue_queued
+        variable lb_queue_depth
+        variable lb_queue_limit_depth
+        variable lb_queue_limit_time
+        variable lb_queue_age_head
+        variable lb_queue_age_max
+        variable lb_queue_age_edm
+        variable lb_queue_age_ema
+        return [list \
+            bias $lb_bias class $lb_class command $lb_command \
+            context_id $lb_context_id dst_tag $lb_dst_tag src_tag $lb_src_tag \
+            decisionlog_enabled $lb_decisionlog_enabled \
+            connect_requested $lb_connect_requested prime_requested $lb_prime_requested \
+            connlimits $lb_connlimits queue_on $lb_queue_on \
+            queue_queued $lb_queue_queued queue_depth $lb_queue_depth \
+            queue_limit_depth $lb_queue_limit_depth queue_limit_time $lb_queue_limit_time \
+            queue_age_head $lb_queue_age_head queue_age_max $lb_queue_age_max \
+            queue_age_edm $lb_queue_age_edm queue_age_ema $lb_queue_age_ema]
+    }
+
+    proc lb_bias_command {args} {
+        variable lb_bias
+        if {[llength $args] == 0} { return $lb_bias }
+        if {[llength $args] != 1 || ![string is integer -strict [lindex $args 0]]} {
+            error "LB::bias accepts an optional integer"
+        }
+        set lb_bias [lindex $args 0]
+        ::itest::log_decision lb bias $lb_bias
+        return ""
+    }
+
+    proc lb_class_command {args} {
+        variable lb_class
+        if {[llength $args] != 0} { error "LB::class takes no arguments" }
+        if {[info exists ::state::lb::traffic_class]} {
+            return $::state::lb::traffic_class
+        }
+        return $lb_class
+    }
+
+    proc lb_command_command {args} {
+        variable lb_command
+        if {[llength $args] == 0} { return $lb_command }
+        if {[llength $args] != 1 || [lindex $args 0] ne "transparent_port"} {
+            error "LB::command accepts transparent_port"
+        }
+        set lb_command transparent_port
+        ::itest::log_decision lb command $args
+        return ""
+    }
+
+    proc lb_connect_command {args} {
+        variable lb_connect_requested
+        if {[llength $args] != 0} { error "LB::connect takes no arguments" }
+        set lb_connect_requested 1
+        if {$::state::lb::pool ne "" && !$::state::lb::selected} {
+            _select_available_member $::state::lb::pool
+        }
+        ::itest::log_decision lb connect
+        return ""
+    }
+
+    proc lb_connlimit_command {args} {
+        variable lb_connlimits
+        if {[llength $args] < 1} {
+            error "LB::connlimit requires virtual, node, or poolmember"
+        }
+        set target [string tolower [lindex $args 0]]
+        if {$target ni {virtual node poolmember}} {
+            error "LB::connlimit target must be virtual, node, or poolmember"
+        }
+        if {![dict exists $lb_connlimits $target]} {
+            dict set lb_connlimits $target [list limit unlimited key ""]
+        }
+        if {[llength $args] == 1} {
+            return [dict get $lb_connlimits $target]
+        }
+        set record [dict get $lb_connlimits $target]
+        set remaining [lrange $args 1 end]
+        if {[llength $remaining] % 2} {
+            error "LB::connlimit options require limit/key pairs"
+        }
+        foreach {option value} $remaining {
+            switch -exact -- [string tolower $option] {
+                limit {
+                    if {$value ne "unlimited" &&
+                        (![string is integer -strict $value] || $value < 0)} {
+                        error "LB::connlimit limit must be unlimited or non-negative"
+                    }
+                    dict set record limit $value
+                }
+                key { dict set record key $value }
+                default { error "unsupported LB::connlimit option $option" }
+            }
+        }
+        dict set lb_connlimits $target $record
+        ::itest::log_decision lb connlimit [list $target $record]
+        return ""
+    }
+
+    proc lb_context_id_command {args} {
+        variable lb_context_id
+        if {[llength $args] != 1} { error "LB::context_id requires an id" }
+        set lb_context_id [lindex $args 0]
+        ::itest::log_decision lb context_id $lb_context_id
+        return ""
+    }
+
+    proc lb_dst_tag_command {args} {
+        variable lb_dst_tag
+        if {[llength $args] != 1} { error "LB::dst_tag requires a tag" }
+        set lb_dst_tag [lindex $args 0]
+        ::itest::log_decision lb dst_tag $lb_dst_tag
+        return ""
+    }
+
+    proc lb_enable_decisionlog_command {args} {
+        variable lb_decisionlog_enabled
+        if {[llength $args] != 0} { error "LB::enable_decisionlog takes no arguments" }
+        set lb_decisionlog_enabled 1
+        ::itest::log_decision lb enable_decisionlog
+        return ""
+    }
+
+    proc lb_mode_command {args} {
+        if {[llength $args] == 0} { return $::state::lb::lb_mode }
+        if {[llength $args] != 1} { error "LB::mode requires a mode" }
+        set mode [string tolower [lindex $args 0]]
+        if {$mode ni {
+            default rr roundrobin leastconns nodeleastconns fastest predictive
+            observed ratio noderatio dynratio dynratiombr
+        }} {
+            error "unsupported LB::mode $mode"
+        }
+        set ::state::lb::lb_mode $mode
+        ::itest::log_decision lb mode $mode
+        return ""
+    }
+
+    proc lb_prime_command {args} {
+        variable lb_prime_requested
+        if {[llength $args] > 1} { error "LB::prime accepts an optional pool" }
+        if {[llength $args] == 1} {
+            set ::state::lb::pool [lindex $args 0]
+        }
+        set lb_prime_requested 1
+        if {$::state::lb::pool ne "" && !$::state::lb::selected} {
+            _select_available_member $::state::lb::pool
+        }
+        ::itest::log_decision lb prime $args
+        return ""
+    }
+
+    proc lb_queue_command {args} {
+        variable lb_queue_on
+        variable lb_queue_queued
+        variable lb_queue_depth
+        variable lb_queue_limit_depth
+        variable lb_queue_limit_time
+        variable lb_queue_age_head
+        variable lb_queue_age_max
+        variable lb_queue_age_edm
+        variable lb_queue_age_ema
+        if {[llength $args] == 1 && [lindex $args 0] eq "queued"} {
+            return $lb_queue_queued
+        }
+        if {[llength $args] >= 2 && [lindex $args 0] eq "on" &&
+            [lindex $args 1] eq "connlimit"} {
+            if {[llength $args] > 3} {
+                error "LB::queue on connlimit accepts an optional pool"
+            }
+            return [expr {$lb_queue_on ? "enabled" : "disabled"}]
+        }
+        if {[llength $args] >= 2 && [lindex $args 0] eq "limit"} {
+            if {[llength $args] < 2 || [llength $args] > 3} {
+                error "LB::queue limit accepts depth/time and an optional pool"
+            }
+            set kind [string tolower [lindex $args 1]]
+            if {$kind eq "depth"} { return $lb_queue_limit_depth }
+            if {$kind eq "time"} { return $lb_queue_limit_time }
+            error "LB::queue limit requires depth or time"
+        }
+        if {[llength $args] >= 2 && [lindex $args 0] eq "depth"} {
+            if {[llength $args] < 2 || [llength $args] > 5} {
+                error "LB::queue depth accepts a kind, pool, and optional member"
+            }
+            set kind [string tolower [lindex $args 1]]
+            if {$kind in {all one}} { return $lb_queue_depth }
+            error "LB::queue depth requires all or one"
+        }
+        if {[llength $args] >= 2 && [lindex $args 0] eq "age"} {
+            if {[llength $args] < 2 || [llength $args] > 5} {
+                error "LB::queue age accepts a kind, pool, and optional member"
+            }
+            switch -exact -- [string tolower [lindex $args 1]] {
+                head { return $lb_queue_age_head }
+                max { return $lb_queue_age_max }
+                edm { return $lb_queue_age_edm }
+                ema { return $lb_queue_age_ema }
+                default { error "LB::queue age requires head, max, edm, or ema" }
+            }
+        }
+        error "unsupported LB::queue query"
+    }
+
+    proc lb_snat_command {args} {
+        if {[llength $args] != 0} { error "LB::snat takes no arguments" }
+        set kind $::state::lb::snat_type
+        if {$kind eq "" || $kind eq "none"} { return "none" }
+        if {$kind eq "automap"} { return "automap" }
+        if {$kind eq "snatpool"} { return [list snatpool] }
+        if {$kind eq "explicit"} {
+            set result [list snat $::state::lb::snat_addr]
+            if {$::state::lb::snat_port ne "" && $::state::lb::snat_port != 0} {
+                lappend result $::state::lb::snat_port
+            }
+            return $result
+        }
+        return $kind
+    }
+
+    proc lb_src_tag_command {args} {
+        variable lb_src_tag
+        if {[llength $args] != 1} { error "LB::src_tag requires a tag" }
+        set lb_src_tag [lindex $args 0]
+        ::itest::log_decision lb src_tag $lb_src_tag
+        return ""
     }
 
     proc _uri_input {args} {
@@ -7773,6 +8076,19 @@ foreach {original replacement} {
     }
 }
 foreach {original replacement} {
+    lb_bias lb_bias_command
+    lb_class lb_class_command
+    lb_command lb_command_command
+    lb_connect lb_connect_command
+    lb_connlimit lb_connlimit_command
+    lb_context_id lb_context_id_command
+    lb_dst_tag lb_dst_tag_command
+    lb_enable_decisionlog lb_enable_decisionlog_command
+    lb_mode lb_mode_command
+    lb_prime lb_prime_command
+    lb_queue lb_queue_command
+    lb_snat lb_snat_command
+    lb_src_tag lb_src_tag_command
     mqtt_clean_session mqtt_clean_session_command
     mqtt_client_id mqtt_client_id_command
     mqtt_collect mqtt_collect_command
@@ -7882,6 +8198,9 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             } else {
                 set ::state::http::collect_response 0
             }
+        }
+        if {$event_name eq "CLIENT_ACCEPTED"} {
+            ::itest::semantic::lb_reset_connection
         }
         if {$gated && $event_name eq "HTTP_REQUEST" && [::itest::semantic::_cache_profile_enabled]} {
             ::itest::semantic::cache_prepare_request

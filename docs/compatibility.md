@@ -58,6 +58,13 @@ collection and replacement, release, metadata getters, and deterministic
 response emission. RTSP currently requires structured packets and the RTSP
 profile; it does not parse raw RTSP wire messages or implement media transport,
 session negotiation, or interleaved RTP.
+The LB control layer models `LB::bias`, `LB::class`, `LB::command`,
+`LB::connect`, `LB::connlimit`, `LB::context_id`, `LB::dst_tag`,
+`LB::enable_decisionlog`, `LB::mode`, `LB::prime`, `LB::queue`, `LB::snat`,
+and `LB::src_tag` as deterministic connection and pool-selection state.
+`LB::connect` and `LB::prime` can select a configured pool member, while
+connection limits and queue values are inspectable records rather than a live
+TMM scheduler or kernel connection-control implementation.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

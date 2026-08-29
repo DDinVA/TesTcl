@@ -73,6 +73,13 @@ events, case-insensitive header lookup and mutation, byte-oriented payload
 collection/replacement, release, metadata getters, and deterministic
 `RTSP::respond` emissions. The packet interface is structured rather than a
 full RTSP wire parser or media-session implementation.
+The load-balancing layer also models the high-value `LB::` connection controls:
+mode and bias overrides, SNAT inspection, context and source/destination tags,
+connection-limit records, queue queries, decision-log enablement, and bounded
+server-connect/prime requests. These controls update semantic state and
+decision output, and pool selection still uses the configured deterministic
+members. The emulator does not open real sideband connections, implement
+kernel connection limits, or run a production queue scheduler.
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose
