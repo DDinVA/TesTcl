@@ -696,7 +696,7 @@ traces, classic PCAP and pcapng replay, sequence-aware persistent connection ses
 structured DNS/TLS/SIP/RADIUS event injection, catalog conformance reporting, an MCP
 facade over the same JSON contract, and an adapter-owned semantic overlay for
 selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, table, TCP, and
-HTTP cookie commands, plus SIP request/response message adaptation and common global string, base64, data-group, and pool
+HTTP cookie commands, PSM FTP/HTTP/SMTP protocol controls, plus SIP request/response message adaptation and common global string, base64, data-group, and pool
 health and pool inventory functions, URI decoding, dotted-domain extraction, CRC32,
 and binary-compatible MD5/SHA1/SHA256/SHA384/SHA512 digests.
 It also models multimap lookup through `llookup`. The semantic overlay also models data-group `class`

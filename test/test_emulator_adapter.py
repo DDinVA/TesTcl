@@ -590,6 +590,66 @@ when HTTP_REQUEST {
             },
         )
 
+    def test_semantic_overlay_models_connection_scoped_psm_controls(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/disable"} {
+        PSM::FTP::disable
+        PSM::HTTP::disable
+        PSM::SMTP::disable
+    } elseif {[HTTP::uri] eq "/enable"} {
+        PSM::FTP::enable
+        PSM::HTTP::enable
+        PSM::SMTP::enable
+    }
+}
+""",
+                "requests": [
+                    {"uri": "/disable"},
+                    {"uri": "/enable"},
+                    {"uri": "/fresh", "new_connection": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        disabled, enabled, fresh = result["results"]
+        self.assertEqual(
+            disabled["semantic"]["psm"],
+            {"FTP": False, "HTTP": False, "SMTP": False},
+        )
+        self.assertEqual(
+            enabled["semantic"]["psm"],
+            {"FTP": True, "HTTP": True, "SMTP": True},
+        )
+        self.assertEqual(
+            fresh["semantic"]["psm"],
+            {"FTP": True, "HTTP": True, "SMTP": True},
+        )
+        self.assertEqual(
+            [decision for decision in disabled["decisions"] if decision.startswith("psm ")],
+            [
+                "psm ftp disable",
+                "psm http disable",
+                "psm smtp disable",
+            ],
+        )
+        self.assertEqual(
+            {entry["name"]: entry["runtime_status"] for entry in result["fidelity"]["commands"]
+             if entry["name"].startswith("PSM::")},
+            {
+                "PSM::FTP::disable": "semantic-mock",
+                "PSM::FTP::enable": "semantic-mock",
+                "PSM::HTTP::disable": "semantic-mock",
+                "PSM::HTTP::enable": "semantic-mock",
+                "PSM::SMTP::disable": "semantic-mock",
+                "PSM::SMTP::enable": "semantic-mock",
+            },
+        )
+
     def test_semantic_overlay_reselects_away_from_down_pool_member(self) -> None:
         result = self.adapter.run_scenario(
             {

@@ -37,6 +37,10 @@ Diameter ingress, egress, and retransmission events. Its routing, retry,
 retransmission, persistence, and capability-exchange commands are modeled as
 deterministic test state rather than a complete Diameter peer or TMM
 route/persistence implementation.
+The TMOS 17.5 `PSM::FTP::*`, `PSM::HTTP::*`, and `PSM::SMTP::*` enable/disable
+commands are modeled as connection-scoped protocol controls and appear in
+semantic state and decision output; they do not run a real Protocol Security
+Module inspection engine.
 RADIUS packet handling validates standard and Vendor-Specific attributes and
 exposes the four TMOS 17.5 AAA request/response events. It intentionally does
 not implement shared-secret cryptography, password obfuscation, live AAA

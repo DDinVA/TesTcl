@@ -22,6 +22,8 @@ namespace eval ::itest::semantic {
     variable http_release_requested 0
     variable http_close_requested 0
     variable http_request_number 0
+    variable psm_enabled
+    array set psm_enabled {FTP 1 HTTP 1 SMTP 1}
     variable ws_enabled 1
     variable ws_request_seen 0
     variable ws_upgrade_seen 0
@@ -340,6 +342,39 @@ namespace eval ::itest::semantic {
         variable http_release_requested
         return [list requested $http_release_requested]
     }
+
+    proc psm_reset_connection {} {
+        variable psm_enabled
+        foreach protocol {FTP HTTP SMTP} {
+            set psm_enabled($protocol) 1
+        }
+    }
+
+    proc psm_snapshot {} {
+        variable psm_enabled
+        return [list FTP $psm_enabled(FTP) HTTP $psm_enabled(HTTP) SMTP $psm_enabled(SMTP)]
+    }
+
+    proc psm_control_command {protocol enabled args} {
+        variable psm_enabled
+        if {[llength $args] != 0} {
+            error "PSM::$protocol takes no arguments"
+        }
+        if {![info exists psm_enabled($protocol)]} {
+            error "unsupported PSM protocol $protocol"
+        }
+        set psm_enabled($protocol) $enabled
+        set action [expr {$enabled ? "enable" : "disable"}]
+        ::itest::log_decision psm [string tolower $protocol] $action
+        return ""
+    }
+
+    proc psm_ftp_disable {args} { return [psm_control_command FTP 0 {*}$args] }
+    proc psm_ftp_enable {args} { return [psm_control_command FTP 1 {*}$args] }
+    proc psm_http_disable {args} { return [psm_control_command HTTP 0 {*}$args] }
+    proc psm_http_enable {args} { return [psm_control_command HTTP 1 {*}$args] }
+    proc psm_smtp_disable {args} { return [psm_control_command SMTP 0 {*}$args] }
+    proc psm_smtp_enable {args} { return [psm_control_command SMTP 1 {*}$args] }
 
     proc ws_reset_connection {} {
         variable ws_enabled
@@ -6923,6 +6958,12 @@ foreach {name proc_name} {
     GTP::payload ::itest::semantic::gtp_payload_command
     GTP::respond ::itest::semantic::gtp_respond_command
     GTP::tunnel ::itest::semantic::gtp_tunnel_command
+    PSM::FTP::disable ::itest::semantic::psm_ftp_disable
+    PSM::FTP::enable ::itest::semantic::psm_ftp_enable
+    PSM::HTTP::disable ::itest::semantic::psm_http_disable
+    PSM::HTTP::enable ::itest::semantic::psm_http_enable
+    PSM::SMTP::disable ::itest::semantic::psm_smtp_disable
+    PSM::SMTP::enable ::itest::semantic::psm_smtp_enable
 } {
     ::itest::register_command $name $proc_name
 }

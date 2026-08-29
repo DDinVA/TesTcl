@@ -713,6 +713,12 @@ SEMANTIC_MOCK_COMMANDS = {
     "GTP::payload",
     "GTP::respond",
     "GTP::tunnel",
+    "PSM::FTP::disable",
+    "PSM::FTP::enable",
+    "PSM::HTTP::disable",
+    "PSM::HTTP::enable",
+    "PSM::SMTP::disable",
+    "PSM::SMTP::enable",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1176,11 +1182,23 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
                     for index in range(0, len(parts) - 1, 2)
                 }
             )
+    psm_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::psm_snapshot"))
+    if len(psm_parts) % 2:
+        raise EmulatorInputError("invalid PSM state")
+    psm = {
+        name: value == "1"
+        for name, value in zip(psm_parts[::2], psm_parts[1::2])
+    }
+    if set(psm) != {"FTP", "HTTP", "SMTP"} or any(
+        value not in {"0", "1"} for value in psm_parts[1::2]
+    ):
+        raise EmulatorInputError("invalid PSM state")
     return {
         "stats": stats,
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "table": table_entries,
+        "psm": psm,
     }
 
 
@@ -5948,6 +5966,7 @@ class EmulatorSession:
             self._connection_request_number = 0
         if not self._connection_open:
             self._connection_request_number = 0
+            session.eval_tcl("::itest::semantic::psm_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -6042,6 +6061,7 @@ class EmulatorSession:
             log_history.extend(session.get_logs()[logs_before_close:])
             session.eval_tcl("set ::orch::_connection_active 0")
             session.eval_tcl("::state::reset_connection_state")
+            session.eval_tcl("::itest::semantic::psm_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         result["decisions"] = decision_history
@@ -6147,6 +6167,7 @@ class EmulatorSession:
                 entry if not isinstance(entry, tuple) else list(entry)
                 for entry in session.get_logs()
             ],
+            "semantic": {"psm": _semantic_snapshot(session)["psm"]},
         }
         emissions = self._tcp_emissions(session)
         emissions.extend(self._websocket_disconnect_emissions(session, event_name))
@@ -6820,6 +6841,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::diameter_reset_connection")
         session.eval_tcl("::itest::semantic::mr_reset_connection")
         session.eval_tcl("::itest::semantic::gtp_reset_connection")
+        session.eval_tcl("::itest::semantic::psm_reset_connection")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
         events.append(
             self._fire_event_on_worker(
@@ -6835,6 +6857,7 @@ class EmulatorSession:
     def _close_packet_connection(self, session: Any) -> None:
         session.eval_tcl("set ::orch::_connection_active 0")
         session.eval_tcl("::state::reset_connection_state")
+        session.eval_tcl("::itest::semantic::psm_reset_connection")
         self._packet_streams.clear()
         self._http2_decoder = None
         self._http2_streams.clear()
