@@ -252,6 +252,15 @@ namespace eval ::itest::semantic {
     variable auth_last_event ""
     variable auth_current_session_id ""
 
+    variable aaa_default_enabled 1
+    variable aaa_enabled 1
+    variable aaa_default_auth_result OK
+    variable aaa_auth_result OK
+    variable aaa_default_acct_result OK
+    variable aaa_acct_result OK
+    variable aaa_requests [dict create]
+    variable aaa_next_id 0
+
     variable sip_discarded 0
     variable sip_response_requested 0
     variable sip_response_code ""
@@ -5695,6 +5704,138 @@ namespace eval ::itest::semantic {
         return $result
     }
 
+    proc aaa_configure {raw} {
+        variable aaa_default_enabled
+        variable aaa_enabled
+        variable aaa_default_auth_result
+        variable aaa_auth_result
+        variable aaa_default_acct_result
+        variable aaa_acct_result
+        if {[llength $raw] != 3} { error "invalid AAA configuration" }
+        lassign $raw enabled auth_result acct_result
+        if {$enabled ni {0 1}} { error "AAA enabled state must be boolean" }
+        foreach {name value} [list auth_result $auth_result acct_result $acct_result] {
+            if {$value ni {OK FAIL INPROGRESS ERROR}} {
+                error "AAA result must be OK, FAIL, INPROGRESS, or ERROR"
+            }
+        }
+        set aaa_default_enabled $enabled
+        set aaa_enabled $enabled
+        set aaa_default_auth_result $auth_result
+        set aaa_auth_result $auth_result
+        set aaa_default_acct_result $acct_result
+        set aaa_acct_result $acct_result
+    }
+
+    proc aaa_reset_connection {} {
+        variable aaa_default_enabled
+        variable aaa_enabled
+        variable aaa_default_auth_result
+        variable aaa_auth_result
+        variable aaa_default_acct_result
+        variable aaa_acct_result
+        variable aaa_requests
+        variable aaa_next_id
+        set aaa_enabled $aaa_default_enabled
+        set aaa_auth_result $aaa_default_auth_result
+        set aaa_acct_result $aaa_default_acct_result
+        set aaa_requests [dict create]
+        set aaa_next_id 0
+    }
+
+    proc _aaa_require_enabled {command} {
+        variable aaa_enabled
+        if {!$aaa_enabled} { error "$command is disabled" }
+    }
+
+    proc _aaa_new_request {kind result virtual_server username} {
+        variable aaa_requests
+        variable aaa_next_id
+        incr aaa_next_id
+        set request_id "aaa-$aaa_next_id"
+        set request [dict create \
+            kind $kind result $result valid 1 virtual_server $virtual_server \
+            username $username]
+        dict set aaa_requests $request_id $request
+        return $request_id
+    }
+
+    proc _aaa_result {request_id kind command} {
+        variable aaa_requests
+        if {$request_id eq "" || ![dict exists $aaa_requests $request_id]} {
+            return ERROR
+        }
+        set request [dict get $aaa_requests $request_id]
+        if {![dict get $request valid] || [dict get $request kind] ne $kind} {
+            return ERROR
+        }
+        return [dict get $request result]
+    }
+
+    proc aaa_auth_send {args} {
+        variable aaa_auth_result
+        _aaa_require_enabled AAA::auth_send
+        if {[llength $args] ni {2 3}} {
+            error "AAA::auth_send requires VIRTUAL_SERVER USERNAME and optional PASSWORD"
+        }
+        set username [lindex $args 1]
+        set password_present [expr {[llength $args] == 3}]
+        set request_id [_aaa_new_request auth $aaa_auth_result [lindex $args 0] $username]
+        ::itest::log_decision aaa auth_send [list $request_id [lindex $args 0] $username $password_present]
+        return $request_id
+    }
+
+    proc aaa_acct_send {args} {
+        variable aaa_acct_result
+        _aaa_require_enabled AAA::acct_send
+        if {[llength $args] < 1 || ([llength $args] - 1) % 2} {
+            error "AAA::acct_send requires VIRTUAL_SERVER and key/value attributes"
+        }
+        set username ""
+        set allowed_attributes {
+            user-name framed-ip-address framed-ipv6-prefix event-timestamp
+            acct-status-type acct-session-id acct-input-octets acct-output-octets
+            3gpp-imsi 3gpp-imeisv 3gpp-user-location-info
+        }
+        foreach {key value} [lrange $args 1 end] {
+            if {$key ni $allowed_attributes} {
+                error "AAA::acct_send received unsupported attribute $key"
+            }
+            if {$key eq "user-name"} { set username $value }
+        }
+        set request_id [_aaa_new_request acct $aaa_acct_result [lindex $args 0] $username]
+        ::itest::log_decision aaa acct_send [list $request_id [lindex $args 0]]
+        return $request_id
+    }
+
+    proc aaa_auth_result {args} {
+        if {[llength $args] != 1} { error "AAA::auth_result requires AAA_REQUEST_ID" }
+        return [_aaa_result [lindex $args 0] auth AAA::auth_result]
+    }
+
+    proc aaa_acct_result {args} {
+        if {[llength $args] != 1} { error "AAA::acct_result requires AAA_REQUEST_ID" }
+        return [_aaa_result [lindex $args 0] acct AAA::acct_result]
+    }
+
+    proc aaa_snapshot {} {
+        variable aaa_enabled
+        variable aaa_auth_result
+        variable aaa_acct_result
+        variable aaa_requests
+        set result [list enabled $aaa_enabled auth_result $aaa_auth_result \
+            acct_result $aaa_acct_result request_count [dict size $aaa_requests]]
+        set requests [list]
+        foreach request_id [lsort -dictionary [dict keys $aaa_requests]] {
+            set request [dict get $aaa_requests $request_id]
+            lappend requests [list $request_id [dict get $request kind] \
+                [dict get $request result] [dict get $request valid] \
+                [dict get $request virtual_server] [dict get $request username]]
+        }
+        lappend result requests $requests
+        return $result
+    }
+
     proc profile_clientssl {args} { return [_profile_enabled CLIENTSSL] }
     proc profile_fastL4 {args} { return [_profile_enabled FASTL4] }
     proc profile_fasthttp {args} { return [_profile_enabled FASTHTTP] }
@@ -10720,6 +10861,10 @@ foreach {name proc_name} {
     ANTIFRAUD::guid ::itest::semantic::antifraud_guid
     ANTIFRAUD::result ::itest::semantic::antifraud_result
     ANTIFRAUD::username ::itest::semantic::antifraud_username
+    AAA::acct_result ::itest::semantic::aaa_acct_result
+    AAA::acct_send ::itest::semantic::aaa_acct_send
+    AAA::auth_result ::itest::semantic::aaa_auth_result
+    AAA::auth_send ::itest::semantic::aaa_auth_send
     AUTH::abort ::itest::semantic::auth_abort
     AUTH::authenticate ::itest::semantic::auth_authenticate
     AUTH::authenticate_continue ::itest::semantic::auth_authenticate_continue

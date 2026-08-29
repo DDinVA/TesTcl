@@ -249,6 +249,23 @@ on), session state resets when a new connection starts, and response data is
 available only to subscribed sessions. This is an offline protocol model: it
 does not contact PAM, RADIUS, LDAP, certificates, or any external identity
 provider, and it does not claim to reproduce asynchronous AAA timing.
+
+### AAA internal virtual-server requests
+
+The `AAA::` family is modeled as deterministic internal virtual-server
+requests. `AAA::auth_send` accepts a virtual server, username, and optional
+password; `AAA::acct_send` accepts a virtual server followed by key/value
+accounting attributes. Both return connection-scoped request IDs (`aaa-1`,
+`aaa-2`, and so on), which can be queried with the matching result command.
+Configure `aaa.auth_result` and `aaa.acct_result` as `OK`, `FAIL`,
+`INPROGRESS`, or `ERROR` to exercise each result path.
+
+The semantic snapshot records request kind, result, validity, virtual server,
+and username, but deliberately never records the password. Requests and IDs
+reset on a new connection. This is an offline IVS model: it does not contact a
+real AAA virtual server, transmit credentials, implement asynchronous
+completion, or perform authentication/accounting policy.
+
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose

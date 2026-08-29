@@ -119,6 +119,13 @@ deterministic; the scenario can seed prompt metadata, LDAP fields, and result
 data. This does not contact PAM, RADIUS, LDAP, certificates, or an external
 identity provider, and does not model production asynchronous authentication
 timing.
+The four TMOS 17.5 `AAA::` commands are represented by deterministic internal
+virtual-server requests. Authentication and accounting sends return
+connection-scoped request IDs and expose configurable `OK`, `FAIL`,
+`INPROGRESS`, or `ERROR` results through their matching result commands. The
+model keeps request metadata for inspection but never stores the supplied
+password and does not contact an AAA virtual server or reproduce asynchronous
+completion.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

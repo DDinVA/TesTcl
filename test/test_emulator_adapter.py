@@ -351,6 +351,15 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(auth["commands"][0]["documentation"]["synopsis"], ["AUTH::abort AUTH_ID"])
         self.assertIn("authentication", auth["commands"][0]["documentation"]["summary"])
 
+        aaa = self.adapter._build_capabilities(
+            root, 0, 10, namespace="AAA", runtime_status="semantic-mock"
+        )
+        self.assertEqual(aaa["chunk"]["total"], 4)
+        self.assertEqual(
+            {entry["name"] for entry in aaa["commands"]},
+            {"AAA::acct_result", "AAA::acct_send", "AAA::auth_result", "AAA::auth_send"},
+        )
+
         post_target = self.adapter._build_capabilities(
             root, 0, 100, target_status="introduced-after-tmos-17.5"
         )
@@ -1104,6 +1113,106 @@ when HTTP_REQUEST {
             self.adapter.EmulatorInputError, "request.antifraud.login must be a boolean"
         ):
             self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+    def test_aaa_authentication_and_accounting_requests(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "aaa": {"auth_result": "OK", "acct_result": "INPROGRESS"},
+                "irule": (
+                    "when HTTP_REQUEST {\n"
+                    "  set ::auth_request [AAA::auth_send /Common/aaa alice secret]\n"
+                    "  set ::acct_request [AAA::acct_send /Common/aaa user-name alice acct-session-id sid]\n"
+                    "  log local0. \"auth=[AAA::auth_result $::auth_request] "
+                    "acct=[AAA::acct_result $::acct_request]\"\n"
+                    "}"
+                ),
+                "request": {"uri": "/aaa"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        self.assertTrue(any("auth=OK acct=INPROGRESS" in log for log in item["logs"]))
+        aaa = item["semantic"]["aaa"]
+        self.assertTrue(aaa["enabled"])
+        self.assertEqual(aaa["request_count"], 2)
+        self.assertEqual(aaa["requests"], [
+            {
+                "id": "aaa-1",
+                "kind": "auth",
+                "result": "OK",
+                "valid": True,
+                "virtual_server": "/Common/aaa",
+                "username": "alice",
+            },
+            {
+                "id": "aaa-2",
+                "kind": "acct",
+                "result": "INPROGRESS",
+                "valid": True,
+                "virtual_server": "/Common/aaa",
+                "username": "alice",
+            },
+        ])
+        self.assertNotIn("secret", json.dumps(aaa))
+
+    def test_aaa_result_branches_reset_and_input_validation(self) -> None:
+        for configured_result in ("FAIL", "ERROR"):
+            with self.subTest(result=configured_result):
+                result = self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "aaa": {"auth_result": configured_result},
+                        "irule": (
+                            "when HTTP_REQUEST { "
+                            "set ::request_id [AAA::auth_send /Common/aaa alice]; "
+                            "log local0. \"result=[AAA::auth_result $::request_id]\" }"
+                        ),
+                        "request": {"uri": "/aaa"},
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+                item = result["results"][0]
+                self.assertTrue(any(f"result={configured_result}" in log for log in item["logs"]))
+
+        reset = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "aaa": {"auth_result": "OK"},
+                "irule": (
+                    "when HTTP_REQUEST { "
+                    "set ::request_id [AAA::auth_send /Common/aaa alice]; "
+                    "log local0. \"request=$::request_id\" }"
+                ),
+                "requests": [
+                    {"uri": "/same"},
+                    {"uri": "/fresh", "new_connection": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any("request=aaa-1" in log for log in reset["results"][0]["logs"]))
+        self.assertTrue(any("request=aaa-1" in log for log in reset["results"][1]["logs"]))
+        self.assertEqual(reset["results"][1]["semantic"]["aaa"]["request_count"], 1)
+
+        base = {
+            "profiles": ["TCP", "HTTP"],
+            "irule": "when HTTP_REQUEST { AAA::auth_send /Common/aaa alice }",
+            "request": {"uri": "/"},
+        }
+        invalid_cases = (
+            ({"enabled": "yes"}, "aaa.enabled must be a boolean"),
+            ({"auth_result": "unknown"}, "aaa.auth_result must be one of"),
+            ({"acct_result": []}, "aaa.acct_result must be a string without NUL"),
+            ({1: "invalid-field-name"}, "aaa field names must be strings"),
+        )
+        for aaa, message in invalid_cases:
+            scenario = dict(base)
+            scenario["aaa"] = aaa
+            with self.subTest(aaa=aaa):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
 
     def test_semantic_overlay_implements_profiles_auth_uri_stats_and_hsl(self) -> None:
         result = self.adapter.run_scenario(

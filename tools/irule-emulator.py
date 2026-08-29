@@ -144,6 +144,7 @@ ANTIFRAUD_ALERT_LOG_LEVELS = frozenset(
     {"Error", "Warning", "Notice", "Informational", "Debug"}
 )
 ANTIFRAUD_RESULTS = frozenset({"passed", "failed"})
+AAA_RESULTS = frozenset({"OK", "FAIL", "INPROGRESS", "ERROR"})
 AUTH_RESULTS = frozenset({"success", "failure", "error", "wantcredential"})
 AUTH_PROMPT_STYLES = frozenset({"echo_on", "echo_off", "unknown"})
 DEFAULT_PROFILES = ["TCP", "HTTP"]
@@ -1100,6 +1101,10 @@ SEMANTIC_MOCK_COMMANDS = {
     "ANTIFRAUD::guid",
     "ANTIFRAUD::result",
     "ANTIFRAUD::username",
+    "AAA::acct_result",
+    "AAA::acct_send",
+    "AAA::auth_result",
+    "AAA::auth_send",
     "AUTH::abort",
     "AUTH::authenticate",
     "AUTH::authenticate_continue",
@@ -1762,6 +1767,16 @@ def _configure_auth(session: Any, auth: dict[str, Any]) -> None:
     )
 
 
+def _configure_aaa(session: Any, aaa: dict[str, Any]) -> None:
+    """Install deterministic AAA request result defaults."""
+    values = [
+        "1" if aaa["enabled"] else "0",
+        aaa["auth_result"],
+        aaa["acct_result"],
+    ]
+    session.eval_tcl("::itest::semantic::aaa_configure " + _tcl_list(values))
+
+
 def _split_tcl_list(value: Any) -> list[str]:
     """Parse a Tcl list returned by the bridge using a temporary interpreter."""
     try:
@@ -2040,6 +2055,46 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         })
     if len(auth_sessions) != auth_session_count:
         raise EmulatorInputError("inconsistent AUTH session count")
+    aaa_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::aaa_snapshot"))
+    if len(aaa_parts) % 2:
+        raise EmulatorInputError("invalid AAA state")
+    aaa_values = dict(zip(aaa_parts[::2], aaa_parts[1::2]))
+    expected_aaa_fields = {
+        "enabled", "auth_result", "acct_result", "request_count", "requests",
+    }
+    if set(aaa_values) != expected_aaa_fields:
+        raise EmulatorInputError("invalid AAA state fields")
+    if aaa_values["enabled"] not in {"0", "1"}:
+        raise EmulatorInputError("invalid AAA boolean state")
+    if aaa_values["auth_result"] not in AAA_RESULTS or aaa_values["acct_result"] not in AAA_RESULTS:
+        raise EmulatorInputError("invalid AAA result state")
+    try:
+        aaa_request_count = int(aaa_values["request_count"])
+    except (KeyError, TypeError, ValueError):
+        raise EmulatorInputError("invalid AAA request count") from None
+    if aaa_request_count < 0:
+        raise EmulatorInputError("invalid AAA request count")
+    aaa_requests: list[dict[str, Any]] = []
+    seen_aaa_ids: set[str] = set()
+    for raw_request in _split_tcl_list(aaa_values["requests"]):
+        request_parts = _split_tcl_list(raw_request)
+        if len(request_parts) != 6 or request_parts[0] in seen_aaa_ids:
+            raise EmulatorInputError("invalid AAA request state")
+        seen_aaa_ids.add(request_parts[0])
+        if request_parts[1] not in {"auth", "acct"}:
+            raise EmulatorInputError("invalid AAA request kind")
+        if request_parts[2] not in AAA_RESULTS or request_parts[3] not in {"0", "1"}:
+            raise EmulatorInputError("invalid AAA request result state")
+        aaa_requests.append({
+            "id": request_parts[0],
+            "kind": request_parts[1],
+            "result": request_parts[2],
+            "valid": request_parts[3] == "1",
+            "virtual_server": request_parts[4],
+            "username": request_parts[5],
+        })
+    if len(aaa_requests) != aaa_request_count:
+        raise EmulatorInputError("inconsistent AAA request count")
     dosl7_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::dosl7_snapshot"))
     if len(dosl7_parts) % 2:
         raise EmulatorInputError("invalid DOSL7 state")
@@ -2170,6 +2225,13 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "last_event": auth_values["last_event"],
             "session_count": auth_session_count,
             "sessions": auth_sessions,
+        },
+        "aaa": {
+            "enabled": aaa_values["enabled"] == "1",
+            "auth_result": aaa_values["auth_result"],
+            "acct_result": aaa_values["acct_result"],
+            "request_count": aaa_request_count,
+            "requests": aaa_requests,
         },
         "dosl7": {
             "enabled": dosl7_values["enabled"] == "1",
@@ -2897,6 +2959,37 @@ def _normalise_auth(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalise_aaa(raw: Any) -> dict[str, Any]:
+    """Normalize deterministic AAA request result inputs."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("aaa must be an object")
+    if any(not isinstance(key, str) for key in raw):
+        raise EmulatorInputError("aaa field names must be strings")
+    allowed = {"enabled", "auth_result", "acct_result"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError("aaa unsupported field(s): " + ", ".join(unknown))
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise EmulatorInputError("aaa.enabled must be a boolean")
+
+    def result_field(name: str) -> str:
+        value = _normalise_asm_string(raw.get(name, "OK"), f"aaa.{name}")
+        if value not in AAA_RESULTS:
+            raise EmulatorInputError(
+                f"aaa.{name} must be one of: " + ", ".join(sorted(AAA_RESULTS))
+            )
+        return value
+
+    return {
+        "enabled": enabled,
+        "auth_result": result_field("auth_result"),
+        "acct_result": result_field("acct_result"),
+    }
+
+
 def _normalise_resolvers(raw: Any) -> dict[str, list[dict[str, Any]]]:
     """Normalize deterministic DNS records used by RESOLVER::name_lookup."""
     if raw is None:
@@ -3168,6 +3261,7 @@ def _normalise_scenario_config(
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
+    dict[str, Any],
 ]:
     if not isinstance(scenario, dict):
         raise EmulatorInputError("scenario must be a JSON object")
@@ -3186,6 +3280,7 @@ def _normalise_scenario_config(
         "botdefense",
         "antifraud",
         "auth",
+        "aaa",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -3232,6 +3327,7 @@ def _normalise_scenario_config(
         _normalise_botdefense(scenario.get("botdefense")),
         _normalise_antifraud(scenario.get("antifraud")),
         _normalise_auth(scenario.get("auth")),
+        _normalise_aaa(scenario.get("aaa")),
     )
 
 
@@ -7508,6 +7604,7 @@ class EmulatorSession:
             botdefense,
             antifraud,
             auth,
+            aaa,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -7528,6 +7625,7 @@ class EmulatorSession:
         self._botdefense = botdefense
         self._antifraud = antifraud
         self._auth = auth
+        self._aaa = aaa
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -7638,6 +7736,7 @@ class EmulatorSession:
                 _configure_botdefense(session, self._botdefense)
                 _configure_antifraud(session, self._antifraud)
                 _configure_auth(session, self._auth)
+                _configure_aaa(session, self._aaa)
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
                     for profile in self._profiles
@@ -7700,6 +7799,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::botdefense_reset_connection")
             session.eval_tcl("::itest::semantic::antifraud_reset_connection")
             session.eval_tcl("::itest::semantic::auth_reset_connection")
+            session.eval_tcl("::itest::semantic::aaa_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
@@ -8648,6 +8748,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::botdefense_reset_connection")
         session.eval_tcl("::itest::semantic::antifraud_reset_connection")
         session.eval_tcl("::itest::semantic::auth_reset_connection")
+        session.eval_tcl("::itest::semantic::aaa_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
@@ -8681,6 +8782,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::botdefense_reset_connection")
         session.eval_tcl("::itest::semantic::antifraud_reset_connection")
         session.eval_tcl("::itest::semantic::auth_reset_connection")
+        session.eval_tcl("::itest::semantic::aaa_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
