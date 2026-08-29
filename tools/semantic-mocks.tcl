@@ -1080,6 +1080,11 @@ namespace eval ::itest::semantic {
         variable enabled 1
     }
 
+    namespace eval ::state::websso {
+        variable enabled 1
+        variable selected ""
+    }
+
     namespace eval ::state::tap {
         variable action allow
         variable score 0
@@ -5826,6 +5831,60 @@ namespace eval ::itest::semantic {
         if {[llength $args] != 0} { error "VDI::enable takes no arguments" }
         set ::state::vdi::enabled 1
         ::itest::log_decision vdi enable
+        return ""
+    }
+
+    proc websso_prepare_request {} {
+        set ::state::websso::enabled 1
+        set ::state::websso::selected ""
+    }
+
+    proc _websso_require_event {command_name} {
+        if {$::itest::current_event ni {ACCESS_ACL_ALLOWED HTTP_REQUEST HTTP_REQUEST_DATA}} {
+            error "$command_name is not valid in $::itest::current_event"
+        }
+    }
+
+    proc _websso_text {value field_name} {
+        if {[string first "\x00" $value] >= 0 ||
+            [string first "\r" $value] >= 0 || [string first "\n" $value] >= 0} {
+            error "$field_name must not contain NUL bytes or newlines"
+        }
+        return $value
+    }
+
+    proc websso_disable_command {args} {
+        _websso_require_event WEBSSO::disable
+        if {![_profile_enabled ACCESS] && ![_profile_enabled HTTP]} {
+            error "WEBSSO::disable requires the ACCESS or HTTP profile"
+        }
+        if {[llength $args] != 0} { error "WEBSSO::disable takes no arguments" }
+        set ::state::websso::enabled 0
+        ::itest::log_decision websso disable
+        return ""
+    }
+
+    proc websso_enable_command {args} {
+        _websso_require_event WEBSSO::enable
+        if {![_profile_enabled ACCESS] && ![_profile_enabled HTTP]} {
+            error "WEBSSO::enable requires the ACCESS or HTTP profile"
+        }
+        if {[llength $args] != 0} { error "WEBSSO::enable takes no arguments" }
+        set ::state::websso::enabled 1
+        ::itest::log_decision websso enable
+        return ""
+    }
+
+    proc websso_select_command {args} {
+        _websso_require_event WEBSSO::select
+        if {![_profile_enabled ACCESS] && ![_profile_enabled HTTP]} {
+            error "WEBSSO::select requires the ACCESS or HTTP profile"
+        }
+        if {[llength $args] != 1} { error "WEBSSO::select requires an SSO object" }
+        set selected [_websso_text [lindex $args 0] "WEBSSO object"]
+        if {$selected eq ""} { error "WEBSSO object must be non-empty" }
+        set ::state::websso::selected $selected
+        ::itest::log_decision websso select $selected
         return ""
     }
 
@@ -20174,6 +20233,9 @@ foreach {original replacement} {
     wam_enable wam_enable_command
     vdi_disable vdi_disable_command
     vdi_enable vdi_enable_command
+    websso_disable websso_disable_command
+    websso_enable websso_enable_command
+    websso_select websso_select_command
     tap_action tap_action_command
     tap_config tap_config_command
     tap_insight tap_insight_command
@@ -20843,6 +20905,9 @@ foreach {name proc_name} {
     WAM::enable ::itest::semantic::wam_enable_command
     VDI::disable ::itest::semantic::vdi_disable_command
     VDI::enable ::itest::semantic::vdi_enable_command
+    WEBSSO::disable ::itest::semantic::websso_disable_command
+    WEBSSO::enable ::itest::semantic::websso_enable_command
+    WEBSSO::select ::itest::semantic::websso_select_command
     TAP::action ::itest::semantic::tap_action_command
     TAP::config ::itest::semantic::tap_config_command
     TAP::insight ::itest::semantic::tap_insight_command

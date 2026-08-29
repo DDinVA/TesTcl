@@ -735,6 +735,67 @@ when HTTP_REQUEST {
         finally:
             session.close()
 
+    def test_websso_request_controls_persist_through_request_data(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP", "ACCESS"],
+                "irule": """
+when HTTP_REQUEST {
+    WEBSSO::disable
+    WEBSSO::select /Common/owa_sso
+    log local0. "request=[set ::state::websso::enabled]/[set ::state::websso::selected]"
+}
+when HTTP_REQUEST_DATA {
+    log local0. "data=[set ::state::websso::enabled]/[set ::state::websso::selected]"
+}
+when ACCESS_ACL_ALLOWED {
+    log local0. "acl=[set ::state::websso::enabled]/[set ::state::websso::selected]"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            request = session.fire_event("HTTP_REQUEST", {"websso": {}})
+            self.assertTrue(request["fired"])
+            self.assertEqual(request["state"]["websso"]["enabled"], "0")
+            self.assertEqual(request["state"]["websso"]["selected"], "/Common/owa_sso")
+            self.assertTrue(any("request=0//Common/owa_sso" in entry for entry in request["logs"]))
+
+            data = session.fire_event("HTTP_REQUEST_DATA", {"websso": {}})
+            self.assertTrue(data["fired"])
+            self.assertEqual(data["state"]["websso"]["enabled"], "0")
+            self.assertEqual(data["state"]["websso"]["selected"], "/Common/owa_sso")
+            self.assertTrue(any("data=0//Common/owa_sso" in entry for entry in data["logs"]))
+
+            acl = session.fire_event("ACCESS_ACL_ALLOWED", {"websso": {}})
+            self.assertTrue(acl["fired"])
+            self.assertEqual(acl["state"]["websso"]["enabled"], "0")
+            self.assertEqual(acl["state"]["websso"]["selected"], "/Common/owa_sso")
+            self.assertTrue(any("acl=0//Common/owa_sso" in entry for entry in acl["logs"]))
+
+            invalid = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {
+                    "profiles": ["HTTP"],
+                    "irule": "when CLIENT_ACCEPTED { WEBSSO::disable }",
+                },
+                allow_irule_file=False,
+                allow_requests=False,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError,
+                    "WEBSSO::disable is not valid in CLIENT_ACCEPTED",
+                ):
+                    invalid.fire_event("CLIENT_ACCEPTED", {"websso": {}})
+            finally:
+                invalid.close()
+        finally:
+            session.close()
+
     def test_tap_token_state_and_insight_submission(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1560,7 +1621,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
         self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 154)
+        self.assertEqual(queue["command_count"], 151)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)

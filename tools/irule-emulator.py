@@ -642,6 +642,7 @@ EVENT_STATE_FIELDS = {
     },
     "wam": {"enabled"},
     "vdi": {"enabled"},
+    "websso": {"enabled", "selected"},
     "tap": {
         "action",
         "score",
@@ -1032,6 +1033,7 @@ EVENT_STATE_NAMESPACES = {
     "policy": "::state::policy",
     "wam": "::state::wam",
     "vdi": "::state::vdi",
+    "websso": "::state::websso",
     "tap": "::state::tap",
     "ha": "::state::ha",
     "bigproto": "::state::bigproto",
@@ -1614,6 +1616,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "WAM::enable",
     "VDI::disable",
     "VDI::enable",
+    "WEBSSO::disable",
+    "WEBSSO::enable",
+    "WEBSSO::select",
     "TAP::action",
     "TAP::config",
     "TAP::insight",
@@ -11003,6 +11008,7 @@ class EmulatorSession:
                     f"{_tcl_quote('1' if antifraud_alert else '0')}"
                 )
                 session.eval_tcl("::itest::semantic::access_prepare_request")
+                session.eval_tcl("::itest::semantic::websso_prepare_request")
                 session.eval_tcl(
                     f"::itest::semantic::prepare_lb_failure {_tcl_quote(attempt_failure)}"
                 )
@@ -11288,6 +11294,8 @@ class EmulatorSession:
         )
         if event_name == "FIX_MESSAGE" or "fix" in state:
             session.eval_tcl("::itest::semantic::fix_prepare_event")
+        if event_name == "HTTP_REQUEST":
+            session.eval_tcl("::itest::semantic::websso_prepare_request")
         def install_state_layer(layer: str, values: dict[str, str]) -> None:
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():

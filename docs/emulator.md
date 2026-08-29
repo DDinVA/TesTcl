@@ -795,6 +795,33 @@ engines. See the F5 [WAM::disable](https://clouddocs.f5.com/api/irules/WAM__disa
 [VDI::disable](https://clouddocs.f5.com/api/irules/VDI__disable.html), and
 [VDI::enable](https://clouddocs.f5.com/api/irules/VDI__enable.html) references.
 
+### WEBSSO request controls
+
+`WEBSSO::disable`, `WEBSSO::enable`, and `WEBSSO::select` model the APM SSO
+decision for the current HTTP request. The state is reset at the beginning of
+`HTTP_REQUEST` and remains visible through `HTTP_REQUEST_DATA` and
+`ACCESS_ACL_ALLOWED`; `websso.selected` records the selected SSO object.
+These commands require an `HTTP` or `ACCESS` profile and reject unrelated
+events. They model request-visible control state, not SSO token generation or
+an APM backend:
+
+```json
+{
+  "event": "HTTP_REQUEST",
+  "state": {
+    "websso": {
+      "enabled": true,
+      "selected": ""
+    }
+  }
+}
+```
+
+See the F5 [`WEBSSO::disable`](https://clouddocs.f5.com/api/irules/WEBSSO__disable.html),
+[`WEBSSO::enable`](https://clouddocs.f5.com/api/irules/WEBSSO__enable.html), and
+[`WEBSSO::select`](https://clouddocs.f5.com/api/irules/WEBSSO__select.html)
+references.
+
 ### TAP security-token state
 
 The direct event API supports `TAP_REQUEST` with deterministic TAP state. The
