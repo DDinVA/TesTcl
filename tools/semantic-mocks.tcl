@@ -49,6 +49,7 @@ namespace eval ::itest::semantic {
     variable resolver_records [dict create]
     variable ssl_cert_counter 0
     variable ssl_cert_objects [dict create]
+    variable http2_pending [dict create]
 
     variable sip_discarded 0
     variable sip_response_requested 0
@@ -97,6 +98,21 @@ namespace eval ::itest::semantic {
             variable handshake_done 0
             variable session_id ""
         }
+    }
+
+    namespace eval ::state::http2 {
+        variable active 0
+        variable version 0
+        variable stream_id 0
+        variable stream_priority 0
+        variable concurrency 0
+        variable requests 0
+        variable enabled 1
+        variable clientside_enabled 1
+        variable serverside_enabled 1
+        variable disconnected 0
+        variable discarded 0
+        variable pseudo_headers {}
     }
 
     namespace eval ::state::mqtt {
@@ -4881,6 +4897,160 @@ namespace eval ::itest::semantic {
         return [_uri_encode_value [lindex $args 0] 0]
     }
 
+    # ── HTTP/2 transaction state ──────────────────────────────────────
+    # The adapter supplies decoded transaction metadata. These commands
+    # model the iRule-visible state without implementing an HTTP/2 frame
+    # parser or a live multiplexing endpoint.
+    proc http2_active_command {args} {
+        if {[llength $args] != 0} { error "HTTP2::active takes no arguments" }
+        return [expr {$::state::http2::active && $::state::http2::enabled}]
+    }
+
+    proc http2_set_pending {args} {
+        variable http2_pending
+        if {[llength $args] != 12} { error "invalid pending HTTP2 state" }
+        set fields {
+            active version stream_id stream_priority concurrency requests enabled
+            clientside_enabled serverside_enabled disconnected discarded pseudo_headers
+        }
+        set http2_pending [dict create]
+        foreach field $fields value $args {
+            dict set http2_pending $field $value
+        }
+    }
+
+    proc http2_clear_pending {} {
+        variable http2_pending
+        set http2_pending [dict create]
+    }
+
+    proc http2_apply_pending {} {
+        variable http2_pending
+        if {[dict size $http2_pending] == 0} { return }
+        foreach field {
+            active version stream_id stream_priority concurrency requests enabled
+            clientside_enabled serverside_enabled disconnected discarded pseudo_headers
+        } {
+            set ::state::http2::$field [dict get $http2_pending $field]
+        }
+    }
+
+    proc http2_concurrency_command {args} {
+        if {[llength $args] != 0} { error "HTTP2::concurrency takes no arguments" }
+        return $::state::http2::concurrency
+    }
+
+    proc _http2_set_enabled {side value} {
+        if {$side eq "clientside"} {
+            set ::state::http2::clientside_enabled $value
+        } elseif {$side eq "serverside"} {
+            set ::state::http2::serverside_enabled $value
+        } else {
+            set ::state::http2::clientside_enabled $value
+            set ::state::http2::serverside_enabled $value
+        }
+        set ::state::http2::enabled [expr {$::state::http2::clientside_enabled &&
+            $::state::http2::serverside_enabled}]
+    }
+
+    proc _http2_control_command {operation args} {
+        set side ""
+        set discard 0
+        foreach arg $args {
+            if {$arg in {clientside serverside}} {
+                if {$side ne ""} { error "HTTP2::$operation accepts at most one side" }
+                set side $arg
+            } elseif {$arg eq "discard" && $operation eq "disable"} {
+                if {$discard} { error "HTTP2::disable accepts discard once" }
+                set discard 1
+            } else {
+                error "HTTP2::$operation received unsupported option $arg"
+            }
+        }
+        _http2_set_enabled $side [expr {$operation eq "enable"}]
+        if {$operation eq "disable" && $discard} {
+            set ::state::http2::discarded 1
+        }
+        ::itest::log_decision http2 $operation [concat $side [expr {$discard ? {discard} : {}}]]
+        return ""
+    }
+
+    proc http2_disable_command {args} {
+        return [_http2_control_command disable {*}$args]
+    }
+
+    proc http2_enable_command {args} {
+        return [_http2_control_command enable {*}$args]
+    }
+
+    proc http2_disconnect_command {args} {
+        if {[llength $args] != 0} { error "HTTP2::disconnect takes no arguments" }
+        set ::state::http2::disconnected 1
+        ::itest::log_decision http2 disconnect
+        return ""
+    }
+
+    proc http2_requests_command {args} {
+        if {[llength $args] != 0} { error "HTTP2::requests takes no arguments" }
+        return $::state::http2::requests
+    }
+
+    proc http2_version_command {args} {
+        if {[llength $args] != 0} { error "HTTP2::version takes no arguments" }
+        return [expr {[http2_active_command] ? $::state::http2::version : 0}]
+    }
+
+    proc http2_header_command {args} {
+        if {[llength $args] < 1 || [llength $args] > 3} {
+            error "HTTP2::header requires a name or a mutation"
+        }
+        set operation [lindex $args 0]
+        if {$operation eq "replace"} {
+            if {[llength $args] ni {2 3}} { error "HTTP2::header replace requires a name and optional value" }
+            set name [lindex $args 1]
+            set value [expr {[llength $args] == 3 ? [lindex $args 2] : ""}]
+            if {![string match :* $name] || $name ne [string tolower $name]} {
+                error "HTTP2 pseudo-header names must be lowercase and begin with :"
+            }
+            dict set ::state::http2::pseudo_headers $name $value
+            ::itest::log_decision http2 header_replace [list $name $value]
+            return ""
+        }
+        if {$operation eq "remove"} {
+            if {[llength $args] != 2} { error "HTTP2::header remove requires a name" }
+            set name [lindex $args 1]
+            if {[dict exists $::state::http2::pseudo_headers $name]} {
+                dict unset ::state::http2::pseudo_headers $name
+            }
+            ::itest::log_decision http2 header_remove $name
+            return ""
+        }
+        if {[llength $args] != 1} { error "HTTP2::header getter requires one name" }
+        if {[dict exists $::state::http2::pseudo_headers $operation]} {
+            return [dict get $::state::http2::pseudo_headers $operation]
+        }
+        return ""
+    }
+
+    proc http2_stream_command {args} {
+        if {[llength $args] > 2} { error "HTTP2::stream accepts an optional selector and value" }
+        if {[llength $args] == 0 || [lindex $args 0] eq "id"} {
+            if {[llength $args] == 2} { error "HTTP2::stream id takes no value" }
+            return $::state::http2::stream_id
+        }
+        if {[lindex $args 0] ne "priority"} {
+            error "HTTP2::stream selector must be id or priority"
+        }
+        if {[llength $args] == 1} { return $::state::http2::stream_priority }
+        set value [lindex $args 1]
+        if {![string is integer -strict $value] || $value < 0 || $value > 255} {
+            error "HTTP2 stream priority must be between 0 and 255"
+        }
+        set ::state::http2::stream_priority $value
+        ::itest::log_decision http2 stream_priority_set $value
+        return 0
+    }
+
     # ── TLS/SSL inspection and control semantics ─────────────────────
     proc _ssl_namespace {{side ""}} {
         if {$side eq "serverside" || [string match "SERVERSSL_*" $::itest::current_event]} {
@@ -6628,6 +6798,15 @@ foreach {name proc_name} {
     SSL::verify_result ::itest::semantic::ssl_verify_result_command
     X509::issuer ::itest::semantic::x509_issuer_command
     X509::subject ::itest::semantic::x509_subject_command
+    HTTP2::active ::itest::semantic::http2_active_command
+    HTTP2::concurrency ::itest::semantic::http2_concurrency_command
+    HTTP2::disable ::itest::semantic::http2_disable_command
+    HTTP2::disconnect ::itest::semantic::http2_disconnect_command
+    HTTP2::enable ::itest::semantic::http2_enable_command
+    HTTP2::header ::itest::semantic::http2_header_command
+    HTTP2::requests ::itest::semantic::http2_requests_command
+    HTTP2::stream ::itest::semantic::http2_stream_command
+    HTTP2::version ::itest::semantic::http2_version_command
     class ::itest::cmd::cmd_class
     MQTT::clean_session ::itest::cmd::mqtt_clean_session
     MQTT::client_id ::itest::cmd::mqtt_client_id
@@ -6746,4 +6925,16 @@ foreach {name proc_name} {
     GTP::tunnel ::itest::semantic::gtp_tunnel_command
 } {
     ::itest::register_command $name $proc_name
+}
+
+# The upstream HTTP orchestrator resets per-request state internally. Apply
+# adapter-supplied HTTP/2 metadata immediately before each event so that the
+# metadata survives that reset while direct event calls remain unaffected.
+if {[::tmm::_orig_info commands ::itest::semantic::_testcl_fire_event_orig] eq "" &&
+    [::tmm::_orig_info commands ::itest::fire_event] ne ""} {
+    ::tmm::_orig_rename ::itest::fire_event ::itest::semantic::_testcl_fire_event_orig
+    proc ::itest::fire_event {args} {
+        ::itest::semantic::http2_apply_pending
+        return [eval [linsert $args 0 ::itest::semantic::_testcl_fire_event_orig]]
+    }
 }

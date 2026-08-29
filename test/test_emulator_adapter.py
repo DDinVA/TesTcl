@@ -3644,6 +3644,112 @@ when CLIENTSSL_CLIENTHELLO {
                 ]
             )
 
+    def test_http2_metadata_drives_commands_and_mutation(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    log local0. "[HTTP2::active] [HTTP2::version] [HTTP2::requests] [HTTP2::concurrency] [HTTP2::header :authority] [HTTP2::stream id]"
+    HTTP2::header replace :path /rewritten
+    HTTP2::stream priority 42
+}
+""",
+                "request": {
+                    "method": "GET",
+                    "uri": "/original",
+                    "host": "api.example.com",
+                    "http2": {
+                        "active": True,
+                        "version": 2,
+                        "stream_id": 3,
+                        "stream_priority": 8,
+                        "concurrency": 2,
+                        "requests": 4,
+                        "pseudo_headers": {
+                            ":authority": "h2.example.com",
+                            ":method": "GET",
+                            ":path": "/original",
+                            ":scheme": "https",
+                        },
+                    },
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_result = result["results"][0]
+        self.assertTrue(any("1 2 4 2 h2.example.com 3" in entry for entry in request_result["logs"]))
+        self.assertEqual(request_result["http2"]["stream_priority"], "42")
+        self.assertEqual(request_result["http2"]["pseudo_headers"][":path"], "/rewritten")
+        self.assertEqual(request_result["http2"]["pseudo_headers"][":authority"], "h2.example.com")
+        self.assertTrue(any("header_replace" in entry for entry in request_result["decisions"]))
+
+    def test_http2_metadata_rejects_invalid_shape_and_bounds(self) -> None:
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "pseudo_headers"):
+            self.adapter._normalise_packets(
+                [
+                    {
+                        "protocol": "http",
+                        "http2": {"pseudo_headers": {":Path": "/bad"}},
+                    }
+                ]
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "stream_priority"):
+            self.adapter._normalise_packets(
+                [
+                    {
+                        "protocol": "http",
+                        "http2": {"stream_priority": 256},
+                    }
+                ]
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "version"):
+            self.adapter._normalise_packets(
+                [
+                    {
+                        "protocol": "http",
+                        "http2": {"version": 1},
+                    }
+                ]
+            )
+
+    def test_http2_metadata_survives_structured_packet_request_flow(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { HTTP2::header replace :path /packet-path }",
+                "packets": [
+                    {
+                        "protocol": "http",
+                        "direction": "client_to_server",
+                        "method": "GET",
+                        "uri": "/original",
+                        "host": "packet.example.com",
+                        "http2": {
+                            "active": True,
+                            "version": 2,
+                            "stream_id": 5,
+                            "pseudo_headers": {
+                                ":authority": "packet.example.com",
+                                ":method": "GET",
+                                ":path": "/original",
+                                ":scheme": "https",
+                            },
+                        },
+                    },
+                    {
+                        "protocol": "http",
+                        "direction": "server_to_client",
+                        "status": 200,
+                        "response_body": "ok",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(result["results"][0]["http2"]["stream_id"], "5")
+        self.assertEqual(result["results"][0]["http2"]["pseudo_headers"][":path"], "/packet-path")
+
     def test_sequence_aware_reassembly_handles_out_of_order_and_retransmission(self) -> None:
         request_payload = b"GET /ordered HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
         first = request_payload[:20]

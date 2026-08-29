@@ -57,6 +57,11 @@ scenario-supplied resolver records without making network requests.
 TLS packet state supports common SNI, cipher, session, certificate, X509
 subject/issuer, verification-result, and SSL enable/disable inspection paths;
 it does not perform a real TLS handshake or certificate cryptography.
+HTTP/2 structured transaction metadata supports pseudo-header lookup and
+mutation, stream ID and priority state, active/version/request/concurrency
+queries, enable/disable, and disconnect decisions through the `HTTP2::*`
+surface. It does not parse HTTP/2 frames, implement HPACK or live stream
+multiplexing, or model `HTTP2::push` response emission.
 GTP packets expose bounded GTPv1 and GTPv2 header/IE state, G-PDU payloads,
 GTP signaling/G-PDU/Prime ingress and egress events, and the catalogued
 `GTP::` command family. GTP-C and GTP-U use UDP ports 2123 and 2152; GTP-Prime

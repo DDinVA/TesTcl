@@ -157,6 +157,20 @@ EVENT_STATE_FIELDS = {
         "handshake_done",
         "session_id",
     },
+    "http2": {
+        "active",
+        "version",
+        "stream_id",
+        "stream_priority",
+        "concurrency",
+        "requests",
+        "enabled",
+        "clientside_enabled",
+        "serverside_enabled",
+        "disconnected",
+        "discarded",
+        "pseudo_headers",
+    },
     "dns": {
         "qname",
         "qtype",
@@ -340,6 +354,7 @@ EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
     "tls_client": "::state::tls::client",
     "tls_server": "::state::tls::server",
+    "http2": "::state::http2",
     "dns": "::state::dns",
     "websocket": "::state::websocket",
     "mqtt": "::state::mqtt",
@@ -456,6 +471,15 @@ SEMANTIC_MOCK_COMMANDS = {
     "SSL::verify_result",
     "X509::issuer",
     "X509::subject",
+    "HTTP2::active",
+    "HTTP2::concurrency",
+    "HTTP2::disable",
+    "HTTP2::disconnect",
+    "HTTP2::enable",
+    "HTTP2::header",
+    "HTTP2::requests",
+    "HTTP2::stream",
+    "HTTP2::version",
     "event",
     "HTTP::passthrough_reason",
     "HTTP::password",
@@ -1307,6 +1331,7 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
         "response_status",
         "response_headers",
         "response_body",
+        "http2",
         "lb_failure",
     }
     unknown = sorted(set(request) - allowed - {"close_before", "close_after", "new_connection"})
@@ -1327,6 +1352,8 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
     for field in ("body", "response_body"):
         if field in request:
             kwargs[field] = _require_string(request[field], field)
+    if "http2" in request:
+        kwargs["http2"] = _normalise_http2_state(request["http2"], "http2")
     if "response_status" in request:
         status = request["response_status"]
         if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 999:
@@ -1348,6 +1375,66 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
             raise EmulatorInputError(f"lb_failure must be one of: {causes}")
         kwargs["lb_failure"] = failure
     return kwargs
+
+
+def _normalise_http2_state(raw: Any, field: str) -> dict[str, Any]:
+    """Validate structured HTTP/2 metadata without parsing wire frames."""
+    if not isinstance(raw, dict):
+        raise EmulatorInputError(f"{field} must be an object")
+    allowed = {
+        "active", "version", "stream_id", "stream_priority", "concurrency",
+        "requests", "enabled", "clientside_enabled", "serverside_enabled",
+        "disconnected", "discarded", "pseudo_headers",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError(f"{field} unsupported field(s): {', '.join(unknown)}")
+
+    result: dict[str, Any] = {}
+    for name in (
+        "active", "enabled", "clientside_enabled", "serverside_enabled",
+        "disconnected", "discarded",
+    ):
+        if name not in raw:
+            continue
+        value = raw[name]
+        if not isinstance(value, bool):
+            raise EmulatorInputError(f"{field}.{name} must be a boolean")
+        result[name] = value
+
+    limits = {
+        "version": 3,
+        "stream_id": 0x7FFF_FFFF,
+        "stream_priority": 255,
+        "concurrency": 0xFFFF_FFFF,
+        "requests": 0xFFFF_FFFF,
+    }
+    for name, maximum in limits.items():
+        if name not in raw:
+            continue
+        value = raw[name]
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+            raise EmulatorInputError(
+                f"{field}.{name} must be an integer from 0 to {maximum}"
+            )
+        result[name] = value
+
+    if "version" in result and result["version"] not in {0, 2}:
+        raise EmulatorInputError(f"{field}.version must be 0 or 2")
+
+    if "pseudo_headers" in raw:
+        headers = raw["pseudo_headers"]
+        if not isinstance(headers, dict) or not all(
+            isinstance(name, str)
+            and re.fullmatch(r":[a-z0-9-]+", name) is not None
+            and isinstance(value, str)
+            for name, value in headers.items()
+        ):
+            raise EmulatorInputError(
+                f"{field}.pseudo_headers must map lowercase :pseudo-names to strings"
+            )
+        result["pseudo_headers"] = dict(headers)
+    return result
 
 
 def _lb_failure_snapshot(session: Any) -> dict[str, str]:
@@ -1677,6 +1764,7 @@ PACKET_PROTOCOL_FIELDS = {
         "status",
         "response_headers",
         "response_body",
+        "http2",
     },
     "dns": {
         "qname",
@@ -4648,6 +4736,10 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = value
             elif field in {"body", "response_body", "method", "uri", "host"}:
                 normalised[field] = _require_string(packet[field], f"packet {index} {field}")
+            elif field == "http2":
+                normalised[field] = _normalise_http2_state(
+                    packet[field], f"packet {index} http2"
+                )
             elif field in {"fin", "masked"}:
                 normalised[field] = _packet_bool(packet[field], f"packet {index} {field}")
             elif protocol == "tls" and field in {"sni_required", "disabled"}:
@@ -5255,6 +5347,7 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
             "headers": _header_dict(response_state.get("headers", "")),
             "body": session.eval_tcl("set ::state::http::response::payload"),
         },
+        "http2": _http2_snapshot(session),
     }
     if lb_failure.get("cause", ""):
         result["lb_failure"] = {
@@ -5272,6 +5365,77 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
     if str(http_close_requested) == "1":
         result["http_close"] = True
     return result
+
+
+def _configure_http2_state(
+    session: Any, metadata: dict[str, Any] | None, request: dict[str, Any]
+) -> None:
+    """Install one deterministic HTTP/2 transaction description in Tcl."""
+    state = {
+        "active": False,
+        "version": 0,
+        "stream_id": 0,
+        "stream_priority": 0,
+        "concurrency": 0,
+        "requests": 0,
+        "enabled": True,
+        "clientside_enabled": True,
+        "serverside_enabled": True,
+        "disconnected": False,
+        "discarded": False,
+        "pseudo_headers": {},
+    }
+    if metadata:
+        state.update(metadata)
+    if state["active"]:
+        state["version"] = state["version"] or 2
+        pseudo_headers = dict(state["pseudo_headers"])
+        pseudo_headers.setdefault(":method", request.get("method", "GET"))
+        pseudo_headers.setdefault(":path", request.get("uri", "/"))
+        pseudo_headers.setdefault(":scheme", "https")
+        if request.get("host"):
+            pseudo_headers.setdefault(":authority", request["host"])
+        state["pseudo_headers"] = pseudo_headers
+        if state["requests"] == 0:
+            state["requests"] = 1
+    values: list[str] = []
+    for field in (
+        "active", "version", "stream_id", "stream_priority", "concurrency",
+        "requests", "enabled", "clientside_enabled", "serverside_enabled",
+        "disconnected", "discarded",
+    ):
+        value = state[field]
+        values.append("1" if isinstance(value, bool) and value else "0" if isinstance(value, bool) else str(value))
+    pairs: list[str] = []
+    for name, header_value in state["pseudo_headers"].items():
+        pairs.extend((name, header_value))
+    encoded_headers = _tcl_list(pairs)
+    session.eval_tcl(
+        "::itest::semantic::http2_set_pending "
+        + " ".join(_tcl_quote(value) for value in values)
+        + " "
+        + encoded_headers
+    )
+
+
+def _http2_snapshot(session: Any) -> dict[str, Any]:
+    fields = (
+        "active", "version", "stream_id", "stream_priority", "concurrency",
+        "requests", "enabled", "clientside_enabled", "serverside_enabled",
+        "disconnected", "discarded",
+    )
+    snapshot: dict[str, Any] = {}
+    for field in fields:
+        value = session.eval_tcl(f"set ::state::http2::{field}")
+        snapshot[field] = value
+    raw_headers = _split_tcl_list(
+        session.eval_tcl("set ::state::http2::pseudo_headers")
+    )
+    snapshot["pseudo_headers"] = {
+        raw_headers[index]: raw_headers[index + 1]
+        for index in range(0, len(raw_headers) - 1, 2)
+    }
+    return snapshot
 
 
 class EmulatorSession:
@@ -5459,17 +5623,21 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::prepare_http_close")
                 session.eval_tcl("set ::itest::semantic::automatic_http_flow 1")
                 try:
-                    use_existing_connection = self._connection_open and (
-                        retry_count > 0 or not request.get("new_connection")
-                    )
-                    if use_existing_connection:
-                        result = _run_request_with_state(
-                            session, "run_next_request", kwargs
+                    _configure_http2_state(session, kwargs.get("http2"), kwargs)
+                    try:
+                        use_existing_connection = self._connection_open and (
+                            retry_count > 0 or not request.get("new_connection")
                         )
-                    else:
-                        result = _run_request_with_state(
-                            session, "run_http_request", kwargs
-                        )
+                        if use_existing_connection:
+                            result = _run_request_with_state(
+                                session, "run_next_request", kwargs
+                            )
+                        else:
+                            result = _run_request_with_state(
+                                session, "run_http_request", kwargs
+                            )
+                    finally:
+                        session.eval_tcl("::itest::semantic::http2_clear_pending")
                 finally:
                     session.eval_tcl(
                         "unset -nocomplain ::itest::semantic::automatic_http_flow"
@@ -5479,9 +5647,10 @@ class EmulatorSession:
                 log_history.extend(result.get("logs", []))
                 retry = result.pop("http_retry", None)
                 http_close = bool(result.pop("http_close", False))
+                http2_disconnected = result.get("http2", {}).get("disconnected") == "1"
                 self._connection_open = True
                 if not retry:
-                    http_close_requested = http_close
+                    http_close_requested = http_close or http2_disconnected
                     break
                 if retry_count >= MAX_HTTP_RETRIES:
                     retry_exhausted = True
@@ -5495,6 +5664,8 @@ class EmulatorSession:
                 ):
                     if field in original_kwargs:
                         retry_kwargs.setdefault(field, original_kwargs[field])
+                if "http2" in original_kwargs:
+                    retry_kwargs.setdefault("http2", original_kwargs["http2"])
                 kwargs = retry_kwargs
         finally:
             session.eval_tcl(
@@ -5716,6 +5887,21 @@ class EmulatorSession:
                 tls_state["handshake_done"] = "1"
             if tls_state:
                 state[layer] = tls_state
+        elif protocol == "http" and "http2" in packet:
+            http2_state: dict[str, str] = {}
+            metadata = packet["http2"]
+            for field in EVENT_STATE_FIELDS["http2"]:
+                if field not in metadata:
+                    continue
+                value = metadata[field]
+                if field == "pseudo_headers":
+                    pairs: list[str] = []
+                    for name, header_value in value.items():
+                        pairs.extend((name, header_value))
+                    http2_state[field] = " ".join(_tcl_quote(item) for item in pairs)
+                else:
+                    http2_state[field] = _packet_scalar(value, field)
+            state["http2"] = http2_state
         elif protocol == "dns":
             dns_state: dict[str, str] = {}
             for field in EVENT_STATE_FIELDS["dns"]:
@@ -6794,6 +6980,8 @@ class EmulatorSession:
                     for field in ("host", "headers", "body"):
                         if field in packet:
                             request[field] = packet[field]
+                    if "http2" in packet:
+                        request["http2"] = packet["http2"]
                     if "payload" in packet and "body" not in request:
                         request["body"] = packet["payload"]
                     pending_http = (request, index)

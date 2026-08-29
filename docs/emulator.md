@@ -483,6 +483,41 @@ exchange, or cryptographic renegotiation.
 }
 ```
 
+HTTP/2 metadata can be attached to a structured HTTP transaction with an
+`http2` object. This drives the reusable `tcl-lsp` pseudo-header and stream
+handlers plus semantic `HTTP2::active`, `HTTP2::version`,
+`HTTP2::requests`, `HTTP2::concurrency`, `HTTP2::enable`, `HTTP2::disable`,
+and `HTTP2::disconnect` behavior. Header names are validated as lowercase
+HTTP/2 pseudo-headers, stream IDs are bounded to 31 bits, and priorities to
+8 bits. The current slice models decoded transaction state; it does not parse
+HTTP/2 frames, implement HPACK, multiplex live streams, or emit
+`HTTP2::push` responses.
+
+```json
+{
+  "profiles": ["TCP", "HTTP"],
+  "irule": "when HTTP_REQUEST { if {[HTTP2::active] && [HTTP2::header :authority] contains \"api\"} { HTTP2::stream priority 32 } }",
+  "request": {
+    "method": "GET",
+    "uri": "/health",
+    "host": "api.example.com",
+    "http2": {
+      "active": true,
+      "version": 2,
+      "stream_id": 3,
+      "concurrency": 2,
+      "requests": 4,
+      "pseudo_headers": {
+        ":authority": "api.example.com",
+        ":method": "GET",
+        ":path": "/health",
+        ":scheme": "https"
+      }
+    }
+  }
+}
+```
+
 For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
 performs bounded sequence-aware TCP application reassembly across records and
