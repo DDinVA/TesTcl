@@ -1339,6 +1339,8 @@ SEMANTIC_MOCK_COMMANDS = {
     "link_qos",
     "rateclass",
     "translate",
+    "urlcatblindquery",
+    "urlcatquery",
     "IPFIX::destination",
     "IPFIX::msg",
     "IPFIX::template",
@@ -3179,6 +3181,24 @@ def _configure_ifiles(session: Any, ifiles: dict[str, dict[str, str]]) -> None:
     session.eval_tcl("::itest::semantic::ifile_configure " + _tcl_list(records))
 
 
+def _configure_urlcat(session: Any, urlcat: dict[str, Any]) -> None:
+    """Install deterministic URL-categorization lookup fixtures."""
+    def category_list(values: list[str]) -> str:
+        return "[list " + " ".join(_tcl_quote(value) for value in values) + "]"
+
+    session.eval_tcl(
+        "::itest::semantic::urlcat_configure "
+        + category_list(urlcat["default"])
+    )
+    for kind in ("queries", "blind_queries"):
+        for lookup, categories in urlcat[kind].items():
+            session.eval_tcl(
+                "::itest::semantic::urlcat_set "
+                f"{_tcl_quote(kind)} {_tcl_quote(lookup)} "
+                f"{category_list(categories)}"
+            )
+
+
 def _split_tcl_list(value: Any) -> list[str]:
     """Parse a Tcl list returned by the bridge using a temporary interpreter."""
     try:
@@ -3412,6 +3432,50 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
     ifile = {
         "names": ifile_names,
         "accesses": ifile_accesses,
+    }
+    urlcat_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::urlcat_snapshot")
+    )
+    if len(urlcat_parts) != 8 or urlcat_parts[::2] != [
+        "default",
+        "query_count",
+        "blind_query_count",
+        "accesses",
+    ]:
+        raise EmulatorInputError("invalid URL categorization state")
+    urlcat_default = _split_tcl_list(urlcat_parts[1])
+    if not urlcat_default or any(
+        not category or "\x00" in category or len(category.encode("utf-8")) > 4096
+        for category in urlcat_default
+    ):
+        raise EmulatorInputError("invalid URL categorization default state")
+    try:
+        query_count = int(urlcat_parts[3])
+        blind_query_count = int(urlcat_parts[5])
+    except (TypeError, ValueError):
+        raise EmulatorInputError("invalid URL categorization fixture count") from None
+    if query_count < 0 or blind_query_count < 0:
+        raise EmulatorInputError("invalid URL categorization fixture count")
+    urlcat_accesses: list[dict[str, str]] = []
+    for raw_access in _split_tcl_list(urlcat_parts[7]):
+        access_parts = _split_tcl_list(raw_access)
+        if len(access_parts) != 2 or access_parts[0] not in {
+            "queries",
+            "blind_queries",
+        }:
+            raise EmulatorInputError("invalid URL categorization access state")
+        if not access_parts[1] or "\x00" in access_parts[1] or len(
+            access_parts[1].encode("utf-8")
+        ) > 4096:
+            raise EmulatorInputError("invalid URL categorization access state")
+        urlcat_accesses.append(
+            {"kind": access_parts[0], "input": access_parts[1]}
+        )
+    urlcat = {
+        "default": urlcat_default,
+        "query_count": query_count,
+        "blind_query_count": blind_query_count,
+        "accesses": urlcat_accesses,
     }
     bwc_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::bwc_snapshot")
@@ -4944,6 +5008,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "legacy": legacy,
         "sideband": sideband,
         "ifile": ifile,
+        "urlcat": urlcat,
         "bwc": bwc,
         "ipfix": ipfix,
         "ilx": ilx,
@@ -7049,6 +7114,90 @@ def _normalise_ifiles(raw: Any) -> dict[str, dict[str, str]]:
     return result
 
 
+def _normalise_urlcat(raw: Any) -> dict[str, Any]:
+    """Normalize deterministic URL categorization lookup fixtures."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("urlcat must be an object")
+    allowed = {"queries", "blind_queries", "default"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError("urlcat unsupported field(s): " + ", ".join(unknown))
+
+    def value(field: str, raw_value: Any, default: list[str] | None = None) -> list[str]:
+        if raw_value is None:
+            if default is not None:
+                return list(default)
+            raise EmulatorInputError(f"urlcat.{field} must contain at least one category")
+        if isinstance(raw_value, str):
+            categories = [raw_value]
+        elif isinstance(raw_value, list):
+            categories = raw_value
+        else:
+            raise EmulatorInputError(
+                f"urlcat.{field} values must be strings or arrays of strings"
+            )
+        if not categories or len(categories) > 64:
+            raise EmulatorInputError(
+                f"urlcat.{field} values must contain 1 to 64 categories"
+            )
+        result: list[str] = []
+        total_bytes = 0
+        for index, category in enumerate(categories):
+            if not isinstance(category, str) or not category or "\x00" in category:
+                raise EmulatorInputError(
+                    f"urlcat.{field}[{index}] must be a non-empty string without NUL"
+                )
+            try:
+                category_bytes = category.encode("utf-8")
+            except UnicodeEncodeError:
+                raise EmulatorInputError(
+                    f"urlcat.{field}[{index}] must be valid UTF-8"
+                ) from None
+            if len(category_bytes) > 4096:
+                raise EmulatorInputError(
+                    f"urlcat.{field}[{index}] cannot exceed 4096 UTF-8 bytes"
+                )
+            total_bytes += len(category_bytes)
+            result.append(category)
+        if total_bytes > 8192:
+            raise EmulatorInputError(f"urlcat.{field} categories cannot exceed 8192 bytes")
+        return result
+
+    def mappings(field: str) -> dict[str, list[str]]:
+        raw_mappings = raw.get(field, {})
+        if not isinstance(raw_mappings, dict):
+            raise EmulatorInputError(f"urlcat.{field} must be an object mapping inputs to categories")
+        if len(raw_mappings) > 256:
+            raise EmulatorInputError(f"urlcat.{field} cannot contain more than 256 entries")
+        result: dict[str, list[str]] = {}
+        for lookup, raw_value in raw_mappings.items():
+            if not isinstance(lookup, str) or not lookup or "\x00" in lookup:
+                raise EmulatorInputError(
+                    f"urlcat.{field} lookup keys must be non-empty strings without NUL"
+                )
+            try:
+                lookup_bytes = lookup.encode("utf-8")
+            except UnicodeEncodeError:
+                raise EmulatorInputError(
+                    f"urlcat.{field} lookup keys must be valid UTF-8"
+                ) from None
+            if len(lookup_bytes) > 4096:
+                raise EmulatorInputError(
+                    f"urlcat.{field} lookup keys cannot exceed 4096 UTF-8 bytes"
+                )
+            result[lookup] = value(field, raw_value)
+        return result
+
+    default = value("default", raw.get("default"), ["Unknown"])
+    return {
+        "queries": mappings("queries"),
+        "blind_queries": mappings("blind_queries"),
+        "default": default,
+    }
+
+
 def _normalise_ip(raw: Any) -> dict[str, Any]:
     """Normalize deterministic inputs for the bounded IP command model."""
     if raw is None:
@@ -7410,6 +7559,7 @@ def _normalise_scenario_config(
         "flowtable",
         "sideband",
         "ifiles",
+        "urlcat",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -7464,6 +7614,7 @@ def _normalise_scenario_config(
         _normalise_flowtable(scenario.get("flowtable")),
         _normalise_sideband(scenario.get("sideband")),
         _normalise_ifiles(scenario.get("ifiles")),
+        _normalise_urlcat(scenario.get("urlcat")),
     )
 
 
@@ -12797,6 +12948,7 @@ class EmulatorSession:
             flowtable_config,
             sideband_config,
             ifile_config,
+            urlcat_config,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -12826,6 +12978,7 @@ class EmulatorSession:
         self._flowtable_config = flowtable_config
         self._sideband_config = sideband_config
         self._ifile_config = ifile_config
+        self._urlcat_config = urlcat_config
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -12997,6 +13150,7 @@ class EmulatorSession:
                 _configure_flowtable(session, self._flowtable_config)
                 _configure_sideband(session, self._sideband_config)
                 _configure_ifiles(session, self._ifile_config)
+                _configure_urlcat(session, self._urlcat_config)
                 session.eval_tcl("::itest::semantic::rewrite_reset_connection")
                 session.eval_tcl("::itest::semantic::html_reset_connection")
                 session.eval_tcl("::itest::semantic::compression_reset_connection")
@@ -13631,6 +13785,7 @@ class EmulatorSession:
                 "legacy": semantic_snapshot["legacy"],
                 "sideband": semantic_snapshot["sideband"],
                 "ifile": semantic_snapshot["ifile"],
+                "urlcat": semantic_snapshot["urlcat"],
                 "adapt": semantic_snapshot["adapt"],
                 "psm": semantic_snapshot["psm"],
                 "ip": semantic_snapshot["ip"],

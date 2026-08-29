@@ -1961,7 +1961,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 22)
+        self.assertEqual(queue["command_count"], 20)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -9728,6 +9728,91 @@ when HTTP_REQUEST {
             normalise({"/etc/passwd": "fixture"})["/etc/passwd"]["revision"],
             "1",
         )
+
+    def test_urlcat_queries_use_deterministic_scenario_fixtures(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "urlcat": {
+                    "queries": {
+                        "example.test/path": ["Malware", "Phishing"],
+                    },
+                    "blind_queries": {"deadbeef": "Business"},
+                },
+                "irule": """
+when HTTP_REQUEST {
+    set direct [urlcatquery example.test/path]
+    set blind [urlcatblindquery deadbeef]
+    set missing [urlcatquery unknown.test]
+    log local0. "direct=$direct blind=$blind missing=$missing"
+    HTTP::respond 200 content "$direct|$blind|$missing"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=True,
+            allow_packets=False,
+        )
+        try:
+            result = session.run_request({"uri": "/"})
+            self.assertEqual(
+                result["response"]["body"],
+                "Malware Phishing|Business|Unknown",
+            )
+            self.assertTrue(
+                any(
+                    "direct=Malware Phishing blind=Business missing=Unknown" in entry
+                    for entry in result["logs"]
+                )
+            )
+            self.assertEqual(
+                result["semantic"]["urlcat"]["default"],
+                ["Unknown"],
+            )
+            self.assertEqual(result["semantic"]["urlcat"]["query_count"], 1)
+            self.assertEqual(result["semantic"]["urlcat"]["blind_query_count"], 1)
+            self.assertEqual(
+                result["semantic"]["urlcat"]["accesses"],
+                [
+                    {"kind": "queries", "input": "example.test/path"},
+                    {"kind": "blind_queries", "input": "deadbeef"},
+                    {"kind": "queries", "input": "unknown.test"},
+                ],
+            )
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            self.assertEqual(usage["urlcatquery"]["runtime_status"], "semantic-mock")
+            self.assertEqual(usage["urlcatblindquery"]["runtime_status"], "semantic-mock")
+        finally:
+            session.close()
+
+        ipv6_session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "irule": "when HTTP_REQUEST { urlcatquery 2001:db8::1 }",
+            },
+            allow_irule_file=True,
+            allow_requests=True,
+            allow_packets=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "urlcatquery does not support IPv6 addresses",
+            ):
+                ipv6_session.run_request({"uri": "/"})
+        finally:
+            ipv6_session.close()
+
+    def test_urlcat_fixture_validation_is_bounded(self) -> None:
+        normalise = self.adapter._normalise_urlcat
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "1 to 64"):
+            normalise({"default": []})
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "lookup keys"):
+            normalise({"queries": {"\x00bad": "Unknown"}})
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "64 categories"):
+            normalise({"default": [f"category-{index}" for index in range(65)]})
 
     def test_sideband_connect_failure_and_lifecycle_validation_are_deterministic(self) -> None:
         failed = self.adapter.EmulatorSession(

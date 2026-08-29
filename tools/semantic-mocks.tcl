@@ -17365,6 +17365,99 @@ namespace eval ::itest::semantic {
         }
     }
 
+    # URL categorization lookups are backed by exact scenario fixtures. The
+    # real BIG-IP database is licensed and external to this emulator, so a
+    # missing fixture deliberately returns the documented Unknown result.
+    variable urlcat_query_records [dict create]
+    variable urlcat_blind_records [dict create]
+    variable urlcat_default {Unknown}
+    variable urlcat_accesses {}
+
+    proc urlcat_configure {default} {
+        if {[llength $default] < 1 || [llength $default] > 64} {
+            error "urlcat default must contain 1 to 64 categories"
+        }
+        foreach category $default {
+            if {$category eq "" || [string first "\x00" $category] >= 0 ||
+                [string bytelength $category] > 4096} {
+                error "invalid urlcat default category"
+            }
+        }
+        set ::itest::semantic::urlcat_query_records [dict create]
+        set ::itest::semantic::urlcat_blind_records [dict create]
+        set ::itest::semantic::urlcat_default $default
+        set ::itest::semantic::urlcat_accesses {}
+    }
+
+    proc urlcat_set {kind lookup categories} {
+        if {$kind ni {queries blind_queries}} {
+            error "invalid urlcat fixture kind"
+        }
+        if {$lookup eq "" || [string first "\x00" $lookup] >= 0 ||
+            [string bytelength $lookup] > 4096} {
+            error "invalid urlcat lookup input"
+        }
+        if {[llength $categories] < 1 || [llength $categories] > 64} {
+            error "urlcat fixture must contain 1 to 64 categories"
+        }
+        foreach category $categories {
+            if {$category eq "" || [string first "\x00" $category] >= 0 ||
+                [string bytelength $category] > 4096} {
+                error "invalid urlcat fixture category"
+            }
+        }
+        set variable_name [expr {$kind eq "queries" ? "urlcat_query_records" : "urlcat_blind_records"}]
+        set records [set ::itest::semantic::$variable_name]
+        dict set records $lookup $categories
+        set ::itest::semantic::$variable_name $records
+    }
+
+    proc _urlcat_query {kind command_name allowed args} {
+        if {$::itest::current_event ni $allowed} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+        if {[llength $args] != 1} {
+            error "$command_name requires one input value"
+        }
+        set lookup [lindex $args 0]
+        if {$lookup eq "" || [string first "\x00" $lookup] >= 0 ||
+            [string bytelength $lookup] > 4096} {
+            error "$command_name requires a non-empty input without NUL"
+        }
+        if {[regexp {^[0-9A-Fa-f:]+$} $lookup] &&
+            [string first ":" $lookup] >= 0} {
+            error "$command_name does not support IPv6 addresses"
+        }
+        set variable_name [expr {$kind eq "queries" ? "urlcat_query_records" : "urlcat_blind_records"}]
+        set records [set ::itest::semantic::$variable_name]
+        if {[dict exists $records $lookup]} {
+            set result [dict get $records $lookup]
+        } else {
+            set result $::itest::semantic::urlcat_default
+        }
+        lappend ::itest::semantic::urlcat_accesses [list $kind $lookup]
+        if {[llength $::itest::semantic::urlcat_accesses] > 1024} {
+            set ::itest::semantic::urlcat_accesses [lrange $::itest::semantic::urlcat_accesses end-1023 end]
+        }
+        ::itest::log_decision urlcat $kind [list $lookup $result]
+        return $result
+    }
+
+    proc urlcatquery_command {args} {
+        return [_urlcat_query queries urlcatquery {HTTP_REQUEST DNS_REQUEST DNS_RESPONSE} {*}$args]
+    }
+
+    proc urlcatblindquery_command {args} {
+        return [_urlcat_query blind_queries urlcatblindquery {HTTP_REQUEST} {*}$args]
+    }
+
+    proc urlcat_snapshot {} {
+        return [list default $::itest::semantic::urlcat_default \
+            query_count [dict size $::itest::semantic::urlcat_query_records] \
+            blind_query_count [dict size $::itest::semantic::urlcat_blind_records] \
+            accesses $::itest::semantic::urlcat_accesses]
+    }
+
     proc classification_prepare_event {} {}
 
     proc _classification_require_detected {command_name} {
@@ -23525,6 +23618,8 @@ foreach {original replacement} {
     substr substr_command
     traffic_group traffic_group_command
     translate legacy_translate_command
+    urlcatblindquery urlcatblindquery_command
+    urlcatquery urlcatquery_command
     uniq_ordered_ip_list uniq_ordered_ip_list_command
     uniq_sorted_ip_list uniq_sorted_ip_list_command
     vlan_id vlan_id_command

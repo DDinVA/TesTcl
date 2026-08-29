@@ -218,6 +218,13 @@ supplied classification result, `CLASSIFY::username` assigns flow metadata,
 `FLOW_INIT` before an explicitly marked server-side classification packet.
 This is deterministic classification control state; it does not run a PEM
 classifier or infer results from payloads.
+The legacy `urlcatquery` and `urlcatblindquery` commands use exact-match
+scenario fixtures under `urlcat.queries` and `urlcat.blind_queries`. Missing
+inputs return the configured default, which is `Unknown` by default; lookup
+results are returned as Tcl lists and recent lookups are visible under
+`result.semantic.urlcat`. These commands do not contact the licensed URL
+categorization database, and literal IPv6 inputs are rejected to match the
+documented 17.5 behavior.
 Structured `category` packet traces dispatch `CATEGORY_MATCHED` for
 client-to-server TCP traffic when the `CATEGORY` profile is attached and the
 scenario marks a match. The six TMOS 17.5 `CATEGORY::*` commands are modeled:

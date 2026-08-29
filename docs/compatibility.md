@@ -160,6 +160,10 @@ classification results; `CLASSIFY::username` assigns flow metadata;
 HTTP-only controls and `FLOW_INIT` restrictions are validated, and all
 classification values remain deterministic scenario state rather than a live
 PEM classification database.
+The legacy `urlcatquery` and `urlcatblindquery` commands use exact-match
+scenario fixtures and return a bounded Tcl-list result, defaulting to
+`Unknown`. They reject literal IPv6 inputs and never contact an external URL
+categorization database; recent accesses are exposed in semantic output.
 The CATEGORY adapter models the six TMOS 17.5 `CATEGORY::*` commands and
 dispatches `CATEGORY_MATCHED` for supplied client-side TCP matches. Lookup,
 safe-search, cached-result, match-type, filetype, and per-request analytics
