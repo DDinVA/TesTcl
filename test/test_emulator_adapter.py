@@ -292,6 +292,71 @@ when FLOW_INIT {
         finally:
             invalid_session.close()
 
+    def test_xlat_source_translation_listener_and_reservation_state(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when SA_PICKED {
+    log local0. "source=[XLAT::src_addr]:[XLAT::src_port] config=[XLAT::src_config] ranges=[XLAT::src_nat_valid_range]"
+}
+when SERVER_CONNECTED {
+    set listener [XLAT::listen -hairpin -single-connection 30 {
+        proto [IP::protocol]
+        bind -ip 198.51.100.20 -port 4000
+        server [IP::client_addr] 80
+        allow 10.0.0.2 0
+        inherit-vs /Common/app_vs
+    }]
+    set lifetime [XLAT::listen_lifetime $listener]
+    set updated [XLAT::listen_lifetime $listener 45]
+    set reservation [XLAT::src_endpoint_reservation create -pool /Common/snat 10.0.0.2 50000 TCP 120]
+    set translation_address [lindex $reservation 0]
+    set translation_port [lindex $reservation 1]
+    set found [XLAT::src_endpoint_reservation get $translation_address $translation_port /Common/snat TCP]
+    set renewed [XLAT::src_endpoint_reservation update_lifetime $translation_address $translation_port /Common/snat TCP 300]
+    log local0. "listener=$listener lifetime=$lifetime/$updated reservation=$reservation found=$found renewed=$renewed"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            picked = session.fire_event(
+                "SA_PICKED",
+                {
+                    "xlat": {
+                        "src_addr": "198.51.100.30",
+                        "src_port": 41000,
+                        "src_config": "SNAT /Common/snat",
+                        "src_nat_valid_range": "{198.51.100.30 40000 45000}",
+                    }
+                },
+            )
+            self.assertTrue(picked["fired"])
+            self.assertTrue(any(
+                "source=198.51.100.30:41000 config=SNAT /Common/snat ranges={198.51.100.30 40000 45000}" in entry
+                for entry in picked["logs"]
+            ))
+
+            connected = session.fire_event("SERVER_CONNECTED", {"xlat": {}})
+            self.assertTrue(connected["fired"])
+            xlat_state = connected["state"]["xlat"]
+            self.assertIn("198.51.100.20%0,4000", xlat_state["listeners"])
+            self.assertIn("lifetime 45", xlat_state["listeners"])
+            self.assertIn("translation_addr 198.51.100.30", xlat_state["reservations"])
+            self.assertIn("lifetime 300", xlat_state["reservations"])
+            self.assertTrue(any(
+                "lifetime=30/45 reservation=198.51.100.30 41000" in entry
+                and "found=10.0.0.2 50000 120" in entry
+                and "renewed=300" in entry
+                for entry in connected["logs"]
+            ))
+        finally:
+            session.close()
+
     def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -894,8 +959,9 @@ when HTTP_REQUEST {
         self.assertNotIn(("SOCKS", "generated-stub"), queue_buckets)
         self.assertNotIn(("SDP", "generated-stub"), queue_buckets)
         self.assertNotIn(("LSN", "generated-stub"), queue_buckets)
+        self.assertNotIn(("XLAT", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 206)
+        self.assertEqual(queue["command_count"], 199)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)

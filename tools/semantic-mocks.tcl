@@ -976,6 +976,18 @@ namespace eval ::itest::semantic {
         variable inbound_entries {}
     }
 
+    namespace eval ::state::xlat {
+        # Source-translation values are supplied by the SA_PICKED event or
+        # directly by an event scenario.  The adapter keeps them as Tcl list
+        # values so callers can inspect the same shape returned by iRules.
+        variable src_addr ""
+        variable src_port 0
+        variable src_config {NONE NA}
+        variable src_nat_valid_range {}
+        variable listeners {}
+        variable reservations {}
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -4187,6 +4199,373 @@ namespace eval ::itest::semantic {
         lappend ::state::lsn::inbound_entries $entry
         ::itest::log_decision lsn inbound_create $entry
         return [list $translation 0]
+    }
+
+    proc xlat_reset_connection {} {
+        set ::state::xlat::src_addr ""
+        set ::state::xlat::src_port 0
+        set ::state::xlat::src_config {NONE NA}
+        set ::state::xlat::src_nat_valid_range {}
+        set ::state::xlat::listeners {}
+        set ::state::xlat::reservations {}
+    }
+
+    proc _xlat_require_event {command_name allowed_events} {
+        if {$::itest::current_event ni $allowed_events} {
+            error "$command_name is not valid in $::itest::current_event"
+        }
+    }
+
+    proc _xlat_require_not_init {command_name} {
+        if {$::itest::current_event eq "RULE_INIT"} {
+            error "$command_name is not valid in RULE_INIT"
+        }
+    }
+
+    proc _xlat_validate_text {value field_name} {
+        if {$value eq "" || [string first "\x00" $value] >= 0 ||
+            [string first "\r" $value] >= 0 || [string first "\n" $value] >= 0} {
+            error "$field_name must be non-empty and contain no NUL bytes or newlines"
+        }
+        return $value
+    }
+
+    proc _xlat_validate_int {value field_name minimum maximum} {
+        if {![string is integer -strict $value] || $value < $minimum || $value > $maximum} {
+            error "$field_name must be an integer from $minimum to $maximum"
+        }
+        return $value
+    }
+
+    proc _xlat_protocol {value} {
+        if {[string is integer -strict $value]} {
+            return [_xlat_validate_int $value "XLAT protocol" 0 255]
+        }
+        # XLAT::listen evaluates its subcommand block on BIG-IP.  The
+        # adapter intentionally does not execute nested iRule commands, but
+        # accepts a bracketed protocol expression as the deterministic TCP
+        # default used by the synthetic listener handle.
+        if {[regexp {^\[.*\]$} $value]} { return 6 }
+        set name [string toupper [_xlat_validate_text $value "XLAT protocol"]]
+        array set protocols {TCP 6 UDP 17 ICMP 1 ICMPV6 58}
+        if {![info exists protocols($name)]} {
+            error "XLAT protocol must be a number from 0 to 255 or TCP, UDP, ICMP, or ICMPV6"
+        }
+        return $protocols($name)
+    }
+
+    proc _xlat_valid_ranges {} {
+        set ranges {}
+        foreach raw_range $::state::xlat::src_nat_valid_range {
+            if {[llength $raw_range] != 3} {
+                error "XLAT source NAT ranges must contain address, start port, and end port"
+            }
+            set address [_xlat_validate_text [lindex $raw_range 0] "XLAT source NAT address"]
+            set start [_xlat_validate_int [lindex $raw_range 1] "XLAT source NAT start port" 0 65535]
+            set end [_xlat_validate_int [lindex $raw_range 2] "XLAT source NAT end port" 0 65535]
+            if {$start > $end} { error "XLAT source NAT start port cannot exceed end port" }
+            lappend ranges [list $address $start $end]
+        }
+        return $ranges
+    }
+
+    proc _xlat_translation {address port field_name} {
+        set address [_xlat_validate_text $address "$field_name address"]
+        set port [_xlat_validate_int $port "$field_name port" 0 65535]
+        return [list $address $port]
+    }
+
+    proc _xlat_listener_port {value field_name} {
+        if {[regexp {^\[.*\]$} $value]} { return 0 }
+        return [_xlat_validate_int $value $field_name 0 65535]
+    }
+
+    proc _xlat_choose_translation {hint_address hint_port} {
+        if {$hint_address ne "" || $hint_port ne ""} {
+            if {$hint_address eq "" || $hint_port eq ""} {
+                error "XLAT translation hints require both address and port"
+            }
+            return [_xlat_translation $hint_address $hint_port "XLAT translation"]
+        }
+        if {$::state::xlat::src_addr ne "" && $::state::xlat::src_port != 0} {
+            return [_xlat_translation $::state::xlat::src_addr $::state::xlat::src_port "XLAT source translation"]
+        }
+        set ranges [_xlat_valid_ranges]
+        if {[llength $ranges] > 0} {
+            set range [lindex $ranges 0]
+            return [list [lindex $range 0] [lindex $range 1]]
+        }
+        return [list 198.51.100.1 1024]
+    }
+
+    proc _xlat_find_listener {handle} {
+        set index 0
+        foreach listener $::state::xlat::listeners {
+            if {[dict get $listener handle] eq $handle} { return $index }
+            incr index
+        }
+        return -1
+    }
+
+    proc _xlat_find_reservation {address port pool protocol} {
+        foreach reservation $::state::xlat::reservations {
+            if {[dict get $reservation translation_addr] eq $address &&
+                [dict get $reservation translation_port] == $port &&
+                [dict get $reservation pool] eq $pool &&
+                [dict get $reservation protocol] == $protocol} {
+                return $reservation
+            }
+        }
+        return {}
+    }
+
+    proc _xlat_reservation_translation_in_use {address port client_addr client_port protocol} {
+        foreach reservation $::state::xlat::reservations {
+            if {[dict get $reservation translation_addr] eq $address &&
+                [dict get $reservation translation_port] == $port &&
+                ([dict get $reservation client_addr] ne $client_addr ||
+                 [dict get $reservation client_port] != $client_port ||
+                 [dict get $reservation protocol] != $protocol)} {
+                return 1
+            }
+        }
+        return 0
+    }
+
+    proc _xlat_listen_body {body} {
+        set protocol 6
+        set local_address "0.0.0.0"
+        set local_port 0
+        set remote_address "0.0.0.0"
+        set remote_port 0
+        set server_address "0.0.0.0"
+        set server_port 0
+        set vlan 0
+        foreach line [split $body "\n"] {
+            set line [string trim $line]
+            if {$line eq "" || [string match "#*" $line]} { continue }
+            if {[catch {set words [lrange $line 0 end]}]} {
+                error "XLAT::listen contains an invalid subcommand list"
+            }
+            if {[llength $words] == 0} { continue }
+            set subcommand [lindex $words 0]
+            switch -exact -- $subcommand {
+                proto {
+                    if {[llength $words] != 2} { error "XLAT::listen proto requires a protocol" }
+                    set protocol [_xlat_protocol [lindex $words 1]]
+                }
+                bind {
+                    set index 1
+                    while {$index < [llength $words]} {
+                        set option [lindex $words $index]
+                        if {$option ni {-allow -deny -ip -port}} {
+                            error "XLAT::listen bind accepts -allow, -deny, -ip, and -port"
+                        }
+                        if {$index + 1 >= [llength $words]} { error "XLAT::listen bind option requires a value" }
+                        set value [lindex $words [incr index]]
+                        if {$option eq "-ip"} { set local_address [_xlat_validate_text $value "XLAT listener bind address"] }
+                        if {$option eq "-port"} { set local_port [_xlat_listener_port $value "XLAT listener bind port"] }
+                        if {$option eq "-allow"} { set vlan [_xlat_validate_text [lindex [split $value ,] 0] "XLAT listener VLAN"] }
+                        incr index
+                    }
+                }
+                server - allow {
+                    if {[llength $words] != 3} { error "XLAT::listen $subcommand requires address and port" }
+                    set address [_xlat_validate_text [lindex $words 1] "XLAT listener $subcommand address"]
+                    set port [_xlat_listener_port [lindex $words 2] "XLAT listener $subcommand port"]
+                    if {$subcommand eq "server"} {
+                        set server_address $address
+                        set server_port $port
+                    } else {
+                        set remote_address $address
+                        set remote_port $port
+                    }
+                }
+                inherit-vs { if {[llength $words] != 2} { error "XLAT::listen inherit-vs requires a virtual name" } }
+                default { error "unsupported XLAT::listen subcommand $subcommand" }
+            }
+        }
+        if {$local_port == 0 && $::state::xlat::src_port != 0} { set local_port $::state::xlat::src_port }
+        return [list $local_address $local_port $remote_address $remote_port $server_address $server_port $vlan $protocol]
+    }
+
+    proc xlat_listen_command {args} {
+        _xlat_require_event XLAT::listen {CLIENT_DATA SERVER_CONNECTED SERVER_DATA}
+        if {[llength $args] < 2} { error "XLAT::listen requires a lifetime and a subcommand block" }
+        set hairpin 0
+        set inherit_main_rules 0
+        set single_connection 0
+        set translation_loose 0
+        set index 0
+        while {$index < [llength $args] && [string match -* [lindex $args $index]]} {
+            set option [lindex $args $index]
+            if {$option ni {-hairpin -inherit-main-rules -single-connection -translation-loose}} {
+                error "XLAT::listen received an unsupported option $option"
+            }
+            switch -exact -- $option {
+                -hairpin { set hairpin 1 }
+                -inherit-main-rules { set inherit_main_rules 1 }
+                -single-connection { set single_connection 1 }
+                -translation-loose { set translation_loose 1 }
+            }
+            incr index
+        }
+        if {$index + 1 >= [llength $args]} { error "XLAT::listen requires a lifetime and a subcommand block" }
+        set lifetime [_xlat_validate_int [lindex $args $index] "XLAT listener lifetime" 0 31536000]
+        incr index
+        if {$index != [llength $args] - 1} { error "XLAT::listen accepts one subcommand block" }
+        set endpoints [_xlat_listen_body [lindex $args $index]]
+        lassign $endpoints local_address local_port remote_address remote_port server_address server_port vlan protocol
+        set handle [format {%s%%0,%s,%s%%0,%s,%s%%0,%s,%s,%s} $local_address $local_port $remote_address $remote_port $server_address $server_port $vlan $protocol]
+        if {[_xlat_find_listener $handle] >= 0} {
+            error "XLAT listener handle already exists"
+        }
+        set listener [dict create handle $handle lifetime $lifetime hairpin $hairpin inherit_main_rules $inherit_main_rules single_connection $single_connection translation_loose $translation_loose local_address $local_address local_port $local_port remote_address $remote_address remote_port $remote_port server_address $server_address server_port $server_port vlan $vlan protocol $protocol]
+        lappend ::state::xlat::listeners $listener
+        ::itest::log_decision xlat listen $listener
+        return $handle
+    }
+
+    proc xlat_listen_lifetime_command {args} {
+        _xlat_require_not_init XLAT::listen_lifetime
+        if {[llength $args] < 1 || [llength $args] > 2} { error "XLAT::listen_lifetime requires a handle and optional lifetime" }
+        set handle [_xlat_validate_text [lindex $args 0] "XLAT listener handle"]
+        set index [_xlat_find_listener $handle]
+        if {$index < 0} { error "XLAT listener handle was not found" }
+        set listener [lindex $::state::xlat::listeners $index]
+        if {[llength $args] == 1} { return [dict get $listener lifetime] }
+        set lifetime [_xlat_validate_int [lindex $args 1] "XLAT listener lifetime" 0 31536000]
+        dict set listener lifetime $lifetime
+        lset ::state::xlat::listeners $index $listener
+        ::itest::log_decision xlat listen_lifetime [list $handle $lifetime]
+        return $lifetime
+    }
+
+    proc xlat_src_addr_command {args} {
+        _xlat_require_event XLAT::src_addr {SA_PICKED}
+        if {[llength $args] != 0} { error "XLAT::src_addr takes no arguments" }
+        if {$::state::xlat::src_addr eq ""} { return "" }
+        return [_xlat_validate_text $::state::xlat::src_addr "XLAT source translation address"]
+    }
+
+    proc xlat_src_port_command {args} {
+        _xlat_require_event XLAT::src_port {SA_PICKED}
+        if {[llength $args] != 0} { error "XLAT::src_port takes no arguments" }
+        return [_xlat_validate_int $::state::xlat::src_port "XLAT source translation port" 0 65535]
+    }
+
+    proc xlat_src_config_command {args} {
+        _xlat_require_not_init XLAT::src_config
+        if {[llength $args] != 0} { error "XLAT::src_config takes no arguments" }
+        if {[llength $::state::xlat::src_config] != 2} { error "XLAT source translation config must contain type and pool" }
+        set type [string toupper [lindex $::state::xlat::src_config 0]]
+        if {$type ni {NONE AUTOMAP SNAT LSN SECURITY-DYNAMIC-PAT SECURITY-DYNAMIC-NAT SECURITY-STATIC-NAT SECURITY-STATIC-PAT}} {
+            error "XLAT source translation type is invalid"
+        }
+        return [list $type [_xlat_validate_text [lindex $::state::xlat::src_config 1] "XLAT source translation pool"]]
+    }
+
+    proc xlat_src_nat_valid_range_command {args} {
+        _xlat_require_event XLAT::src_nat_valid_range {CLIENT_DATA SA_PICKED SERVER_CONNECTED SERVER_DATA}
+        if {[llength $args] != 0} { error "XLAT::src_nat_valid_range takes no arguments" }
+        return [_xlat_valid_ranges]
+    }
+
+    proc xlat_src_endpoint_reservation_command {args} {
+        _xlat_require_not_init XLAT::src_endpoint_reservation
+        if {[llength $args] < 1} { error "XLAT::src_endpoint_reservation requires create, update_lifetime, or get" }
+        set operation [lindex $args 0]
+        if {$operation eq "get"} {
+            if {[llength $args] != 5} { error "XLAT::src_endpoint_reservation get requires translation address, port, pool, and protocol" }
+            set address [_xlat_validate_text [lindex $args 1] "XLAT reservation translation address"]
+            set port [_xlat_validate_int [lindex $args 2] "XLAT reservation translation port" 0 65535]
+            set pool [_xlat_validate_text [lindex $args 3] "XLAT reservation pool"]
+            set protocol [_xlat_protocol [lindex $args 4]]
+            set reservation [_xlat_find_reservation $address $port $pool $protocol]
+            if {$reservation eq ""} { return "" }
+            return [list [dict get $reservation client_addr] [dict get $reservation client_port] [dict get $reservation lifetime]]
+        }
+        if {$operation eq "update_lifetime"} {
+            if {[llength $args] != 6} { error "XLAT::src_endpoint_reservation update_lifetime requires translation address, port, pool, protocol, and lifetime" }
+            set address [_xlat_validate_text [lindex $args 1] "XLAT reservation translation address"]
+            set port [_xlat_validate_int [lindex $args 2] "XLAT reservation translation port" 0 65535]
+            set pool [_xlat_validate_text [lindex $args 3] "XLAT reservation pool"]
+            set protocol [_xlat_protocol [lindex $args 4]]
+            set lifetime [_xlat_validate_int [lindex $args 5] "XLAT reservation lifetime" 0 31536000]
+            set index 0
+            foreach reservation $::state::xlat::reservations {
+                if {[dict get $reservation translation_addr] eq $address &&
+                    [dict get $reservation translation_port] == $port &&
+                    [dict get $reservation pool] eq $pool &&
+                    [dict get $reservation protocol] == $protocol} {
+                    dict set reservation lifetime $lifetime
+                    lset ::state::xlat::reservations $index $reservation
+                    ::itest::log_decision xlat reservation_update [list $address $port $pool $protocol $lifetime]
+                    return $lifetime
+                }
+                incr index
+            }
+            error "XLAT endpoint reservation was not found"
+        }
+        if {$operation ne "create"} { error "XLAT::src_endpoint_reservation requires create, update_lifetime, or get" }
+        set create_args [lrange $args 1 end]
+        set no_persist 0
+        set pool ""
+        set hint_address ""
+        set hint_port ""
+        set hint_mode ""
+        set dslite_local ""
+        set dslite_remote ""
+        set index 0
+        while {$index < [llength $create_args] && [string match -* [lindex $create_args $index]]} {
+            set option [lindex $create_args $index]
+            switch -exact -- $option {
+                -no-persist { set no_persist 1; incr index }
+                -pool {
+                    if {$index + 1 >= [llength $create_args]} { error "XLAT reservation -pool requires a pool" }
+                    set pool [_xlat_validate_text [lindex $create_args [incr index]] "XLAT reservation pool"]
+                    incr index
+                }
+                -dslite {
+                    if {$index + 2 >= [llength $create_args]} { error "XLAT reservation -dslite requires local and remote addresses" }
+                    set dslite_local [_xlat_validate_text [lindex $create_args [incr index]] "XLAT DS-Lite local address"]
+                    set dslite_remote [_xlat_validate_text [lindex $create_args [incr index]] "XLAT DS-Lite remote address"]
+                    incr index
+                }
+                -translation-loose - -translation-strict {
+                    set hint_mode [string range $option 13 end]
+                    if {$index + 2 >= [llength $create_args]} { error "XLAT reservation $option requires address and port" }
+                    set hint_address [_xlat_validate_text [lindex $create_args [incr index]] "XLAT reservation translation address"]
+                    set hint_port [_xlat_validate_int [lindex $create_args [incr index]] "XLAT reservation translation port" 0 65535]
+                    incr index
+                }
+                default { error "unsupported XLAT reservation option $option" }
+            }
+        }
+        if {[llength $create_args] - $index != 4} { error "XLAT reservation create requires client address, client port, protocol, and lifetime" }
+        set client_addr [_xlat_validate_text [lindex $create_args $index] "XLAT reservation client address"]
+        set client_port [_xlat_validate_int [lindex $create_args [incr index]] "XLAT reservation client port" 0 65535]
+        set protocol [_xlat_protocol [lindex $create_args [incr index]]]
+        set lifetime [_xlat_validate_int [lindex $create_args [incr index]] "XLAT reservation lifetime" 0 31536000]
+        if {$hint_mode eq "strict" && $hint_address eq ""} { error "XLAT strict translation requires a hint" }
+        lassign [_xlat_choose_translation $hint_address $hint_port] translation_addr translation_port
+        set attempts 0
+        while {[_xlat_reservation_translation_in_use $translation_addr $translation_port $client_addr $client_port $protocol]} {
+            if {$hint_mode eq "strict"} { error "XLAT strict translation hint is already reserved" }
+            incr translation_port
+            if {$translation_port > 65535} { set translation_port 1024 }
+            incr attempts
+            if {$attempts > 64512} { error "XLAT translation endpoint space is exhausted" }
+        }
+        set reservation [dict create client_addr $client_addr client_port $client_port translation_addr $translation_addr translation_port $translation_port pool $pool protocol $protocol lifetime $lifetime persisted [expr {!$no_persist}] dslite_local $dslite_local dslite_remote $dslite_remote]
+        set remaining {}
+        foreach item $::state::xlat::reservations {
+            if {[dict get $item client_addr] ne $client_addr || [dict get $item client_port] != $client_port || [dict get $item protocol] != $protocol} { lappend remaining $item }
+        }
+        lappend remaining $reservation
+        set ::state::xlat::reservations $remaining
+        ::itest::log_decision xlat reservation_create $reservation
+        return [list $translation_addr $translation_port]
     }
 
     proc diameter_reset_connection {} {
@@ -18261,6 +18640,13 @@ foreach {original replacement} {
     lsn_persistence_entry lsn_persistence_entry_command
     lsn_pool lsn_pool_command
     lsn_port lsn_port_command
+    xlat_listen xlat_listen_command
+    xlat_listen_lifetime xlat_listen_lifetime_command
+    xlat_src_addr xlat_src_addr_command
+    xlat_src_config xlat_src_config_command
+    xlat_src_endpoint_reservation xlat_src_endpoint_reservation_command
+    xlat_src_nat_valid_range xlat_src_nat_valid_range_command
+    xlat_src_port xlat_src_port_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
         ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
@@ -18878,6 +19264,13 @@ foreach {name proc_name} {
     LSN::persistence-entry ::itest::semantic::lsn_persistence_entry_command
     LSN::pool ::itest::semantic::lsn_pool_command
     LSN::port ::itest::semantic::lsn_port_command
+    XLAT::listen ::itest::semantic::xlat_listen_command
+    XLAT::listen_lifetime ::itest::semantic::xlat_listen_lifetime_command
+    XLAT::src_addr ::itest::semantic::xlat_src_addr_command
+    XLAT::src_config ::itest::semantic::xlat_src_config_command
+    XLAT::src_endpoint_reservation ::itest::semantic::xlat_src_endpoint_reservation_command
+    XLAT::src_nat_valid_range ::itest::semantic::xlat_src_nat_valid_range_command
+    XLAT::src_port ::itest::semantic::xlat_src_port_command
     DIAMETER::avp ::itest::semantic::diameter_avp_command
     DIAMETER::command ::itest::semantic::diameter_command_command
     DIAMETER::disconnect ::itest::semantic::diameter_disconnect_command

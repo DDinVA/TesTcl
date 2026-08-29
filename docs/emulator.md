@@ -639,6 +639,35 @@ PROTOCOL` returns a two-item `{client route-domain}` list; `create` and
 they do not allocate from a live CGNAT pool, translate packets, replicate
 mappings, or enforce wall-clock expiry.
 
+### XLAT source-translation state
+
+The emulator also models the seven catalogued `XLAT::*` commands as a
+deterministic overlay. Supply source-translation values in an event state and
+inspect them from `SA_PICKED`:
+
+```json
+{
+  "event": "SA_PICKED",
+  "state": {
+    "xlat": {
+      "src_addr": "198.51.100.30",
+      "src_port": 41000,
+      "src_config": "SNAT /Common/snat",
+      "src_nat_valid_range": "{198.51.100.30 40000 45000}"
+    }
+  }
+}
+```
+
+`XLAT::listen LIFETIME { ... }` accepts the documented `proto`, `bind`,
+`server`, `allow`, and `inherit-vs` subcommands and returns a deterministic
+listener handle. `XLAT::listen_lifetime` reads or updates that handle.
+`XLAT::src_endpoint_reservation create` returns a `{translation-address
+translation-port}` pair; `get` and `update_lifetime` inspect or update the
+reservation. The source-NAT range value is a Tcl list of `{address start-port
+end-port}` entries. These records do not open sockets, reserve real ports,
+translate packets, or reproduce live LSN/CGNAT allocation and expiry.
+
 ### FLOWTABLE query inputs
 
 The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,
