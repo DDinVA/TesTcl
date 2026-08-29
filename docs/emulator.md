@@ -1370,6 +1370,22 @@ the bounded slice without rereading the registry checkout.
 status. Use that compact queue to choose a work family, then consume that
 family through the filtered capability chunks.
 
+For consumers that want one reproducible ingest operation, `--catalog` walks
+the capability pages and emits a manifest containing every filtered command
+inside deterministic chunks, plus the shared event and profile catalogs:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --catalog --limit 250 > catalog-17.5.json
+```
+
+The same manifest is available from `GET /v1/catalog?chunk_size=250` and the
+`irule_catalog` MCP tool. A catalog consumer can persist each `chunks[*]`
+entry, use its offsets as stable work checkpoints, and dispatch only commands
+whose `target_status` is available and whose `runtime_status` is not yet
+semantic. This makes catalog ingestion a repeatable input to the semantic-mock
+implementation queue rather than a manually copied list.
+
 ## Structured packet traces
 
 One-shot scenarios may use `packets` instead of `request`/`requests`. A trace
@@ -1538,6 +1554,14 @@ connection-scoped control flag, returned under `semantic.qoe`. This is a
 deterministic metric/control model: it does not parse media, calculate MOS,
 or reproduce a live QOE engine. See the F5
 [`QOE::video`](https://clouddocs.f5.com/api/irules/QOE__video.html) reference.
+`OFFBOX::request SERVICE PAYLOAD ?cache KEY? ?blocking ?TIMEOUT??` is modeled
+as a bounded local request ledger. It validates the documented option forms,
+records service, payload, cache, blocking, and timeout fields under
+`semantic.offbox`, and deliberately performs no outbound network I/O. The
+ledger records `result: "not-executed"` so an iRule test cannot mistake the
+portable emulator for a live off-box service. See the F5
+[`OFFBOX::request`](https://clouddocs.f5.com/api/irules/OFFBOX__request.html)
+reference.
 Diameter support is pinned to the 17.5 catalog. Structured
 `protocol: "diameter"` packets and raw Diameter-over-TCP packets drive
 `DIAMETER_INGRESS` or `DIAMETER_EGRESS`; a packet with the retransmit flag also

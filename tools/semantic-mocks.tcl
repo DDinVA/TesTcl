@@ -608,6 +608,16 @@ namespace eval ::itest::semantic {
         variable requests {}
     }
 
+    namespace eval ::state::offbox {
+        variable request_count 0
+        variable last_service ""
+        variable last_payload ""
+        variable last_cache_key ""
+        variable last_blocking 0
+        variable last_timeout 0
+        variable requests {}
+    }
+
     namespace eval ::state::tds {
         variable type 0
         variable length 0
@@ -3607,6 +3617,90 @@ namespace eval ::itest::semantic {
             last_uri $::state::rest::last_uri \
             last_body $::state::rest::last_body \
             requests $::state::rest::requests]
+    }
+
+    proc offbox_reset_connection {} {
+        set ::state::offbox::request_count 0
+        set ::state::offbox::last_service ""
+        set ::state::offbox::last_payload ""
+        set ::state::offbox::last_cache_key ""
+        set ::state::offbox::last_blocking 0
+        set ::state::offbox::last_timeout 0
+        set ::state::offbox::requests {}
+    }
+
+    proc offbox_request_command {args} {
+        if {[llength $args] < 2 || [llength $args] > 6} {
+            error "OFFBOX::request syntax is: OFFBOX::request SERVICE PAYLOAD ?cache KEY? ?blocking ?TIMEOUT??"
+        }
+        set service [lindex $args 0]
+        set payload [lindex $args 1]
+        set nul [binary format c 0]
+        if {$service eq ""} {
+            error "OFFBOX::request service must not be empty"
+        }
+        if {[string first $nul $service] >= 0 || [string first $nul $payload] >= 0} {
+            error "OFFBOX::request arguments must not contain NUL"
+        }
+        if {[string bytelength $service] > 4096} {
+            error "OFFBOX::request service exceeds 4096 bytes"
+        }
+        if {[string bytelength $payload] > 1048576} {
+            error "OFFBOX::request payload exceeds 1048576 bytes"
+        }
+        set remaining [lrange $args 2 end]
+        set cache_key ""
+        set blocking 0
+        set timeout 0
+        if {[llength $remaining] > 0 && [lindex $remaining 0] eq "cache"} {
+            if {[llength $remaining] < 2} {
+                error "OFFBOX::request cache requires a key"
+            }
+            set cache_key [lindex $remaining 1]
+            if {$cache_key eq ""} {
+                error "OFFBOX::request cache key must not be empty"
+            }
+            if {[string first $nul $cache_key] >= 0 || [string bytelength $cache_key] > 4096} {
+                error "OFFBOX::request cache key is invalid"
+            }
+            set remaining [lrange $remaining 2 end]
+        }
+        if {[llength $remaining] > 0} {
+            if {[lindex $remaining 0] ne "blocking" || [llength $remaining] > 2} {
+                error "OFFBOX::request options must be cache KEY and/or blocking TIMEOUT"
+            }
+            set blocking 1
+            if {[llength $remaining] == 2} {
+                set timeout [lindex $remaining 1]
+                if {![string is integer -strict $timeout] || $timeout < 0} {
+                    error "OFFBOX::request timeout must be a non-negative integer"
+                }
+            }
+        }
+        incr ::state::offbox::request_count
+        set ::state::offbox::last_service $service
+        set ::state::offbox::last_payload $payload
+        set ::state::offbox::last_cache_key $cache_key
+        set ::state::offbox::last_blocking $blocking
+        set ::state::offbox::last_timeout $timeout
+        lappend ::state::offbox::requests \
+            [list $service $payload $cache_key $blocking $timeout not-executed]
+        if {[llength $::state::offbox::requests] > 1024} {
+            set ::state::offbox::requests [lrange $::state::offbox::requests end-1023 end]
+        }
+        ::itest::log_decision offbox request [list $service $cache_key $blocking $timeout]
+        return ""
+    }
+
+    proc offbox_snapshot {} {
+        return [list \
+            request_count $::state::offbox::request_count \
+            last_service $::state::offbox::last_service \
+            last_payload $::state::offbox::last_payload \
+            last_cache_key $::state::offbox::last_cache_key \
+            last_blocking $::state::offbox::last_blocking \
+            last_timeout $::state::offbox::last_timeout \
+            requests $::state::offbox::requests]
     }
 
     proc tds_reset_connection {} {
@@ -22880,6 +22974,7 @@ foreach {name proc_name} {
     DHCPv6::reject ::itest::semantic::dhcpv6_reject_command
     DHCPv6::transaction_id ::itest::semantic::dhcpv6_transaction_id_command
     REST::send ::itest::semantic::rest_send_command
+    OFFBOX::request ::itest::semantic::offbox_request_command
     TDS::msg ::itest::semantic::tds_msg_command
     TDS::session ::itest::semantic::tds_session_command
     QOE::disable ::itest::semantic::qoe_disable_command

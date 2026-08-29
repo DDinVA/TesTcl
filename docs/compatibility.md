@@ -295,6 +295,11 @@ video measurements, while `QOE::enable` and `QOE::disable` update a
 connection-scoped enable flag exposed under `semantic.qoe`. The model does not
 parse media, calculate quality scores, or emulate a live QOE engine.
 
+`OFFBOX::request` is modeled as a bounded, connection-scoped request ledger.
+The emulator validates service/payload/options and records each request under
+`semantic.offbox`, but never contacts an off-box service. Entries are marked
+`not-executed` to make that boundary explicit.
+
 The legacy XML command family is intentionally not implemented for the
 TMOS 17.5 target. F5 documents those commands and XML events as unavailable
 beginning in v10, except for `XML_CONTENT_BASED_ROUTING`; the catalog retains
@@ -561,3 +566,6 @@ carry `target_status`, and the conformance response reports both the full
 registry count and the count available in TMOS 17.5. Known 21.0-only JSON and
 SSE commands/events are retained for catalog visibility but are marked
 `introduced-after-tmos-17.5` and rejected by the emulator.
+The CLI `--catalog`, HTTP `/v1/catalog`, and MCP `irule_catalog` surfaces can
+materialize the complete filtered command catalog as deterministic bounded
+chunks for downstream semantic-emulation workers.

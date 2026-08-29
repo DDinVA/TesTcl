@@ -1444,6 +1444,38 @@ when HTTP_RESPONSE_RELEASE {
         self.assertFalse(final["chunk"]["has_more"])
         self.assertEqual(final["commands"], [])
 
+        catalog = self.adapter._build_catalog(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root), 1000
+        )
+        self.assertEqual(catalog["chunking"], {"chunk_size": 1000, "chunk_count": 2})
+        self.assertEqual(
+            sum(chunk["count"] for chunk in catalog["chunks"]),
+            catalog["summary"]["command_count"],
+        )
+        self.assertEqual(
+            [chunk["offset"] for chunk in catalog["chunks"]], [0, 1000]
+        )
+        self.assertEqual(
+            [chunk["count"] for chunk in catalog["chunks"]],
+            [1000, catalog["summary"]["command_count"] - 1000],
+        )
+        self.assertEqual(
+            catalog["chunks"][0]["commands"][-1]["name"] <
+            catalog["chunks"][1]["commands"][0]["name"],
+            True,
+        )
+        self.assertEqual(len(catalog["events"]), catalog["summary"]["event_count"])
+        self.assertGreater(len(catalog["profiles"]), 0)
+
+        offbox_catalog = self.adapter._build_catalog(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root), 1, namespace="OFFBOX"
+        )
+        self.assertEqual(offbox_catalog["chunking"]["chunk_count"], 1)
+        self.assertEqual(
+            [command["name"] for command in offbox_catalog["chunks"][0]["commands"]],
+            ["OFFBOX::request"],
+        )
+
     def test_capability_filters_produce_bounded_implementation_slices(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         auth = self.adapter._build_capabilities(
@@ -1869,11 +1901,12 @@ when HTTP_REQUEST {
         self.assertNotIn(("NSH", "generated-stub"), queue_buckets)
         self.assertNotIn(("SIPALG", "generated-stub"), queue_buckets)
         self.assertNotIn(("REST", "generated-stub"), queue_buckets)
+        self.assertNotIn(("OFFBOX", "generated-stub"), queue_buckets)
         self.assertNotIn(("TDS", "generated-stub"), queue_buckets)
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 55)
+        self.assertEqual(queue["command_count"], 54)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -8667,6 +8700,82 @@ when HTTP_REQUEST {
                     tcl_lsp_root=self.tcl_lsp_root,
                 )
 
+    def test_offbox_request_records_bounded_local_request_without_network_io(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    OFFBOX::request /Common/offbox::ip_reputation 203.0.113.10 cache 203.0.113.10 blocking 250
+    OFFBOX::request /Common/offbox::health ping
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = session.fire_event("HTTP_REQUEST")
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            self.assertEqual(usage["OFFBOX::request"]["runtime_status"], "semantic-mock")
+        finally:
+            session.close()
+
+        self.assertEqual(result["semantic"]["offbox"]["request_count"], 2)
+        self.assertEqual(
+            result["semantic"]["offbox"]["last"],
+            {
+                "service": "/Common/offbox::health",
+                "payload": "ping",
+                "cache_key": "",
+                "blocking": False,
+                "timeout": 0,
+            },
+        )
+        self.assertEqual(
+            result["semantic"]["offbox"]["requests"][0],
+            {
+                "service": "/Common/offbox::ip_reputation",
+                "payload": "203.0.113.10",
+                "cache_key": "203.0.113.10",
+                "blocking": True,
+                "timeout": 250,
+                "result": "not-executed",
+            },
+        )
+        self.assertTrue(any(entry.startswith("offbox request ") for entry in result["decisions"]))
+
+        for irule, message in (
+            (
+                "when HTTP_REQUEST { OFFBOX::request svc payload cache }",
+                "OFFBOX::request cache requires a key",
+            ),
+            (
+                "when HTTP_REQUEST { OFFBOX::request svc payload blocking -1 }",
+                "OFFBOX::request timeout must be a non-negative integer",
+            ),
+            (
+                "when HTTP_REQUEST { OFFBOX::request svc payload async }",
+                "OFFBOX::request options must be cache KEY and/or blocking TIMEOUT",
+            ),
+        ):
+            invalid = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {"profiles": ["HTTP"], "irule": irule},
+                allow_irule_file=True,
+                allow_requests=False,
+                allow_packets=False,
+            )
+            try:
+                with self.subTest(message=message), self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError, message
+                ):
+                    invalid.fire_event("HTTP_REQUEST")
+            finally:
+                invalid.close()
+
     def test_tds_message_and_session_commands_model_direct_events(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -11881,6 +11990,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         self.assertIn("irule_conformance", tool_names)
         self.assertIn("irule_pcap_replay", tool_names)
         self.assertIn("irule_session_trace", tool_names)
+        self.assertIn("irule_catalog", tool_names)
         capability_payload = responses[4]["result"]["structuredContent"]
         self.assertEqual(capability_payload["chunk"]["offset"], 1498)
         self.assertLessEqual(capability_payload["chunk"]["count"], 2)
@@ -11919,6 +12029,24 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             filtered_payload = filtered["result"]["structuredContent"]
             self.assertEqual(filtered_payload["chunk"]["total"], 18)
             self.assertEqual(filtered_payload["commands"][0]["name"], "AUTH::abort")
+
+            catalog_response = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_catalog",
+                        "arguments": {"chunk_size": 1000},
+                    },
+                }
+            )
+            catalog_payload = catalog_response["result"]["structuredContent"]
+            self.assertEqual(catalog_payload["chunking"]["chunk_count"], 2)
+            self.assertEqual(
+                sum(chunk["count"] for chunk in catalog_payload["chunks"]),
+                catalog_payload["summary"]["command_count"],
+            )
 
             pcap = _pcap_bytes([
                 (4, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
@@ -12051,6 +12179,17 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             self.assertEqual(status, 200)
             self.assertGreaterEqual(conformance["commands"]["catalog_count"], 1400)
             self.assertGreater(conformance["events"]["packet_adapter_count"], 0)
+
+            status, catalog = request_json("/v1/catalog?chunk_size=1000")
+            self.assertEqual(status, 200)
+            self.assertEqual(catalog["chunking"], {"chunk_size": 1000, "chunk_count": 2})
+            self.assertEqual(
+                sum(chunk["count"] for chunk in catalog["chunks"]),
+                catalog["summary"]["command_count"],
+            )
+            self.assertEqual(
+                [chunk["offset"] for chunk in catalog["chunks"]], [0, 1000]
+            )
 
             status, created = request_json("/v1/sessions", "POST", config)
             session_id = created["session_id"]

@@ -1327,6 +1327,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "DHCPv6::reject",
     "DHCPv6::transaction_id",
     "REST::send",
+    "OFFBOX::request",
     "TDS::msg",
     "TDS::session",
     "QOE::disable",
@@ -2171,6 +2172,23 @@ def _catalog_event_names(namespace_registry: Any) -> list[str]:
     return sorted(set(namespace_registry.all_event_names()) | set(TMOS_17_5_EVENT_OVERRIDES))
 
 
+def _f5_catalog_command_names(command_registry: Any) -> list[str]:
+    """Return only F5 commands, excluding Tk specs loaded by the Tcl bridge.
+
+    The tcl-lsp test bridge may load Tk after an emulator session starts. Tk
+    specs use ``dialects=None`` and therefore appear in a later
+    ``command_names(dialect="f5-irules")`` query even though they are not part
+    of the F5 iRules catalog. Filter them by their explicit package marker so
+    catalog and conformance counts stay stable across process lifetime.
+    """
+    names: list[str] = []
+    for name in command_registry.command_names(dialect="f5-irules"):
+        spec = command_registry.get_any(name)
+        if spec is not None and getattr(spec, "required_package", None) != "Tk":
+            names.append(name)
+    return sorted(names)
+
+
 def _build_capabilities(
     root: Path,
     offset: int,
@@ -2205,8 +2223,7 @@ def _build_capabilities(
     except ImportError as exc:  # pragma: no cover - depends on external checkout
         raise EmulatorInputError(f"could not load tcl-lsp capability registry: {exc}") from exc
 
-    command_names = list(REGISTRY.command_names(dialect="f5-irules"))
-    command_names.sort()
+    command_names = _f5_catalog_command_names(REGISTRY)
     tcl_dir = root / "tooling" / "irule_test" / "tcl"
     handwritten = _proc_names(tcl_dir / "command_mocks.tcl")
     generated = _proc_names(tcl_dir / "_mock_stubs.tcl")
@@ -2362,6 +2379,64 @@ def _build_capabilities(
     }
 
 
+def _build_catalog(
+    root: Path,
+    chunk_size: int,
+    *,
+    namespace: str | None = None,
+    runtime_status: str | None = None,
+    target_status: str | None = None,
+) -> dict[str, Any]:
+    """Materialize the complete filtered command catalog as deterministic chunks."""
+    if not 1 <= chunk_size <= 1000:
+        raise EmulatorInputError("catalog chunk size must be between 1 and 1000")
+    filters = {
+        "namespace": namespace,
+        "runtime_status": runtime_status,
+        "target_status": target_status,
+    }
+    first = _build_capabilities(root, 0, chunk_size, **filters)
+    chunks: list[dict[str, Any]] = []
+    page = first
+    while True:
+        chunk = page["chunk"]
+        chunks.append(
+            {
+                "offset": chunk["offset"],
+                "limit": chunk["limit"],
+                "count": chunk["count"],
+                "has_more": chunk["has_more"],
+                "commands": page["commands"],
+            }
+        )
+        if not chunk["has_more"]:
+            break
+        if chunk["count"] <= 0:
+            raise EmulatorInputError("catalog chunk pagination made no progress")
+        page = _build_capabilities(
+            root,
+            chunk["offset"] + chunk["count"],
+            chunk_size,
+            **filters,
+        )
+    return {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "source": first["source"],
+        "filter": first["filter"],
+        "summary": first["summary"],
+        "chunking": {
+            "chunk_size": chunk_size,
+            "chunk_count": len(chunks),
+        },
+        "chunks": chunks,
+        "events": first["events"],
+        "profiles": first["profiles"],
+    }
+
+
 def _build_conformance(root: Path) -> dict[str, Any]:
     """Report static catalog coverage without pretending stubs are semantics."""
     registry, status_map = _runtime_status_map(root)
@@ -2491,7 +2566,7 @@ def _runtime_status_map(root: Path) -> tuple[Any, dict[str, str]]:
     handwritten = _proc_names(tcl_dir / "command_mocks.tcl")
     generated = _proc_names(tcl_dir / "_mock_stubs.tcl")
     status_map: dict[str, str] = {}
-    for name in REGISTRY.command_names(dialect="f5-irules"):
+    for name in _f5_catalog_command_names(REGISTRY):
         status_map[name] = _capability_status(_mock_proc_name(name), handwritten, generated)
     return REGISTRY, status_map
 
@@ -3575,6 +3650,90 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         },
         "requests": rest_requests,
     }
+    offbox_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::offbox_snapshot")
+    )
+    if len(offbox_parts) % 2:
+        raise EmulatorInputError("invalid OFFBOX state")
+    offbox_keys = offbox_parts[::2]
+    if len(set(offbox_keys)) != len(offbox_keys):
+        raise EmulatorInputError("duplicate OFFBOX state field")
+    offbox_values = dict(zip(offbox_keys, offbox_parts[1::2]))
+    expected_offbox_fields = {
+        "request_count", "last_service", "last_payload", "last_cache_key",
+        "last_blocking", "last_timeout", "requests",
+    }
+    if set(offbox_values) != expected_offbox_fields:
+        raise EmulatorInputError("invalid OFFBOX state fields")
+    if offbox_values["last_blocking"] not in {"0", "1"}:
+        raise EmulatorInputError("invalid OFFBOX blocking state")
+    try:
+        offbox_request_count = int(offbox_values["request_count"])
+        offbox_timeout = int(offbox_values["last_timeout"])
+    except (KeyError, TypeError, ValueError):
+        raise EmulatorInputError("invalid OFFBOX numeric state") from None
+    if offbox_request_count < 0 or offbox_timeout < 0:
+        raise EmulatorInputError("invalid OFFBOX numeric state")
+    offbox_requests: list[dict[str, Any]] = []
+    for raw_request in _split_tcl_list(offbox_values["requests"]):
+        request_parts = _split_tcl_list(raw_request)
+        if len(request_parts) != 6:
+            raise EmulatorInputError("invalid OFFBOX request history")
+        if request_parts[3] not in {"0", "1"}:
+            raise EmulatorInputError("invalid OFFBOX request blocking state")
+        try:
+            timeout = int(request_parts[4])
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid OFFBOX request timeout state") from None
+        if timeout < 0:
+            raise EmulatorInputError("invalid OFFBOX request timeout state")
+        offbox_requests.append(
+            {
+                "service": request_parts[0],
+                "payload": request_parts[1],
+                "cache_key": request_parts[2],
+                "blocking": request_parts[3] == "1",
+                "timeout": timeout,
+                "result": request_parts[5],
+            }
+        )
+    if len(offbox_requests) > 1024 or offbox_request_count < len(offbox_requests):
+        raise EmulatorInputError("invalid OFFBOX request history length")
+    if offbox_request_count == 0:
+        if any(
+            offbox_values[name]
+            for name in ("last_service", "last_payload", "last_cache_key")
+        ) or offbox_values["last_blocking"] != "0":
+            raise EmulatorInputError("invalid OFFBOX last request state")
+    elif not offbox_requests:
+        raise EmulatorInputError("invalid OFFBOX last request state")
+    else:
+        last_offbox_request = offbox_requests[-1]
+        if {
+            "service": last_offbox_request["service"],
+            "payload": last_offbox_request["payload"],
+            "cache_key": last_offbox_request["cache_key"],
+            "blocking": "1" if last_offbox_request["blocking"] else "0",
+            "timeout": str(last_offbox_request["timeout"]),
+        } != {
+            "service": offbox_values["last_service"],
+            "payload": offbox_values["last_payload"],
+            "cache_key": offbox_values["last_cache_key"],
+            "blocking": offbox_values["last_blocking"],
+            "timeout": offbox_values["last_timeout"],
+        }:
+            raise EmulatorInputError("invalid OFFBOX last request state")
+    offbox = {
+        "request_count": offbox_request_count,
+        "last": {
+            "service": offbox_values["last_service"],
+            "payload": offbox_values["last_payload"],
+            "cache_key": offbox_values["last_cache_key"],
+            "blocking": offbox_values["last_blocking"] == "1",
+            "timeout": offbox_timeout,
+        },
+        "requests": offbox_requests,
+    }
     tds_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::tds_snapshot"))
     if len(tds_parts) % 2:
         raise EmulatorInputError("invalid TDS state")
@@ -4474,6 +4633,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "sipalg": sipalg,
         "feature_controls": feature_controls,
         "rest": rest,
+        "offbox": offbox,
         "tds": tds,
         "qoe": qoe,
         "hsl_messages": hsl_messages,
@@ -12077,6 +12237,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::sdp_reset_connection")
                 session.eval_tcl("::itest::semantic::dhcp_reset_connection")
                 session.eval_tcl("::itest::semantic::tds_reset_connection")
+                session.eval_tcl("::itest::semantic::offbox_reset_connection")
                 session.eval_tcl("::itest::semantic::qoe_reset_connection")
                 session.eval_tcl("::itest::semantic::ike_reset_event")
                 session.eval_tcl("::itest::semantic::ftp_reset_connection")
@@ -12760,6 +12921,7 @@ class EmulatorSession:
                 "sipalg": semantic_snapshot["sipalg"],
                 "feature_controls": semantic_snapshot["feature_controls"],
                 "rest": semantic_snapshot["rest"],
+                "offbox": semantic_snapshot["offbox"],
                 "tds": semantic_snapshot["tds"],
                 "qoe": semantic_snapshot["qoe"],
             },
@@ -16238,6 +16400,25 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_catalog",
+                "title": "Export the iRule catalog",
+                "description": "Materialize the complete pinned BIG-IP 17.5 command catalog as deterministic bounded chunks.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "chunk_size": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 250},
+                        "namespace": {"type": "string", "minLength": 1},
+                        "runtime_status": {
+                            "type": "string",
+                            "enum": sorted(RUNTIME_STATUS_VALUES),
+                        },
+                        "target_status": {
+                            "type": "string",
+                            "enum": sorted(TARGET_STATUS_VALUES),
+                        },
+                    }
+                ),
+            },
+            {
                 "name": "irule_conformance",
                 "title": "Report catalog conformance",
                 "description": "Report static 17.5 catalog coverage for runtime command handlers and packet-to-event adapters.",
@@ -16403,6 +16584,22 @@ class McpProtocolServer:
             return self._tool_success(
                 _build_capabilities(self._root, offset, limit, **filters)
             )
+
+        if name == "irule_catalog":
+            unknown = sorted(
+                set(args) - {"chunk_size", "namespace", "runtime_status", "target_status"}
+            )
+            if unknown:
+                raise McpProtocolError(-32602, f"unsupported irule_catalog field(s): {', '.join(unknown)}")
+            chunk_size = args.get("chunk_size", 250)
+            if isinstance(chunk_size, bool) or not isinstance(chunk_size, int):
+                raise McpProtocolError(-32602, "catalog chunk size must be an integer")
+            filters = {
+                field: args[field]
+                for field in ("namespace", "runtime_status", "target_status")
+                if field in args
+            }
+            return self._tool_success(_build_catalog(self._root, chunk_size, **filters))
 
         if name == "irule_conformance":
             if args:
@@ -16827,6 +17024,21 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
             if parsed.path == "/healthz":
                 _json_response(self, 200, {"status": "ok", "profile": "tmos-17.5"})
                 return
+            if parsed.path == "/v1/catalog":
+                query = parse_qs(parsed.query, strict_parsing=False)
+                try:
+                    chunk_size = int(query.get("chunk_size", ["250"])[0])
+                    filters = {
+                        field: query[field][0]
+                        for field in ("namespace", "runtime_status", "target_status")
+                        if field in query
+                    }
+                    payload = _build_catalog(root, chunk_size, **filters)
+                except (TypeError, ValueError, EmulatorInputError) as exc:
+                    _json_response(self, 400, {"status": "error", "error": str(exc)})
+                    return
+                _json_response(self, 200, payload)
+                return
             if parsed.path == "/v1/capabilities":
                 query = parse_qs(parsed.query, strict_parsing=False)
                 try:
@@ -17105,6 +17317,11 @@ def main(argv: list[str] | None = None) -> int:
         help="emit a chunk of the complete tcl-lsp iRule capability catalog",
     )
     mode.add_argument(
+        "--catalog",
+        action="store_true",
+        help="emit the complete catalog as a bounded-chunk manifest",
+    )
+    mode.add_argument(
         "--conformance",
         action="store_true",
         help="report static catalog-to-runtime and packet-event adapter coverage",
@@ -17140,17 +17357,29 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         root = _find_tcl_lsp_root(args.tcl_lsp_root)
-        if args.pcap and (args.serve or args.mcp or args.capabilities or args.conformance):
+        if args.pcap and (
+            args.serve or args.mcp or args.capabilities or args.catalog or args.conformance
+        ):
             raise EmulatorInputError(
                 "--pcap can only be used with one-shot scenario execution"
             )
+        if args.catalog and args.offset != 0:
+            raise EmulatorInputError("--offset cannot be used with --catalog")
         if args.serve:
             serve(root, args.host, args.port)
             return 0
         if args.mcp:
             serve_mcp(root)
             return 0
-        if args.capabilities:
+        if args.catalog:
+            response = _build_catalog(
+                root,
+                args.limit,
+                namespace=args.namespace,
+                runtime_status=args.runtime_status,
+                target_status=args.target_status,
+            )
+        elif args.capabilities:
             response = _build_capabilities(
                 root,
                 args.offset,
