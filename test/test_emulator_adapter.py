@@ -493,7 +493,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("SMTPS", "generated-stub"), queue_buckets)
         self.assertNotIn(("NTLM", "generated-stub"), queue_buckets)
         self.assertNotIn(("PROTOCOL_INSPECTION", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 253)
+        self.assertNotIn(("CLASSIFICATION", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 245)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1526,6 +1527,123 @@ when PROTOCOL_INSPECTION_MATCH {
                     "packets": [{
                         "protocol": "ntlm",
                         "payload": "x" * (2 * 1024 * 1024 + 1),
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_classification_packet_results_and_controls(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "CLASSIFICATION"],
+                "irule": """
+when CLIENT_ACCEPTED { CLASSIFICATION::enable }
+when CLASSIFICATION_DETECTED {
+    log local0. "app=[CLASSIFICATION::app] category=[CLASSIFICATION::category] protocol=[CLASSIFICATION::protocol] result=[CLASSIFICATION::result] urlcat=[CLASSIFICATION::urlcat] user=[CLASSIFICATION::username]"
+    CLASSIFICATION::disable
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "classification",
+                        "app": "streaming",
+                        "category": "media",
+                        "classification_protocol": "https",
+                        "result": ["streaming", "media"],
+                        "urlcat": "entertainment",
+                        "username": "alice",
+                        "payload": "classified request",
+                    },
+                    {
+                        "protocol": "classification",
+                        "app": "later",
+                        "detected": True,
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        detected_event = next(
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] == "CLASSIFICATION_DETECTED"
+        )
+        classification_state = detected_event["state"]["classification"]
+        self.assertEqual(classification_state["app"], "streaming")
+        self.assertEqual(classification_state["category"], "media")
+        self.assertEqual(classification_state["protocol"], "https")
+        self.assertEqual(classification_state["result"], '{"streaming" "media"}')
+        self.assertEqual(classification_state["urlcat"], "entertainment")
+        self.assertEqual(classification_state["username"], "alice")
+        self.assertEqual(classification_state["detected"], "1")
+        self.assertEqual(
+            result["trace"][0]["classification_result"],
+            '{"streaming" "media"}',
+        )
+        self.assertTrue(result["trace"][0]["disabled"])
+        self.assertEqual(result["trace"][1]["ignored"], "classification is disabled")
+
+        undetected = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "CLASSIFICATION"],
+                "irule": "when CLASSIFICATION_DETECTED { return }",
+                "packets": [{
+                    "protocol": "classification",
+                    "detected": False,
+                    "app": "not-used",
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            undetected["trace"][0]["ignored"],
+            "classification packet was not detected",
+        )
+        self.assertNotIn(
+            "CLASSIFICATION_DETECTED",
+            [event["event"] for event in undetected["trace"][0]["events"]],
+        )
+
+        gated = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": "when CLASSIFICATION_DETECTED { return }",
+                "packets": [{"protocol": "classification"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            gated["trace"][0]["ignored"],
+            "CLASSIFICATION profile is not attached",
+        )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "CLASSIFICATION packets must be client_to_server",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "CLASSIFICATION"],
+                    "irule": "when CLASSIFICATION_DETECTED { return }",
+                    "packets": [{
+                        "protocol": "classification",
+                        "direction": "server_to_client",
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "CLASSIFICATION result cannot contain empty strings",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "CLASSIFICATION"],
+                    "irule": "when CLASSIFICATION_DETECTED { return }",
+                    "packets": [{
+                        "protocol": "classification",
+                        "result": [""],
                     }],
                 },
                 tcl_lsp_root=self.tcl_lsp_root,

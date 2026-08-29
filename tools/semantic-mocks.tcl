@@ -603,6 +603,20 @@ namespace eval ::itest::semantic {
         variable payload_length 0
     }
 
+    namespace eval ::state::classification {
+        variable app ""
+        variable category ""
+        variable detected 1
+        variable disabled 0
+        variable enabled 1
+        variable payload ""
+        variable payload_length 0
+        variable protocol ""
+        variable result {}
+        variable urlcat ""
+        variable username ""
+    }
+
     namespace eval ::state::icap {
         variable headers {Host icap.example.net}
         variable method REQMOD
@@ -12010,6 +12024,83 @@ namespace eval ::itest::semantic {
         return $::state::protocol_inspection::ids
     }
 
+    proc classification_reset_connection {} {
+        foreach {name value} {
+            app ""
+            category ""
+            detected 1
+            disabled 0
+            enabled 1
+            payload ""
+            payload_length 0
+            protocol ""
+            result {}
+            urlcat ""
+            username ""
+        } {
+            set ::state::classification::$name $value
+        }
+    }
+
+    proc classification_prepare_event {} {}
+
+    proc _classification_require_detected {command_name} {
+        if {$::itest::current_event ne "CLASSIFICATION_DETECTED"} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc classification_field_command {field command_name args} {
+        _classification_require_detected $command_name
+        if {[llength $args] != 0} {
+            error "$command_name takes no arguments"
+        }
+        return [set ::state::classification::$field]
+    }
+
+    proc classification_toggle_command {command_name enabled args} {
+        if {[llength $args] != 0} {
+            error "$command_name takes no arguments"
+        }
+        set enabled_value [expr {$enabled ? 1 : 0}]
+        set ::state::classification::enabled $enabled_value
+        set ::state::classification::disabled [expr {!$enabled_value}]
+        ::itest::log_decision classification [expr {$enabled_value ? "enable" : "disable"}] 1
+        return ""
+    }
+
+    proc classification_app_command {args} {
+        return [classification_field_command app CLASSIFICATION::app {*}$args]
+    }
+
+    proc classification_category_command {args} {
+        return [classification_field_command category CLASSIFICATION::category {*}$args]
+    }
+
+    proc classification_disable_command {args} {
+        return [classification_toggle_command CLASSIFICATION::disable 0 {*}$args]
+    }
+
+    proc classification_enable_command {args} {
+        return [classification_toggle_command CLASSIFICATION::enable 1 {*}$args]
+    }
+
+    proc classification_protocol_command {args} {
+        return [classification_field_command protocol CLASSIFICATION::protocol {*}$args]
+    }
+
+    proc classification_result_command {args} {
+        return [classification_field_command result CLASSIFICATION::result {*}$args]
+    }
+
+    proc classification_urlcat_command {args} {
+        return [classification_field_command urlcat CLASSIFICATION::urlcat {*}$args]
+    }
+
+    proc classification_username_command {args} {
+        return [classification_field_command username CLASSIFICATION::username {*}$args]
+    }
+
     proc icap_reset_connection {} {
         set ::state::icap::headers [list Host icap.example.net]
         set ::state::icap::method REQMOD
@@ -16787,6 +16878,14 @@ foreach {name proc_name} {
     NTLM::enable ::itest::semantic::ntlm_enable_command
     PROTOCOL_INSPECTION::disable ::itest::semantic::protocol_inspection_disable_command
     PROTOCOL_INSPECTION::id ::itest::semantic::protocol_inspection_id_command
+    CLASSIFICATION::app ::itest::semantic::classification_app_command
+    CLASSIFICATION::category ::itest::semantic::classification_category_command
+    CLASSIFICATION::disable ::itest::semantic::classification_disable_command
+    CLASSIFICATION::enable ::itest::semantic::classification_enable_command
+    CLASSIFICATION::protocol ::itest::semantic::classification_protocol_command
+    CLASSIFICATION::result ::itest::semantic::classification_result_command
+    CLASSIFICATION::urlcat ::itest::semantic::classification_urlcat_command
+    CLASSIFICATION::username ::itest::semantic::classification_username_command
     ICAP::header ::itest::semantic::icap_header_command
     ICAP::method ::itest::semantic::icap_method_command
     ICAP::status ::itest::semantic::icap_status_command
