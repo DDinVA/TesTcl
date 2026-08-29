@@ -7,7 +7,7 @@ python_bin="$repo_root/.venv/bin/python"
 
 if [[ ! -x "$python_bin" ]]; then
   echo "TesTcl requires a uv-managed Python 3.13+ environment at $python_bin" >&2
-  echo "Create it with: uv venv --python 3.13 .venv" >&2
+  echo "Create it with: uv sync --python 3.13" >&2
   exit 2
 fi
 

@@ -19,6 +19,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from hpack import Encoder
+
+from tools.http2_wire import HTTP2_CLIENT_PREFACE, Http2ConnectionDecoder
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ADAPTER_PATH = ROOT / "tools" / "irule-emulator.py"
@@ -63,6 +67,15 @@ def _tls_client_hello_payload(host: str) -> bytes:
     )
     handshake = b"\x01" + len(body).to_bytes(3, "big") + body
     return b"\x16\x03\x03" + struct.pack("!H", len(handshake)) + handshake
+
+
+def _http2_frame(frame_type: int, flags: int, stream_id: int, payload: bytes = b"") -> bytes:
+    return (
+        len(payload).to_bytes(3, "big")
+        + bytes([frame_type, flags])
+        + (stream_id & 0x7FFF_FFFF).to_bytes(4, "big")
+        + payload
+    )
 
 
 def _raw_ipv4_udp_hex(
@@ -3711,6 +3724,145 @@ when HTTP_REQUEST {
                         "http2": {"version": 1},
                     }
                 ]
+            )
+
+    def test_http2_wire_frames_decode_hpack_and_drive_http_lifecycle(self) -> None:
+        request_block = Encoder().encode(
+            [
+                (":method", "POST"),
+                (":path", "/submit"),
+                (":scheme", "https"),
+                (":authority", "api.example.com"),
+                ("x-request", "one"),
+            ]
+        )
+        response_block = Encoder().encode(
+            [(":status", "201"), ("x-response", "created")]
+        )
+        split_at = max(1, len(request_block) // 2)
+        packets = [
+            {
+                "protocol": "http2",
+                "direction": "client_to_server",
+                "payload_hex": (
+                    HTTP2_CLIENT_PREFACE
+                    + _http2_frame(0x4, 0x0, 0)
+                    + _http2_frame(0x1, 0x0, 1, request_block[:split_at])
+                ).hex(),
+            },
+            {
+                "protocol": "http2",
+                "direction": "client_to_server",
+                "payload_hex": (
+                    _http2_frame(0x9, 0x4, 1, request_block[split_at:])
+                    + _http2_frame(0x0, 0x1, 1, b"request-body")
+                ).hex(),
+            },
+            {
+                "protocol": "http2",
+                "direction": "server_to_client",
+                "payload_hex": _http2_frame(0x1, 0x4, 1, response_block).hex(),
+            },
+            {
+                "protocol": "http2",
+                "direction": "server_to_client",
+                "payload_hex": _http2_frame(0x0, 0x1, 1, b"created-body").hex(),
+            },
+        ]
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST { log local0. "request=[HTTP2::header :authority] [HTTP::payload]" }
+when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
+""",
+                "packets": packets,
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(len(result["results"]), 1)
+        transaction = result["results"][0]
+        self.assertEqual(transaction["request"]["method"], "POST")
+        self.assertEqual(transaction["request"]["body"], "request-body")
+        self.assertEqual(transaction["request"]["headers"]["x-request"], "one")
+        self.assertEqual(transaction["response"]["status"], 201)
+        self.assertEqual(transaction["response"]["body"], "created-body")
+        self.assertTrue(any("request=api.example.com request-body" in log for log in transaction["logs"]))
+        self.assertTrue(any("response=201 created-body" in log for log in transaction["logs"]))
+        self.assertEqual(result["trace"][0]["http2_frames"][0]["frame_type"], "SETTINGS")
+        self.assertTrue(result["trace"][1]["http2_frames"][0]["continued"])
+
+    def test_http2_wire_frames_reject_oversized_frame_headers(self) -> None:
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "frame exceeds"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when HTTP_REQUEST { return }",
+                    "packets": [
+                        {
+                            "protocol": "http2",
+                            "direction": "client_to_server",
+                            "payload_hex": "100001000000000000",
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_http2_wire_decoder_enforces_frame_invariants(self) -> None:
+        request_block = Encoder().encode(
+            [(":method", "GET"), (":path", "/"), (":scheme", "https")]
+        )
+        priority_payload = (0).to_bytes(4, "big") + bytes([42]) + request_block
+        decoder = Http2ConnectionDecoder()
+        events = decoder.feed(
+            HTTP2_CLIENT_PREFACE + _http2_frame(0x1, 0x24, 1, priority_payload),
+            "client_to_server",
+        )
+        self.assertEqual(events[0]["priority"], 42)
+
+        decoder = Http2ConnectionDecoder()
+        duplicate_headers = Encoder().encode([("x-duplicate", "one"), ("x-duplicate", "two")])
+        events = decoder.feed(
+            HTTP2_CLIENT_PREFACE + _http2_frame(0x1, 0x5, 1, duplicate_headers),
+            "client_to_server",
+        )
+        self.assertEqual(events[0]["headers"]["x-duplicate"], "one,two")
+        self.assertEqual(len(events[0]["header_list"]), 2)
+
+        decoder = Http2ConnectionDecoder()
+        invalid_name_block = b"\x00\x08bad name\x01x"
+        with self.assertRaisesRegex(ValueError, "valid token"):
+            decoder.feed(
+                HTTP2_CLIENT_PREFACE + _http2_frame(0x1, 0x5, 1, invalid_name_block),
+                "client_to_server",
+            )
+
+        decoder = Http2ConnectionDecoder()
+        with self.assertRaisesRegex(ValueError, "CONTINUATION"):
+            decoder.feed(
+                HTTP2_CLIENT_PREFACE
+                + _http2_frame(0x1, 0x0, 1, request_block[:1])
+                + _http2_frame(0x0, 0x0, 1, b"bad"),
+                "client_to_server",
+            )
+
+        for frame_type, stream_id, payload, message in (
+            (0x0, 0, b"data", "DATA frame requires a stream"),
+            (0x1, 0, request_block, "HEADERS frame requires a stream"),
+        ):
+            decoder = Http2ConnectionDecoder()
+            with self.assertRaisesRegex(ValueError, message):
+                decoder.feed(
+                    HTTP2_CLIENT_PREFACE + _http2_frame(frame_type, 0x4, stream_id, payload),
+                    "client_to_server",
+                )
+
+        decoder = Http2ConnectionDecoder()
+        with self.assertRaisesRegex(ValueError, "SETTINGS"):
+            decoder.feed(
+                HTTP2_CLIENT_PREFACE + _http2_frame(0x4, 0x1, 0, b"\x00\x01\x00\x00\x00\x00"),
+                "client_to_server",
             )
 
     def test_http2_metadata_survives_structured_packet_request_flow(self) -> None:

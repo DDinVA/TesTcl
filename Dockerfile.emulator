@@ -11,8 +11,7 @@ ARG TCL_LSP_COMMIT=cad24955f16953c2443902efd83d9f7f95d9b648
 
 COPY --from=uv /uv /usr/local/bin/uv
 
-RUN uv venv --python /usr/local/bin/python /opt/venv \
-    && rm /usr/local/bin/uv
+RUN uv venv --python /usr/local/bin/python /opt/venv
 
 RUN apt-get update \
     && apt-get install --no-install-recommends --yes ca-certificates git tcl tk \
@@ -23,8 +22,13 @@ RUN apt-get update \
 
 COPY tools/irule-emulator.py /opt/testcl/tools/irule-emulator.py
 COPY tools/semantic-mocks.tcl /opt/testcl/tools/semantic-mocks.tcl
+COPY tools/http2_wire.py /opt/testcl/tools/http2_wire.py
+COPY requirements-emulator.txt /opt/testcl/requirements-emulator.txt
 COPY LICENSE /opt/testcl/LICENSE
 COPY THIRD_PARTY.md /opt/testcl/THIRD_PARTY.md
+
+RUN uv pip install --python /opt/venv/bin/python --requirement /opt/testcl/requirements-emulator.txt \
+    && rm -rf /root/.cache/uv /usr/local/bin/uv
 
 ENV TCL_LSP_ROOT=/opt/tcl-lsp \
     TCL_LSP_COMMIT=${TCL_LSP_COMMIT} \

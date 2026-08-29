@@ -17,7 +17,7 @@ Create the repo-local uv environment once, then point the adapter at a checkout
 of `tcl-lsp`:
 
 ```sh
-uv venv --python 3.13 .venv
+uv sync --python 3.13
 export TCL_LSP_ROOT=/path/to/tcl-lsp
 ./scripts/emulate-irule.sh <<'JSON'
 {
@@ -243,6 +243,30 @@ structured packet adapter: it models the HTTP upgrade and the eight WebSocket
 frame/data events, and the raw TCP/PCAP path decodes RFC 6455 frames after a
 successful upgrade. Compressed frames using unsupported RSV extensions are
 rejected; pcapng and IPv4 fragment handling remain outside this slice.
+HTTP/2 wire packets use `protocol: "http2"` and a lossless `payload_hex`
+field. The decoder accepts the client connection preface, frame boundaries
+split across packets, HEADERS plus CONTINUATION blocks, per-direction HPACK
+dynamic tables, DATA frames, SETTINGS, PRIORITY, and other control frames.
+Decoded request and response streams are joined by stream ID and then pass
+through the existing HTTP iRule lifecycle, including `HTTP2::*` state. Frame
+payloads are capped at 1 MiB, header blocks at 1 MiB, and header count at 128;
+malformed padding, stream-zero data/header frames, invalid continuation order,
+uppercase headers, duplicate pseudo-headers, and invalid HPACK fail closed.
+This is still a bounded transaction adapter, not a full HTTP/2 endpoint: it
+does not implement live flow-control negotiation, server push emission, or
+TCP/IPv4 wire detection of HTTP/2 without an explicit packet protocol.
+
+```json
+{
+  "profiles": ["TCP", "HTTP"],
+  "irule": "when HTTP_REQUEST { if {[HTTP2::active]} { log local0. [HTTP2::header :authority] } }",
+  "packets": [{
+    "protocol": "http2",
+    "direction": "client_to_server",
+    "payload_hex": "<HTTP/2 preface and frame bytes in hexadecimal>"
+  }]
+}
+```
 MQTT support is pinned to the 17.5-era MQTT 3.1.1 event model: structured
 `CONNECT`, `CONNACK`, `PUBLISH`, subscription, acknowledgement, ping, and
 disconnect packets can drive `MQTT_CLIENT_INGRESS`/`MQTT_SERVER_INGRESS`, while

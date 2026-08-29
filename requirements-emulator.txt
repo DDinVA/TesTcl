@@ -1,0 +1,2 @@
+# HPACK decoder used by the bounded HTTP/2 wire adapter.
+hpack==4.1.0

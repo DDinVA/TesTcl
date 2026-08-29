@@ -15,6 +15,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import math
@@ -30,6 +31,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
+
+
+try:
+    from http2_wire import Http2ConnectionDecoder, Http2DecodeError
+except ModuleNotFoundError:  # test modules load this script by absolute path
+    _http2_spec = importlib.util.spec_from_file_location(
+        "testcl_http2_wire", Path(__file__).with_name("http2_wire.py")
+    )
+    if _http2_spec is None or _http2_spec.loader is None:  # pragma: no cover
+        raise ImportError("could not load HTTP/2 wire decoder")
+    _http2_module = importlib.util.module_from_spec(_http2_spec)
+    sys.modules[_http2_spec.name] = _http2_module
+    _http2_spec.loader.exec_module(_http2_module)
+    Http2ConnectionDecoder = _http2_module.Http2ConnectionDecoder
+    Http2DecodeError = _http2_module.Http2DecodeError
 
 
 TMOS_VERSION = "17.5"
@@ -1715,7 +1731,7 @@ TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "wire"}
+PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -1765,6 +1781,9 @@ PACKET_PROTOCOL_FIELDS = {
         "response_headers",
         "response_body",
         "http2",
+    },
+    "http2": {
+        "payload_hex",
     },
     "dns": {
         "qname",
@@ -4740,6 +4759,24 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = _normalise_http2_state(
                     packet[field], f"packet {index} http2"
                 )
+            elif protocol == "http2" and field == "payload_hex":
+                value = _require_string(packet[field], f"packet {index} payload_hex")
+                if len(value) % 2:
+                    raise EmulatorInputError(
+                        f"packet {index} payload_hex must contain complete bytes"
+                    )
+                try:
+                    payload_bytes = bytes.fromhex(value)
+                except ValueError as exc:
+                    raise EmulatorInputError(
+                        f"packet {index} payload_hex must be hexadecimal"
+                    ) from exc
+                if len(payload_bytes) > 2 * 1024 * 1024:
+                    raise EmulatorInputError(
+                        f"packet {index} HTTP/2 payload exceeds 2097152 bytes"
+                    )
+                normalised[field] = payload_bytes.hex()
+                normalised["_http2_payload"] = payload_bytes
             elif field in {"fin", "masked"}:
                 normalised[field] = _packet_bool(packet[field], f"packet {index} {field}")
             elif protocol == "tls" and field in {"sni_required", "disabled"}:
@@ -4868,6 +4905,8 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
 
         if protocol == "tls" and "type" not in normalised:
             raise EmulatorInputError(f"packet {index} TLS packets require type")
+        if protocol == "http2" and "_http2_payload" not in normalised:
+            raise EmulatorInputError(f"packet {index} HTTP/2 packets require payload_hex")
         if protocol == "tls":
             client_types = {"client_hello", "client_cert", "handshake", "client_data"}
             server_types = {"server_hello", "server_cert", "server_handshake", "server_data"}
@@ -5505,6 +5544,8 @@ class EmulatorSession:
         self._server_connection_open = False
         self._tcp_buffers = {"client": "", "server": ""}
         self._packet_streams: dict[tuple[Any, ...], _TcpStream] = {}
+        self._http2_decoder: Http2ConnectionDecoder | None = None
+        self._http2_streams: dict[int, dict[str, Any]] = {}
         self._websocket_raw_active = False
         self._mqtt_raw_active = any(
             str(profile).upper() == "MQTT" for profile in self._profiles
@@ -5833,7 +5874,7 @@ class EmulatorSession:
         protocol = packet["protocol"]
         if protocol == "sip" and packet.get("transport", "tcp") == "udp":
             connection.update({"protocol": "17", "transport": "udp"})
-        elif protocol in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter", "mr"}:
+        elif protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr"}:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol in {"udp", "dns", "radius"}:
             connection.update({"protocol": "17", "transport": "udp"})
@@ -6279,9 +6320,120 @@ class EmulatorSession:
             )
         return emissions
 
+    def _decode_http2_packet(self, packet: dict[str, Any]) -> list[dict[str, Any]]:
+        if self._http2_decoder is None:
+            try:
+                self._http2_decoder = Http2ConnectionDecoder()
+            except Http2DecodeError as exc:
+                raise EmulatorInputError(str(exc)) from exc
+        payload = packet.get("_http2_payload", b"")
+        try:
+            return self._http2_decoder.feed(payload, packet["direction"])
+        except Http2DecodeError as exc:
+            raise EmulatorInputError(f"invalid HTTP/2 packet: {exc}") from exc
+
+    @staticmethod
+    def _http2_trace_event(event: dict[str, Any]) -> dict[str, Any]:
+        result = {key: value for key, value in event.items() if key != "data"}
+        data = event.get("data")
+        if isinstance(data, (bytes, bytearray)):
+            result["payload_hex"] = bytes(data).hex()
+            result["byte_length"] = len(data)
+        return result
+
+    def _consume_http2_event(
+        self, session: Any, event: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        stream_id = int(event["stream_id"])
+        if stream_id == 0:
+            return None
+        context = self._http2_streams.setdefault(
+            stream_id,
+            {
+                "request_headers": None,
+                "request_body": bytearray(),
+                "request_end": False,
+                "response_headers": None,
+                "response_body": bytearray(),
+                "response_end": False,
+                "priority": 0,
+            },
+        )
+        direction = event["direction"]
+        if event["kind"] == "headers":
+            pseudo_headers = dict(event["pseudo_headers"])
+            if direction == "client_to_server":
+                if context["request_headers"] is not None:
+                    raise EmulatorInputError(
+                        f"HTTP/2 stream {stream_id} has duplicate request headers"
+                    )
+                if ":method" not in pseudo_headers or ":path" not in pseudo_headers:
+                    raise EmulatorInputError(
+                        f"HTTP/2 request stream {stream_id} is missing :method or :path"
+                    )
+                context["request_headers"] = {
+                    "method": pseudo_headers[":method"],
+                    "uri": pseudo_headers[":path"],
+                    "host": pseudo_headers.get(":authority", ""),
+                    "headers": dict(event["headers"]),
+                }
+                context["request_pseudo_headers"] = pseudo_headers
+                context["request_end"] = bool(event["end_stream"])
+                context["priority"] = int(event.get("priority", 0))
+            else:
+                if context["response_headers"] is not None:
+                    raise EmulatorInputError(
+                        f"HTTP/2 stream {stream_id} has duplicate response headers"
+                    )
+                status = pseudo_headers.get(":status")
+                if status is None or not status.isdigit() or not 100 <= int(status) <= 999:
+                    raise EmulatorInputError(
+                        f"HTTP/2 response stream {stream_id} has an invalid :status"
+                    )
+                context["response_headers"] = {
+                    "status": int(status),
+                    "headers": dict(event["headers"]),
+                }
+                context["response_end"] = bool(event["end_stream"])
+                context["response_pseudo_headers"] = pseudo_headers
+        elif event["kind"] == "data":
+            if direction == "client_to_server":
+                if context["request_headers"] is None:
+                    raise EmulatorInputError(
+                        f"HTTP/2 DATA arrived before request headers on stream {stream_id}"
+                    )
+                context["request_body"].extend(event["data"])
+                context["request_end"] = bool(event["end_stream"])
+            else:
+                if context["response_headers"] is None:
+                    raise EmulatorInputError(
+                        f"HTTP/2 DATA arrived before response headers on stream {stream_id}"
+                    )
+                context["response_body"].extend(event["data"])
+                context["response_end"] = bool(event["end_stream"])
+        if not context["request_end"] or not context["response_end"]:
+            return None
+        request = dict(context["request_headers"])
+        request["body"] = _decode_wire_text(bytes(context["request_body"]))
+        request["response_status"] = context["response_headers"]["status"]
+        request["response_headers"] = context["response_headers"]["headers"]
+        request["response_body"] = _decode_wire_text(bytes(context["response_body"]))
+        request["http2"] = {
+            "active": True,
+            "version": 2,
+            "stream_id": stream_id,
+            "stream_priority": context["priority"],
+            "concurrency": len(self._http2_streams),
+            "requests": self._connection_request_number + 1,
+            "pseudo_headers": context["request_pseudo_headers"],
+        }
+        result = self._run_request_on_worker(session, request)
+        self._http2_streams.pop(stream_id, None)
+        return result
+
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
-        if packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter", "mr", "gtp"}:
+        if packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp"}:
             return
         source = packet["source"]
         destination = packet["destination"]
@@ -6301,7 +6453,7 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http", "websocket", "mqtt", "sip", "diameter", "mr", "gtp"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
@@ -6326,6 +6478,8 @@ class EmulatorSession:
         session.eval_tcl("set ::orch::_connection_active 0")
         session.eval_tcl("::state::reset_connection_state")
         self._packet_streams.clear()
+        self._http2_decoder = None
+        self._http2_streams.clear()
         self._tcp_buffers = {"client": "", "server": ""}
         self._websocket_raw_active = False
         self._connection_open = False
@@ -6969,6 +7123,21 @@ class EmulatorSession:
                 packet.pop("_wire_payload", None)
             protocol = packet["protocol"]
             direction = packet["direction"]
+            if protocol == "http2":
+                self._activate_packet_connection(session, packet, entry["events"])
+                frame_events = self._decode_http2_packet(packet)
+                entry["http2_frames"] = [
+                    self._http2_trace_event(frame_event) for frame_event in frame_events
+                ]
+                for frame_event in frame_events:
+                    transaction = self._consume_http2_event(session, frame_event)
+                    if transaction is not None:
+                        entry.setdefault("http_results", []).append(transaction)
+                        entry.setdefault("http_result", transaction)
+                        http_results.append(transaction)
+                        if transaction.get("http2", {}).get("disconnected") == "1":
+                            self._close_packet_connection(session)
+                continue
             if protocol == "http":
                 self._activate_packet_connection(session, packet, entry["events"])
                 if direction == "client_to_server":

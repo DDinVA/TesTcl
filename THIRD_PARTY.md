@@ -10,3 +10,7 @@ its `LICENSE` and `DUAL-LICENSING.md` files for the complete terms. A build or
 deployment that distributes the emulator container must review and satisfy
 those terms, or obtain an appropriate commercial license from the upstream
 maintainer.
+
+The wire-level HTTP/2 adapter uses `hpack==4.1.0`, licensed under the **MIT**
+license. Its source distribution and license metadata are installed into the
+container environment by the pinned dependency installation.
