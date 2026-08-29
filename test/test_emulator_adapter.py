@@ -4043,6 +4043,123 @@ when MQTT_CLIENT_SHUTDOWN { log local0. shutdown }
         self.assertEqual(result["trace"][3]["protocol"], "mqtt")
         self.assertEqual(result["trace"][4]["protocol"], "tcp")
 
+    def test_mqtt_message_mutation_response_and_insert_emissions(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["MQTT"],
+                "irule": """
+when MQTT_CLIENT_INGRESS {
+    if {[MQTT::type] eq "CONNECT"} {
+        MQTT::will topic /devices/will
+        MQTT::will message offline
+        MQTT::will qos 1
+        MQTT::will retain 1
+        MQTT::insert after type PINGREQ
+        MQTT::respond type CONNACK return_code 5
+    }
+    if {[MQTT::type] eq "PUBLISH"} {
+        MQTT::replace type PUBLISH topic rewritten payload changed qos 1 packet_id 7 dup 1 retain 1
+    }
+    if {[MQTT::type] eq "SUBSCRIBE"} {
+        MQTT::replace type SUBSCRIBE packet_id 9 topic_list {{devices/# 1} {alerts 0}}
+    }
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "mqtt",
+                        "type": "CONNECT",
+                        "direction": "client_to_server",
+                        "client_id": "device-1",
+                        "username": "alice",
+                        "password": "secret",
+                    },
+                    {
+                        "protocol": "mqtt",
+                        "type": "PUBLISH",
+                        "direction": "client_to_server",
+                        "topic": "devices/input",
+                        "payload": "online",
+                        "qos": 0,
+                    },
+                    {
+                        "protocol": "mqtt",
+                        "type": "SUBSCRIBE",
+                        "direction": "client_to_server",
+                        "packet_id": 2,
+                        "topic_list": [["devices/#", 0]],
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        connect_event = result["trace"][0]["events"][-1]
+        self.assertEqual(connect_event["event"], "MQTT_CLIENT_INGRESS")
+        self.assertEqual(connect_event["forwarded"]["to"], "server")
+        self.assertEqual(connect_event["forwarded"]["packet"]["will_flag"], "1")
+        self.assertEqual(connect_event["forwarded"]["packet"]["will_qos"], "1")
+        self.assertEqual(connect_event["forwarded"]["packet"]["will_retain"], "1")
+        self.assertEqual(connect_event["forwarded"]["packet"]["username_flag"], "1")
+        self.assertEqual(connect_event["forwarded"]["packet"]["password_flag"], "1")
+        self.assertEqual(connect_event["emissions"][0]["kind"], "insert")
+        self.assertEqual(connect_event["emissions"][0]["position"], "after")
+        self.assertEqual(connect_event["emissions"][0]["to"], "server")
+        self.assertEqual(connect_event["emissions"][0]["packet"]["type"], "PINGREQ")
+        self.assertEqual(connect_event["emissions"][1]["kind"], "response")
+        self.assertEqual(connect_event["emissions"][1]["to"], "client")
+        self.assertEqual(connect_event["emissions"][1]["packet"]["return_code"], "5")
+
+        publish_event = result["trace"][1]["events"][0]
+        self.assertEqual(publish_event["forwarded"]["packet"]["topic"], "rewritten")
+        self.assertEqual(publish_event["forwarded"]["packet"]["payload"], "changed")
+        self.assertEqual(publish_event["forwarded"]["packet"]["qos"], "1")
+        self.assertEqual(publish_event["forwarded"]["packet"]["packet_id"], "7")
+        self.assertEqual(publish_event["forwarded"]["packet"]["dup"], "1")
+        self.assertEqual(publish_event["forwarded"]["packet"]["retain"], "1")
+
+        subscribe_event = result["trace"][2]["events"][0]
+        self.assertEqual(
+            subscribe_event["forwarded"]["packet"]["topic_list"],
+            [["devices/#", "1"], ["alerts", "0"]],
+        )
+        self.assertEqual(subscribe_event["forwarded"]["packet"]["packet_id"], "9")
+
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in ("MQTT::insert", "MQTT::replace", "MQTT::respond", "MQTT::will"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+    def test_mqtt_message_commands_reject_invalid_shapes_and_events(self) -> None:
+        for irule, message in (
+            (
+                "when MQTT_CLIENT_INGRESS { MQTT::replace type PUBLISH topic x payload y qos 1 }",
+                "packet_id",
+            ),
+            (
+                "when MQTT_CLIENT_INGRESS { MQTT::will topic x }",
+                "only for CONNECT",
+            ),
+        ):
+            with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["MQTT"],
+                        "irule": irule,
+                        "packets": [
+                            {
+                                "protocol": "mqtt",
+                                "type": "PUBLISH" if "will" in irule else "CONNECT",
+                                "direction": "client_to_server",
+                                "client_id": "device-1",
+                                "topic": "x",
+                                "payload": "y",
+                                "qos": 0,
+                            }
+                        ],
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+
     def test_sip_structured_lifecycle_headers_payload_and_response_rewrite(self) -> None:
         result = self.adapter.run_scenario(
             {

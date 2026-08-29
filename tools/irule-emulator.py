@@ -346,10 +346,13 @@ EVENT_STATE_FIELDS = {
         "keep_alive",
         "username",
         "password",
+        "username_flag",
+        "password_flag",
         "will_topic",
         "will_message",
         "will_qos",
         "will_retain",
+        "will_flag",
         "packet_id",
         "qos",
         "dup",
@@ -843,6 +846,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "URI::query",
     "MQTT::clean_session",
     "MQTT::client_id",
+    "MQTT::insert",
     "MQTT::collect",
     "MQTT::disable",
     "MQTT::disconnect",
@@ -862,10 +866,13 @@ SEMANTIC_MOCK_COMMANDS = {
     "MQTT::retain",
     "MQTT::return_code",
     "MQTT::return_code_list",
+    "MQTT::replace",
+    "MQTT::respond",
     "MQTT::session_present",
     "MQTT::topic",
     "MQTT::type",
     "MQTT::username",
+    "MQTT::will",
     "SIP::call_id",
     "SIP::discard",
     "SIP::from",
@@ -3904,10 +3911,13 @@ PACKET_PROTOCOL_FIELDS = {
         "keep_alive",
         "username",
         "password",
+        "username_flag",
+        "password_flag",
         "will_topic",
         "will_message",
         "will_qos",
         "will_retain",
+        "will_flag",
         "packet_id",
         "qos",
         "dup",
@@ -5617,6 +5627,9 @@ def _decode_mqtt_message(
                 "client_id": client_id,
                 "clean_session": bool(connect_flags & 0x02),
                 "keep_alive": keep_alive,
+                "will_flag": will_flag,
+                "username_flag": bool(connect_flags & 0x80),
+                "password_flag": bool(connect_flags & 0x40),
             }
         )
         if will_flag:
@@ -5743,6 +5756,64 @@ def _mqtt_encode_remaining_length(length: int) -> bytes:
             return bytes(encoded)
 
 
+def _mqtt_topic_list_from_state(value: Any) -> list[list[Any]]:
+    """Convert either JSON or Tcl-list MQTT topic-list state to wire fields."""
+    if isinstance(value, list):
+        raw: Any = value
+    elif isinstance(value, str):
+        try:
+            raw = json.loads(value)
+        except json.JSONDecodeError:
+            entries = _split_tcl_list(value)
+            raw = []
+            for entry in entries:
+                fields = _split_tcl_list(entry)
+                if fields:
+                    raw.append(fields)
+    else:
+        raw = []
+    if not isinstance(raw, list):
+        raise EmulatorInputError("MQTT topic_list state must be an array or Tcl list")
+    result: list[list[Any]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, (list, tuple)) or not item or not isinstance(item[0], str):
+            raise EmulatorInputError(f"MQTT topic_list entry {index} is invalid")
+        if len(item) > 2:
+            raise EmulatorInputError(f"MQTT topic_list entry {index} has too many fields")
+        result.append(list(item))
+    return result
+
+
+def _mqtt_packet_from_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Build an encoder packet from the post-handler Tcl MQTT snapshot."""
+    packet = {
+        field: value
+        for field, value in state.items()
+        if field not in {"message", "message_length", "payload_length", "topic_list"}
+    }
+    packet["payload"] = state.get("payload", "")
+    if "topic_list" in state:
+        packet["topic_list"] = _mqtt_topic_list_from_state(state["topic_list"])
+    return packet
+
+
+def _mqtt_tcl_dict(value: Any, field: str) -> dict[str, Any]:
+    parts = _split_tcl_list(value)
+    if len(parts) % 2:
+        raise EmulatorInputError(f"MQTT {field} state is not a key/value list")
+    return dict(zip(parts[::2], parts[1::2]))
+
+
+def _mqtt_public_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    public = dict(packet)
+    payload = public.get("payload")
+    if isinstance(payload, (bytes, bytearray)):
+        public["payload"] = _decode_wire_text(bytes(payload))
+    if "topic_list" in public:
+        public["topic_list"] = _mqtt_topic_list_from_state(public["topic_list"])
+    return public
+
+
 def _mqtt_int(packet: dict[str, Any], field: str, default: int = 0) -> int:
     value = packet.get(field, default)
     if isinstance(value, bool):
@@ -5815,16 +5886,28 @@ def _encode_mqtt_message(packet: dict[str, Any]) -> bytes:
         body.append(protocol_version)
         will_topic = packet.get("will_topic", "")
         will_message = packet.get("will_message", "")
-        has_will = "will_topic" in packet or "will_message" in packet
+        has_will = _mqtt_flag(
+            packet,
+            "will_flag",
+            "will_topic" in packet or "will_message" in packet,
+        )
         will_qos = _mqtt_int(packet, "will_qos", 0)
         if will_qos > 2:
             raise EmulatorInputError("MQTT will_qos must be 0, 1, or 2")
         connect_flags = (_mqtt_flag(packet, "clean_session", True) << 1)
         if has_will:
             connect_flags |= 0x04 | (will_qos << 3) | (_mqtt_flag(packet, "will_retain") << 5)
-        if "password" in packet:
+        has_username = _mqtt_flag(
+            packet, "username_flag", "username" in packet
+        )
+        has_password = _mqtt_flag(
+            packet, "password_flag", "password" in packet
+        )
+        if has_password and not has_username:
+            raise EmulatorInputError("MQTT CONNECT password requires username")
+        if has_password:
             connect_flags |= 0x40
-        if "username" in packet:
+        if has_username:
             connect_flags |= 0x80
         body.append(connect_flags)
         body += _mqtt_int(packet, "keep_alive", 60).to_bytes(2, "big")
@@ -5832,9 +5915,9 @@ def _encode_mqtt_message(packet: dict[str, Any]) -> bytes:
         if has_will:
             body += _mqtt_encode_utf8(will_topic, "will_topic")
             body += _mqtt_encode_utf8(will_message, "will_message")
-        if "username" in packet:
+        if has_username:
             body += _mqtt_encode_utf8(packet["username"], "username")
-        if "password" in packet:
+        if has_password:
             body += _mqtt_encode_utf8(packet["password"], "password")
     elif packet_type == "CONNACK":
         return_code = _mqtt_byte(packet, "return_code", 0)
@@ -7449,6 +7532,29 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 )
             if packet_type == "PUBLISH" and "topic" not in normalised:
                 raise EmulatorInputError(f"packet {index} MQTT PUBLISH packets require topic")
+            if packet_type == "CONNECT":
+                has_will_fields = any(
+                    field in normalised
+                    for field in ("will_topic", "will_message", "will_qos", "will_retain")
+                )
+                normalised["will_flag"] = _packet_bool(
+                    normalised.get("will_flag", has_will_fields),
+                    f"packet {index} MQTT will_flag",
+                )
+                has_username = "username" in normalised
+                has_password = "password" in normalised
+                normalised["username_flag"] = _packet_bool(
+                    normalised.get("username_flag", has_username),
+                    f"packet {index} MQTT username_flag",
+                )
+                normalised["password_flag"] = _packet_bool(
+                    normalised.get("password_flag", has_password),
+                    f"packet {index} MQTT password_flag",
+                )
+                if normalised["password_flag"] == "1" and normalised["username_flag"] != "1":
+                    raise EmulatorInputError(
+                        f"packet {index} MQTT password requires username"
+                    )
             if packet_type in {"CONNECT", "PUBLISH"} and "payload" not in normalised:
                 normalised.setdefault("payload", "")
             payload = normalised.get("payload", "")
@@ -8326,6 +8432,54 @@ class EmulatorSession:
     def run_request(self, request: dict[str, Any]) -> dict[str, Any]:
         return self._call(lambda session: self._run_request_on_worker(session, request))
 
+    @staticmethod
+    def _mqtt_event_outputs(
+        session: Any,
+        event_name: str,
+        mqtt_state: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        current_packet = _mqtt_packet_from_state(mqtt_state)
+        current_wire = _encode_mqtt_message(current_packet)
+        outgoing_side = "server" if event_name.startswith("MQTT_CLIENT_") else "client"
+        forwarded = {
+            "to": outgoing_side,
+            "packet": _mqtt_public_packet(current_packet),
+            "wire_hex": current_wire.hex(),
+        }
+        snapshot = _mqtt_tcl_dict(
+            session.eval_tcl("::itest::semantic::mqtt_emissions_snapshot"),
+            "emissions",
+        )
+        emissions: list[dict[str, Any]] = []
+        for raw_operation in _split_tcl_list(snapshot.get("operations", "")):
+            operation = _split_tcl_list(raw_operation)
+            if len(operation) == 2 and operation[0] == "response":
+                response = _mqtt_tcl_dict(operation[1], "response")
+                response_wire = _encode_mqtt_message(response)
+                emissions.append(
+                    {
+                        "kind": "response",
+                        "to": "client" if event_name.startswith("MQTT_CLIENT_") else "server",
+                        "packet": _mqtt_public_packet(response),
+                        "wire_hex": response_wire.hex(),
+                    }
+                )
+            elif len(operation) == 3 and operation[0] == "insert":
+                insertion_packet = _mqtt_tcl_dict(operation[2], "insertion")
+                insertion_wire = _encode_mqtt_message(insertion_packet)
+                emissions.append(
+                    {
+                        "kind": "insert",
+                        "position": operation[1],
+                        "to": outgoing_side,
+                        "packet": _mqtt_public_packet(insertion_packet),
+                        "wire_hex": insertion_wire.hex(),
+                    }
+                )
+            else:
+                raise EmulatorInputError("MQTT operation state is invalid")
+        return forwarded, emissions
+
     def _fire_event_on_worker(
         self,
         session: Any,
@@ -8411,6 +8565,22 @@ class EmulatorSession:
             else:
                 state_snapshot["dns"]["message_hex"] = dns_wire.hex()
                 state_snapshot["dns"]["message_length"] = str(len(dns_wire))
+        mqtt_forwarded: dict[str, Any] | None = None
+        mqtt_emissions: list[dict[str, Any]] = []
+        if (
+            event_name
+            in {
+                "MQTT_CLIENT_INGRESS",
+                "MQTT_SERVER_INGRESS",
+                "MQTT_CLIENT_DATA",
+                "MQTT_SERVER_DATA",
+            }
+            and "mqtt" in state
+            and state_snapshot.get("mqtt", {}).get("type")
+        ):
+            mqtt_forwarded, mqtt_emissions = self._mqtt_event_outputs(
+                session, event_name, state_snapshot["mqtt"]
+            )
         result = {
             "event": event_name,
             "fired": bool(event_result.fired),
@@ -8427,8 +8597,11 @@ class EmulatorSession:
             ],
             "semantic": {"psm": _semantic_snapshot(session)["psm"]},
         }
+        if mqtt_forwarded is not None:
+            result["forwarded"] = mqtt_forwarded
         emissions = self._tcp_emissions(session)
         emissions.extend(self._websocket_disconnect_emissions(session, event_name))
+        emissions.extend(mqtt_emissions)
         if emissions:
             result["emissions"] = emissions
         return result
@@ -9763,10 +9936,13 @@ class EmulatorSession:
                 "keep_alive",
                 "username",
                 "password",
+                "username_flag",
+                "password_flag",
                 "will_topic",
                 "will_message",
                 "will_qos",
                 "will_retain",
+                "will_flag",
                 "packet_id",
                 "qos",
                 "dup",

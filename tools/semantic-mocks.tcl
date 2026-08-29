@@ -43,6 +43,11 @@ namespace eval ::itest::semantic {
     variable mqtt_release_requested 0
     variable mqtt_dropped 0
     variable mqtt_disconnect_requested 0
+    variable mqtt_response_requested 0
+    variable mqtt_response_message {}
+    variable mqtt_insertions {}
+    variable mqtt_operations {}
+    variable mqtt_message_replaced 0
 
     variable dns_rr_counter 0
     variable dns_rr_objects [dict create]
@@ -491,10 +496,13 @@ namespace eval ::itest::semantic {
         variable keep_alive 60
         variable username ""
         variable password ""
+        variable username_flag 0
+        variable password_flag 0
         variable will_topic ""
         variable will_message ""
         variable will_qos 0
         variable will_retain 0
+        variable will_flag 0
         variable packet_id 0
         variable qos 0
         variable dup 0
@@ -789,12 +797,22 @@ namespace eval ::itest::semantic {
         variable mqtt_release_requested
         variable mqtt_dropped
         variable mqtt_disconnect_requested
+        variable mqtt_response_requested
+        variable mqtt_response_message
+        variable mqtt_insertions
+        variable mqtt_operations
+        variable mqtt_message_replaced
         set mqtt_enabled 1
         set mqtt_collection_requested 0
         set mqtt_collection_length 0
         set mqtt_release_requested 0
         set mqtt_dropped 0
         set mqtt_disconnect_requested 0
+        set mqtt_response_requested 0
+        set mqtt_response_message {}
+        set mqtt_insertions {}
+        set mqtt_operations {}
+        set mqtt_message_replaced 0
         namespace eval ::state::mqtt {
             variable type ""
             variable protocol_name "MQTT"
@@ -804,10 +822,13 @@ namespace eval ::itest::semantic {
             variable keep_alive 60
             variable username ""
             variable password ""
+            variable username_flag 0
+            variable password_flag 0
             variable will_topic ""
             variable will_message ""
             variable will_qos 0
             variable will_retain 0
+            variable will_flag 0
             variable packet_id 0
             variable qos 0
             variable dup 0
@@ -828,9 +849,19 @@ namespace eval ::itest::semantic {
         variable mqtt_release_requested
         variable mqtt_dropped
         variable mqtt_disconnect_requested
+        variable mqtt_response_requested
+        variable mqtt_response_message
+        variable mqtt_insertions
+        variable mqtt_operations
+        variable mqtt_message_replaced
         set mqtt_release_requested 0
         set mqtt_dropped 0
         set mqtt_disconnect_requested 0
+        set mqtt_response_requested 0
+        set mqtt_response_message {}
+        set mqtt_insertions {}
+        set mqtt_operations {}
+        set mqtt_message_replaced 0
     }
 
     proc _mqtt_require_event {allowed command_name} {
@@ -849,7 +880,14 @@ namespace eval ::itest::semantic {
     proc mqtt_flags_snapshot {} {
         variable mqtt_dropped
         variable mqtt_disconnect_requested
-        return [list dropped $mqtt_dropped disconnect $mqtt_disconnect_requested]
+        variable mqtt_response_requested
+        variable mqtt_message_replaced
+        return [list dropped $mqtt_dropped disconnect $mqtt_disconnect_requested responded $mqtt_response_requested replaced $mqtt_message_replaced]
+    }
+
+    proc mqtt_emissions_snapshot {} {
+        variable mqtt_operations
+        return [list operations $mqtt_operations]
     }
 
     proc ws_collection_snapshot {} {
@@ -1325,6 +1363,226 @@ namespace eval ::itest::semantic {
         set ::state::mqtt::payload $payload
         set ::state::mqtt::payload_length [::itest::cmd::_payload_bytelength $payload]
         ::itest::log_decision mqtt payload_$operation [lindex $args 1]
+        return ""
+    }
+
+    proc mqtt_validate_integer {value field minimum maximum} {
+        if {![string is integer -strict $value] || $value < $minimum || $value > $maximum} {
+            error "$field must be between $minimum and $maximum"
+        }
+        return $value
+    }
+
+    proc mqtt_validate_boolean {value field} {
+        if {$value ni {0 1 true false}} {
+            error "$field must be 0 or 1"
+        }
+        return [expr {$value in {1 true}}]
+    }
+
+    proc mqtt_dict_get_default {mapping key default} {
+        if {[dict exists $mapping $key]} {
+            return [dict get $mapping $key]
+        }
+        return $default
+    }
+
+    proc mqtt_validate_topic_list {value type} {
+        if {[catch {llength $value}]} {
+            error "MQTT $type topic_list must be a Tcl list"
+        }
+        if {[llength $value] == 0} {
+            error "MQTT $type topic_list must not be empty"
+        }
+        set result {}
+        foreach item $value {
+            set item_length [llength $item]
+            if {$item_length < 1 || ($type eq "SUBSCRIBE" && $item_length != 2) || ($type eq "UNSUBSCRIBE" && $item_length > 2)} {
+                error "MQTT $type topic_list entries have an invalid format"
+            }
+            set topic [lindex $item 0]
+            if {$topic eq ""} {
+                error "MQTT $type topic_list topics must not be empty"
+            }
+            if {$type eq "SUBSCRIBE"} {
+                set qos [mqtt_validate_integer [lindex $item 1] "MQTT $type topic QoS" 0 2]
+                lappend result [list $topic $qos]
+            } else {
+                lappend result [list $topic]
+            }
+        }
+        return $result
+    }
+
+    proc mqtt_parse_message {args} {
+        if {[llength $args] < 2 || [lindex $args 0] ne "type"} {
+            error "MQTT message requires type and its value"
+        }
+        set type [string toupper [lindex $args 1]]
+        set valid_types {CONNECT CONNACK PUBLISH PUBACK PUBREC PUBREL PUBCOMP SUBSCRIBE SUBACK UNSUBSCRIBE UNSUBACK PINGREQ PINGRESP DISCONNECT}
+        if {$type ni $valid_types} {
+            error "unsupported MQTT message type $type"
+        }
+        set rest [lrange $args 2 end]
+        if {[llength $rest] % 2} {
+            error "MQTT $type arguments must be field/value pairs"
+        }
+        set parsed [dict create type $type]
+        foreach {field value} $rest {
+            if {[dict exists $parsed $field]} {
+                error "MQTT $type field $field was specified more than once"
+            }
+            dict set parsed $field $value
+        }
+        set supplied_fields [dict keys $parsed]
+        switch -exact -- $type {
+            CONNECT {
+                set allowed {client_id keep_alive clean_session protocol_name protocol_version username password will_topic will_message will_qos will_retain}
+                if {![dict exists $parsed client_id]} { error "MQTT CONNECT requires client_id" }
+                set has_will [expr {
+                    [lsearch -exact $supplied_fields will_topic] >= 0 ||
+                    [lsearch -exact $supplied_fields will_message] >= 0 ||
+                    [lsearch -exact $supplied_fields will_qos] >= 0 ||
+                    [lsearch -exact $supplied_fields will_retain] >= 0
+                }]
+                dict set parsed keep_alive [mqtt_validate_integer [mqtt_dict_get_default $parsed keep_alive 60] "MQTT CONNECT keep_alive" 0 65535]
+                dict set parsed clean_session [mqtt_validate_boolean [mqtt_dict_get_default $parsed clean_session 1] "MQTT CONNECT clean_session"]
+                dict set parsed protocol_name [mqtt_dict_get_default $parsed protocol_name MQTT]
+                dict set parsed protocol_version [mqtt_validate_integer [mqtt_dict_get_default $parsed protocol_version 4] "MQTT CONNECT protocol_version" 0 255]
+                dict set parsed username [mqtt_dict_get_default $parsed username ""]
+                dict set parsed password [mqtt_dict_get_default $parsed password ""]
+                dict set parsed username_flag [expr {[lsearch -exact $supplied_fields username] >= 0}]
+                dict set parsed password_flag [expr {[lsearch -exact $supplied_fields password] >= 0}]
+                if {[dict get $parsed password_flag] && ![dict get $parsed username_flag]} {
+                    error "MQTT CONNECT password requires username"
+                }
+                dict set parsed will_topic [mqtt_dict_get_default $parsed will_topic ""]
+                dict set parsed will_message [mqtt_dict_get_default $parsed will_message ""]
+                dict set parsed will_qos [mqtt_validate_integer [mqtt_dict_get_default $parsed will_qos 0] "MQTT CONNECT will_qos" 0 2]
+                dict set parsed will_retain [mqtt_validate_boolean [mqtt_dict_get_default $parsed will_retain 0] "MQTT CONNECT will_retain"]
+                dict set parsed will_flag $has_will
+            }
+            CONNACK {
+                set allowed {return_code session_present}
+                if {![dict exists $parsed return_code]} { error "MQTT CONNACK requires return_code" }
+                dict set parsed return_code [mqtt_validate_integer [dict get $parsed return_code] "MQTT CONNACK return_code" 0 5]
+                dict set parsed session_present [mqtt_validate_boolean [mqtt_dict_get_default $parsed session_present 0] "MQTT CONNACK session_present"]
+            }
+            PUBLISH {
+                set allowed {topic payload qos packet_id dup retain}
+                foreach required {topic payload} { if {![dict exists $parsed $required]} { error "MQTT PUBLISH requires $required" } }
+                if {[dict get $parsed topic] eq ""} { error "MQTT PUBLISH topic must not be empty" }
+                dict set parsed qos [mqtt_validate_integer [mqtt_dict_get_default $parsed qos 0] "MQTT PUBLISH qos" 0 2]
+                dict set parsed dup [mqtt_validate_boolean [mqtt_dict_get_default $parsed dup 0] "MQTT PUBLISH dup"]
+                dict set parsed retain [mqtt_validate_boolean [mqtt_dict_get_default $parsed retain 0] "MQTT PUBLISH retain"]
+                if {[dict get $parsed qos] > 0} {
+                    if {![dict exists $parsed packet_id]} { error "MQTT PUBLISH QoS 1 or 2 requires packet_id" }
+                    dict set parsed packet_id [mqtt_validate_integer [dict get $parsed packet_id] "MQTT PUBLISH packet_id" 1 65535]
+                } elseif {[dict exists $parsed packet_id]} {
+                    error "MQTT PUBLISH QoS 0 must not specify packet_id"
+                }
+            }
+            PUBACK - PUBREC - PUBREL - PUBCOMP - UNSUBACK {
+                set allowed {packet_id}
+                if {[llength $rest] != 2 || ![dict exists $parsed packet_id]} { error "MQTT $type requires packet_id" }
+                dict set parsed packet_id [mqtt_validate_integer [dict get $parsed packet_id] "MQTT $type packet_id" 1 65535]
+            }
+            SUBSCRIBE - UNSUBSCRIBE {
+                set allowed {packet_id topic_list}
+                foreach required {packet_id topic_list} { if {![dict exists $parsed $required]} { error "MQTT $type requires $required" } }
+                dict set parsed packet_id [mqtt_validate_integer [dict get $parsed packet_id] "MQTT $type packet_id" 1 65535]
+                dict set parsed topic_list [mqtt_validate_topic_list [dict get $parsed topic_list] $type]
+            }
+            SUBACK {
+                set allowed {packet_id return_code_list}
+                foreach required {packet_id return_code_list} { if {![dict exists $parsed $required]} { error "MQTT SUBACK requires $required" } }
+                dict set parsed packet_id [mqtt_validate_integer [dict get $parsed packet_id] "MQTT SUBACK packet_id" 1 65535]
+                set codes [dict get $parsed return_code_list]
+                if {[catch {llength $codes}] || [llength $codes] == 0} { error "MQTT SUBACK return_code_list must not be empty" }
+                set normalized_codes {}
+                foreach code $codes {
+                    if {$code ni {0 1 2 128}} { error "MQTT SUBACK return codes must be 0, 1, 2, or 128" }
+                    lappend normalized_codes $code
+                }
+                dict set parsed return_code_list $normalized_codes
+            }
+            PINGREQ - PINGRESP - DISCONNECT {
+                set allowed {}
+            }
+        }
+        foreach field $supplied_fields {
+            if {$field ni [concat {type} $allowed]} {
+                error "MQTT $type does not accept field $field"
+            }
+        }
+        return $parsed
+    }
+
+    proc mqtt_apply_message {parsed} {
+        foreach {field value} {
+            type "" protocol_name MQTT protocol_version 4 client_id "" clean_session 1 keep_alive 60 username "" password ""
+            will_topic "" will_message "" will_qos 0 will_retain 0 will_flag 0 username_flag 0 password_flag 0 packet_id 0 qos 0 dup 0 retain 0 topic ""
+            payload "" payload_length 0 message "" message_length 0 return_code 0 return_code_list {} session_present 0 topic_list {}
+        } {
+            set ::state::mqtt::$field $value
+        }
+        foreach {field value} $parsed {
+            set ::state::mqtt::$field $value
+        }
+        set ::state::mqtt::payload_length [string bytelength $::state::mqtt::payload]
+        set ::itest::semantic::mqtt_message_replaced 1
+        ::itest::log_decision mqtt replace $::state::mqtt::type
+        return ""
+    }
+
+    proc mqtt_will_command {args} {
+        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::will
+        if {$::state::mqtt::type ne "CONNECT"} { error "MQTT::will is valid only for CONNECT messages" }
+        if {[llength $args] < 1 || [llength $args] > 2} { error "MQTT::will requires a field and optional value" }
+        set field [lindex $args 0]
+        if {$field ni {topic message qos retain}} { error "unsupported MQTT::will field $field" }
+        set state_field will_$field
+        if {[llength $args] == 1} { return [set ::state::mqtt::$state_field] }
+        set value [lindex $args 1]
+        switch -exact -- $field {
+            qos { set value [mqtt_validate_integer $value "MQTT::will qos" 0 2] }
+            retain { set value [mqtt_validate_boolean $value "MQTT::will retain"] }
+        }
+        set ::state::mqtt::$state_field $value
+        set ::state::mqtt::will_flag 1
+        ::itest::log_decision mqtt will_$field $value
+        return $value
+    }
+
+    proc mqtt_insert_command {args} {
+        variable mqtt_insertions
+        variable mqtt_operations
+        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::insert
+        if {[llength $args] < 3} { error "MQTT::insert requires before/after and a message" }
+        set position [lindex $args 0]
+        if {$position ni {before after}} { error "MQTT::insert position must be before or after" }
+        set parsed [mqtt_parse_message {*}[lrange $args 1 end]]
+        lappend mqtt_insertions [list $position $parsed]
+        lappend mqtt_operations [list insert $position $parsed]
+        ::itest::log_decision mqtt insert [list $position [dict get $parsed type]]
+        return ""
+    }
+
+    proc mqtt_replace_command {args} {
+        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::replace
+        mqtt_apply_message [mqtt_parse_message {*}$args]
+        return ""
+    }
+
+    proc mqtt_respond_command {args} {
+        variable mqtt_response_requested
+        variable mqtt_response_message
+        variable mqtt_operations
+        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::respond
+        set mqtt_response_message [mqtt_parse_message {*}$args]
+        set mqtt_response_requested 1
+        lappend mqtt_operations [list response $mqtt_response_message]
+        ::itest::log_decision mqtt respond [dict get $mqtt_response_message type]
         return ""
     }
 
@@ -12271,6 +12529,7 @@ foreach {name proc_name} {
     MQTT::keep_alive ::itest::cmd::mqtt_keep_alive
     MQTT::length ::itest::cmd::mqtt_length
     MQTT::message ::itest::cmd::mqtt_message
+    MQTT::insert ::itest::semantic::mqtt_insert_command
     MQTT::packet_id ::itest::cmd::mqtt_packet_id
     MQTT::password ::itest::cmd::mqtt_password
     MQTT::payload ::itest::cmd::mqtt_payload
@@ -12281,10 +12540,13 @@ foreach {name proc_name} {
     MQTT::retain ::itest::cmd::mqtt_retain
     MQTT::return_code ::itest::cmd::mqtt_return_code
     MQTT::return_code_list ::itest::cmd::mqtt_return_code_list
+    MQTT::replace ::itest::semantic::mqtt_replace_command
+    MQTT::respond ::itest::semantic::mqtt_respond_command
     MQTT::session_present ::itest::cmd::mqtt_session_present
     MQTT::topic ::itest::cmd::mqtt_topic
     MQTT::type ::itest::cmd::mqtt_type
     MQTT::username ::itest::cmd::mqtt_username
+    MQTT::will ::itest::semantic::mqtt_will_command
     SIP::call_id ::itest::semantic::sip_call_id_command
     SIP::discard ::itest::semantic::sip_discard_command
     SIP::from ::itest::semantic::sip_from_command

@@ -589,11 +589,19 @@ disconnect packets can drive `MQTT_CLIENT_INGRESS`/`MQTT_SERVER_INGRESS`, while
 collected payload. Raw MQTT-over-TCP payloads are decoded after bounded TCP
 reassembly, including messages split across segments and multiple messages in
 one segment. `MQTT::payload`, `MQTT::drop`, `MQTT::release`, and the common
-MQTT field getters/setters are semantic mocks; `MQTT::replace`, `respond`,
-`insert`, and `will` remain explicitly reported as generated-stub catalog
-entries. See the F5 [`MQTT`](https://clouddocs.f5.com/api/irules/MQTT.html),
+MQTT field getters/setters are semantic mocks. `MQTT::will` mutates CONNECT
+will fields; `MQTT::replace` rebuilds the current message; and `MQTT::respond`
+and `MQTT::insert` expose ordered, encoded wire emissions in each event result.
+The message commands validate the documented CONNECT, CONNACK, PUBLISH,
+subscription, acknowledgement, ping, and disconnect forms. Forwarded and
+emitted packets are deterministic adapter outputs, not live MQTT socket
+traffic. See the F5 [`MQTT`](https://clouddocs.f5.com/api/irules/MQTT.html),
 [`MQTT::collect`](https://clouddocs.f5.com/api/irules/MQTT__collect.html), and
-[`MQTT::payload`](https://clouddocs.f5.com/api/irules/MQTT__payload.html)
+[`MQTT::payload`](https://clouddocs.f5.com/api/irules/MQTT__payload.html),
+[`MQTT::insert`](https://clouddocs.f5.com/api/irules/MQTT__insert.html),
+[`MQTT::replace`](https://clouddocs.f5.com/api/irules/MQTT__replace.html),
+[`MQTT::respond`](https://clouddocs.f5.com/api/irules/MQTT__respond.html), and
+[`MQTT::will`](https://clouddocs.f5.com/api/irules/MQTT__will.html)
 references for the production command/event contract.
 SIP support is pinned to the 17.5 SIP message-event model. A structured SIP
 packet uses `protocol: "sip"`, `type: "request"` or `type: "response"`, and
