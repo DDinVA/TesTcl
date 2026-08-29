@@ -614,6 +614,27 @@ EVENT_STATE_FIELDS = {
         "response",
         "response_length",
     },
+    "sctp": {
+        "payload",
+        "payload_length",
+        "client_port",
+        "server_port",
+        "local_port",
+        "remote_port",
+        "mss",
+        "ppi",
+        "collect_requested",
+        "collect_length",
+        "released",
+        "released_length",
+        "responded",
+        "response",
+        "response_length",
+        "rto_initial",
+        "rto_max",
+        "rto_min",
+        "sack_timeout",
+    },
     "tcp": {
         "abc",
         "analytics",
@@ -706,6 +727,7 @@ EVENT_STATE_NAMESPACES = {
     "mr": "::state::mr",
     "gtp": "::state::gtp",
     "udp": "::state::udp",
+    "sctp": "::state::sctp",
     "tcp": "::state::tcp",
     "rtsp": "::state::rtsp",
     "cache": "::state::cache",
@@ -793,6 +815,20 @@ SEMANTIC_MOCK_COMMANDS = {
     "DATAGRAM::l2",
     "DATAGRAM::tcp",
     "DATAGRAM::udp",
+    "SCTP::client_port",
+    "SCTP::collect",
+    "SCTP::local_port",
+    "SCTP::mss",
+    "SCTP::payload",
+    "SCTP::ppi",
+    "SCTP::release",
+    "SCTP::respond",
+    "SCTP::remote_port",
+    "SCTP::rto_initial",
+    "SCTP::rto_max",
+    "SCTP::rto_min",
+    "SCTP::sack_timeout",
+    "SCTP::server_port",
     "CRYPTO::hash",
     "CRYPTO::sign",
     "CRYPTO::verify",
@@ -4924,7 +4960,7 @@ TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "wire"}
+PACKET_PROTOCOLS = {"tcp", "udp", "sctp", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -4950,6 +4986,15 @@ PACKET_PROTOCOL_FIELDS = {
         "payload_hex",
     },
     "udp": set(),
+    "sctp": {
+        "payload_hex",
+        "ppi",
+        "mss",
+        "rto_initial",
+        "rto_max",
+        "rto_min",
+        "sack_timeout",
+    },
     "tls": {"type"}
     | (EVENT_STATE_FIELDS["tls_client"] | EVENT_STATE_FIELDS["tls_server"])
     - {"handshake_done"},
@@ -8360,9 +8405,9 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             raise EmulatorInputError(
                 f"unsupported packet {index} field(s): {', '.join(unknown)}"
             )
-        if protocol == "tcp" and "payload" in packet and "payload_hex" in packet:
+        if protocol in {"tcp", "sctp"} and "payload" in packet and "payload_hex" in packet:
             raise EmulatorInputError(
-                f"packet {index} TCP packets must use payload or payload_hex, not both"
+                f"packet {index} {protocol.upper()} packets must use payload or payload_hex, not both"
             )
 
         normalised: dict[str, Any] = {
@@ -8473,7 +8518,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = _normalise_http2_state(
                     packet[field], f"packet {index} http2"
                 )
-            elif protocol == "tcp" and field == "payload_hex":
+            elif protocol in {"tcp", "sctp"} and field == "payload_hex":
                 value = _require_string(packet[field], f"packet {index} payload_hex")
                 if len(value) % 2:
                     raise EmulatorInputError(
@@ -8487,10 +8532,28 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     ) from exc
                 if len(payload_bytes) > STREAM_MAX_BYTES:
                     raise EmulatorInputError(
-                        f"packet {index} TCP payload exceeds {STREAM_MAX_BYTES} bytes"
+                        f"packet {index} {protocol.upper()} payload exceeds {STREAM_MAX_BYTES} bytes"
                     )
                 normalised[field] = payload_bytes.hex()
                 normalised["_wire_payload"] = payload_bytes
+            elif protocol == "sctp" and field in {
+                "ppi",
+                "mss",
+                "rto_initial",
+                "rto_max",
+                "rto_min",
+                "sack_timeout",
+            }:
+                value = packet[field]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise EmulatorInputError(
+                        f"packet {index} {field} must be a non-negative integer"
+                    )
+                if field == "ppi" and value > 65535:
+                    raise EmulatorInputError(
+                        f"packet {index} ppi must be an integer from 0 to 65535"
+                    )
+                normalised[field] = value
             elif protocol == "http2" and field == "payload_hex":
                 value = _require_string(packet[field], f"packet {index} payload_hex")
                 if len(value) % 2:
@@ -9419,6 +9482,7 @@ class EmulatorSession:
         self._server_connection_id = 0
         self._server_connection_detached = False
         self._tcp_buffers = {"client": "", "server": ""}
+        self._sctp_buffers = {"client": b"", "server": b""}
         self._ssl_buffers = {"client": b"", "server": b""}
         self._packet_streams: dict[tuple[Any, ...], _TcpStream] = {}
         self._http2_decoder: Http2ConnectionDecoder | None = None
@@ -9476,6 +9540,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::crypto_reset_connection")
                 session.eval_tcl("::itest::semantic::adapt_reset_connection")
                 session.eval_tcl("::itest::semantic::datagram_reset_connection")
+                session.eval_tcl("::itest::semantic::sctp_reset_connection")
                 session.eval_tcl("::itest::semantic::profile_settings_clear")
                 for profile_name, attributes in self._profile_settings.items():
                     flattened = [
@@ -9517,6 +9582,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::crypto_reset_connection")
                 session.eval_tcl("::itest::semantic::adapt_reset_connection")
                 session.eval_tcl("::itest::semantic::datagram_reset_connection")
+                session.eval_tcl("::itest::semantic::sctp_reset_connection")
                 session.eval_tcl("::itest::semantic::flow_reset_connection")
                 if any(str(profile).upper() == "REWRITE" for profile in self._profiles):
                     session.eval_tcl("::itest::semantic::rewrite_install_flow_hooks")
@@ -9620,6 +9686,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::compression_reset_connection")
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
             session.eval_tcl("::itest::semantic::datagram_reset_connection")
+            session.eval_tcl("::itest::semantic::sctp_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -9809,6 +9876,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::crypto_reset_connection")
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
             session.eval_tcl("::itest::semantic::datagram_reset_connection")
+            session.eval_tcl("::itest::semantic::sctp_reset_connection")
             self._connection_open = False
             self._server_connection_open = False
             self._server_connection_detached = False
@@ -9835,6 +9903,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::crypto_reset_connection")
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
             session.eval_tcl("::itest::semantic::datagram_reset_connection")
+            session.eval_tcl("::itest::semantic::sctp_reset_connection")
             self._connection_open = False
             self._server_connection_open = False
             self._server_connection_detached = False
@@ -9901,6 +9970,8 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::tcp_clear_event_state")
         if "udp" in state:
             session.eval_tcl("::itest::semantic::udp_prepare_event")
+        if "sctp" in state:
+            session.eval_tcl("::itest::semantic::sctp_prepare_event")
         session.eval_tcl("::itest::semantic::datagram_prepare_event")
         if "rtsp" in state:
             session.eval_tcl("::itest::semantic::rtsp_prepare_event")
@@ -9925,7 +9996,7 @@ class EmulatorSession:
         def install_state_layer(layer: str, values: dict[str, str]) -> None:
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "rtsp", "cache", "datagram", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "sctp", "rtsp", "cache", "datagram", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -10073,6 +10144,8 @@ class EmulatorSession:
             connection.update({"protocol": "17", "transport": "udp"})
         elif protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "rtsp"}:
             connection.update({"protocol": "6", "transport": "tcp"})
+        elif protocol == "sctp":
+            connection.update({"protocol": "132", "transport": "sctp"})
         elif protocol in {"udp", "dns", "radius"}:
             connection.update({"protocol": "17", "transport": "udp"})
         elif protocol == "gtp":
@@ -10119,6 +10192,8 @@ class EmulatorSession:
                 "mr",
                 "rtsp",
             }
+            else 132
+            if packet["protocol"] == "sctp"
             else 0
         )
         payload = packet.get("_wire_payload")
@@ -10214,6 +10289,33 @@ class EmulatorSession:
                 "remote_port": str(remote.get("port", 0)),
             }
             state["udp"] = udp_state
+        elif protocol == "sctp":
+            source = packet.get("source", {})
+            destination = packet.get("destination", {})
+            if direction == "client_to_server":
+                client, server = source, destination
+                local, remote = destination, source
+            else:
+                client, server = destination, source
+                local, remote = source, destination
+            payload = packet.get("_wire_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                payload = str(packet.get("payload", "")).encode("utf-8")
+            sctp_state: dict[str, Any] = {
+                "payload": bytes(payload),
+                "payload_length": str(len(payload)),
+                "client_port": str(client.get("port", 0)),
+                "server_port": str(server.get("port", 0)),
+                "local_port": str(local.get("port", 0)),
+                "remote_port": str(remote.get("port", 0)),
+                "mss": str(packet.get("mss", 1460)),
+                "ppi": str(packet.get("ppi", 0)),
+                "rto_initial": str(packet.get("rto_initial", 1000)),
+                "rto_max": str(packet.get("rto_max", 60000)),
+                "rto_min": str(packet.get("rto_min", 100)),
+                "sack_timeout": str(packet.get("sack_timeout", 200)),
+            }
+            state["sctp"] = sctp_state
         elif protocol == "http" and "http2" in packet:
             http2_state: dict[str, str] = {}
             metadata = packet["http2"]
@@ -10569,6 +10671,14 @@ class EmulatorSession:
             raise EmulatorInputError("invalid SSL payload state") from exc
 
     @staticmethod
+    def _sctp_payload_from_tcl(session: Any) -> bytes:
+        encoded = session.eval_tcl("binary encode hex $::state::sctp::payload")
+        try:
+            return bytes.fromhex(str(encoded))
+        except ValueError as exc:  # pragma: no cover - Tcl binary contract guard
+            raise EmulatorInputError("invalid SCTP payload state") from exc
+
+    @staticmethod
     def _tcp_emissions(session: Any) -> list[dict[str, Any]]:
         emissions: list[dict[str, Any]] = []
         raw_emissions = _split_tcl_list(
@@ -10901,7 +11011,7 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
@@ -10932,6 +11042,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::crypto_reset_connection")
         session.eval_tcl("::itest::semantic::adapt_reset_connection")
         session.eval_tcl("::itest::semantic::datagram_reset_connection")
+        session.eval_tcl("::itest::semantic::sctp_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
@@ -10941,7 +11052,7 @@ class EmulatorSession:
         )
         accepted_state = (
             self._packet_event_state(packet)
-            if packet["protocol"] == "udp" or packet_has_tcp_layer
+            if packet["protocol"] in {"udp", "sctp"} or packet_has_tcp_layer
             else {"connection": self._packet_connection_state(packet)}
         )
         if any(str(profile).upper() == "FLOW" for profile in self._profiles):
@@ -10972,6 +11083,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::datagram_reset_connection")
+        session.eval_tcl("::itest::semantic::sctp_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
@@ -10984,6 +11096,7 @@ class EmulatorSession:
         self._http2_streams.clear()
         self._http2_tcp_active = False
         self._tcp_buffers = {"client": "", "server": ""}
+        self._sctp_buffers = {"client": b"", "server": b""}
         self._ssl_buffers = {"client": b"", "server": b""}
         self._websocket_raw_active = False
         self._ip_connection_initialized = False
@@ -12334,6 +12447,128 @@ class EmulatorSession:
                         entry["disabled"] = True
                     if response_dns.get("response_sent") in {"1", "true"}:
                         entry["responded"] = True
+                continue
+            elif protocol == "sctp":
+                self._activate_packet_connection(session, packet, entry["events"])
+                accepted_event = next(
+                    (
+                        event
+                        for event in reversed(entry["events"])
+                        if event.get("event") == "CLIENT_ACCEPTED"
+                    ),
+                    None,
+                )
+                accepted_sctp = (
+                    accepted_event.get("state", {}).get("sctp", {})
+                    if accepted_event is not None
+                    else {}
+                )
+                if accepted_sctp.get("responded") in {"1", "true"}:
+                    response = accepted_sctp.get("response", "")
+                    entry["responded"] = True
+                    entry["response"] = response
+                    accepted_event.setdefault("emissions", []).append(
+                        {
+                            "protocol": "sctp",
+                            "direction": "server_to_client",
+                            "payload": response,
+                            "byte_length": int(
+                                accepted_sctp.get(
+                                    "response_length", len(response.encode("utf-8"))
+                                )
+                            ),
+                        }
+                    )
+                if direction == "server_to_client" and not self._server_connection_open:
+                    self._configure_packet_connection(session, packet)
+                    entry["events"].append(
+                        self._fire_event_on_worker(
+                            session,
+                            "SERVER_CONNECTED",
+                            {"connection": self._packet_connection_state(packet)},
+                        )
+                    )
+                    self._server_connection_open = True
+                side = "client" if direction == "client_to_server" else "server"
+                wire_payload = packet.get("_wire_payload")
+                if not isinstance(wire_payload, (bytes, bytearray)):
+                    wire_payload = str(packet.get("payload", "")).encode("utf-8")
+                if not wire_payload:
+                    continue
+                collection = _split_tcl_list(
+                    session.eval_tcl(
+                        f"::itest::semantic::sctp_collection_request {side}"
+                    )
+                )
+                if len(collection) != 4:
+                    entry["ignored"] = "sctp payload not collected"
+                    continue
+                try:
+                    collection_values = {
+                        collection[index]: int(collection[index + 1])
+                        for index in range(0, len(collection), 2)
+                    }
+                except (TypeError, ValueError):
+                    raise EmulatorInputError("invalid SCTP collection state") from None
+                buffered = self._sctp_buffers[side] + bytes(wire_payload)
+                if len(buffered) > STREAM_MAX_BYTES:
+                    raise EmulatorInputError(
+                        f"SCTP collection exceeds {STREAM_MAX_BYTES // (1024 * 1024)} MiB"
+                    )
+                length = collection_values.get("length", 0)
+                every_packet = collection_values.get("every_packet", 0) == 1
+                if length and len(buffered) < length:
+                    self._sctp_buffers[side] = buffered
+                    entry["buffered"] = True
+                    entry["buffered_bytes"] = len(buffered)
+                    continue
+                event_payload = buffered if not length else buffered[:length]
+                remainder = buffered[len(event_payload):]
+                event_packet = dict(packet)
+                event_packet["payload"] = _decode_wire_text(event_payload)
+                event_packet["_wire_payload"] = event_payload
+                if not every_packet:
+                    session.eval_tcl(
+                        f"::itest::semantic::sctp_clear_collection {side}"
+                    )
+                event_name = "CLIENT_DATA" if direction == "client_to_server" else "SERVER_DATA"
+                event_result = self._fire_event_on_worker(
+                    session, event_name, self._packet_event_state(event_packet)
+                )
+                entry["events"].append(event_result)
+                sctp_state = event_result.get("state", {}).get("sctp", {})
+                released = sctp_state.get("released") in {"1", "true"}
+                entry["released"] = released
+                if released:
+                    try:
+                        released_length = int(sctp_state.get("released_length", "0"))
+                    except (TypeError, ValueError):
+                        raise EmulatorInputError("invalid SCTP release length") from None
+                    entry["released_length"] = released_length
+                retained_payload = self._sctp_payload_from_tcl(session) if not released else b""
+                self._sctp_buffers[side] = retained_payload + remainder
+                if sctp_state.get("responded") in {"1", "true"} and not entry.get("dropped"):
+                    response = sctp_state.get("response", "")
+                    entry["responded"] = True
+                    entry["response"] = response
+                    event_result.setdefault("emissions", []).append(
+                        {
+                            "protocol": "sctp",
+                            "direction": (
+                                "server_to_client"
+                                if direction == "client_to_server"
+                                else "client_to_server"
+                            ),
+                            "payload": response,
+                            "byte_length": int(
+                                sctp_state.get(
+                                    "response_length", len(response.encode("utf-8"))
+                                )
+                            ),
+                        }
+                    )
+                if "payload" in sctp_state:
+                    entry["payload_after"] = sctp_state["payload"]
                 continue
             elif protocol == "udp":
                 self._activate_packet_connection(session, packet, entry["events"])

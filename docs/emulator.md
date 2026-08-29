@@ -82,6 +82,15 @@ pacing, PUSH mode, congestion label, proxy-buffer thresholds, and a
 deterministic unused-port allocator; those values persist across packet
 events in the emulated connection. This is transport-control state, not a
 kernel TCP implementation or wire-level congestion/retransmission simulator.
+Structured SCTP packet traces expose `CLIENT_ACCEPTED`, `CLIENT_DATA`,
+`SERVER_CONNECTED`, and `SERVER_DATA` when the `SCTP` profile is attached.
+The 14-command SCTP slice models client/server/local/remote ports, MSS, PPI,
+RTO and SACK timeout readers, bounded collection buffering, byte-oriented
+payload reads/replacement, release, and response emission. Supply SCTP packets
+with `protocol: "sctp"`, endpoints, and either `payload` or `payload_hex`.
+This is a deterministic iRule-facing transport model: it does not implement a
+kernel SCTP association, chunk parsing, multihoming, retransmission, or
+congestion control.
 The ROUTE layer accepts scenario-seeded route-domain and congestion-metric
 entries. `ROUTE::age`, `ROUTE::bandwidth`, `ROUTE::cwnd`, `ROUTE::expiration`,
 `ROUTE::mtu`, `ROUTE::rtt`, and `ROUTE::rttvar` read deterministic entries, and

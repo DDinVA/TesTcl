@@ -464,6 +464,28 @@ namespace eval ::itest::semantic {
         variable response_length 0
     }
 
+    namespace eval ::state::sctp {
+        variable payload ""
+        variable payload_length 0
+        variable client_port 0
+        variable server_port 0
+        variable local_port 0
+        variable remote_port 0
+        variable mss 1460
+        variable ppi 0
+        variable collect_requested 0
+        variable collect_length 0
+        variable released 0
+        variable released_length 0
+        variable responded 0
+        variable response ""
+        variable response_length 0
+        variable rto_initial 1000
+        variable rto_max 60000
+        variable rto_min 100
+        variable sack_timeout 200
+    }
+
     namespace eval ::state::datagram {
         variable ip_version 4
         variable ip_tos 0
@@ -11210,6 +11232,245 @@ namespace eval ::itest::semantic {
         return $result
     }
 
+    proc sctp_reset_connection {} {
+        namespace eval ::state::sctp {
+            variable payload ""
+            variable payload_length 0
+            variable client_port 0
+            variable server_port 0
+            variable local_port 0
+            variable remote_port 0
+            variable mss 1460
+            variable ppi 0
+            variable collect_requested 0
+            variable collect_length 0
+            variable released 0
+            variable released_length 0
+            variable responded 0
+            variable response ""
+            variable response_length 0
+            variable rto_initial 1000
+            variable rto_max 60000
+            variable rto_min 100
+            variable sack_timeout 200
+        }
+        unset -nocomplain ::state::vars::connection_vars(__testcl_sctp_collect_client)
+        unset -nocomplain ::state::vars::connection_vars(__testcl_sctp_collect_server)
+    }
+
+    proc sctp_prepare_event {} {
+        namespace eval ::state::sctp {
+            variable payload ""
+            variable payload_length 0
+            variable released 0
+            variable released_length 0
+            variable responded 0
+            variable response ""
+            variable response_length 0
+        }
+    }
+
+    proc sctp_collection_request {side} {
+        if {$side ni {client server}} {
+            error "SCTP collection side must be client or server"
+        }
+        set key "__testcl_sctp_collect_$side"
+        if {[info exists ::state::vars::connection_vars($key)]} {
+            return $::state::vars::connection_vars($key)
+        }
+        return ""
+    }
+
+    proc sctp_clear_collection {side} {
+        if {$side ni {client server}} {
+            error "SCTP collection side must be client or server"
+        }
+        unset -nocomplain ::state::vars::connection_vars(__testcl_sctp_collect_$side)
+        set ::state::sctp::collect_requested 0
+        set ::state::sctp::collect_length 0
+    }
+
+    proc sctp_port_command {which args} {
+        if {[llength $args] != 0} { error "SCTP::$which takes no arguments" }
+        return [set ::state::sctp::$which]
+    }
+
+    proc sctp_client_port_command {args} {
+        return [sctp_port_command client_port {*}$args]
+    }
+
+    proc sctp_server_port_command {args} {
+        return [sctp_port_command server_port {*}$args]
+    }
+
+    proc sctp_local_port_command {args} {
+        if {[llength $args] > 1} {
+            error "SCTP::local_port accepts an optional side"
+        }
+        if {[llength $args] == 1} {
+            set side [string tolower [lindex $args 0]]
+            if {$side ni {clientside serverside}} {
+                error "SCTP::local_port side must be clientside or serverside"
+            }
+            return $::state::sctp::server_port
+        }
+        return $::state::sctp::local_port
+    }
+
+    proc sctp_remote_port_command {args} {
+        if {[llength $args] > 1} {
+            error "SCTP::remote_port accepts an optional side"
+        }
+        if {[llength $args] == 1} {
+            set side [string tolower [lindex $args 0]]
+            if {$side ni {clientside serverside}} {
+                error "SCTP::remote_port side must be clientside or serverside"
+            }
+            return [expr {$side eq "clientside" ? $::state::sctp::client_port : $::state::sctp::server_port}]
+        }
+        return $::state::sctp::remote_port
+    }
+
+    proc sctp_mss_command {args} {
+        if {[llength $args] != 0} { error "SCTP::mss takes no arguments" }
+        return $::state::sctp::mss
+    }
+
+    proc sctp_ppi_command {args} {
+        if {[llength $args] > 1} { error "SCTP::ppi accepts an optional integer" }
+        if {[llength $args] == 1} {
+            set value [lindex $args 0]
+            if {![string is integer -strict $value] || $value < 0 || $value > 65535} {
+                error "SCTP::ppi requires an integer from 0 to 65535"
+            }
+            set ::state::sctp::ppi $value
+            ::itest::log_decision sctp ppi $value
+        }
+        return $::state::sctp::ppi
+    }
+
+    proc sctp_collect_command {args} {
+        if {[llength $args] > 1} { error "SCTP::collect accepts an optional length" }
+        set length 0
+        set every_packet 1
+        if {[llength $args] == 1} {
+            set length [lindex $args 0]
+            if {![string is integer -strict $length] || $length <= 0} {
+                error "SCTP::collect length must be a positive integer"
+            }
+            set every_packet 0
+        }
+        set side [expr {[info exists ::itest::semantic::peer_side] &&
+            $::itest::semantic::peer_side eq "server" ? "server" : "client"}]
+        set ::state::vars::connection_vars(__testcl_sctp_collect_$side) \
+            [list length $length every_packet $every_packet]
+        set ::state::sctp::collect_requested 1
+        set ::state::sctp::collect_length $length
+        ::itest::log_decision sctp collect [list $side $length $every_packet]
+        return ""
+    }
+
+    proc sctp_payload_command {args} {
+        if {[llength $args] == 0} { return $::state::sctp::payload }
+        if {[lindex $args 0] eq "length"} {
+            if {[llength $args] != 1} { error "SCTP::payload length takes no arguments" }
+            return [::itest::cmd::_payload_bytelength $::state::sctp::payload]
+        }
+        if {[lindex $args 0] eq "replace"} {
+            if {[llength $args] != 4} {
+                error "SCTP::payload replace requires offset, length, and data"
+            }
+            set offset [lindex $args 1]
+            set length [lindex $args 2]
+            if {![string is integer -strict $offset] || $offset < 0 ||
+                ![string is integer -strict $length] || $length < 0} {
+                error "SCTP::payload replace offsets must be non-negative integers"
+            }
+            set ::state::sctp::payload [::itest::cmd::_payload_splice \
+                $::state::sctp::payload $offset $length [lindex $args 3]]
+            set ::state::sctp::payload_length \
+                [::itest::cmd::_payload_bytelength $::state::sctp::payload]
+            ::itest::log_decision sctp payload_replace [list $offset $length]
+            return ""
+        }
+        if {[llength $args] == 1} {
+            set length [lindex $args 0]
+            if {![string is integer -strict $length] || $length < 0} {
+                error "SCTP::payload accepts a non-negative size"
+            }
+            return [::itest::cmd::_payload_first $::state::sctp::payload $length]
+        }
+        if {[llength $args] == 2} {
+            set offset [lindex $args 0]
+            set length [lindex $args 1]
+            if {![string is integer -strict $offset] || $offset < 0 ||
+                ![string is integer -strict $length] || $length < 0} {
+                error "SCTP::payload offsets must be non-negative integers"
+            }
+            set tail [string range [binary format a* $::state::sctp::payload] $offset end]
+            return [::itest::cmd::_payload_first $tail $length]
+        }
+        error "SCTP::payload accepts length, offset/length, or replace"
+    }
+
+    proc sctp_release_command {args} {
+        if {[llength $args] > 1} { error "SCTP::release accepts an optional length" }
+        set available [::itest::cmd::_payload_bytelength $::state::sctp::payload]
+        set length $available
+        if {[llength $args] == 1} { set length [lindex $args 0] }
+        if {![string is integer -strict $length] || $length < 0} {
+            error "SCTP::release length must be a non-negative integer"
+        }
+        if {$length > $available} { set length $available }
+        if {$length > 0} {
+            set ::state::sctp::payload [::itest::cmd::_payload_splice \
+                $::state::sctp::payload 0 $length ""]
+        }
+        set ::state::sctp::payload_length \
+            [::itest::cmd::_payload_bytelength $::state::sctp::payload]
+        set ::state::sctp::released 1
+        set ::state::sctp::released_length $length
+        sctp_clear_collection [expr {[info exists ::itest::semantic::peer_side] &&
+            $::itest::semantic::peer_side eq "server" ? "server" : "client"}]
+        ::itest::log_decision sctp release $length
+        return $length
+    }
+
+    proc sctp_respond_command {args} {
+        if {[llength $args] < 1 || [llength $args] > 3} {
+            error "SCTP::respond requires data and optional offset and length"
+        }
+        set data [lindex $args 0]
+        set offset 0
+        set length [::itest::cmd::_payload_bytelength $data]
+        if {[llength $args] >= 2} { set offset [lindex $args 1] }
+        if {[llength $args] == 3} { set length [lindex $args 2] }
+        if {![string is integer -strict $offset] || $offset < 0 ||
+            ![string is integer -strict $length] || $length < 0} {
+            error "SCTP::respond offset and length must be non-negative integers"
+        }
+        set tail [string range [binary format a* $data] $offset end]
+        set ::state::sctp::response [::itest::cmd::_payload_first $tail $length]
+        set ::state::sctp::response_length \
+            [::itest::cmd::_payload_bytelength $::state::sctp::response]
+        set ::state::sctp::responded 1
+        ::itest::log_decision sctp respond [list $offset $length]
+        return ""
+    }
+
+    proc sctp_timeout_command {name args} {
+        if {[llength $args] > 1} { error "SCTP::$name accepts an optional side" }
+        if {[llength $args] == 1 && [string tolower [lindex $args 0]] ni {clientside serverside}} {
+            error "SCTP::$name side must be clientside or serverside"
+        }
+        return [set ::state::sctp::$name]
+    }
+
+    proc sctp_rto_initial_command {args} { return [sctp_timeout_command rto_initial {*}$args] }
+    proc sctp_rto_max_command {args} { return [sctp_timeout_command rto_max {*}$args] }
+    proc sctp_rto_min_command {args} { return [sctp_timeout_command rto_min {*}$args] }
+    proc sctp_sack_timeout_command {args} { return [sctp_timeout_command sack_timeout {*}$args] }
+
     proc tcp_reset_transport {} {
         namespace eval ::state::tcp {
             set abc enable
@@ -15744,6 +16005,20 @@ foreach {name proc_name} {
     UDP::sendbuffer ::itest::semantic::udp_sendbuffer_command
     UDP::server_port ::itest::semantic::udp_server_port_command
     UDP::unused_port ::itest::semantic::udp_unused_port_command
+    SCTP::client_port ::itest::semantic::sctp_client_port_command
+    SCTP::collect ::itest::semantic::sctp_collect_command
+    SCTP::local_port ::itest::semantic::sctp_local_port_command
+    SCTP::mss ::itest::semantic::sctp_mss_command
+    SCTP::payload ::itest::semantic::sctp_payload_command
+    SCTP::ppi ::itest::semantic::sctp_ppi_command
+    SCTP::release ::itest::semantic::sctp_release_command
+    SCTP::respond ::itest::semantic::sctp_respond_command
+    SCTP::remote_port ::itest::semantic::sctp_remote_port_command
+    SCTP::rto_initial ::itest::semantic::sctp_rto_initial_command
+    SCTP::rto_max ::itest::semantic::sctp_rto_max_command
+    SCTP::rto_min ::itest::semantic::sctp_rto_min_command
+    SCTP::sack_timeout ::itest::semantic::sctp_sack_timeout_command
+    SCTP::server_port ::itest::semantic::sctp_server_port_command
     peer ::itest::cmd::cmd_peer
     clientside ::itest::cmd::cmd_clientside
     serverside ::itest::cmd::cmd_serverside

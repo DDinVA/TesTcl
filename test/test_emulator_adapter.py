@@ -481,7 +481,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
         self.assertNotIn(("ADAPT", "generated-stub"), queue_buckets)
         self.assertNotIn(("DATAGRAM", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 318)
+        self.assertNotIn(("SCTP", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 304)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -810,6 +811,102 @@ when CLIENT_DATA {
                 },
                 tcl_lsp_root=self.tcl_lsp_root,
             )
+
+    def test_sctp_packet_collection_payload_and_response_controls(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["SCTP"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    SCTP::collect 4
+    SCTP::ppi 3
+    log local0. "accepted=[SCTP::client_port]/[SCTP::server_port] mss=[SCTP::mss] ppi=[SCTP::ppi]"
+}
+when CLIENT_DATA {
+    log local0. "data=[SCTP::payload]/[SCTP::payload length]/[SCTP::payload 2]"
+    SCTP::payload replace 0 4 PONG
+    SCTP::respond reply 0 3
+    SCTP::release 0
+}
+""",
+                "packets": [{
+                    "protocol": "sctp",
+                    "source": {"address": "10.0.0.1", "port": 5000},
+                    "destination": {"address": "192.0.2.10", "port": 9899},
+                    "payload": "ping",
+                    "ppi": 7,
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        entry = result["trace"][0]
+        accepted = next(event for event in entry["events"] if event["event"] == "CLIENT_ACCEPTED")
+        data = next(event for event in entry["events"] if event["event"] == "CLIENT_DATA")
+        self.assertTrue(any("accepted=5000/9899" in line and "mss=1460" in line and "ppi=3" in line
+                            for line in accepted["logs"]))
+        self.assertTrue(any("data=ping/4/pi" in line for line in data["logs"]))
+        self.assertEqual(data["state"]["connection"]["protocol"], "132")
+        self.assertEqual(data["state"]["sctp"]["payload"], "PONG")
+        self.assertEqual(data["state"]["sctp"]["ppi"], "7")
+        self.assertEqual(data["state"]["sctp"]["released"], "1")
+        self.assertEqual(data["state"]["sctp"]["released_length"], "0")
+        self.assertEqual(entry["response"], "rep")
+        self.assertEqual(result["emitted"][0]["protocol"], "sctp")
+
+    def test_sctp_payload_validation_and_timeout_queries(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["SCTP"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    log local0. "ports=[SCTP::local_port]/[SCTP::remote_port]/[SCTP::local_port clientside]/[SCTP::remote_port serverside]"
+    log local0. "rto=[SCTP::rto_initial]/[SCTP::rto_max]/[SCTP::rto_min]/[SCTP::sack_timeout]"
+}
+""",
+                "packets": [{
+                    "protocol": "sctp",
+                    "source": {"address": "10.0.0.1", "port": 5000},
+                    "destination": {"address": "192.0.2.10", "port": 9899},
+                    "payload_hex": "ff00",
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        accepted = next(event for event in result["trace"][0]["events"] if event["event"] == "CLIENT_ACCEPTED")
+        self.assertTrue(any("ports=9899/5000/9899/9899" in line for line in accepted["logs"]))
+        self.assertTrue(any("rto=1000/60000/100/200" in line for line in accepted["logs"]))
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "ppi must be an integer"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["SCTP"],
+                    "irule": "when CLIENT_ACCEPTED { log local0. ok }",
+                    "packets": [{"protocol": "sctp", "ppi": 65536}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_sctp_collection_buffers_partial_payloads(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["SCTP"],
+                "irule": "when CLIENT_ACCEPTED { SCTP::collect 4 } when CLIENT_DATA { log local0. \"payload=[SCTP::payload]\" }",
+                "packets": [
+                    {"protocol": "sctp", "payload": "pi"},
+                    {"protocol": "sctp", "payload": "ng"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(result["trace"][0]["buffered"])
+        self.assertEqual(result["trace"][0]["buffered_bytes"], 2)
+        data_events = [
+            event
+            for packet in result["trace"]
+            for event in packet["events"]
+            if event["event"] == "CLIENT_DATA"
+        ]
+        self.assertEqual(len(data_events), 1)
+        self.assertTrue(any("payload=ping" in line for line in data_events[0]["logs"]))
 
     def test_post_tmos_17_5_features_are_reported_and_rejected(self) -> None:
         with self.assertRaisesRegex(

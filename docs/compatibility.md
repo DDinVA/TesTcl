@@ -28,7 +28,7 @@ references rather than maintained as an unqualified list of mocked commands.
 The optional TMOS 17.5 emulator exposes the pinned `tcl-lsp` registry in
 bounded chunks and reports static command-handler and packet-event coverage
 through its conformance endpoint. Structured packet traces currently cover
-TCP, TLS, HTTP, generic UDP, DNS, SIP over TCP or UDP, Diameter over TCP, RADIUS over UDP, GTP over UDP or GTP-Prime over TCP, Message Routing Framework messages over TCP, and raw IPv4 transport records. Fragmented IPv4
+TCP, TLS, HTTP, generic UDP, SCTP, DNS, SIP over TCP or UDP, Diameter over TCP, RADIUS over UDP, GTP over UDP or GTP-Prime over TCP, Message Routing Framework messages over TCP, and raw IPv4 transport records. Fragmented IPv4
 packets remain outside the current boundary. Classic PCAP and bounded pcapng
 ingestion are supported, and TCP stream reassembly includes bounded gap,
 overlap, and retransmission de-duplication handling. Diameter validates and
@@ -74,6 +74,12 @@ proxy-buffer thresholds. `TCP::unused_port` allocates deterministic ephemeral
 ports for a validated tuple. These are deterministic state and inspection
 values; the adapter does not implement a kernel TCP stack, congestion-control
 algorithm, retransmission timers, or wire-level pacing.
+The SCTP packet adapter models the 17.5 `SCTP::*` surface for endpoint ports,
+MSS, PPI, timeout readers, bounded collection, byte-oriented payload mutation,
+release, and direct response emission. It dispatches the SCTP client/server
+accept, connect, and data event path for structured packets. It does not parse
+SCTP chunks or emulate associations, multihoming, retransmission, SACK, or
+congestion-control behavior.
 The TMOS 17.5 `ROUTE::*` surface uses scenario-seeded route-domain and
 congestion-metric entries. Metric getters return deterministic values and
 `ROUTE::clear` removes a matching entry for the session; connection lifecycle
