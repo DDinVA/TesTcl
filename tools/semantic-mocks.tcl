@@ -49,6 +49,19 @@ namespace eval ::itest::semantic {
     variable mqtt_operations {}
     variable mqtt_message_replaced 0
 
+    variable ip_default_hops 0
+    variable ip_hops 0
+    variable ip_intelligence_records [dict create]
+    variable ip_reputation_records [dict create]
+    variable ip_drop_rates [dict create]
+    variable ip_global_gray_list_rate 0
+    variable ip_global_rate 0
+    variable ip_stats_pkts_in 0
+    variable ip_stats_pkts_out 0
+    variable ip_stats_bytes_in 0
+    variable ip_stats_bytes_out 0
+    variable ip_stats_age_ms 0
+
     variable dns_rr_counter 0
     variable dns_rr_objects [dict create]
     variable dns_message_counter 0
@@ -7402,8 +7415,326 @@ namespace eval ::itest::semantic {
     }
 
     proc ip_version {args} {
+        if {[llength $args] != 0} {
+            error "IP::version takes no arguments"
+        }
         set address $::state::connection::client_addr
         return [expr {[string first : $address] >= 0 ? 6 : 4}]
+    }
+
+    proc _ipv6_address_valid {address} {
+        if {[string first ":::" $address] >= 0} {
+            return 0
+        }
+        set compression [string first "::" $address]
+        if {$compression >= 0 && [string last "::" $address] != $compression} {
+            return 0
+        }
+        set pieces [list]
+        if {$compression >= 0} {
+            set left [string range $address 0 [expr {$compression - 1}]]
+            set right [string range $address [expr {$compression + 2}] end]
+            set pieces [concat [split $left :] [split $right :]]
+        } else {
+            set pieces [split $address :]
+        }
+        set count 0
+        foreach piece $pieces {
+            if {$piece eq ""} {
+                continue
+            }
+            if {[string length $piece] > 4 || ![regexp {^[0-9A-Fa-f]+$} $piece]} {
+                return 0
+            }
+            incr count
+        }
+        if {$compression >= 0} {
+            return [expr {$count < 8}]
+        }
+        return [expr {$count == 8}]
+    }
+
+    proc ip_address_key {address} {
+        if {$address eq "" || [string first "\x00" $address] >= 0} {
+            error "invalid IP address \"$address\""
+        }
+        set original_address $address
+        if {[string first . $address] >= 0} {
+            set last_colon [string last : $address]
+            if {$last_colon < 0} {
+                if {[catch {_ipv4_int $address}]} {
+                    error "invalid IP address \"$address\""
+                }
+            } else {
+                set ipv4 [string range $address [expr {$last_colon + 1}] end]
+                if {[catch {_ipv4_int $ipv4}]} {
+                    error "invalid IP address \"$address\""
+                }
+                set validation_address "[string range $address 0 $last_colon]0:0"
+                if {![_ipv6_address_valid $validation_address]} {
+                    error "invalid IP address \"$original_address\""
+                }
+            }
+        } elseif {[string first : $address] >= 0} {
+            if {![_ipv6_address_valid $address]} {
+                error "invalid IP address \"$address\""
+            }
+        } elseif {[catch {_ipv4_int $address}]} {
+            error "invalid IP address \"$address\""
+        }
+        return [string tolower $original_address]
+    }
+
+    proc ip_configure {hops} {
+        if {![string is integer -strict $hops] || $hops < 0 || $hops > 255} {
+            error "IP hops must be an integer from 0 to 255"
+        }
+        variable ip_default_hops
+        variable ip_hops
+        variable ip_intelligence_records
+        variable ip_reputation_records
+        variable ip_drop_rates
+        variable ip_global_gray_list_rate
+        variable ip_global_rate
+        set ip_default_hops $hops
+        set ip_hops $hops
+        set ip_intelligence_records [dict create]
+        set ip_reputation_records [dict create]
+        set ip_drop_rates [dict create]
+        set ip_global_gray_list_rate 0
+        set ip_global_rate 0
+        ip_reset_connection
+    }
+
+    proc ip_set_intelligence {address categories} {
+        variable ip_intelligence_records
+        set key [ip_address_key $address]
+        if {[catch {llength $categories}]} {
+            error "IP intelligence categories must be a Tcl list"
+        }
+        foreach category $categories {
+            if {$category eq "" || [string first "\x00" $category] >= 0 ||
+                [string first "{" $category] >= 0 || [string first "}" $category] >= 0} {
+                error "IP intelligence categories must be non-empty strings"
+            }
+        }
+        dict set ip_intelligence_records $key $categories
+    }
+
+    proc ip_set_reputation {address categories} {
+        variable ip_reputation_records
+        set key [ip_address_key $address]
+        if {[catch {llength $categories}]} {
+            error "IP reputation categories must be a Tcl list"
+        }
+        foreach category $categories {
+            if {$category eq "" || [string first "\x00" $category] >= 0 ||
+                [string first "{" $category] >= 0 || [string first "}" $category] >= 0} {
+                error "IP reputation categories must be non-empty strings"
+            }
+        }
+        dict set ip_reputation_records $key $categories
+    }
+
+    proc ip_reset_connection {} {
+        variable ip_default_hops
+        variable ip_hops
+        variable ip_stats_pkts_in
+        variable ip_stats_pkts_out
+        variable ip_stats_bytes_in
+        variable ip_stats_bytes_out
+        variable ip_stats_age_ms
+        set ip_hops $ip_default_hops
+        set ip_stats_pkts_in 0
+        set ip_stats_pkts_out 0
+        set ip_stats_bytes_in 0
+        set ip_stats_bytes_out 0
+        set ip_stats_age_ms 0
+    }
+
+    proc ip_record_packet {direction byte_count age_ms {hops ""}} {
+        if {$direction ni {client_to_server server_to_client}} {
+            error "IP packet direction must be client_to_server or server_to_client"
+        }
+        if {![string is integer -strict $byte_count] || $byte_count < 0} {
+            error "IP packet byte count must be a non-negative integer"
+        }
+        if {![string is integer -strict $age_ms] || $age_ms < 0} {
+            error "IP packet age must be a non-negative integer"
+        }
+        if {$hops ne "" && (![string is integer -strict $hops] || $hops < 0 || $hops > 255)} {
+            error "IP packet hops must be an integer from 0 to 255"
+        }
+        variable ip_hops
+        variable ip_stats_pkts_in
+        variable ip_stats_pkts_out
+        variable ip_stats_bytes_in
+        variable ip_stats_bytes_out
+        variable ip_stats_age_ms
+        if {$direction eq "client_to_server"} {
+            incr ip_stats_pkts_in
+            incr ip_stats_bytes_in $byte_count
+        } else {
+            incr ip_stats_pkts_out
+            incr ip_stats_bytes_out $byte_count
+        }
+        if {$age_ms > $ip_stats_age_ms} {
+            set ip_stats_age_ms $age_ms
+        }
+        if {$hops ne ""} {
+            set ip_hops $hops
+        }
+    }
+
+    proc ip_hops_command {args} {
+        if {[llength $args] != 0} {
+            error "IP::hops takes no arguments"
+        }
+        variable ip_hops
+        return $ip_hops
+    }
+
+    proc ip_idle_timeout_command {args} {
+        if {[llength $args] > 1} {
+            error "IP::idle_timeout accepts zero or one argument"
+        }
+        if {[llength $args] == 1} {
+            set value [lindex $args 0]
+            if {![string is integer -strict $value] || $value < 0} {
+                error "IP::idle_timeout requires a non-negative integer"
+            }
+            set ::state::connection::idle_timeout $value
+            ::itest::log_decision ip idle_timeout $value
+        }
+        if {[info exists ::state::connection::idle_timeout]} {
+            return $::state::connection::idle_timeout
+        }
+        return 0
+    }
+
+    proc ip_ingress_drop_rate_command {args} {
+        if {[llength $args] != 3} {
+            error "IP::ingress_drop_rate requires IP, DROP_RATE, and TIMEOUT"
+        }
+        lassign $args address rate timeout
+        set key [ip_address_key $address]
+        if {![string is integer -strict $rate] || $rate < 0 || $rate > 100} {
+            error "IP::ingress_drop_rate DROP_RATE must be an integer from 0 to 100"
+        }
+        if {![string is integer -strict $timeout] || $timeout < 0} {
+            error "IP::ingress_drop_rate TIMEOUT must be a non-negative integer"
+        }
+        variable ip_drop_rates
+        dict set ip_drop_rates $key [list $rate $timeout]
+        ::itest::log_decision ip ingress_drop_rate [list $key $rate $timeout]
+        return ""
+    }
+
+    proc ip_ingress_rate_limit_command {args} {
+        if {[llength $args] != 2} {
+            error "IP::ingress_rate_limit requires GLOBAL_GRAY_LIST_RATE and GLOBAL_RATE"
+        }
+        lassign $args gray_list_rate global_rate
+        foreach value [list $gray_list_rate $global_rate] {
+            if {![string is integer -strict $value] || $value < 0} {
+                error "IP::ingress_rate_limit rates must be non-negative integers"
+            }
+        }
+        variable ip_global_gray_list_rate
+        variable ip_global_rate
+        set ip_global_gray_list_rate $gray_list_rate
+        set ip_global_rate $global_rate
+        ::itest::log_decision ip ingress_rate_limit [list $gray_list_rate $global_rate]
+        return ""
+    }
+
+    proc ip_intelligence_command {args} {
+        if {[llength $args] != 1} {
+            error "IP::intelligence requires one IP address"
+        }
+        variable ip_intelligence_records
+        set key [ip_address_key [lindex $args 0]]
+        if {[dict exists $ip_intelligence_records $key]} {
+            return [dict get $ip_intelligence_records $key]
+        }
+        return [list]
+    }
+
+    proc ip_reputation_command {args} {
+        if {[llength $args] < 1} {
+            error "IP::reputation requires one or more IP addresses"
+        }
+        variable ip_reputation_records
+        set result [list]
+        foreach address $args {
+            set key [ip_address_key $address]
+            if {![dict exists $ip_reputation_records $key]} {
+                continue
+            }
+            foreach category [dict get $ip_reputation_records $key] {
+                if {[lsearch -exact $result $category] < 0} {
+                    lappend result $category
+                }
+            }
+        }
+        return $result
+    }
+
+    proc ip_stats_command {args} {
+        if {[llength $args] > 2} {
+            error "IP::stats accepts at most two arguments"
+        }
+        variable ip_stats_pkts_in
+        variable ip_stats_pkts_out
+        variable ip_stats_bytes_in
+        variable ip_stats_bytes_out
+        variable ip_stats_age_ms
+        if {[llength $args] == 0} {
+            return [list $ip_stats_pkts_in $ip_stats_pkts_out $ip_stats_bytes_in $ip_stats_bytes_out $ip_stats_age_ms]
+        }
+        set metric [string tolower [lindex $args 0]]
+        if {[llength $args] == 1} {
+            switch -exact -- $metric {
+                pkts { return [list $ip_stats_pkts_in $ip_stats_pkts_out] }
+                bytes { return [list $ip_stats_bytes_in $ip_stats_bytes_out] }
+                in { return [list $ip_stats_pkts_in $ip_stats_bytes_in] }
+                out { return [list $ip_stats_pkts_out $ip_stats_bytes_out] }
+                age { return $ip_stats_age_ms }
+                default { error "unsupported IP::stats selector \"$metric\"" }
+            }
+        }
+        set direction [string tolower [lindex $args 1]]
+        if {$direction ni {in out} || $metric ni {pkts bytes}} {
+            error "IP::stats requires pkts or bytes followed by in or out"
+        }
+        if {$metric eq "pkts"} {
+            return [expr {$direction eq "in" ? $ip_stats_pkts_in : $ip_stats_pkts_out}]
+        }
+        return [expr {$direction eq "in" ? $ip_stats_bytes_in : $ip_stats_bytes_out}]
+    }
+
+    proc ip_snapshot {} {
+        variable ip_hops
+        variable ip_intelligence_records
+        variable ip_reputation_records
+        variable ip_drop_rates
+        variable ip_global_gray_list_rate
+        variable ip_global_rate
+        variable ip_stats_pkts_in
+        variable ip_stats_pkts_out
+        variable ip_stats_bytes_in
+        variable ip_stats_bytes_out
+        variable ip_stats_age_ms
+        set idle_timeout 0
+        if {[info exists ::state::connection::idle_timeout]} {
+            set idle_timeout $::state::connection::idle_timeout
+        }
+        return [list hops $ip_hops idle_timeout $idle_timeout \
+            pkts_in $ip_stats_pkts_in pkts_out $ip_stats_pkts_out \
+            bytes_in $ip_stats_bytes_in bytes_out $ip_stats_bytes_out \
+            age_ms $ip_stats_age_ms intelligence $ip_intelligence_records \
+            reputation $ip_reputation_records drop_rates $ip_drop_rates \
+            global_gray_list_rate $ip_global_gray_list_rate global_rate $ip_global_rate]
     }
 
     proc ip_addr {args} {
@@ -12266,6 +12597,13 @@ foreach {name proc_name} {
     serverside ::itest::cmd::cmd_serverside
     IP::addr ::itest::semantic::ip_addr
     IP::version ::itest::semantic::ip_version
+    IP::hops ::itest::semantic::ip_hops_command
+    IP::idle_timeout ::itest::semantic::ip_idle_timeout_command
+    IP::ingress_drop_rate ::itest::semantic::ip_ingress_drop_rate_command
+    IP::ingress_rate_limit ::itest::semantic::ip_ingress_rate_limit_command
+    IP::intelligence ::itest::semantic::ip_intelligence_command
+    IP::reputation ::itest::semantic::ip_reputation_command
+    IP::stats ::itest::semantic::ip_stats_command
     PROFILE::clientssl ::itest::semantic::profile_clientssl
     PROFILE::access ::itest::semantic::profile_access_command
     PROFILE::antifraud ::itest::semantic::profile_antifraud_command

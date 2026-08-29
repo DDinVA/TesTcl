@@ -73,6 +73,35 @@ pacing, PUSH mode, congestion label, proxy-buffer thresholds, and a
 deterministic unused-port allocator; those values persist across packet
 events in the emulated connection. This is transport-control state, not a
 kernel TCP implementation or wire-level congestion/retransmission simulator.
+The IP layer models the seven TMOS 17.5 commands `IP::hops`,
+`IP::idle_timeout`, `IP::ingress_drop_rate`, `IP::ingress_rate_limit`,
+`IP::intelligence`, `IP::reputation`, and `IP::stats`. `IP::hops` reads a
+deterministic scenario value or per-packet override; `IP::idle_timeout` reads
+or updates connection state; the ingress rate commands record bounded control
+values; and `IP::stats` reports directional packet/byte counters plus a
+deterministic connection age in milliseconds. Scenario data can seed
+`ip.intelligence` and `ip.reputation` maps for repeatable rules:
+
+```json
+{
+  "ip": {
+    "hops": 3,
+    "intelligence": {"10.0.0.5": ["Proxy", "Scanners"]},
+    "reputation": {"10.0.0.5": ["Scanners"]}
+  }
+}
+```
+
+Structured packet traces count UTF-8 payload bytes; raw IPv4 packets count
+their IPv4 total length. This is deterministic test data, not a live IP
+Intelligence/Reputation database or packet-rate enforcement engine. See the
+F5 [`IP::hops`](https://clouddocs.f5.com/api/irules/IP__hops.html),
+[`IP::idle_timeout`](https://clouddocs.f5.com/api/irules/IP__idle_timeout.html),
+[`IP::ingress_drop_rate`](https://clouddocs.f5.com/api/irules/IP__ingress_drop_rate.html),
+[`IP::ingress_rate_limit`](https://clouddocs.f5.com/api/irules/IP__ingress_rate_limit.html),
+[`IP::intelligence`](https://clouddocs.f5.com/api/irules/IP__intelligence.html),
+[`IP::reputation`](https://clouddocs.f5.com/api/irules/IP__reputation.html), and
+[`IP::stats`](https://clouddocs.f5.com/api/irules/IP__stats.html) references.
 RTSP packet traces use the RTSP profile and expose structured request/response
 events, case-insensitive header lookup and mutation, byte-oriented payload
 collection/replacement, release, metadata getters, and deterministic

@@ -744,6 +744,13 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTTP::username",
     "IP::addr",
     "IP::version",
+    "IP::hops",
+    "IP::idle_timeout",
+    "IP::ingress_drop_rate",
+    "IP::ingress_rate_limit",
+    "IP::intelligence",
+    "IP::reputation",
+    "IP::stats",
     "LB::down",
     "LB::bias",
     "LB::class",
@@ -1873,6 +1880,26 @@ def _configure_access(session: Any, access: dict[str, Any]) -> None:
     )
 
 
+def _configure_ip(session: Any, ip_config: dict[str, Any]) -> None:
+    """Install deterministic IP path, intelligence, and reputation inputs."""
+    session.eval_tcl(
+        "::itest::semantic::ip_configure "
+        f"{_tcl_quote(str(ip_config['hops']))}"
+    )
+    for address, categories in ip_config["intelligence"].items():
+        category_list = "[list " + " ".join(_tcl_quote(category) for category in categories) + "]"
+        session.eval_tcl(
+            "::itest::semantic::ip_set_intelligence "
+            f"{_tcl_quote(address)} {category_list}"
+        )
+    for address, categories in ip_config["reputation"].items():
+        category_list = "[list " + " ".join(_tcl_quote(category) for category in categories) + "]"
+        session.eval_tcl(
+            "::itest::semantic::ip_set_reputation "
+            f"{_tcl_quote(address)} {category_list}"
+        )
+
+
 def _split_tcl_list(value: Any) -> list[str]:
     """Parse a Tcl list returned by the bridge using a temporary interpreter."""
     try:
@@ -2374,6 +2401,74 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         if not 0 <= rate <= 100 or timeout < 0:
             raise EmulatorInputError("invalid DOSL7 greylist state")
         dosl7_greylist[record[0]] = {"rate": rate, "timeout": timeout}
+
+    ip_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::ip_snapshot"))
+    if len(ip_parts) % 2:
+        raise EmulatorInputError("invalid IP state")
+    ip_values = dict(zip(ip_parts[::2], ip_parts[1::2]))
+    expected_ip_fields = {
+        "hops", "idle_timeout", "pkts_in", "pkts_out", "bytes_in", "bytes_out",
+        "age_ms", "intelligence", "reputation", "drop_rates",
+        "global_gray_list_rate", "global_rate",
+    }
+    if set(ip_values) != expected_ip_fields:
+        raise EmulatorInputError("invalid IP state fields")
+
+    def parse_ip_integer(name: str, minimum: int = 0) -> int:
+        try:
+            value = int(ip_values[name])
+        except (KeyError, TypeError, ValueError):
+            raise EmulatorInputError(f"invalid IP {name} state") from None
+        if value < minimum:
+            raise EmulatorInputError(f"invalid IP {name} state")
+        return value
+
+    def parse_ip_records(raw_records: str, name: str) -> dict[str, list[str]]:
+        parts = _split_tcl_list(raw_records)
+        if len(parts) % 2:
+            raise EmulatorInputError(f"invalid IP {name} records")
+        result: dict[str, list[str]] = {}
+        for address, raw_categories in zip(parts[::2], parts[1::2]):
+            if address in result:
+                raise EmulatorInputError(f"duplicate IP {name} record")
+            categories = _split_tcl_list(raw_categories)
+            if any(not category for category in categories):
+                raise EmulatorInputError(f"invalid IP {name} category")
+            result[address] = categories
+        return result
+
+    drop_parts = _split_tcl_list(ip_values["drop_rates"])
+    if len(drop_parts) % 2:
+        raise EmulatorInputError("invalid IP drop-rate state")
+    drop_rates: dict[str, dict[str, int]] = {}
+    for address, raw_rate in zip(drop_parts[::2], drop_parts[1::2]):
+        if address in drop_rates:
+            raise EmulatorInputError("duplicate IP drop-rate state")
+        rate_parts = _split_tcl_list(raw_rate)
+        if len(rate_parts) != 2:
+            raise EmulatorInputError("invalid IP drop-rate state")
+        try:
+            rate, timeout = (int(value) for value in rate_parts)
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid IP drop-rate state") from None
+        if not 0 <= rate <= 100 or timeout < 0:
+            raise EmulatorInputError("invalid IP drop-rate state")
+        drop_rates[address] = {"rate": rate, "timeout": timeout}
+
+    ip = {
+        "hops": parse_ip_integer("hops"),
+        "idle_timeout": parse_ip_integer("idle_timeout"),
+        "pkts_in": parse_ip_integer("pkts_in"),
+        "pkts_out": parse_ip_integer("pkts_out"),
+        "bytes_in": parse_ip_integer("bytes_in"),
+        "bytes_out": parse_ip_integer("bytes_out"),
+        "age_ms": parse_ip_integer("age_ms"),
+        "intelligence": parse_ip_records(ip_values["intelligence"], "intelligence"),
+        "reputation": parse_ip_records(ip_values["reputation"], "reputation"),
+        "drop_rates": drop_rates,
+        "global_gray_list_rate": parse_ip_integer("global_gray_list_rate"),
+        "global_rate": parse_ip_integer("global_rate"),
+    }
     return {
         "stats": stats,
         "hsl_messages": hsl_messages,
@@ -2516,6 +2611,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "profile_object": dosl7_values["profile_object"],
             "greylist": dosl7_greylist,
         },
+        "ip": ip,
     }
 
 
@@ -3341,6 +3437,63 @@ def _normalise_access(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalise_ip(raw: Any) -> dict[str, Any]:
+    """Normalize deterministic inputs for the bounded IP command model."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("ip must be an object")
+    allowed = {"hops", "intelligence", "reputation"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError("ip unsupported field(s): " + ", ".join(unknown))
+
+    hops = raw.get("hops", 0)
+    if isinstance(hops, bool) or not isinstance(hops, int) or not 0 <= hops <= 255:
+        raise EmulatorInputError("ip.hops must be an integer from 0 to 255")
+
+    def records(name: str) -> dict[str, list[str]]:
+        value = raw.get(name, {})
+        if not isinstance(value, dict):
+            raise EmulatorInputError(f"ip.{name} must be an object mapping IP addresses to category arrays")
+        result: dict[str, list[str]] = {}
+        for address, categories in value.items():
+            if not isinstance(address, str) or not address or "\x00" in address:
+                raise EmulatorInputError(f"ip.{name} keys must be non-empty IP address strings without NUL")
+            try:
+                canonical_address = str(ipaddress.ip_address(address))
+            except ValueError:
+                raise EmulatorInputError(
+                    f"ip.{name} key {address!r} is not a valid IPv4 or IPv6 address"
+                ) from None
+            if canonical_address in result:
+                raise EmulatorInputError(
+                    f"ip.{name} contains duplicate address {address!r}"
+                )
+            if not isinstance(categories, list) or not all(
+                isinstance(category, str)
+                and category
+                and "\x00" not in category
+                and not any(delimiter in category for delimiter in "{}")
+                for category in categories
+            ):
+                raise EmulatorInputError(
+                    f"ip.{name}.{address} must be an array of non-empty strings without NUL or Tcl braces"
+                )
+            if len(categories) > 128:
+                raise EmulatorInputError(
+                    f"ip.{name}.{address} cannot contain more than 128 categories"
+                )
+            result[canonical_address] = list(categories)
+        return result
+
+    return {
+        "hops": hops,
+        "intelligence": records("intelligence"),
+        "reputation": records("reputation"),
+    }
+
+
 def _normalise_resolvers(raw: Any) -> dict[str, list[dict[str, Any]]]:
     """Normalize deterministic DNS records used by RESOLVER::name_lookup."""
     if raw is None:
@@ -3613,6 +3766,7 @@ def _normalise_scenario_config(
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
+    dict[str, Any],
 ]:
     if not isinstance(scenario, dict):
         raise EmulatorInputError("scenario must be a JSON object")
@@ -3633,6 +3787,7 @@ def _normalise_scenario_config(
         "auth",
         "aaa",
         "access",
+        "ip",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -3681,6 +3836,7 @@ def _normalise_scenario_config(
         _normalise_auth(scenario.get("auth")),
         _normalise_aaa(scenario.get("aaa")),
         _normalise_access(scenario.get("access")),
+        _normalise_ip(scenario.get("ip")),
     )
 
 
@@ -3834,6 +3990,9 @@ PACKET_COMMON_FIELDS = {
     "timestamp",
     "seq",
     "ack",
+    "hops",
+    "ttl",
+    "tos",
 }
 PACKET_PROTOCOL_FIELDS = {
     "tcp": {
@@ -4795,11 +4954,14 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
         packet: dict[str, Any] = {
             "protocol": "tcp",
             "direction": direction,
+            "ttl": raw[8],
+            "tos": raw[1],
             "flags": flag_names,
             "seq": int.from_bytes(payload[4:8], "big"),
             "ack": int.from_bytes(payload[8:12], "big"),
             "source": {"address": source_address, "port": int.from_bytes(payload[0:2], "big")},
             "destination": {"address": destination_address, "port": int.from_bytes(payload[2:4], "big")},
+            "_wire_length": total_length,
         }
         if "timestamp" in raw_packet:
             packet["timestamp"] = raw_packet["timestamp"]
@@ -4814,8 +4976,11 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
         packet = {
             "protocol": "udp",
             "direction": direction,
+            "ttl": raw[8],
+            "tos": raw[1],
             "source": {"address": source_address, "port": int.from_bytes(payload[0:2], "big")},
             "destination": {"address": destination_address, "port": int.from_bytes(payload[2:4], "big")},
+            "_wire_length": total_length,
         }
         if "timestamp" in raw_packet:
             packet["timestamp"] = raw_packet["timestamp"]
@@ -5291,7 +5456,14 @@ def _packet_endpoint(raw: Any, prefix: str, packet_index: int) -> dict[str, Any]
         )
     result: dict[str, Any] = {}
     if "address" in raw:
-        result["address"] = _require_string(raw["address"], f"packet {prefix} address")
+        address = _require_string(raw["address"], f"packet {prefix} address")
+        try:
+            address = str(ipaddress.ip_address(address))
+        except ValueError:
+            # Preserve non-IP endpoint labels for existing structured tests;
+            # IP-specific lookups still validate addresses at command use.
+            pass
+        result["address"] = address
     if "port" in raw:
         port = raw["port"]
         if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
@@ -7114,11 +7286,13 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             )
         direction = _packet_direction(packet.get("direction", "client_to_server"))
         wire_payload: bytes | None = None
+        wire_length: int | None = None
         if protocol == "wire":
             packet = _decode_wire_packet(packet, index, direction)
             protocol = packet["protocol"]
             direction = packet["direction"]
             wire_payload = packet.pop("_wire_payload", None)
+            wire_length = packet.pop("_wire_length", None)
         allowed = PACKET_COMMON_FIELDS | PACKET_PROTOCOL_FIELDS[protocol]
         unknown = sorted(set(packet) - allowed)
         if unknown:
@@ -7158,6 +7332,10 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 continue
             if field.endswith("_addr"):
                 value = _require_string(packet[field], f"packet {index} {field}")
+                try:
+                    value = str(ipaddress.ip_address(value))
+                except ValueError:
+                    pass
             else:
                 value = packet[field]
                 if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 65535:
@@ -7185,6 +7363,16 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < TCP_SEQUENCE_MODULUS:
                 raise EmulatorInputError(
                     f"packet {index} {field} must be an integer from 0 to {TCP_SEQUENCE_MODULUS - 1}"
+                )
+            normalised[field] = value
+
+        for field in ("hops", "ttl", "tos"):
+            if field not in packet:
+                continue
+            value = packet[field]
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 255:
+                raise EmulatorInputError(
+                    f"packet {index} {field} must be an integer from 0 to 255"
                 )
             normalised[field] = value
 
@@ -7378,6 +7566,8 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
 
         if wire_payload is not None:
             normalised["_wire_payload"] = wire_payload
+        if wire_length is not None:
+            normalised["_wire_length"] = wire_length
 
         if protocol == "tls" and "type" not in normalised:
             raise EmulatorInputError(f"packet {index} TLS packets require type")
@@ -8061,6 +8251,7 @@ class EmulatorSession:
             auth,
             aaa,
             access,
+            ip_config,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -8083,6 +8274,7 @@ class EmulatorSession:
         self._auth = auth
         self._aaa = aaa
         self._access = access
+        self._ip_config = ip_config
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -8122,6 +8314,10 @@ class EmulatorSession:
         self._http2_streams: dict[int, dict[str, Any]] = {}
         self._http2_tcp_active = False
         self._websocket_raw_active = False
+        self._ip_connection_initialized = False
+        self._ip_connection_start_timestamp: float | None = None
+        self._ip_age_ms = 0
+        self._ip_virtual_age_ms = 0
         self._mqtt_raw_active = any(
             str(profile).upper() == "MQTT" for profile in self._profiles
         )
@@ -8195,6 +8391,7 @@ class EmulatorSession:
                 _configure_auth(session, self._auth)
                 _configure_aaa(session, self._aaa)
                 _configure_access(session, self._access)
+                _configure_ip(session, self._ip_config)
                 session.eval_tcl("::itest::semantic::flow_reset_connection")
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
@@ -8581,6 +8778,7 @@ class EmulatorSession:
             mqtt_forwarded, mqtt_emissions = self._mqtt_event_outputs(
                 session, event_name, state_snapshot["mqtt"]
             )
+        semantic_snapshot = _semantic_snapshot(session)
         result = {
             "event": event_name,
             "fired": bool(event_result.fired),
@@ -8595,7 +8793,10 @@ class EmulatorSession:
                 entry if not isinstance(entry, tuple) else list(entry)
                 for entry in session.get_logs()
             ],
-            "semantic": {"psm": _semantic_snapshot(session)["psm"]},
+            "semantic": {
+                "psm": semantic_snapshot["psm"],
+                "ip": semantic_snapshot["ip"],
+            },
         }
         if mqtt_forwarded is not None:
             result["forwarded"] = mqtt_forwarded
@@ -8651,6 +8852,9 @@ class EmulatorSession:
         if "payload" in packet:
             payload_key = "client_payload" if direction == "client_to_server" else "server_payload"
             connection[payload_key] = packet["payload"]
+        for field in ("ttl", "tos"):
+            if field in packet:
+                connection[field] = str(packet[field])
         return connection
 
     @staticmethod
@@ -9291,6 +9495,64 @@ class EmulatorSession:
         for key, value in values.items():
             session.eval_tcl(f"set ::orch::config({key}) {_tcl_quote(str(value))}")
 
+    @staticmethod
+    def _packet_byte_count(packet: dict[str, Any]) -> int:
+        """Return the adapter's byte-count boundary for one observed packet."""
+        wire_length = packet.get("_wire_length")
+        if isinstance(wire_length, int) and wire_length >= 0:
+            return wire_length
+        for field in ("_wire_payload", "_mqtt_payload", "_http2_payload", "_rtsp_payload"):
+            payload = packet.get(field)
+            if isinstance(payload, (bytes, bytearray)):
+                return len(payload)
+        payload = packet.get("payload")
+        if isinstance(payload, str):
+            return len(payload.encode("utf-8"))
+        for field in ("message_hex", "payload_hex"):
+            value = packet.get(field)
+            if isinstance(value, str) and len(value) % 2 == 0:
+                try:
+                    return len(bytes.fromhex(value))
+                except ValueError:
+                    pass
+        return 0
+
+    def _record_ip_packet(self, session: Any, packet: dict[str, Any]) -> None:
+        """Record one real trace packet before protocol adapters emit events."""
+        if packet.get("_synthetic_coalesced"):
+            return
+        if not self._ip_connection_initialized:
+            session.eval_tcl("::itest::semantic::ip_reset_connection")
+            self._ip_connection_initialized = True
+            self._ip_connection_start_timestamp = None
+            self._ip_age_ms = 0
+            self._ip_virtual_age_ms = 0
+
+        timestamp = packet.get("timestamp")
+        if timestamp is None:
+            age_ms = self._ip_virtual_age_ms
+            self._ip_virtual_age_ms += 1
+        else:
+            timestamp_value = float(timestamp)
+            if self._ip_connection_start_timestamp is None:
+                self._ip_connection_start_timestamp = timestamp_value
+                age_ms = 0
+            else:
+                age_ms = max(
+                    0,
+                    int(round((timestamp_value - self._ip_connection_start_timestamp) * 1000)),
+                )
+        self._ip_age_ms = max(self._ip_age_ms, age_ms)
+        command = (
+            "::itest::semantic::ip_record_packet "
+            f"{_tcl_quote(packet['direction'])} "
+            f"{_tcl_quote(str(self._packet_byte_count(packet)))} "
+            f"{_tcl_quote(str(self._ip_age_ms))}"
+        )
+        if "hops" in packet:
+            command += f" {_tcl_quote(str(packet['hops']))}"
+        session.eval_tcl(command)
+
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
@@ -9359,6 +9621,10 @@ class EmulatorSession:
         self._http2_tcp_active = False
         self._tcp_buffers = {"client": "", "server": ""}
         self._websocket_raw_active = False
+        self._ip_connection_initialized = False
+        self._ip_connection_start_timestamp = None
+        self._ip_age_ms = 0
+        self._ip_virtual_age_ms = 0
         self._connection_open = False
         self._server_connection_open = False
 
@@ -9862,13 +10128,19 @@ class EmulatorSession:
         while queue_index < len(packet_queue):
             index, original_packet = packet_queue[queue_index]
             queue_index += 1
+            self._record_ip_packet(session, original_packet)
             packet = original_packet
             packet, buffered_bytes = self._reassemble_packet(packet, index)
             if packet is not None:
                 coalesced_packets = packet.pop("_coalesced_packets", [])
                 if coalesced_packets:
+                    synthetic_packets = []
+                    for coalesced_packet in coalesced_packets:
+                        coalesced_packet = dict(coalesced_packet)
+                        coalesced_packet["_synthetic_coalesced"] = True
+                        synthetic_packets.append(coalesced_packet)
                     packet_queue[queue_index:queue_index] = [
-                        (index, coalesced) for coalesced in coalesced_packets
+                        (index, coalesced) for coalesced in synthetic_packets
                     ]
             if packet is None:
                 buffered_entry: dict[str, Any] = {
@@ -9884,6 +10156,9 @@ class EmulatorSession:
                     "destination",
                     "flags",
                     "timestamp",
+                    "hops",
+                    "ttl",
+                    "tos",
                 ):
                     if field in original_packet:
                         buffered_entry[field] = original_packet[field]
@@ -10008,6 +10283,9 @@ class EmulatorSession:
                 "timestamp",
                 "seq",
                 "ack",
+                "hops",
+                "ttl",
+                "tos",
             ):
                 if field in packet:
                     if field == "avps" and isinstance(packet[field], list):

@@ -1403,6 +1403,128 @@ when HTTP_REQUEST {
             },
         )
 
+    def test_ip_semantics_record_packet_state_and_seeded_lookups(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "ip": {
+                    "hops": 3,
+                    "intelligence": {"10.0.0.5": ["Proxy", "Scanners"]},
+                    "reputation": {"10.0.0.5": ["Scanners", "Cloud Provider Networks"]},
+                },
+                "irule": """
+when CLIENT_ACCEPTED {
+    TCP::collect
+    log local0. "accepted hops=[IP::hops] stats=[IP::stats] reputation=[IP::reputation [IP::client_addr]] intelligence=[IP::intelligence [IP::client_addr]]"
+    IP::idle_timeout 900
+}
+when CLIENT_DATA {
+    IP::ingress_drop_rate [IP::client_addr] 10 30
+    IP::ingress_rate_limit 20 100
+    log local0. "data pkts=[IP::stats pkts in] bytes=[IP::stats bytes in] age=[IP::stats age] in=[IP::stats in] out=[IP::stats out]"
+}
+when SERVER_CONNECTED {
+    log local0. "server pkts=[IP::stats pkts out] bytes=[IP::stats bytes out]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                        "flags": ["SYN"],
+                        "hops": 4,
+                        "timestamp": 10,
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                        "flags": ["ACK", "PSH"],
+                        "payload": "hello",
+                        "hops": 4,
+                        "timestamp": 10.25,
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": {"address": "192.0.2.10", "port": 443},
+                        "destination": {"address": "10.0.0.5", "port": 51000},
+                        "flags": ["ACK"],
+                        "payload": "ok",
+                        "timestamp": 10.5,
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        accepted = result["trace"][0]["events"][-1]
+        self.assertEqual(accepted["event"], "CLIENT_ACCEPTED")
+        self.assertTrue(any("accepted hops=4" in log for log in accepted["logs"]))
+        self.assertTrue(any("reputation=Scanners" in log for log in accepted["logs"]))
+        self.assertEqual(accepted["semantic"]["ip"]["intelligence"]["10.0.0.5"], [
+            "Proxy", "Scanners"
+        ])
+        self.assertEqual(accepted["semantic"]["ip"]["pkts_in"], 1)
+        self.assertEqual(accepted["semantic"]["ip"]["bytes_in"], 0)
+        self.assertEqual(accepted["semantic"]["ip"]["hops"], 4)
+
+        data_event = result["trace"][1]["events"][-1]
+        self.assertEqual(data_event["event"], "CLIENT_DATA")
+        self.assertTrue(any("pkts=2 bytes=5 age=250" in log for log in data_event["logs"]))
+        self.assertEqual(data_event["semantic"]["ip"]["drop_rates"], {
+            "10.0.0.5": {"rate": 10, "timeout": 30}
+        })
+        self.assertEqual(data_event["semantic"]["ip"]["global_gray_list_rate"], 20)
+        self.assertEqual(data_event["semantic"]["ip"]["global_rate"], 100)
+        self.assertEqual(data_event["semantic"]["ip"]["idle_timeout"], 900)
+
+        server_event = result["trace"][2]["events"][-1]
+        self.assertEqual(server_event["event"], "SERVER_CONNECTED")
+        self.assertTrue(any("server pkts=1 bytes=2" in log for log in server_event["logs"]))
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in (
+            "IP::hops", "IP::idle_timeout", "IP::ingress_drop_rate",
+            "IP::ingress_rate_limit", "IP::intelligence", "IP::reputation", "IP::stats",
+        ):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+    def test_ip_semantics_reject_invalid_inputs(self) -> None:
+        base = {
+            "profiles": ["TCP"],
+            "irule": "when CLIENT_ACCEPTED { IP::hops }",
+            "packets": [{
+                "protocol": "tcp",
+                "direction": "client_to_server",
+                "flags": ["SYN"],
+            }],
+        }
+        invalid_scenarios = (
+            ({"ip": {"hops": 256}}, "ip.hops must be an integer from 0 to 255"),
+            ({"ip": {"reputation": {"not-an-ip": ["Botnets"]}}}, "not a valid IPv4 or IPv6"),
+            ({"ip": {"reputation": {"10.0.0.5": ["bad}category"]}}}, "Tcl braces"),
+        )
+        for extra, message in invalid_scenarios:
+            scenario = dict(base)
+            scenario.update(extra)
+            with self.subTest(extra=extra):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+        for irule, message in (
+            ("when CLIENT_ACCEPTED { IP::stats nope }", "unsupported IP::stats selector"),
+            ("when CLIENT_ACCEPTED { IP::idle_timeout -1 }", "non-negative integer"),
+            ("when CLIENT_ACCEPTED { IP::ingress_rate_limit 1 }", "requires GLOBAL_GRAY_LIST_RATE"),
+        ):
+            scenario = dict(base)
+            scenario["irule"] = irule
+            with self.subTest(irule=irule):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
     def test_profile_attribute_commands_read_configured_17_5_settings(self) -> None:
         profiles = [
             "TCP",
