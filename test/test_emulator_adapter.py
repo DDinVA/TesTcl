@@ -707,6 +707,34 @@ when HTTP_REQUEST {
         finally:
             session.close()
 
+    def test_wam_and_vdi_plugin_controls_are_connection_scoped(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP", "FASTHTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    WAM::disable
+    VDI::disable
+    set disabled "[set ::state::wam::enabled]/[set ::state::vdi::enabled]"
+    WAM::enable
+    VDI::enable
+    log local0. "disabled=$disabled enabled=[set ::state::wam::enabled]/[set ::state::vdi::enabled]"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event("HTTP_REQUEST", {"wam": {}, "vdi": {}})
+            self.assertTrue(result["fired"])
+            self.assertEqual(result["state"]["wam"]["enabled"], "1")
+            self.assertEqual(result["state"]["vdi"]["enabled"], "1")
+            self.assertTrue(any("disabled=0/0 enabled=1/1" in entry for entry in result["logs"]))
+        finally:
+            session.close()
+
     def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1314,7 +1342,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
         self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 167)
+        self.assertEqual(queue["command_count"], 163)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)

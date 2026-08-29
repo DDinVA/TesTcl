@@ -1072,6 +1072,14 @@ namespace eval ::itest::semantic {
         variable rules {}
     }
 
+    namespace eval ::state::wam {
+        variable enabled 1
+    }
+
+    namespace eval ::state::vdi {
+        variable enabled 1
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -5745,6 +5753,58 @@ namespace eval ::itest::semantic {
         }
         if {!$exists} { return {} }
         return [_policy_list [dict get $::state::policy::rules $policy_name] "POLICY::rules $policy_name"]
+    }
+
+    proc wam_reset_connection {} {
+        set ::state::wam::enabled 1
+    }
+
+    proc vdi_reset_connection {} {
+        set ::state::vdi::enabled 1
+    }
+
+    proc _wam_require_http {command_name} {
+        if {![_profile_enabled HTTP]} {
+            error "$command_name requires an HTTP profile"
+        }
+    }
+
+    proc _vdi_require_flow {command_name} {
+        if {$::itest::current_event ne "CLIENT_ACCEPTED" && ![_profile_enabled FASTHTTP]} {
+            error "$command_name requires a FASTHTTP profile or CLIENT_ACCEPTED"
+        }
+    }
+
+    proc wam_disable_command {args} {
+        _wam_require_http WAM::disable
+        if {[llength $args] != 0} { error "WAM::disable takes no arguments" }
+        set ::state::wam::enabled 0
+        ::itest::log_decision wam disable
+        return ""
+    }
+
+    proc wam_enable_command {args} {
+        _wam_require_http WAM::enable
+        if {[llength $args] != 0} { error "WAM::enable takes no arguments" }
+        set ::state::wam::enabled 1
+        ::itest::log_decision wam enable
+        return ""
+    }
+
+    proc vdi_disable_command {args} {
+        _vdi_require_flow VDI::disable
+        if {[llength $args] != 0} { error "VDI::disable takes no arguments" }
+        set ::state::vdi::enabled 0
+        ::itest::log_decision vdi disable
+        return ""
+    }
+
+    proc vdi_enable_command {args} {
+        _vdi_require_flow VDI::enable
+        if {[llength $args] != 0} { error "VDI::enable takes no arguments" }
+        set ::state::vdi::enabled 1
+        ::itest::log_decision vdi enable
+        return ""
     }
 
     proc diameter_reset_connection {} {
@@ -19847,6 +19907,10 @@ foreach {original replacement} {
     policy_names policy_names_command
     policy_rules policy_rules_command
     policy_targets policy_targets_command
+    wam_disable wam_disable_command
+    wam_enable wam_enable_command
+    vdi_disable vdi_disable_command
+    vdi_enable vdi_enable_command
     psc_aaa_reporting_interval psc_aaa_reporting_interval_command
     psc_attr psc_attr_command
     psc_calling_id psc_calling_id_command
@@ -20503,6 +20567,10 @@ foreach {name proc_name} {
     POLICY::names ::itest::semantic::policy_names_command
     POLICY::rules ::itest::semantic::policy_rules_command
     POLICY::targets ::itest::semantic::policy_targets_command
+    WAM::disable ::itest::semantic::wam_disable_command
+    WAM::enable ::itest::semantic::wam_enable_command
+    VDI::disable ::itest::semantic::vdi_disable_command
+    VDI::enable ::itest::semantic::vdi_enable_command
     PSC::aaa_reporting_interval ::itest::semantic::psc_aaa_reporting_interval_command
     PSC::attr ::itest::semantic::psc_attr_command
     PSC::calling_id ::itest::semantic::psc_calling_id_command

@@ -782,6 +782,19 @@ decision; it does not evaluate LTM policy conditions or execute policy actions.
 See the F5 [POLICY namespace](https://clouddocs.f5.com/api/irules/POLICY.html)
 reference.
 
+### WAM and VDI plugin controls
+
+`WAM::disable` and `WAM::enable` model connection-scoped Web Accelerator
+processing. `VDI::disable` and `VDI::enable` model the VDI flow toggle; VDI
+commands are accepted at `CLIENT_ACCEPTED` or with a `FASTHTTP` profile, while
+WAM commands require an `HTTP` profile. All four commands take no arguments,
+record a decision, and reset to enabled at connection teardown. These controls
+do not execute WAM/VDI plugin processing or emulate the underlying acceleration
+engines. See the F5 [WAM::disable](https://clouddocs.f5.com/api/irules/WAM__disable.html),
+[WAM::enable](https://clouddocs.f5.com/api/irules/WAM__enable.html),
+[VDI::disable](https://clouddocs.f5.com/api/irules/VDI__disable.html), and
+[VDI::enable](https://clouddocs.f5.com/api/irules/VDI__enable.html) references.
+
 ### FLOWTABLE query inputs
 
 The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,
