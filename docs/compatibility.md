@@ -441,6 +441,12 @@ The TMOS 17.5 `ACCESS2::access2_proc` command is also modeled for
 `ACCESS2_POLICY_EXPRESSION_EVAL`: the direct event state supplies the selected
 procedure name and the command returns it without invoking hidden policy code.
 That procedure value is reset at each event boundary.
+The seven catalogued `AM::*` commands are represented by a deterministic
+acceleration-metadata layer: the six no-argument readers return caller-supplied
+metadata and `AM::disable` records connection-scoped disable state. The
+adapter does not execute Application Acceleration Manager policy, cache
+population, or media transformation because those behaviors are not defined
+by the pinned command contract.
 The TMOS 17.5 `ACL::action` and `ACL::eval` commands are represented by a
 deterministic ACL decision state. `ACL::action` supports the documented
 `default`, `drop`, `reset`, `allow`, and `allow-final` actions in `FLOW_INIT`;

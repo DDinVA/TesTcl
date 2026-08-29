@@ -588,6 +588,15 @@ EVENT_STATE_FIELDS = {
         "applied_action",
     },
     "access2": {"proc"},
+    "am": {
+        "age",
+        "application",
+        "cache",
+        "disabled",
+        "expires",
+        "media_playlist",
+        "policy_node",
+    },
     "lsn": {
         "address",
         "port",
@@ -1134,6 +1143,7 @@ EVENT_STATE_NAMESPACES = {
     "sdp": "::state::sdp",
     "acl": "::state::acl",
     "access2": "::state::access2",
+    "am": "::state::am",
     "lsn": "::state::lsn",
     "xlat": "::state::xlat",
     "pcp": "::state::pcp",
@@ -2080,6 +2090,13 @@ SEMANTIC_MOCK_COMMANDS = {
     "AAA::auth_send",
     "ACCESS::acl",
     "ACCESS2::access2_proc",
+    "AM::age",
+    "AM::application",
+    "AM::cache",
+    "AM::disable",
+    "AM::expires",
+    "AM::media_playlist",
+    "AM::policy_node",
     "ACCESS::disable",
     "ACCESS::enable",
     "ACCESS::ephemeral-auth",
@@ -4453,6 +4470,27 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
     if len(access2_parts) != 2 or access2_parts[0] != "proc":
         raise EmulatorInputError("invalid ACCESS2 state")
     access2 = {"proc": access2_parts[1]}
+    am_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::am_snapshot"))
+    if len(am_parts) % 2:
+        raise EmulatorInputError("invalid AM state")
+    am_values = dict(zip(am_parts[::2], am_parts[1::2]))
+    expected_am_fields = {
+        "age", "application", "cache", "disabled", "expires",
+        "media_playlist", "policy_node",
+    }
+    if set(am_values) != expected_am_fields:
+        raise EmulatorInputError("invalid AM state fields")
+    if am_values["disabled"] not in {"0", "1"}:
+        raise EmulatorInputError("invalid AM disabled state")
+    am = {
+        "age": am_values["age"],
+        "application": am_values["application"],
+        "cache": am_values["cache"],
+        "disabled": am_values["disabled"] == "1",
+        "expires": am_values["expires"],
+        "media_playlist": am_values["media_playlist"],
+        "policy_node": am_values["policy_node"],
+    }
 
     def parse_access_map(raw: str, label: str) -> dict[str, str]:
         parts = _split_tcl_list(raw)
@@ -4832,6 +4870,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "saml": access_saml,
         },
         "access2": access2,
+        "am": am,
         "flow": {
             "clock": flow_clock,
             "current_side": flow_values["current_side"],
@@ -12952,6 +12991,7 @@ class EmulatorSession:
                 "tds": semantic_snapshot["tds"],
                 "qoe": semantic_snapshot["qoe"],
                 "access2": semantic_snapshot["access2"],
+                "am": semantic_snapshot["am"],
             },
         }
         if mqtt_forwarded is not None:
@@ -12979,6 +13019,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::ipfix_reset_connection")
                 session.eval_tcl("::itest::semantic::eca_reset_connection")
                 session.eval_tcl("::itest::semantic::avr_reset_connection")
+                session.eval_tcl("::itest::semantic::am_reset_connection")
             return self._fire_event_on_worker(session, event_name, normalised_state)
 
         return self._call(
@@ -14056,6 +14097,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::auth_reset_connection")
         session.eval_tcl("::itest::semantic::aaa_reset_connection")
         session.eval_tcl("::itest::semantic::access_reset_connection")
+        session.eval_tcl("::itest::semantic::am_reset_connection")
         session.eval_tcl("::itest::semantic::flow_reset_connection")
         session.eval_tcl("::itest::semantic::acl_reset_connection")
         session.eval_tcl("::itest::semantic::lsn_reset_connection")
@@ -14138,6 +14180,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::auth_reset_connection")
         session.eval_tcl("::itest::semantic::aaa_reset_connection")
         session.eval_tcl("::itest::semantic::access_reset_connection")
+        session.eval_tcl("::itest::semantic::am_reset_connection")
         session.eval_tcl("::itest::semantic::flow_reset_connection")
         session.eval_tcl("::itest::semantic::acl_reset_connection")
         session.eval_tcl("::itest::semantic::lsn_reset_connection")

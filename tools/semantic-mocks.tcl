@@ -1001,6 +1001,20 @@ namespace eval ::itest::semantic {
         variable proc ""
     }
 
+    # AM is the legacy Application Acceleration Manager surface.  The pinned
+    # registry supplies no event restriction or argument detail, so the
+    # adapter exposes caller-provided metadata and models only the documented
+    # no-argument reads plus connection-scoped disable state.
+    namespace eval ::state::am {
+        variable age 0
+        variable application ""
+        variable cache ""
+        variable disabled 0
+        variable expires ""
+        variable media_playlist ""
+        variable policy_node ""
+    }
+
     namespace eval ::state::mqtt {
         variable type ""
         variable protocol_name "MQTT"
@@ -12164,6 +12178,48 @@ namespace eval ::itest::semantic {
         return [list proc $::state::access2::proc]
     }
 
+    proc am_reset_connection {} {
+        set ::state::am::age 0
+        set ::state::am::application ""
+        set ::state::am::cache ""
+        set ::state::am::disabled 0
+        set ::state::am::expires ""
+        set ::state::am::media_playlist ""
+        set ::state::am::policy_node ""
+    }
+
+    proc _am_read {field args} {
+        if {[llength $args] != 0} {
+            error "AM::$field takes no arguments"
+        }
+        return [set ::state::am::$field]
+    }
+
+    proc am_age_command {args} { return [_am_read age {*}$args] }
+    proc am_application_command {args} { return [_am_read application {*}$args] }
+    proc am_cache_command {args} { return [_am_read cache {*}$args] }
+    proc am_expires_command {args} { return [_am_read expires {*}$args] }
+    proc am_media_playlist_command {args} { return [_am_read media_playlist {*}$args] }
+    proc am_policy_node_command {args} { return [_am_read policy_node {*}$args] }
+
+    proc am_disable_command {args} {
+        if {[llength $args] != 0} {
+            error "AM::disable takes no arguments"
+        }
+        set ::state::am::disabled 1
+        ::itest::log_decision am disable
+        return ""
+    }
+
+    proc am_snapshot {} {
+        return [list age $::state::am::age \
+            application $::state::am::application \
+            cache $::state::am::cache disabled $::state::am::disabled \
+            expires $::state::am::expires \
+            media_playlist $::state::am::media_playlist \
+            policy_node $::state::am::policy_node]
+    }
+
     proc access_reset_connection {} {
         variable access_default_enabled
         variable access_enabled
@@ -23202,6 +23258,13 @@ foreach {name proc_name} {
     AAA::auth_send ::itest::semantic::aaa_auth_send
     ACCESS::acl ::itest::semantic::access_acl
     ACCESS2::access2_proc ::itest::semantic::access2_proc_command
+    AM::age ::itest::semantic::am_age_command
+    AM::application ::itest::semantic::am_application_command
+    AM::cache ::itest::semantic::am_cache_command
+    AM::disable ::itest::semantic::am_disable_command
+    AM::expires ::itest::semantic::am_expires_command
+    AM::media_playlist ::itest::semantic::am_media_playlist_command
+    AM::policy_node ::itest::semantic::am_policy_node_command
     ACCESS::disable ::itest::semantic::access_disable
     ACCESS::enable ::itest::semantic::access_enable
     ACCESS::ephemeral-auth ::itest::semantic::access_ephemeral_auth

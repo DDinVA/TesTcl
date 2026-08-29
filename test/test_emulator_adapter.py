@@ -1906,7 +1906,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 53)
+        self.assertEqual(queue["command_count"], 46)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -9030,6 +9030,97 @@ when ACCESS2_POLICY_EXPRESSION_EVAL {
                 )
         finally:
             event_only.close()
+
+    def test_am_commands_model_acceleration_metadata_and_disable_state(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    log local0. "am=[AM::age]/[AM::application]/[AM::cache]/[AM::expires]/[AM::media_playlist]/[AM::policy_node]"
+    AM::disable
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = session.fire_event(
+                "HTTP_REQUEST",
+                {
+                    "am": {
+                        "age": 37,
+                        "application": "/Common/video-app",
+                        "cache": "hit",
+                        "expires": 3600,
+                        "media_playlist": "playlist-1",
+                        "policy_node": "node-7",
+                    }
+                },
+            )
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            for command in (
+                "AM::age",
+                "AM::application",
+                "AM::cache",
+                "AM::disable",
+                "AM::expires",
+                "AM::media_playlist",
+                "AM::policy_node",
+            ):
+                self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+            self.assertTrue(
+                any("am=37//Common/video-app/hit/3600/playlist-1/node-7" in entry for entry in result["logs"])
+            )
+            self.assertEqual(
+                result["semantic"]["am"],
+                {
+                    "age": "37",
+                    "application": "/Common/video-app",
+                    "cache": "hit",
+                    "disabled": True,
+                    "expires": "3600",
+                    "media_playlist": "playlist-1",
+                    "policy_node": "node-7",
+                },
+            )
+
+            persisted = session.fire_event("HTTP_RESPONSE")
+            self.assertEqual(persisted["semantic"]["am"]["disabled"], True)
+
+            reset = session.fire_event("CLIENT_ACCEPTED")
+            self.assertEqual(
+                reset["semantic"]["am"],
+                {
+                    "age": "0",
+                    "application": "",
+                    "cache": "",
+                    "disabled": False,
+                    "expires": "",
+                    "media_playlist": "",
+                    "policy_node": "",
+                },
+            )
+        finally:
+            session.close()
+
+        invalid = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {"profiles": ["HTTP"], "irule": "when HTTP_REQUEST { AM::age invalid }"},
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, "AM::age takes no arguments"
+            ):
+                invalid.fire_event("HTTP_REQUEST")
+        finally:
+            invalid.close()
 
     def test_qoe_commands_model_video_metrics_and_connection_control(self) -> None:
         session = self.adapter.EmulatorSession(

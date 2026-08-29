@@ -655,6 +655,25 @@ expressions or reproduce the policy engine:
 }
 ```
 
+### AM acceleration metadata
+
+The seven catalogued `AM::*` commands are available with deterministic
+caller-supplied metadata. `AM::age`, `AM::application`, `AM::cache`,
+`AM::expires`, `AM::media_playlist`, and `AM::policy_node` are modeled as
+no-argument reads from the `am` event-state layer; `AM::disable` records a
+connection-scoped disable decision. Since the public command pages and the
+pinned registry do not define richer argument or value semantics, this layer
+does not execute Application Acceleration Manager policy, cache behavior, or
+media transformation:
+
+```json
+{
+  "profiles": ["HTTP"],
+  "irule": "when HTTP_REQUEST { log local0. [AM::application]; AM::disable }",
+  "request": {"uri": "/video.m3u8"}
+}
+```
+
 ### FLOW connection handles
 
 With the `FLOW` profile attached, the emulator models the seven catalogued
