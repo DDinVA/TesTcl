@@ -72,6 +72,15 @@ congestion-metric entries. Metric getters return deterministic values and
 `ROUTE::clear` removes a matching entry for the session; connection lifecycle
 state is reset independently. No live route discovery, metric aging, or
 multi-TMM cache synchronization is performed.
+The TMOS 17.5 `HTTP::proxy` surface uses scenario-seeded explicit-proxy
+resolution and chaining state. It models proxy enable/disable, URI rewriting,
+`exists`, destination getters, chain enable/disable, chain host/port updates,
+and one-request chain retry intent. Each HTTP transaction starts from the
+scenario defaults, while changes made within that transaction remain visible
+to later HTTP proxy events. Destination getters return empty values until the
+seeded resolution is marked present. The adapter does not perform DNS, proxy
+CONNECT negotiation, URI rewriting on forwarded bytes, or live downstream
+proxy chaining.
 The IP semantic layer models the seven TMOS 17.5 commands `IP::hops`,
 `IP::idle_timeout`, `IP::ingress_drop_rate`, `IP::ingress_rate_limit`,
 `IP::intelligence`, `IP::reputation`, and `IP::stats`. Path hops, directional

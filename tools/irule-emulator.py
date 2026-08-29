@@ -865,6 +865,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTTP::is_redirect",
     "HTTP::request_num",
     "HTTP::cookie",
+    "HTTP::proxy",
     "WS::collect",
     "WS::disconnect",
     "WS::enabled",
@@ -2068,6 +2069,27 @@ def _configure_route(session: Any, route_config: dict[str, Any]) -> None:
     )
 
 
+def _configure_http_proxy(session: Any, proxy_config: dict[str, Any]) -> None:
+    """Install deterministic explicit-proxy and proxy-chaining inputs."""
+    chain = proxy_config["chain"]
+    values = (
+        "1" if proxy_config["enabled"] else "0",
+        "1" if proxy_config["uri_rewrite"] else "0",
+        "1" if proxy_config["resolved"] else "0",
+        proxy_config["addr"],
+        str(proxy_config["port"]),
+        str(proxy_config["rtdom"]),
+        proxy_config["iptuple"],
+        "1" if chain["enabled"] else "0",
+        chain["host"],
+        str(chain["port"]),
+    )
+    session.eval_tcl(
+        "::itest::semantic::http_proxy_configure "
+        + " ".join(_tcl_quote(value) for value in values)
+    )
+
+
 def _split_tcl_list(value: Any) -> list[str]:
     """Parse a Tcl list returned by the bridge using a temporary interpreter."""
     try:
@@ -2148,6 +2170,42 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         value not in {"0", "1"} for value in psm_parts[1::2]
     ):
         raise EmulatorInputError("invalid PSM state")
+    http_proxy_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::http_proxy_snapshot")
+    )
+    if len(http_proxy_parts) % 2:
+        raise EmulatorInputError("invalid HTTP proxy state")
+    http_proxy_keys = http_proxy_parts[::2]
+    if len(set(http_proxy_keys)) != len(http_proxy_keys):
+        raise EmulatorInputError("duplicate HTTP proxy state field")
+    http_proxy_values = dict(
+        zip(http_proxy_parts[::2], http_proxy_parts[1::2])
+    )
+    expected_http_proxy_fields = {
+        "enabled", "uri_rewrite", "resolved", "addr", "port", "rtdom",
+        "iptuple", "chain_enabled", "chain_host", "chain_port",
+        "chain_retry_requested",
+    }
+    if set(http_proxy_values) != expected_http_proxy_fields:
+        raise EmulatorInputError("invalid HTTP proxy state fields")
+    http_proxy_bool_fields = {
+        "enabled", "uri_rewrite", "resolved", "chain_enabled",
+        "chain_retry_requested",
+    }
+    if any(
+        http_proxy_values[name] not in {"0", "1"}
+        for name in http_proxy_bool_fields
+    ):
+        raise EmulatorInputError("invalid HTTP proxy boolean state")
+    http_proxy_ints: dict[str, int] = {}
+    for name in ("port", "rtdom", "chain_port"):
+        try:
+            value = int(http_proxy_values[name])
+        except (KeyError, TypeError, ValueError):
+            raise EmulatorInputError(f"invalid HTTP proxy {name} state") from None
+        if value < 0:
+            raise EmulatorInputError(f"invalid HTTP proxy {name} state")
+        http_proxy_ints[name] = value
     cache_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::cache_snapshot"))
     if len(cache_parts) % 2:
         raise EmulatorInputError("invalid cache state")
@@ -2644,6 +2702,19 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "lb": lb_control,
         "table": table_entries,
         "psm": psm,
+        "http_proxy": {
+            "enabled": http_proxy_values["enabled"] == "1",
+            "uri_rewrite": http_proxy_values["uri_rewrite"] == "1",
+            "resolved": http_proxy_values["resolved"] == "1",
+            "addr": http_proxy_values["addr"],
+            "port": http_proxy_ints["port"],
+            "rtdom": http_proxy_ints["rtdom"],
+            "iptuple": http_proxy_values["iptuple"],
+            "chain_enabled": http_proxy_values["chain_enabled"] == "1",
+            "chain_host": http_proxy_values["chain_host"],
+            "chain_port": http_proxy_ints["chain_port"],
+            "chain_retry_requested": http_proxy_values["chain_retry_requested"] == "1",
+        },
         "cache": cache,
         "profile_settings": profile_settings,
         "asm": {
@@ -3672,6 +3743,92 @@ def _normalise_route(raw: Any) -> dict[str, Any]:
     return {"domain": domain, "metrics": result}
 
 
+def _normalise_http_proxy(raw: Any) -> dict[str, Any]:
+    """Normalize deterministic explicit-proxy and proxy-chaining inputs."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("http_proxy must be an object")
+    allowed = {
+        "enabled", "uri_rewrite", "resolved", "addr", "port", "rtdom",
+        "iptuple", "chain",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            "http_proxy unsupported field(s): " + ", ".join(unknown)
+        )
+
+    def boolean(name: str, default: bool) -> bool:
+        value = raw.get(name, default)
+        if not isinstance(value, bool):
+            raise EmulatorInputError(f"http_proxy.{name} must be a boolean")
+        return value
+
+    def string(name: str, default: str = "") -> str:
+        value = raw.get(name, default)
+        if not isinstance(value, str) or "\x00" in value:
+            raise EmulatorInputError(
+                f"http_proxy.{name} must be a string without NUL"
+            )
+        return value
+
+    def integer(name: str, minimum: int, maximum: int) -> int:
+        value = raw.get(name, 0)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not minimum <= value <= maximum
+        ):
+            raise EmulatorInputError(
+                f"http_proxy.{name} must be an integer from {minimum} to {maximum}"
+            )
+        return value
+
+    addr = string("addr")
+    resolved = boolean("resolved", bool(addr))
+    chain_raw = raw.get("chain", {})
+    if not isinstance(chain_raw, dict):
+        raise EmulatorInputError("http_proxy.chain must be an object")
+    unknown_chain = sorted(set(chain_raw) - {"enabled", "host", "port"})
+    if unknown_chain:
+        raise EmulatorInputError(
+            "http_proxy.chain unsupported field(s): " + ", ".join(unknown_chain)
+        )
+    chain_enabled = chain_raw.get("enabled", True)
+    if not isinstance(chain_enabled, bool):
+        raise EmulatorInputError("http_proxy.chain.enabled must be a boolean")
+    chain_host = chain_raw.get("host", "")
+    if not isinstance(chain_host, str) or "\x00" in chain_host:
+        raise EmulatorInputError(
+            "http_proxy.chain.host must be a string without NUL"
+        )
+    chain_port = chain_raw.get("port", 0)
+    if (
+        isinstance(chain_port, bool)
+        or not isinstance(chain_port, int)
+        or not 0 <= chain_port <= 65535
+    ):
+        raise EmulatorInputError(
+            "http_proxy.chain.port must be an integer from 0 to 65535"
+        )
+
+    return {
+        "enabled": boolean("enabled", True),
+        "uri_rewrite": boolean("uri_rewrite", True),
+        "resolved": resolved,
+        "addr": addr,
+        "port": integer("port", 0, 65535),
+        "rtdom": integer("rtdom", 0, 2**32 - 1),
+        "iptuple": string("iptuple"),
+        "chain": {
+            "enabled": chain_enabled,
+            "host": chain_host,
+            "port": chain_port,
+        },
+    }
+
+
 def _normalise_ip(raw: Any) -> dict[str, Any]:
     """Normalize deterministic inputs for the bounded IP command model."""
     if raw is None:
@@ -4003,6 +4160,8 @@ def _normalise_scenario_config(
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
 ]:
     if not isinstance(scenario, dict):
         raise EmulatorInputError("scenario must be a JSON object")
@@ -4025,6 +4184,7 @@ def _normalise_scenario_config(
         "access",
         "ip",
         "route",
+        "http_proxy",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -4075,6 +4235,7 @@ def _normalise_scenario_config(
         _normalise_access(scenario.get("access")),
         _normalise_ip(scenario.get("ip")),
         _normalise_route(scenario.get("route")),
+        _normalise_http_proxy(scenario.get("http_proxy")),
     )
 
 
@@ -8525,6 +8686,7 @@ class EmulatorSession:
             access,
             ip_config,
             route_config,
+            http_proxy_config,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -8550,6 +8712,7 @@ class EmulatorSession:
         self._ip_config = ip_config
         self._route_config = route_config
         self._route_visible = bool(route_config["metrics"]) or "ROUTE::" in source
+        self._http_proxy_config = http_proxy_config
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -8669,6 +8832,7 @@ class EmulatorSession:
                 _configure_access(session, self._access)
                 _configure_ip(session, self._ip_config)
                 _configure_route(session, self._route_config)
+                _configure_http_proxy(session, self._http_proxy_config)
                 session.eval_tcl("::itest::semantic::flow_reset_connection")
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
@@ -8724,6 +8888,7 @@ class EmulatorSession:
                 session.close_connection()
                 session.eval_tcl("::itest::semantic::stream_reset_connection")
                 session.eval_tcl("::itest::semantic::route_reset_connection")
+                session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         if not self._connection_open:
@@ -8740,6 +8905,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::route_reset_connection")
+            session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -8763,6 +8929,7 @@ class EmulatorSession:
         result: dict[str, Any]
         try:
             while True:
+                session.eval_tcl("::itest::semantic::http_proxy_prepare_request")
                 attempt_failure = lb_failure if retry_count == 0 else ""
                 dosl7_mitigated = "0"
                 if dosl7_request is not None and dosl7_request["mitigated"]:
@@ -8892,6 +9059,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::flow_reset_connection")
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::route_reset_connection")
+            session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         result["decisions"] = decision_history
@@ -8907,6 +9075,7 @@ class EmulatorSession:
         if request.get("close_after"):
             session.close_connection()
             session.eval_tcl("::itest::semantic::stream_reset_connection")
+            session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         return result
@@ -9086,6 +9255,7 @@ class EmulatorSession:
             "semantic": {
                 "psm": semantic_snapshot["psm"],
                 "ip": semantic_snapshot["ip"],
+                "http_proxy": semantic_snapshot["http_proxy"],
             },
         }
         if mqtt_forwarded is not None:
@@ -9898,6 +10068,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::stream_reset_connection")
         session.eval_tcl("::itest::semantic::route_reset_connection")
+        session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
@@ -9937,6 +10108,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
+        session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
         self._packet_streams.clear()
         self._http2_decoder = None
         self._http2_streams.clear()

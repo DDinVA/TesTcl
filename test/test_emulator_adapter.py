@@ -478,7 +478,7 @@ when HTTP_REQUEST {
         }
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
-        self.assertGreaterEqual(queue["command_count"], 367)
+        self.assertGreaterEqual(queue["command_count"], 366)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -5806,6 +5806,105 @@ when CLIENT_ACCEPTED {{
                     self.adapter.EmulatorSession(
                         Path(self.tcl_lsp_root),
                         scenario,
+                        allow_irule_file=False,
+                        allow_requests=False,
+                    )
+
+    def test_http_proxy_controls_resolution_and_proxy_chaining(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "http_proxy": {
+                    "enabled": True,
+                    "uri_rewrite": True,
+                    "resolved": True,
+                    "addr": "192.0.2.44",
+                    "port": 3128,
+                    "rtdom": 7,
+                    "iptuple": "192.0.2.44%7:3128",
+                    "chain": {
+                        "enabled": True,
+                        "host": "proxy.internal",
+                        "port": 8080,
+                    },
+                },
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::request_num] == 1} {
+        log local0. "before=[list [HTTP::proxy] [HTTP::proxy exists] [HTTP::proxy addr] [HTTP::proxy port] [HTTP::proxy rtdom] [HTTP::proxy iptuple] [HTTP::proxy chain] [HTTP::proxy chain host] [HTTP::proxy chain port]]"
+        HTTP::proxy disable
+        HTTP::proxy uri-rewrite disable
+        HTTP::proxy chain disable
+        HTTP::proxy chain host next-proxy.internal
+        HTTP::proxy chain port 8081
+        HTTP::proxy chain retry
+        log local0. "after=[list [HTTP::proxy] [set ::itest::semantic::http_proxy_uri_rewrite] [HTTP::proxy chain] [HTTP::proxy chain host] [HTTP::proxy chain port] [set ::itest::semantic::http_proxy_chain_retry_requested]]"
+    }
+}
+""",
+                "requests": [{"host": "example.com", "uri": "/one"}, {"uri": "/two"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first, second = result["results"]
+        self.assertTrue(any("before=1 1 192.0.2.44 3128 7 192.0.2.44%7:3128 1 proxy.internal 8080" in entry for entry in first["logs"]))
+        self.assertTrue(any("after=0 0 0 next-proxy.internal 8081 1" in entry for entry in first["logs"]))
+        self.assertEqual(
+            first["semantic"]["http_proxy"],
+            {
+                "enabled": False,
+                "uri_rewrite": False,
+                "resolved": True,
+                "addr": "192.0.2.44",
+                "port": 3128,
+                "rtdom": 7,
+                "iptuple": "192.0.2.44%7:3128",
+                "chain_enabled": False,
+                "chain_host": "next-proxy.internal",
+                "chain_port": 8081,
+                "chain_retry_requested": True,
+            },
+        )
+        self.assertEqual(second["semantic"]["http_proxy"]["enabled"], True)
+        self.assertEqual(second["semantic"]["http_proxy"]["uri_rewrite"], True)
+        self.assertEqual(second["semantic"]["http_proxy"]["chain_host"], "proxy.internal")
+        self.assertFalse(second["semantic"]["http_proxy"]["chain_retry_requested"])
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        self.assertEqual(usage["HTTP::proxy"]["runtime_status"], "semantic-mock")
+
+    def test_http_proxy_unresolved_destination_and_input_validation(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "http_proxy": {
+                    "resolved": False,
+                    "addr": "192.0.2.44",
+                    "port": 3128,
+                    "rtdom": 7,
+                },
+                "irule": "when HTTP_REQUEST { log local0. \"exists=[HTTP::proxy exists] addr=[HTTP::proxy addr] port=[HTTP::proxy port] rtdom=[HTTP::proxy rtdom] tuple=[HTTP::proxy iptuple]\" }",
+                "request": {"host": "unresolved.example.com"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event_log = result["results"][0]["logs"]
+        self.assertTrue(any("exists=0 addr= port= rtdom= tuple=" in entry for entry in event_log))
+
+        invalid_values = (
+            ({"chain": {"port": 65536}}, "chain.port"),
+            ({"port": -1}, "http_proxy.port"),
+            ({"enabled": "yes"}, "http_proxy.enabled"),
+        )
+        for proxy, message in invalid_values:
+            with self.subTest(proxy=proxy):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.EmulatorSession(
+                        Path(self.tcl_lsp_root),
+                        {
+                            "profiles": ["TCP", "HTTP"],
+                            "http_proxy": proxy,
+                            "irule": "when HTTP_REQUEST { log local0. ok }",
+                        },
                         allow_irule_file=False,
                         allow_requests=False,
                     )

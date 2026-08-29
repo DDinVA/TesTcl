@@ -22,6 +22,27 @@ namespace eval ::itest::semantic {
     variable http_release_requested 0
     variable http_close_requested 0
     variable http_request_number 0
+    variable http_proxy_default_enabled 1
+    variable http_proxy_default_uri_rewrite 1
+    variable http_proxy_default_resolved 0
+    variable http_proxy_default_addr ""
+    variable http_proxy_default_port 0
+    variable http_proxy_default_rtdom 0
+    variable http_proxy_default_iptuple ""
+    variable http_proxy_default_chain_enabled 1
+    variable http_proxy_default_chain_host ""
+    variable http_proxy_default_chain_port 0
+    variable http_proxy_enabled 1
+    variable http_proxy_uri_rewrite 1
+    variable http_proxy_resolved 0
+    variable http_proxy_addr ""
+    variable http_proxy_port 0
+    variable http_proxy_rtdom 0
+    variable http_proxy_iptuple ""
+    variable http_proxy_chain_enabled 1
+    variable http_proxy_chain_host ""
+    variable http_proxy_chain_port 0
+    variable http_proxy_chain_retry_requested 0
     variable psm_enabled
     array set psm_enabled {FTP 1 HTTP 1 SMTP 1}
     variable ws_enabled 1
@@ -794,6 +815,260 @@ namespace eval ::itest::semantic {
     proc http_release_snapshot {} {
         variable http_release_requested
         return [list requested $http_release_requested]
+    }
+
+    proc http_proxy_prepare_request {} {
+        variable http_proxy_default_enabled
+        variable http_proxy_default_uri_rewrite
+        variable http_proxy_default_resolved
+        variable http_proxy_default_addr
+        variable http_proxy_default_port
+        variable http_proxy_default_rtdom
+        variable http_proxy_default_iptuple
+        variable http_proxy_default_chain_enabled
+        variable http_proxy_default_chain_host
+        variable http_proxy_default_chain_port
+        variable http_proxy_enabled
+        variable http_proxy_uri_rewrite
+        variable http_proxy_resolved
+        variable http_proxy_addr
+        variable http_proxy_port
+        variable http_proxy_rtdom
+        variable http_proxy_iptuple
+        variable http_proxy_chain_enabled
+        variable http_proxy_chain_host
+        variable http_proxy_chain_port
+        variable http_proxy_chain_retry_requested
+        set http_proxy_enabled $http_proxy_default_enabled
+        set http_proxy_uri_rewrite $http_proxy_default_uri_rewrite
+        set http_proxy_resolved $http_proxy_default_resolved
+        set http_proxy_addr $http_proxy_default_addr
+        set http_proxy_port $http_proxy_default_port
+        set http_proxy_rtdom $http_proxy_default_rtdom
+        set http_proxy_iptuple $http_proxy_default_iptuple
+        if {!$http_proxy_resolved} {
+            set http_proxy_addr ""
+            set http_proxy_port 0
+            set http_proxy_rtdom 0
+            set http_proxy_iptuple ""
+        } elseif {$http_proxy_iptuple eq ""} {
+            set http_proxy_iptuple [list $http_proxy_addr $http_proxy_port $http_proxy_rtdom]
+        }
+        set http_proxy_chain_enabled $http_proxy_default_chain_enabled
+        set http_proxy_chain_host $http_proxy_default_chain_host
+        set http_proxy_chain_port $http_proxy_default_chain_port
+        set http_proxy_chain_retry_requested 0
+    }
+
+    proc http_proxy_reset_connection {} {
+        http_proxy_prepare_request
+    }
+
+    proc http_proxy_configure {args} {
+        if {[llength $args] != 10} {
+            error "HTTP proxy configuration requires ten values"
+        }
+        foreach {
+            enabled uri_rewrite resolved addr port rtdom iptuple
+            chain_enabled chain_host chain_port
+        } $args break
+        foreach field {enabled uri_rewrite resolved chain_enabled} value [list \
+            $enabled $uri_rewrite $resolved $chain_enabled] {
+            if {$value ni {0 1}} {
+                error "HTTP proxy $field must be boolean"
+            }
+        }
+        foreach field {port chain_port} value [list $port $chain_port] {
+            if {![string is integer -strict $value] || $value < 0 || $value > 65535} {
+                error "HTTP proxy $field must be between 0 and 65535"
+            }
+        }
+        if {![string is integer -strict $rtdom] || $rtdom < 0} {
+            error "HTTP proxy rtdom must be a non-negative integer"
+        }
+        foreach field {addr iptuple chain_host} value [list $addr $iptuple $chain_host] {
+            if {[string first "\x00" $value] >= 0} {
+                error "HTTP proxy $field must not contain NUL"
+            }
+        }
+        variable http_proxy_default_enabled
+        variable http_proxy_default_uri_rewrite
+        variable http_proxy_default_resolved
+        variable http_proxy_default_addr
+        variable http_proxy_default_port
+        variable http_proxy_default_rtdom
+        variable http_proxy_default_iptuple
+        variable http_proxy_default_chain_enabled
+        variable http_proxy_default_chain_host
+        variable http_proxy_default_chain_port
+        set http_proxy_default_enabled $enabled
+        set http_proxy_default_uri_rewrite $uri_rewrite
+        set http_proxy_default_resolved $resolved
+        set http_proxy_default_addr $addr
+        set http_proxy_default_port $port
+        set http_proxy_default_rtdom $rtdom
+        set http_proxy_default_iptuple $iptuple
+        set http_proxy_default_chain_enabled $chain_enabled
+        set http_proxy_default_chain_host $chain_host
+        set http_proxy_default_chain_port $chain_port
+        http_proxy_prepare_request
+    }
+
+    proc http_proxy_snapshot {} {
+        variable http_proxy_enabled
+        variable http_proxy_uri_rewrite
+        variable http_proxy_resolved
+        variable http_proxy_addr
+        variable http_proxy_port
+        variable http_proxy_rtdom
+        variable http_proxy_iptuple
+        variable http_proxy_chain_enabled
+        variable http_proxy_chain_host
+        variable http_proxy_chain_port
+        variable http_proxy_chain_retry_requested
+        return [list \
+            enabled $http_proxy_enabled \
+            uri_rewrite $http_proxy_uri_rewrite \
+            resolved $http_proxy_resolved \
+            addr $http_proxy_addr \
+            port $http_proxy_port \
+            rtdom $http_proxy_rtdom \
+            iptuple $http_proxy_iptuple \
+            chain_enabled $http_proxy_chain_enabled \
+            chain_host $http_proxy_chain_host \
+            chain_port $http_proxy_chain_port \
+            chain_retry_requested $http_proxy_chain_retry_requested]
+    }
+
+    proc _http_proxy_require_event {} {
+        if {$::itest::current_event ni {
+            HTTP_PROXY_REQUEST HTTP_REQUEST HTTP_REQUEST_DATA HTTP_RESPONSE
+            HTTP_RESPONSE_DATA HTTP_PROXY_CONNECT HTTP_PROXY_RESPONSE
+        }} {
+            error "HTTP::proxy is not valid in $::itest::current_event"
+        }
+    }
+
+    proc _http_proxy_resolved_value {value} {
+        variable http_proxy_resolved
+        if {!$http_proxy_resolved} { return "" }
+        return $value
+    }
+
+    proc http_proxy_command {args} {
+        _http_proxy_require_event
+        variable http_proxy_enabled
+        variable http_proxy_uri_rewrite
+        variable http_proxy_resolved
+        variable http_proxy_addr
+        variable http_proxy_port
+        variable http_proxy_rtdom
+        variable http_proxy_iptuple
+        variable http_proxy_chain_enabled
+        variable http_proxy_chain_host
+        variable http_proxy_chain_port
+        variable http_proxy_chain_retry_requested
+        if {[llength $args] == 0} {
+            return $http_proxy_enabled
+        }
+        set command [lindex $args 0]
+        switch -exact -- $command {
+            enable - disable {
+                if {[llength $args] != 1} {
+                    error "HTTP::proxy $command takes no arguments"
+                }
+                set http_proxy_enabled [expr {$command eq "enable"}]
+                ::itest::log_decision http_proxy $command
+                return ""
+            }
+            uri-rewrite {
+                if {[llength $args] != 2 || [lindex $args 1] ni {enable disable}} {
+                    error "HTTP::proxy uri-rewrite requires enable or disable"
+                }
+                set http_proxy_uri_rewrite [expr {[lindex $args 1] eq "enable"}]
+                ::itest::log_decision http_proxy uri-rewrite [lindex $args 1]
+                return ""
+            }
+            addr - port - rtdom - iptuple {
+                if {[llength $args] != 1} {
+                    error "HTTP::proxy $command takes no arguments"
+                }
+                return [_http_proxy_resolved_value [set http_proxy_$command]]
+            }
+            exists {
+                if {[llength $args] != 1} {
+                    error "HTTP::proxy exists takes no arguments"
+                }
+                return $http_proxy_resolved
+            }
+            chain {
+                if {[llength $args] == 1} {
+                    return $http_proxy_chain_enabled
+                }
+                set chain_command [lindex $args 1]
+                switch -exact -- $chain_command {
+                    enable - disable {
+                        if {[llength $args] != 2} {
+                            error "HTTP::proxy chain $chain_command takes no arguments"
+                        }
+                        set http_proxy_chain_enabled [expr {$chain_command eq "enable"}]
+                        ::itest::log_decision http_proxy chain $chain_command
+                        return ""
+                    }
+                    host {
+                        if {[llength $args] == 2} {
+                            return $http_proxy_chain_host
+                        }
+                        if {[llength $args] ni {3 4}} {
+                            error "HTTP::proxy chain host requires a hostname and optional port"
+                        }
+                        set host [lindex $args 2]
+                        if {$host eq "" || [string first "\x00" $host] >= 0} {
+                            error "HTTP::proxy chain host must be non-empty and contain no NUL"
+                        }
+                        set http_proxy_chain_host $host
+                        if {[llength $args] == 4} {
+                            set port [lindex $args 3]
+                            if {![string is integer -strict $port] || $port < 1 || $port > 65535} {
+                                error "HTTP::proxy chain host port must be between 1 and 65535"
+                            }
+                            set http_proxy_chain_port $port
+                        }
+                        ::itest::log_decision http_proxy chain_host [list $http_proxy_chain_host $http_proxy_chain_port]
+                        return ""
+                    }
+                    port {
+                        if {[llength $args] == 2} {
+                            return $http_proxy_chain_port
+                        }
+                        if {[llength $args] != 3} {
+                            error "HTTP::proxy chain port requires one port"
+                        }
+                        set port [lindex $args 2]
+                        if {![string is integer -strict $port] || $port < 1 || $port > 65535} {
+                            error "HTTP::proxy chain port must be between 1 and 65535"
+                        }
+                        set http_proxy_chain_port $port
+                        ::itest::log_decision http_proxy chain_port $port
+                        return ""
+                    }
+                    retry {
+                        if {[llength $args] != 2} {
+                            error "HTTP::proxy chain retry takes no arguments"
+                        }
+                        set http_proxy_chain_retry_requested 1
+                        ::itest::log_decision http_proxy chain_retry
+                        return ""
+                    }
+                    default {
+                        error "unsupported HTTP::proxy chain operation $chain_command"
+                    }
+                }
+            }
+            default {
+                error "unsupported HTTP::proxy operation $command"
+            }
+        }
     }
 
     proc psm_reset_connection {} {
@@ -13748,6 +14023,7 @@ foreach {name proc_name} {
     HTTP2::push ::itest::semantic::http2_push_command
     HTTP2::stream ::itest::semantic::http2_stream_command
     HTTP2::version ::itest::semantic::http2_version_command
+    HTTP::proxy ::itest::semantic::http_proxy_command
     ROUTE::age ::itest::semantic::route_age_command
     ROUTE::bandwidth ::itest::semantic::route_bandwidth_command
     ROUTE::clear ::itest::semantic::route_clear_command

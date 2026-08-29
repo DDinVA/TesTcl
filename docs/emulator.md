@@ -80,6 +80,38 @@ entries. `ROUTE::age`, `ROUTE::bandwidth`, `ROUTE::cwnd`, `ROUTE::expiration`,
 the session. This models rule-visible cache decisions, not live route
 discovery, metric aging, or multi-TMM cache synchronization.
 
+The HTTP proxy layer accepts deterministic explicit-proxy resolution and proxy
+chaining inputs. It models all of the documented `HTTP::proxy` forms: proxy
+enable/disable, URI-rewrite enable/disable, `addr`, `port`, `rtdom`, `exists`,
+`iptuple`, and the `chain` enable/disable, host, port, and retry controls.
+Proxy state is reset to the scenario defaults at the start of each HTTP
+transaction, so a rule can safely test per-request decisions on a keep-alive
+connection. A resolved proxy can be seeded like this:
+
+```json
+{
+  "http_proxy": {
+    "resolved": true,
+    "addr": "192.0.2.44",
+    "port": 3128,
+    "rtdom": 7,
+    "iptuple": "192.0.2.44%7:3128",
+    "chain": {
+      "enabled": true,
+      "host": "proxy.internal",
+      "port": 8080
+    }
+  }
+}
+```
+
+If `iptuple` is omitted for a resolved proxy, the adapter returns the
+deterministic Tcl list `{address port route-domain}`. If `resolved` is false,
+`HTTP::proxy exists` returns `0` and the destination getters return empty
+values. `HTTP::proxy chain retry` records intent in semantic state; the
+adapter does not perform DNS, proxy CONNECT negotiation, URI rewriting on
+forwarded bytes, or live downstream proxy chaining.
+
 ```json
 {
   "route": {
