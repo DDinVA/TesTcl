@@ -93,6 +93,44 @@ namespace eval ::itest::semantic {
     variable dosl7_greylist
     set dosl7_greylist [dict create]
 
+    variable asm_default_enabled 1
+    variable asm_enabled 1
+    variable asm_default_policy ""
+    variable asm_policy ""
+    variable asm_default_client_ip ""
+    variable asm_client_ip ""
+    variable asm_default_fingerprint 0
+    variable asm_fingerprint 0
+    variable asm_default_username ""
+    variable asm_username ""
+    variable asm_default_login_status not_logged_in
+    variable asm_login_status not_logged_in
+    variable asm_default_microservice ""
+    variable asm_microservice ""
+    variable asm_default_status ""
+    variable asm_status Clear
+    variable asm_default_severity ""
+    variable asm_severity ""
+    variable asm_default_support_id ""
+    variable asm_support_id ""
+    variable asm_default_captcha_status not_received
+    variable asm_captcha_status not_received
+    variable asm_default_captcha_age -1
+    variable asm_captcha_age -1
+    variable asm_payload ""
+    variable asm_default_payload ""
+    variable asm_default_violations {}
+    variable asm_violations {}
+    variable asm_default_signatures [dict create]
+    variable asm_signatures [dict create]
+    variable asm_default_campaigns [dict create]
+    variable asm_campaigns [dict create]
+    variable asm_captcha_sent 0
+    variable asm_uncaptcha 0
+    variable asm_unblocked 0
+    variable asm_conviction 0
+    variable asm_deception 0
+
     variable sip_discarded 0
     variable sip_response_requested 0
     variable sip_response_code ""
@@ -3846,6 +3884,496 @@ namespace eval ::itest::semantic {
             mitigated $dosl7_mitigated \
             profile_object $dosl7_profile_object \
             greylist $greylist]
+    }
+
+    proc asm_configure {enabled policy client_ip fingerprint username login_status microservice status severity support_id captcha_status captcha_age payload} {
+        variable asm_default_enabled
+        variable asm_enabled
+        variable asm_default_policy
+        variable asm_policy
+        variable asm_default_client_ip
+        variable asm_client_ip
+        variable asm_default_fingerprint
+        variable asm_fingerprint
+        variable asm_default_username
+        variable asm_username
+        variable asm_default_login_status
+        variable asm_login_status
+        variable asm_default_microservice
+        variable asm_microservice
+        variable asm_default_status
+        variable asm_status
+        variable asm_default_severity
+        variable asm_severity
+        variable asm_default_support_id
+        variable asm_support_id
+        variable asm_default_captcha_status
+        variable asm_captcha_status
+        variable asm_default_captcha_age
+        variable asm_captcha_age
+        variable asm_default_payload
+        variable asm_payload
+        if {$enabled ni {0 1}} { error "ASM enabled state must be boolean" }
+        if {$login_status ni {not_logged_in logging_in logged_in failed}} {
+            error "invalid ASM login status"
+        }
+        if {$status ni {Alarm Blocked Clear {}}} { error "invalid ASM status" }
+        if {$severity ni {Emergency Alert Critical Error Warning Notice Informational {}}} {
+            error "invalid ASM severity"
+        }
+        if {$captcha_status ni {not_received correct incorrect empty}} {
+            error "invalid ASM CAPTCHA status"
+        }
+        if {![string is integer -strict $captcha_age] || $captcha_age < -1} {
+            error "ASM CAPTCHA age must be an integer from -1"
+        }
+        set asm_default_enabled $enabled
+        set asm_enabled $enabled
+        set asm_default_policy $policy
+        set asm_policy $policy
+        set asm_default_client_ip $client_ip
+        set asm_client_ip $client_ip
+        set asm_default_fingerprint $fingerprint
+        set asm_fingerprint $fingerprint
+        set asm_default_username $username
+        set asm_username $username
+        set asm_default_login_status $login_status
+        set asm_login_status $login_status
+        set asm_default_microservice $microservice
+        set asm_microservice $microservice
+        set asm_default_status $status
+        set asm_status $status
+        set asm_default_severity $severity
+        set asm_severity $severity
+        set asm_default_support_id $support_id
+        set asm_support_id $support_id
+        set asm_default_captcha_status $captcha_status
+        set asm_captcha_status $captcha_status
+        set asm_default_captcha_age $captcha_age
+        set asm_captcha_age $captcha_age
+        set asm_default_payload $payload
+        set asm_payload $payload
+        set asm_captcha_sent 0
+        set asm_uncaptcha 0
+        set asm_unblocked 0
+        set asm_conviction 0
+        set asm_deception 0
+    }
+
+    proc asm_set_violations {args} {
+        variable asm_default_violations
+        variable asm_violations
+        set violations [list]
+        foreach record $args {
+            if {[llength $record] != 4} {
+                error "ASM violation records require name, attack type, rating, and details"
+            }
+            lassign $record name attack_type rating details
+            if {$name eq "" || [llength $details] % 2} {
+                error "invalid ASM violation record"
+            }
+            lappend violations [list $name $attack_type $rating $details]
+        }
+        set asm_default_violations $violations
+        set asm_violations $violations
+    }
+
+    proc asm_set_signatures {field raw_values} {
+        variable asm_default_signatures
+        variable asm_signatures
+        if {$field ni {ids names set_names staged_ids staged_names staged_set_names}} {
+            error "invalid ASM signature field"
+        }
+        dict set asm_default_signatures $field $raw_values
+        dict set asm_signatures $field $raw_values
+    }
+
+    proc asm_set_campaigns {field raw_values} {
+        variable asm_default_campaigns
+        variable asm_campaigns
+        if {$field ni {names staged_names}} {
+            error "invalid ASM threat campaign field"
+        }
+        dict set asm_default_campaigns $field $raw_values
+        dict set asm_campaigns $field $raw_values
+    }
+
+    proc _asm_derived_status {} {
+        variable asm_violations
+        if {[llength $asm_violations] > 0} { return Alarm }
+        return Clear
+    }
+
+    proc _asm_derived_severity {} {
+        variable asm_violations
+        set best -1
+        set result ""
+        set ranks {Informational 0 Notice 1 Warning 2 Error 3 Critical 4 Alert 5 Emergency 6}
+        foreach record $asm_violations {
+            set rating [lindex $record 2]
+            set index [lsearch -exact $ranks $rating]
+            if {$index >= 0 && $index > $best} {
+                set best $index
+                set result $rating
+            }
+        }
+        return $result
+    }
+
+    proc asm_prepare_request {has_body body} {
+        variable asm_default_client_ip
+        variable asm_client_ip
+        variable asm_default_fingerprint
+        variable asm_fingerprint
+        variable asm_default_username
+        variable asm_username
+        variable asm_default_login_status
+        variable asm_login_status
+        variable asm_default_microservice
+        variable asm_microservice
+        variable asm_default_status
+        variable asm_status
+        variable asm_default_severity
+        variable asm_severity
+        variable asm_default_support_id
+        variable asm_support_id
+        variable asm_default_captcha_status
+        variable asm_captcha_status
+        variable asm_default_captcha_age
+        variable asm_captcha_age
+        variable asm_default_payload
+        variable asm_payload
+        variable asm_default_violations
+        variable asm_violations
+        variable asm_default_signatures
+        variable asm_signatures
+        variable asm_default_campaigns
+        variable asm_campaigns
+        variable asm_captcha_sent
+        variable asm_uncaptcha
+        variable asm_unblocked
+        variable asm_conviction
+        variable asm_deception
+        if {$has_body ni {0 1}} { error "ASM request body presence must be boolean" }
+        set asm_client_ip $asm_default_client_ip
+        set asm_fingerprint $asm_default_fingerprint
+        set asm_username $asm_default_username
+        set asm_login_status $asm_default_login_status
+        set asm_microservice $asm_default_microservice
+        set asm_status $asm_default_status
+        set asm_severity $asm_default_severity
+        set asm_support_id $asm_default_support_id
+        set asm_captcha_status $asm_default_captcha_status
+        set asm_captcha_age $asm_default_captcha_age
+        set asm_payload $asm_default_payload
+        if {$has_body} { set asm_payload $body }
+        set asm_violations $asm_default_violations
+        set asm_signatures $asm_default_signatures
+        set asm_campaigns $asm_default_campaigns
+        if {$asm_status eq ""} { set asm_status [_asm_derived_status] }
+        if {$asm_severity eq ""} { set asm_severity [_asm_derived_severity] }
+        set asm_captcha_sent 0
+        set asm_uncaptcha 0
+        set asm_unblocked 0
+        set asm_conviction 0
+        set asm_deception 0
+    }
+
+    proc asm_reset_connection {} {
+        variable asm_default_enabled
+        variable asm_enabled
+        variable asm_default_policy
+        variable asm_policy
+        set asm_enabled $asm_default_enabled
+        set asm_policy $asm_default_policy
+    }
+
+    proc asm_client_ip {args} {
+        variable asm_client_ip
+        if {[llength $args] != 0} { error "ASM::client_ip takes no arguments" }
+        if {$asm_client_ip ne ""} { return $asm_client_ip }
+        return $::state::connection::client_addr
+    }
+
+    proc asm_fingerprint {args} {
+        variable asm_fingerprint
+        if {[llength $args] != 0} { error "ASM::fingerprint takes no arguments" }
+        return $asm_fingerprint
+    }
+
+    proc asm_username {args} {
+        variable asm_username
+        if {[llength $args] != 0} { error "ASM::username takes no arguments" }
+        return $asm_username
+    }
+
+    proc asm_login_status {args} {
+        variable asm_login_status
+        if {[llength $args] != 0} { error "ASM::login_status takes no arguments" }
+        return $asm_login_status
+    }
+
+    proc asm_is_authenticated {args} {
+        if {[llength $args] != 0} { error "ASM::is_authenticated takes no arguments" }
+        return [expr {[asm_login_status] eq "logged_in"}]
+    }
+
+    proc asm_microservice {args} {
+        variable asm_microservice
+        if {[llength $args] != 0} { error "ASM::microservice takes no arguments" }
+        return $asm_microservice
+    }
+
+    proc asm_policy {args} {
+        variable asm_enabled
+        variable asm_policy
+        if {[llength $args] != 0} { error "ASM::policy takes no arguments" }
+        if {!$asm_enabled} { return "" }
+        return $asm_policy
+    }
+
+    proc asm_support_id {args} {
+        variable asm_support_id
+        if {[llength $args] != 0} { error "ASM::support_id takes no arguments" }
+        return $asm_support_id
+    }
+
+    proc asm_status {args} {
+        variable asm_enabled
+        variable asm_status
+        if {[llength $args] != 0} { error "ASM::status takes no arguments" }
+        if {!$asm_enabled} { return "" }
+        return $asm_status
+    }
+
+    proc asm_severity {args} {
+        variable asm_enabled
+        variable asm_severity
+        if {[llength $args] != 0} { error "ASM::severity takes no arguments" }
+        if {!$asm_enabled} { return "" }
+        return $asm_severity
+    }
+
+    proc asm_violation {args} {
+        variable asm_violations
+        if {[llength $args] != 1} {
+            error "ASM::violation requires count, names, attack_types, details, or rating"
+        }
+        set option [lindex $args 0]
+        if {$option eq "count"} { return [llength $asm_violations] }
+        set result [list]
+        foreach record $asm_violations {
+            switch -exact -- $option {
+                names { lappend result [lindex $record 0] }
+                attack_types { lappend result [lindex $record 1] }
+                details { lappend result [lindex $record 3] }
+                rating { lappend result [lindex $record 2] }
+                default { error "unsupported ASM::violation selector $option" }
+            }
+        }
+        return $result
+    }
+
+    proc asm_signature {args} {
+        variable asm_signatures
+        if {[llength $args] != 1} { error "ASM::signature requires a selector" }
+        set field [lindex $args 0]
+        if {$field ni {ids names set_names staged_ids staged_names staged_set_names}} {
+            error "unsupported ASM::signature selector $field"
+        }
+        return [dict get $asm_signatures $field]
+    }
+
+    proc asm_threat_campaign {args} {
+        variable asm_campaigns
+        if {[llength $args] != 1 || [lindex $args 0] ni {names staged_names}} {
+            error "ASM::threat_campaign requires names or staged_names"
+        }
+        return [dict get $asm_campaigns [lindex $args 0]]
+    }
+
+    proc asm_captcha_status {args} {
+        variable asm_captcha_status
+        if {[llength $args] != 0} { error "ASM::captcha_status takes no arguments" }
+        return $asm_captcha_status
+    }
+
+    proc asm_captcha_age {args} {
+        variable asm_captcha_status
+        variable asm_captcha_age
+        if {[llength $args] != 0} { error "ASM::captcha_age takes no arguments" }
+        if {$asm_captcha_status ne "correct"} { return -1 }
+        return $asm_captcha_age
+    }
+
+    proc asm_captcha {args} {
+        variable asm_status
+        variable asm_uncaptcha
+        variable asm_captcha_sent
+        if {[llength $args] != 0} { error "ASM::captcha takes no arguments" }
+        if {$asm_uncaptcha} { return "nok asm uncaptcha command was raised" }
+        if {$asm_status eq "Blocked"} { return "nok asm blocked request" }
+        set asm_captcha_sent 1
+        ::itest::log_decision asm captcha
+        return ok
+    }
+
+    proc asm_uncaptcha {args} {
+        variable asm_uncaptcha
+        if {[llength $args] != 0} { error "ASM::uncaptcha takes no arguments" }
+        set asm_uncaptcha 1
+        ::itest::log_decision asm uncaptcha
+        return ""
+    }
+
+    proc asm_unblock {args} {
+        variable asm_status
+        variable asm_unblocked
+        if {[llength $args] != 0} { error "ASM::unblock takes no arguments" }
+        if {$asm_status eq "Blocked"} { set asm_status Alarm }
+        set asm_unblocked 1
+        ::itest::log_decision asm unblock
+        return ""
+    }
+
+    proc asm_conviction {args} {
+        variable asm_conviction
+        if {[llength $args] != 0} { error "ASM::conviction takes no arguments" }
+        set asm_conviction 1
+        ::itest::log_decision asm conviction
+        return ""
+    }
+
+    proc asm_deception {args} {
+        variable asm_deception
+        if {[llength $args] != 0} { error "ASM::deception takes no arguments" }
+        set asm_deception 1
+        ::itest::log_decision asm deception
+        return ""
+    }
+
+    proc asm_disable {args} {
+        variable asm_enabled
+        if {[llength $args] != 0} { error "ASM::disable takes no arguments" }
+        set asm_enabled 0
+        ::itest::log_decision asm disable
+        return ""
+    }
+
+    proc asm_enable {args} {
+        variable asm_enabled
+        variable asm_policy
+        if {[llength $args] != 1} { error "ASM::enable requires an ASM policy" }
+        set asm_enabled 1
+        set asm_policy [lindex $args 0]
+        ::itest::log_decision asm enable $asm_policy
+        return ""
+    }
+
+    proc asm_raise {args} {
+        variable asm_violations
+        variable asm_status
+        variable asm_severity
+        if {[llength $args] < 1 || [llength $args] > 2} {
+            error "ASM::raise requires a violation name and optional details"
+        }
+        set name [lindex $args 0]
+        set details {}
+        if {[llength $args] == 2} { set details [lindex $args 1] }
+        if {$name eq "" || [llength $details] % 2} {
+            error "ASM::raise requires a non-empty name and even detail pairs"
+        }
+        lappend asm_violations [list $name "" "" $details]
+        if {$asm_status eq "Clear"} { set asm_status Alarm }
+        if {$asm_severity eq ""} { set asm_severity [_asm_derived_severity] }
+        ::itest::log_decision asm raise [list $name $details]
+        return ""
+    }
+
+    proc asm_payload {args} {
+        variable asm_payload
+        if {[llength $args] == 0} { return $asm_payload }
+        if {[lindex $args 0] eq "replace"} {
+            if {[llength $args] != 4} { error "ASM::payload replace requires offset, length, and payload" }
+            set offset [lindex $args 1]
+            set length [lindex $args 2]
+            if {![string is integer -strict $offset] || $offset < 0 || ![string is integer -strict $length] || $length < 0} {
+                error "ASM::payload offsets and lengths must be non-negative integers"
+            }
+            set offset [expr {min($offset, [string length $asm_payload])}]
+            set prefix [string range $asm_payload 0 [expr {$offset - 1}]]
+            set suffix [string range $asm_payload [expr {$offset + $length}] end]
+            set asm_payload "$prefix[lindex $args 3]$suffix"
+            return ""
+        }
+        if {[llength $args] == 1} {
+            set offset 0
+            set length [lindex $args 0]
+        } elseif {[llength $args] == 2} {
+            set offset [lindex $args 0]
+            set length [lindex $args 1]
+        } else {
+            error "ASM::payload accepts length, offset/length, or replace"
+        }
+        if {![string is integer -strict $offset] || $offset < 0 || ![string is integer -strict $length] || $length < 0} {
+            error "ASM::payload offsets and lengths must be non-negative integers"
+        }
+        return [string range $asm_payload $offset [expr {$offset + $length - 1}]]
+    }
+
+    proc asm_violation_data {args} {
+        variable asm_violations
+        variable asm_support_id
+        if {[llength $args] != 0} { error "ASM::violation_data takes no arguments" }
+        if {[llength $asm_violations] == 0} { return [list] }
+        return [list [lindex [lindex $asm_violations 0] 0] $asm_support_id [asm_client_ip]]
+    }
+
+    proc asm_snapshot {} {
+        variable asm_enabled
+        variable asm_policy
+        variable asm_client_ip
+        variable asm_fingerprint
+        variable asm_username
+        variable asm_login_status
+        variable asm_microservice
+        variable asm_status
+        variable asm_severity
+        variable asm_support_id
+        variable asm_captcha_status
+        variable asm_captcha_age
+        variable asm_payload
+        variable asm_captcha_sent
+        variable asm_uncaptcha
+        variable asm_unblocked
+        variable asm_conviction
+        variable asm_deception
+        variable asm_violations
+        variable asm_signatures
+        variable asm_campaigns
+        set effective_policy [asm_policy]
+        set effective_status [asm_status]
+        set effective_severity [asm_severity]
+        set violations [list]
+        foreach record $asm_violations { lappend violations $record }
+        set signatures [list]
+        foreach field {ids names set_names staged_ids staged_names staged_set_names} {
+            lappend signatures [list $field [dict get $asm_signatures $field]]
+        }
+        set campaigns [list]
+        foreach field {names staged_names} {
+            lappend campaigns [list $field [dict get $asm_campaigns $field]]
+        }
+        return [list \
+            enabled $asm_enabled policy $effective_policy client_ip [asm_client_ip] \
+            fingerprint $asm_fingerprint username $asm_username \
+            login_status $asm_login_status microservice $asm_microservice \
+            status $effective_status severity $effective_severity support_id $asm_support_id \
+            captcha_status $asm_captcha_status captcha_age $asm_captcha_age \
+            payload $asm_payload captcha_sent $asm_captcha_sent \
+            uncaptcha $asm_uncaptcha unblocked $asm_unblocked \
+            conviction $asm_conviction deception $asm_deception \
+            violations $violations signatures $signatures threat_campaigns $campaigns]
     }
 
     proc profile_clientssl {args} { return [_profile_enabled CLIENTSSL] }
@@ -8463,6 +8991,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
         if {$event_name eq "CLIENT_ACCEPTED"} {
             ::itest::semantic::lb_reset_connection
             ::itest::semantic::dosl7_reset_connection
+            ::itest::semantic::asm_reset_connection
         }
         if {$gated && $event_name eq "HTTP_REQUEST" && [::itest::semantic::_cache_profile_enabled]} {
             ::itest::semantic::cache_prepare_request
@@ -8768,6 +9297,31 @@ foreach {name proc_name} {
     DOSL7::is_mitigated ::itest::semantic::dosl7_is_mitigated
     DOSL7::profile ::itest::semantic::dosl7_profile
     DOSL7::slowdown ::itest::semantic::dosl7_slowdown
+    ASM::captcha ::itest::semantic::asm_captcha
+    ASM::captcha_age ::itest::semantic::asm_captcha_age
+    ASM::captcha_status ::itest::semantic::asm_captcha_status
+    ASM::client_ip ::itest::semantic::asm_client_ip
+    ASM::conviction ::itest::semantic::asm_conviction
+    ASM::deception ::itest::semantic::asm_deception
+    ASM::disable ::itest::semantic::asm_disable
+    ASM::enable ::itest::semantic::asm_enable
+    ASM::fingerprint ::itest::semantic::asm_fingerprint
+    ASM::is_authenticated ::itest::semantic::asm_is_authenticated
+    ASM::login_status ::itest::semantic::asm_login_status
+    ASM::microservice ::itest::semantic::asm_microservice
+    ASM::payload ::itest::semantic::asm_payload
+    ASM::policy ::itest::semantic::asm_policy
+    ASM::raise ::itest::semantic::asm_raise
+    ASM::severity ::itest::semantic::asm_severity
+    ASM::signature ::itest::semantic::asm_signature
+    ASM::status ::itest::semantic::asm_status
+    ASM::support_id ::itest::semantic::asm_support_id
+    ASM::threat_campaign ::itest::semantic::asm_threat_campaign
+    ASM::unblock ::itest::semantic::asm_unblock
+    ASM::uncaptcha ::itest::semantic::asm_uncaptcha
+    ASM::username ::itest::semantic::asm_username
+    ASM::violation ::itest::semantic::asm_violation
+    ASM::violation_data ::itest::semantic::asm_violation_data
     STATS::get ::itest::semantic::stats_get
     STATS::incr ::itest::semantic::stats_incr
     STATS::set ::itest::semantic::stats_set

@@ -82,6 +82,15 @@ An HTTP request can override the seeded `is_mitigated` result for one
 transaction, including across an internal `HTTP::retry`. The adapter records
 rate and timeout values but does not implement wall-clock expiry, traffic-rate
 measurement, or the ASM/DOS inspection and mitigation engines.
+The TMOS 17.5 `ASM::` surface is represented by a deterministic scenario-level
+policy model covering all 25 catalogued commands. It can seed policy identity,
+client identity, login/CAPTCHA state, payload, violations, signatures, threat
+campaigns, and status/severity values; rule actions such as enable/disable,
+raise, unblock, uncaptcha, conviction, deception, and payload replacement are
+recorded in request semantic state. Request inputs reset between transactions,
+while connection overrides reset when a new connection begins. The model does
+not perform WAF signature matching, request inspection, CAPTCHA validation,
+threat-campaign detection, or production ASM enforcement.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

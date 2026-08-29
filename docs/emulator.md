@@ -114,6 +114,42 @@ not advance a wall clock or run a real L7 DoS detection/mitigation engine. An
 HTTP request may include `"dosl7": {"mitigated": true}` or `false` to override
 the seeded mitigation result for that transaction; the override is reused for
 an internal `HTTP::retry` and the next request returns to the scenario default.
+The `ASM` policy surface can be seeded with deterministic WAF inputs:
+
+```json
+{
+  "profiles": ["TCP", "HTTP", "ASM", "FASTHTTP"],
+  "asm": {
+    "enabled": true,
+    "policy": "/Common/asm-policy",
+    "status": "Blocked",
+    "severity": "Error",
+    "support_id": "SUP-42",
+    "violations": [
+      {
+        "name": "VIOLATION_ILLEGAL_PARAMETER",
+        "attack_type": "Parameter Tampering",
+        "rating": "Error",
+        "details": {"param_data.param_name": "dGVzdA=="}
+      }
+    ],
+    "signatures": {"ids": ["200000001"]},
+    "threat_campaigns": {"names": ["campaign-a"]}
+  },
+  "irule": "when HTTP_REQUEST { log local0. \"[ASM::status] [ASM::violation count]\" }"
+}
+```
+
+This models all 25 catalogued TMOS 17.5 `ASM::` commands. Getters expose the
+seeded policy, identity, login, CAPTCHA, signature, campaign, violation, and
+payload values. `ASM::enable`, `ASM::disable`, `ASM::raise`, `ASM::unblock`,
+`ASM::uncaptcha`, `ASM::conviction`, `ASM::deception`, and payload replacement
+update the current request state and appear in decisions or semantic output.
+Request body data replaces the seeded payload for that transaction. Policy
+inputs reset between requests; connection-scoped enable/disable and policy
+overrides reset at a new connection. This is a deterministic policy model,
+not a WAF inspection, signature-matching, CAPTCHA service, or attack-detection
+engine.
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose

@@ -79,6 +79,21 @@ TMOS_17_5_POST_TARGET_EVENTS = frozenset(
         "SSE_RESPONSE",
     }
 )
+ASM_LOGIN_STATUSES = frozenset({"not_logged_in", "logging_in", "logged_in", "failed"})
+ASM_CAPTCHA_STATUSES = frozenset({"not_received", "correct", "incorrect", "empty"})
+ASM_STATUSES = frozenset({"Alarm", "Blocked", "Clear"})
+ASM_SEVERITIES = frozenset(
+    {"Emergency", "Alert", "Critical", "Error", "Warning", "Notice", "Informational"}
+)
+ASM_SIGNATURE_FIELDS = (
+    "ids",
+    "names",
+    "set_names",
+    "staged_ids",
+    "staged_names",
+    "staged_set_names",
+)
+ASM_CAMPAIGN_FIELDS = ("names", "staged_names")
 DEFAULT_PROFILES = ["TCP", "HTTP"]
 LB_FAILURE_CAUSES = frozenset(
     {"no_member", "unreachable", "queue_limit", "connection_timeout"}
@@ -944,6 +959,31 @@ SEMANTIC_MOCK_COMMANDS = {
     "DOSL7::is_mitigated",
     "DOSL7::profile",
     "DOSL7::slowdown",
+    "ASM::captcha",
+    "ASM::captcha_age",
+    "ASM::captcha_status",
+    "ASM::client_ip",
+    "ASM::conviction",
+    "ASM::deception",
+    "ASM::disable",
+    "ASM::enable",
+    "ASM::fingerprint",
+    "ASM::is_authenticated",
+    "ASM::login_status",
+    "ASM::microservice",
+    "ASM::payload",
+    "ASM::policy",
+    "ASM::raise",
+    "ASM::severity",
+    "ASM::signature",
+    "ASM::status",
+    "ASM::support_id",
+    "ASM::threat_campaign",
+    "ASM::unblock",
+    "ASM::uncaptcha",
+    "ASM::username",
+    "ASM::violation",
+    "ASM::violation_data",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1360,6 +1400,64 @@ def _tcl_list(values: list[str]) -> str:
     return "{" + " ".join(_tcl_quote(value) for value in values) + "}"
 
 
+def _configure_asm(session: Any, asm: dict[str, Any]) -> None:
+    """Install the deterministic ASM/WAF policy inputs in the Tcl session."""
+    scalar_values = (
+        "1" if asm["enabled"] else "0",
+        asm["policy"],
+        asm["client_ip"],
+        asm["fingerprint"],
+        asm["username"],
+        asm["login_status"],
+        asm["microservice"],
+        asm["status"],
+        asm["severity"],
+        asm["support_id"],
+        asm["captcha_status"],
+        str(asm["captcha_age"]),
+        asm["payload"],
+    )
+    session.eval_tcl(
+        "::itest::semantic::asm_configure "
+        + " ".join(_tcl_quote(value) for value in scalar_values)
+    )
+
+    records: list[str] = []
+    for violation in asm["violations"]:
+        details_flattened = [
+            item
+            for key, value in violation["details"].items()
+            for item in (key, value)
+        ]
+        records.append(
+            " ".join(
+                [
+                    _tcl_quote(violation["name"]),
+                    _tcl_quote(violation["attack_type"]),
+                    _tcl_quote(violation["rating"]),
+                    _tcl_list(details_flattened),
+                ]
+            )
+        )
+    command = "::itest::semantic::asm_set_violations"
+    if records:
+        command += " " + " ".join(_tcl_quote(record) for record in records)
+    session.eval_tcl(command)
+    for field in ASM_SIGNATURE_FIELDS:
+        session.eval_tcl(
+            "::itest::semantic::asm_set_signatures "
+            f"{_tcl_quote(field)} "
+            f"{_tcl_list(asm['signatures'][field])}"
+        )
+    for field in ASM_CAMPAIGN_FIELDS:
+        session.eval_tcl(
+            "::itest::semantic::asm_set_campaigns "
+            f"{_tcl_quote(field)} "
+            f"{_tcl_list(asm['threat_campaigns'][field])}"
+        )
+    session.eval_tcl("::itest::semantic::asm_prepare_request 0 \"\"")
+
+
 def _split_tcl_list(value: Any) -> list[str]:
     """Parse a Tcl list returned by the bridge using a temporary interpreter."""
     try:
@@ -1443,6 +1541,68 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             raise EmulatorInputError("invalid profile settings state")
         profile_name, attribute, value = setting_parts
         profile_settings.setdefault(profile_name, {})[attribute] = value
+    asm_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::asm_snapshot"))
+    if len(asm_parts) % 2:
+        raise EmulatorInputError("invalid ASM state")
+    asm_keys = asm_parts[::2]
+    if len(set(asm_keys)) != len(asm_keys):
+        raise EmulatorInputError("duplicate ASM state field")
+    asm_values = dict(zip(asm_parts[::2], asm_parts[1::2]))
+    expected_asm_fields = {
+        "enabled", "policy", "client_ip", "fingerprint", "username",
+        "login_status", "microservice", "status", "severity", "support_id",
+        "captcha_status", "captcha_age", "payload", "captcha_sent", "uncaptcha",
+        "unblocked", "conviction", "deception", "violations", "signatures",
+        "threat_campaigns",
+    }
+    if set(asm_values) != expected_asm_fields:
+        raise EmulatorInputError("invalid ASM state fields")
+    bool_fields = {"enabled", "captcha_sent", "uncaptcha", "unblocked", "conviction", "deception"}
+    if any(asm_values[name] not in {"0", "1"} for name in bool_fields):
+        raise EmulatorInputError("invalid ASM boolean state")
+    try:
+        asm_captcha_age = int(asm_values["captcha_age"])
+    except (KeyError, TypeError, ValueError):
+        raise EmulatorInputError("invalid ASM CAPTCHA age state") from None
+    if asm_captcha_age < -1:
+        raise EmulatorInputError("invalid ASM CAPTCHA age state")
+    asm_violations: list[dict[str, Any]] = []
+    for raw_record in _split_tcl_list(asm_values["violations"]):
+        record = _split_tcl_list(raw_record)
+        if len(record) != 4:
+            raise EmulatorInputError("invalid ASM violation state")
+        details_parts = _split_tcl_list(record[3])
+        if len(details_parts) % 2:
+            raise EmulatorInputError("invalid ASM violation details state")
+        details: dict[str, str] = {}
+        for key, value in zip(details_parts[::2], details_parts[1::2]):
+            if key in details:
+                raise EmulatorInputError("duplicate ASM violation detail")
+            details[key] = value
+        asm_violations.append(
+            {
+                "name": record[0],
+                "attack_type": record[1],
+                "rating": record[2],
+                "details": details,
+            }
+        )
+    asm_signatures: dict[str, list[str]] = {}
+    for raw_record in _split_tcl_list(asm_values["signatures"]):
+        record = _split_tcl_list(raw_record)
+        if len(record) != 2 or record[0] not in ASM_SIGNATURE_FIELDS or record[0] in asm_signatures:
+            raise EmulatorInputError("invalid ASM signature state")
+        asm_signatures[record[0]] = _split_tcl_list(record[1])
+    if set(asm_signatures) != set(ASM_SIGNATURE_FIELDS):
+        raise EmulatorInputError("incomplete ASM signature state")
+    asm_campaigns: dict[str, list[str]] = {}
+    for raw_record in _split_tcl_list(asm_values["threat_campaigns"]):
+        record = _split_tcl_list(raw_record)
+        if len(record) != 2 or record[0] not in ASM_CAMPAIGN_FIELDS or record[0] in asm_campaigns:
+            raise EmulatorInputError("invalid ASM threat campaign state")
+        asm_campaigns[record[0]] = _split_tcl_list(record[1])
+    if set(asm_campaigns) != set(ASM_CAMPAIGN_FIELDS):
+        raise EmulatorInputError("incomplete ASM threat campaign state")
     dosl7_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::dosl7_snapshot"))
     if len(dosl7_parts) % 2:
         raise EmulatorInputError("invalid DOSL7 state")
@@ -1481,6 +1641,29 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "psm": psm,
         "cache": cache,
         "profile_settings": profile_settings,
+        "asm": {
+            "enabled": asm_values["enabled"] == "1",
+            "policy": asm_values["policy"],
+            "client_ip": asm_values["client_ip"],
+            "fingerprint": asm_values["fingerprint"],
+            "username": asm_values["username"],
+            "login_status": asm_values["login_status"],
+            "microservice": asm_values["microservice"],
+            "status": asm_values["status"],
+            "severity": asm_values["severity"],
+            "support_id": asm_values["support_id"],
+            "captcha_status": asm_values["captcha_status"],
+            "captcha_age": asm_captcha_age,
+            "payload": asm_values["payload"],
+            "captcha_sent": asm_values["captcha_sent"] == "1",
+            "uncaptcha": asm_values["uncaptcha"] == "1",
+            "unblocked": asm_values["unblocked"] == "1",
+            "conviction": asm_values["conviction"] == "1",
+            "deception": asm_values["deception"] == "1",
+            "violations": asm_violations,
+            "signatures": asm_signatures,
+            "threat_campaigns": asm_campaigns,
+        },
         "dosl7": {
             "enabled": dosl7_values["enabled"] == "1",
             "health": dosl7_health,
@@ -1727,6 +1910,190 @@ def _normalise_dosl7_request(raw: Any) -> dict[str, bool]:
     if not isinstance(mitigated, bool):
         raise EmulatorInputError("request.dosl7.mitigated must be a boolean")
     return {"mitigated": mitigated}
+
+
+def _normalise_asm_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or "\x00" in value:
+        raise EmulatorInputError(f"{field} must be a string without NUL")
+    return value
+
+
+def _normalise_asm_string_list(value: Any, field: str) -> list[str]:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and "\x00" not in item for item in value
+    ):
+        raise EmulatorInputError(f"{field} must be an array of strings without NUL")
+    return list(value)
+
+
+def _normalise_asm_violations(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        raise EmulatorInputError("asm.violations must be an array")
+    violations: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        field = f"asm.violations[{index}]"
+        if not isinstance(item, dict):
+            raise EmulatorInputError(f"{field} must be an object")
+        unknown = sorted(set(item) - {"name", "attack_type", "rating", "details"})
+        if unknown:
+            raise EmulatorInputError(
+                f"{field} unsupported field(s): {', '.join(unknown)}"
+            )
+        name = _normalise_asm_string(item.get("name"), f"{field}.name")
+        if not name:
+            raise EmulatorInputError(f"{field}.name cannot be empty")
+        attack_type = _normalise_asm_string(
+            item.get("attack_type", ""), f"{field}.attack_type"
+        )
+        rating = _normalise_asm_string(item.get("rating", ""), f"{field}.rating")
+        details = item.get("details", {})
+        if not isinstance(details, dict) or not all(
+            isinstance(key, str)
+            and "\x00" not in key
+            and isinstance(value, str)
+            and "\x00" not in value
+            for key, value in details.items()
+        ):
+            raise EmulatorInputError(f"{field}.details must be an object of strings")
+        violations.append(
+            {
+                "name": name,
+                "attack_type": attack_type,
+                "rating": rating,
+                "details": dict(details),
+            }
+        )
+    return violations
+
+
+def _normalise_asm(raw: Any) -> dict[str, Any]:
+    """Normalize deterministic inputs for the bounded ASM/WAF policy model."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("asm must be an object")
+    allowed = {
+        "enabled",
+        "policy",
+        "client_ip",
+        "fingerprint",
+        "username",
+        "login_status",
+        "microservice",
+        "status",
+        "severity",
+        "support_id",
+        "captcha_status",
+        "captcha_age",
+        "payload",
+        "violations",
+        "signatures",
+        "threat_campaigns",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError(f"asm unsupported field(s): {', '.join(unknown)}")
+
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise EmulatorInputError("asm.enabled must be a boolean")
+    policy = _normalise_asm_string(raw.get("policy", ""), "asm.policy")
+    client_ip = _normalise_asm_string(raw.get("client_ip", ""), "asm.client_ip")
+    if client_ip:
+        try:
+            ipaddress.ip_address(client_ip)
+        except ValueError:
+            raise EmulatorInputError(
+                f"asm.client_ip {client_ip!r} is not a valid IPv4 or IPv6 address"
+            ) from None
+    fingerprint = _normalise_asm_string(raw.get("fingerprint", "0"), "asm.fingerprint")
+    username = _normalise_asm_string(raw.get("username", ""), "asm.username")
+    login_status = _normalise_asm_string(
+        raw.get("login_status", "not_logged_in"), "asm.login_status"
+    )
+    if login_status not in ASM_LOGIN_STATUSES:
+        raise EmulatorInputError(
+            "asm.login_status must be one of: " + ", ".join(sorted(ASM_LOGIN_STATUSES))
+        )
+    microservice = _normalise_asm_string(
+        raw.get("microservice", ""), "asm.microservice"
+    )
+    status = _normalise_asm_string(raw.get("status", ""), "asm.status")
+    if status not in {"", *ASM_STATUSES}:
+        raise EmulatorInputError(
+            "asm.status must be empty or one of: " + ", ".join(sorted(ASM_STATUSES))
+        )
+    severity = _normalise_asm_string(raw.get("severity", ""), "asm.severity")
+    if severity not in {"", *ASM_SEVERITIES}:
+        raise EmulatorInputError(
+            "asm.severity must be empty or one of: " + ", ".join(sorted(ASM_SEVERITIES))
+        )
+    support_id = _normalise_asm_string(raw.get("support_id", ""), "asm.support_id")
+    captcha_status = _normalise_asm_string(
+        raw.get("captcha_status", "not_received"), "asm.captcha_status"
+    )
+    if captcha_status not in ASM_CAPTCHA_STATUSES:
+        raise EmulatorInputError(
+            "asm.captcha_status must be one of: "
+            + ", ".join(sorted(ASM_CAPTCHA_STATUSES))
+        )
+    captcha_age = raw.get("captcha_age", -1)
+    if (
+        isinstance(captcha_age, bool)
+        or not isinstance(captcha_age, int)
+        or not -1 <= captcha_age <= 2**31 - 1
+    ):
+        raise EmulatorInputError("asm.captcha_age must be an integer from -1 to 2147483647")
+    payload = _normalise_asm_string(raw.get("payload", ""), "asm.payload")
+
+    signatures_raw = raw.get("signatures", {})
+    if not isinstance(signatures_raw, dict):
+        raise EmulatorInputError("asm.signatures must be an object")
+    unknown_signatures = sorted(set(signatures_raw) - set(ASM_SIGNATURE_FIELDS))
+    if unknown_signatures:
+        raise EmulatorInputError(
+            "asm.signatures unsupported field(s): " + ", ".join(unknown_signatures)
+        )
+    signatures = {
+        field: _normalise_asm_string_list(
+            signatures_raw.get(field, []), f"asm.signatures.{field}"
+        )
+        for field in ASM_SIGNATURE_FIELDS
+    }
+
+    campaigns_raw = raw.get("threat_campaigns", {})
+    if not isinstance(campaigns_raw, dict):
+        raise EmulatorInputError("asm.threat_campaigns must be an object")
+    unknown_campaigns = sorted(set(campaigns_raw) - set(ASM_CAMPAIGN_FIELDS))
+    if unknown_campaigns:
+        raise EmulatorInputError(
+            "asm.threat_campaigns unsupported field(s): "
+            + ", ".join(unknown_campaigns)
+        )
+    campaigns = {
+        field: _normalise_asm_string_list(
+            campaigns_raw.get(field, []), f"asm.threat_campaigns.{field}"
+        )
+        for field in ASM_CAMPAIGN_FIELDS
+    }
+    return {
+        "enabled": enabled,
+        "policy": policy,
+        "client_ip": client_ip,
+        "fingerprint": fingerprint,
+        "username": username,
+        "login_status": login_status,
+        "microservice": microservice,
+        "status": status,
+        "severity": severity,
+        "support_id": support_id,
+        "captcha_status": captcha_status,
+        "captcha_age": captcha_age,
+        "payload": payload,
+        "violations": _normalise_asm_violations(raw.get("violations", [])),
+        "signatures": signatures,
+        "threat_campaigns": campaigns,
+    }
 
 
 def _normalise_resolvers(raw: Any) -> dict[str, list[dict[str, Any]]]:
@@ -1992,6 +2359,8 @@ def _normalise_scenario_config(
     dict[str, list[dict[str, Any]]],
     list[tuple[str, dict[str, str], str]],
     dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
 ]:
     if not isinstance(scenario, dict):
         raise EmulatorInputError("scenario must be a JSON object")
@@ -2006,6 +2375,7 @@ def _normalise_scenario_config(
         "datagroups",
         "profile_settings",
         "dosl7",
+        "asm",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -2048,6 +2418,7 @@ def _normalise_scenario_config(
         _normalise_datagroups(scenario.get("datagroups")),
         _normalise_profile_settings(scenario.get("profile_settings")),
         _normalise_dosl7(scenario.get("dosl7")),
+        _normalise_asm(scenario.get("asm")),
     )
 
 
@@ -6320,6 +6691,7 @@ class EmulatorSession:
             datagroups,
             profile_settings,
             dosl7,
+            asm,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -6336,6 +6708,7 @@ class EmulatorSession:
         self._datagroups = datagroups
         self._profile_settings = profile_settings
         self._dosl7 = dosl7
+        self._asm = asm
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -6442,6 +6815,7 @@ class EmulatorSession:
                     f"{_tcl_quote('1' if self._dosl7['mitigated'] else '0')} "
                     f"{_tcl_list(dosl7_flattened)}"
                 )
+                _configure_asm(session, self._asm)
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
                     for profile in self._profiles
@@ -6500,6 +6874,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::lb_reset_connection")
             session.eval_tcl("::itest::semantic::psm_reset_connection")
             session.eval_tcl("::itest::semantic::dosl7_reset_connection")
+            session.eval_tcl("::itest::semantic::asm_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
@@ -6526,6 +6901,11 @@ class EmulatorSession:
                     "::itest::semantic::dosl7_prepare_request "
                     f"{_tcl_quote('1' if dosl7_request is not None else '0')} "
                     f"{_tcl_quote(dosl7_mitigated)}"
+                )
+                session.eval_tcl(
+                    "::itest::semantic::asm_prepare_request "
+                    f"{_tcl_quote('1' if 'body' in kwargs else '0')} "
+                    f"{_tcl_quote(kwargs.get('body', ''))}"
                 )
                 session.eval_tcl(
                     f"::itest::semantic::prepare_lb_failure {_tcl_quote(attempt_failure)}"
@@ -7425,6 +7805,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
         session.eval_tcl("::itest::semantic::psm_reset_connection")
         session.eval_tcl("::itest::semantic::dosl7_reset_connection")
+        session.eval_tcl("::itest::semantic::asm_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
@@ -7454,6 +7835,7 @@ class EmulatorSession:
         session.eval_tcl("::state::reset_connection_state")
         session.eval_tcl("::itest::semantic::psm_reset_connection")
         session.eval_tcl("::itest::semantic::dosl7_reset_connection")
+        session.eval_tcl("::itest::semantic::asm_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")

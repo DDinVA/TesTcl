@@ -488,10 +488,150 @@ when HTTP_REQUEST {
             ["TCP", "HTTP"],
         )
         usage = {entry["name"]: entry for entry in report["commands"]}
-        self.assertEqual(usage["ASM::status"]["runtime_status"], "generated-stub")
+        self.assertEqual(usage["ASM::status"]["runtime_status"], "semantic-mock")
         warning_codes = {warning["code"] for warning in report["warnings"]}
-        self.assertIn("runtime-fidelity", warning_codes)
         self.assertIn("profile-gated-event", warning_codes)
+
+    def test_asm_policy_state_getters_collections_and_actions(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ASM", "FASTHTTP"],
+                "asm": {
+                    "policy": "/Common/asm-policy",
+                    "client_ip": "203.0.113.9",
+                    "fingerprint": "fp-123",
+                    "username": "alice",
+                    "login_status": "logged_in",
+                    "microservice": "*a/login.php",
+                    "status": "Blocked",
+                    "severity": "Error",
+                    "support_id": "SUP-42",
+                    "captcha_status": "correct",
+                    "captcha_age": 35,
+                    "payload": "configured-body",
+                    "violations": [
+                        {
+                            "name": "VIOLATION_ILLEGAL_PARAMETER",
+                            "attack_type": "Parameter Tampering",
+                            "rating": "Error",
+                            "details": {"param_data.param_name": "dGVzdA=="},
+                        }
+                    ],
+                    "signatures": {
+                        "ids": ["200000001"],
+                        "names": ["Illegal parameter"],
+                        "set_names": ["Default"],
+                        "staged_ids": ["300000001"],
+                        "staged_names": ["Staged"],
+                        "staged_set_names": ["StagedSet"],
+                    },
+                    "threat_campaigns": {
+                        "names": ["campaign-a"],
+                        "staged_names": ["campaign-b"],
+                    },
+                },
+                "irule": (
+                    "when HTTP_REQUEST {\n"
+                    "  log local0. \"asm ip=[ASM::client_ip] fp=[ASM::fingerprint] user=[ASM::username]\"\n"
+                    "  log local0. \"auth=[ASM::is_authenticated] login=[ASM::login_status] micro=[ASM::microservice]\"\n"
+                    "  log local0. \"policy=[ASM::policy] status=[ASM::status] severity=[ASM::severity] support=[ASM::support_id]\"\n"
+                    "  log local0. \"captcha_status=[ASM::captcha_status] age=[ASM::captcha_age] count=[ASM::violation count]\"\n"
+                    "  log local0. \"names=[ASM::violation names] attacks=[ASM::violation attack_types] rating=[ASM::violation rating]\"\n"
+                    "  log local0. \"details=[ASM::violation details] signatures=[ASM::signature ids] campaigns=[ASM::threat_campaign names]\"\n"
+                    "  log local0. \"vdata=[ASM::violation_data] captcha=[ASM::captcha]\"\n"
+                    "  ASM::unblock\n"
+                    "  ASM::uncaptcha\n"
+                    "  ASM::conviction\n"
+                    "  ASM::deception\n"
+                    "  ASM::payload replace 0 3 BAD\n"
+                    "  ASM::raise CUSTOM_VIOLATION {field value}\n"
+                    "  log local0. \"after status=[ASM::status] count=[ASM::violation count] payload=[ASM::payload]\"\n"
+                    "}"
+                ),
+                "request": {"uri": "/login", "body": "bad-body"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        logs = result["results"][0]["logs"]
+        self.assertTrue(any("ip=203.0.113.9 fp=fp-123 user=alice" in log for log in logs))
+        self.assertTrue(any("auth=1 login=logged_in micro=*a/login.php" in log for log in logs))
+        self.assertTrue(any("policy=/Common/asm-policy status=Blocked severity=Error support=SUP-42" in log for log in logs))
+        self.assertTrue(any("captcha_status=correct age=35 count=1" in log for log in logs))
+        self.assertTrue(any("names=VIOLATION_ILLEGAL_PARAMETER" in log for log in logs))
+        self.assertTrue(any("captcha=nok asm blocked request" in log for log in logs))
+        self.assertTrue(any("after status=Alarm count=2 payload=BAD-body" in log for log in logs))
+
+        asm = result["results"][0]["semantic"]["asm"]
+        self.assertEqual(asm["client_ip"], "203.0.113.9")
+        self.assertEqual(asm["status"], "Alarm")
+        self.assertEqual(asm["payload"], "BAD-body")
+        self.assertEqual(asm["signatures"]["ids"], ["200000001"])
+        self.assertEqual(asm["threat_campaigns"]["names"], ["campaign-a"])
+        self.assertTrue(asm["uncaptcha"])
+        self.assertTrue(asm["unblocked"])
+        self.assertTrue(asm["conviction"])
+        self.assertTrue(asm["deception"])
+        self.assertEqual([item["name"] for item in asm["violations"]], [
+            "VIOLATION_ILLEGAL_PARAMETER",
+            "CUSTOM_VIOLATION",
+        ])
+
+    def test_asm_request_and_connection_state_resets(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ASM", "FASTHTTP"],
+                "asm": {"policy": "/Common/default", "status": "Clear", "payload": "seed"},
+                "irule": (
+                    "when HTTP_REQUEST {\n"
+                    "  if {[HTTP::uri] eq \"/disable\"} { ASM::disable }\n"
+                    "  if {[HTTP::uri] eq \"/enable\"} { ASM::enable /Common/override }\n"
+                    "  if {[HTTP::uri] eq \"/raise\"} { ASM::raise REQUEST_VIOLATION }\n"
+                    "  log local0. \"uri=[HTTP::uri] enabled=[ASM::status] policy=[ASM::policy] count=[ASM::violation count] payload=[ASM::payload]\"\n"
+                    "}"
+                ),
+                "requests": [
+                    {"uri": "/disable"},
+                    {"uri": "/enable"},
+                    {"uri": "/raise"},
+                    {"uri": "/fresh", "new_connection": True},
+                    {"uri": "/empty", "body": ""},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        snapshots = [item["semantic"]["asm"] for item in result["results"]]
+        self.assertFalse(snapshots[0]["enabled"])
+        self.assertEqual(snapshots[0]["policy"], "")
+        self.assertTrue(snapshots[1]["enabled"])
+        self.assertEqual(snapshots[1]["policy"], "/Common/override")
+        self.assertEqual(snapshots[2]["violations"][0]["name"], "REQUEST_VIOLATION")
+        self.assertEqual(snapshots[3]["policy"], "/Common/default")
+        self.assertEqual(snapshots[3]["violations"], [])
+        self.assertEqual(snapshots[3]["payload"], "seed")
+        self.assertEqual(snapshots[4]["payload"], "")
+
+    def test_asm_input_validation_rejects_unsafe_or_ambiguous_values(self) -> None:
+        base = {
+            "profiles": ["TCP", "HTTP", "ASM"],
+            "irule": "when HTTP_REQUEST { ASM::status }",
+            "request": {"uri": "/"},
+        }
+        invalid_cases = (
+            ({"enabled": "yes"}, "asm.enabled must be a boolean"),
+            ({"client_ip": "not-an-ip"}, "not a valid IPv4 or IPv6 address"),
+            ({"status": []}, "asm.status must be a string without NUL"),
+            ({"login_status": {}}, "asm.login_status must be a string without NUL"),
+            ({"captcha_age": -2}, "asm.captcha_age must be an integer"),
+            ({"violations": [{"name": "x", "details": ["bad"]}]}, "details must be an object"),
+            ({"signatures": {"ids": ["bad\x00value"]}}, "array of strings without NUL"),
+            ({"unknown": True}, "asm unsupported field"),
+        )
+        for asm, message in invalid_cases:
+            scenario = dict(base)
+            scenario["asm"] = asm
+            with self.subTest(asm=asm):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
 
     def test_semantic_overlay_implements_profiles_auth_uri_stats_and_hsl(self) -> None:
         result = self.adapter.run_scenario(
