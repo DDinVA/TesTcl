@@ -112,6 +112,14 @@ integer, permits negative values for gauge keys, and rejects non-numeric or
 string values. Missing string keys read as an empty value and other missing
 keys read as zero. The adapter does not aggregate values across emulator
 processes or expose a live control-plane iStats database.
+
+The TMOS 17.5 `CRYPTO::hash`, `CRYPTO::sign`, and `CRYPTO::verify` commands
+have one-shot semantic support and require an explicit `-alg`. Hashes cover `md5`, `ripemd160`, `sha1`,
+`sha224`, `sha256`, `sha384`, and `sha512`; signing and verification cover the
+corresponding HMAC algorithms. Binary results are preserved, including
+`-keyhex` inputs. Context streaming (`-ctx`/`-final`), encryption/decryption,
+and key generation remain explicitly queued rather than approximated.
+
 The IP semantic layer models the seven TMOS 17.5 commands `IP::hops`,
 `IP::idle_timeout`, `IP::ingress_drop_rate`, `IP::ingress_rate_limit`,
 `IP::intelligence`, `IP::reputation`, and `IP::stats`. Path hops, directional

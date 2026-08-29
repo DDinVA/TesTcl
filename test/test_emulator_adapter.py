@@ -479,7 +479,7 @@ when HTTP_REQUEST {
         }
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
-        self.assertGreaterEqual(queue["command_count"], 343)
+        self.assertGreaterEqual(queue["command_count"], 340)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1468,6 +1468,52 @@ when HTTP_REQUEST {
                 },
                 tcl_lsp_root=self.tcl_lsp_root,
             )
+
+    def test_crypto_hash_sign_verify_and_validate_options(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    set digest [CRYPTO::hash -alg sha256 hello]
+    set signature [CRYPTO::sign -alg hmac-sha256 -key secret hello]
+    set hex_signature [CRYPTO::sign -alg hmac-sha256 -keyhex 736563726574 hello]
+    log local0. "hash=[b64encode $digest] signature=[b64encode $signature] hex=[b64encode $hex_signature] valid=[CRYPTO::verify -alg hmac-sha256 -key secret -signature $signature hello] invalid=[CRYPTO::verify -alg hmac-sha256 -key secret -signature $signature changed]"
+}
+""",
+                "request": {"uri": "/"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertTrue(any(
+            "hash=LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=" in entry
+            and "signature=iKqz7ejTrflNJquQ07r9SiCDBww7zOnAFO4EpEOEfAs=" in entry
+            and "hex=iKqz7ejTrflNJquQ07r9SiCDBww7zOnAFO4EpEOEfAs=" in entry
+            and "valid=1 invalid=0" in entry
+            for entry in result["results"][0]["logs"]
+        ))
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in ("CRYPTO::hash", "CRYPTO::sign", "CRYPTO::verify"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+        for irule, message in (
+            ('when HTTP_REQUEST { CRYPTO::hash -alg sha256 -ctx ctx hello }', "context mode"),
+            ('when HTTP_REQUEST { CRYPTO::sign -alg hmac-sha256 hello }', "requires -key"),
+            ('when HTTP_REQUEST { CRYPTO::verify -alg hmac-sha256 -key secret hello }', "requires -signature"),
+            ('when HTTP_REQUEST { CRYPTO::hash hello }', "requires -alg"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, message
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "request": {"uri": "/"},
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
 
     def test_ip_semantics_record_packet_state_and_seeded_lookups(self) -> None:
         result = self.adapter.run_scenario(

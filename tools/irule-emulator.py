@@ -751,6 +751,9 @@ def _target_status(name: str, post_target_names: frozenset[str]) -> str:
 
 
 SEMANTIC_MOCK_COMMANDS = {
+    "CRYPTO::hash",
+    "CRYPTO::sign",
+    "CRYPTO::verify",
     "HSL::open",
     "HSL::send",
     "DNS::additional",
@@ -3189,6 +3192,7 @@ def _install_runtime_shims(session: Any) -> None:
         """
     )
     _install_python_digest_helper(session)
+    _install_python_crypto_helper(session)
     _install_python_codec_helper(session)
     semantic_path = Path(__file__).with_name("semantic-mocks.tcl")
     if not semantic_path.exists():
@@ -3209,7 +3213,7 @@ def _install_python_digest_helper(session: Any) -> None:
     if interpreter is None or not hasattr(interpreter, "createcommand"):
         raise EmulatorInputError("binary digest support requires the in-process Tcl backend")
 
-    algorithms = {"md5", "sha1", "sha256", "sha384", "sha512"}
+    algorithms = {"md5", "ripemd160", "sha1", "sha224", "sha256", "sha384", "sha512"}
 
     def digest_callback(*args: str) -> str:
         if len(args) != 2 or args[0] not in algorithms:
@@ -3222,6 +3226,67 @@ def _install_python_digest_helper(session: Any) -> None:
     # Keep a strong reference on the session for bridge implementations that
     # do not retain Python callbacks independently of tkinter's command table.
     setattr(session, "_testcl_digest_callback", digest_callback)
+
+
+def _install_python_crypto_helper(session: Any) -> None:
+    """Expose bounded one-shot hash and HMAC operations to semantic Tcl."""
+    inner = getattr(session, "_session", None)
+    inprocess = getattr(inner, "_inprocess", None)
+    interpreter = getattr(inprocess, "_interp", None)
+    if interpreter is None or not hasattr(interpreter, "createcommand"):
+        raise EmulatorInputError("crypto support requires the in-process Tcl backend")
+
+    import hmac
+
+    hash_algorithms = {
+        "md5",
+        "ripemd160",
+        "sha1",
+        "sha224",
+        "sha256",
+        "sha384",
+        "sha512",
+    }
+    hmac_algorithms = {f"hmac-{algorithm}" for algorithm in hash_algorithms}
+    max_bytes = 16 * 1024 * 1024
+
+    def decode(value: str, field: str) -> bytes:
+        try:
+            raw = base64.b64decode(value.encode("ascii"), validate=True)
+        except (UnicodeEncodeError, ValueError, binascii.Error) as exc:
+            raise ValueError(f"crypto {field} is not valid base64") from exc
+        if len(raw) > max_bytes:
+            raise ValueError(f"crypto {field} exceeds the {max_bytes}-byte limit")
+        return raw
+
+    def crypto_callback(*args: str) -> str:
+        if len(args) != 5:
+            raise ValueError(
+                "crypto helper requires operation, algorithm, key, data, and signature"
+            )
+        operation, algorithm, key_encoded, data_encoded, signature_encoded = args
+        key = decode(key_encoded, "key")
+        data = decode(data_encoded, "data")
+        signature = decode(signature_encoded, "signature")
+        if operation == "hash":
+            if algorithm not in hash_algorithms:
+                raise ValueError(f"unsupported hash algorithm: {algorithm}")
+            digest = hashlib.new(algorithm, data).digest()
+        elif operation == "sign":
+            if algorithm not in hmac_algorithms:
+                raise ValueError(f"unsupported HMAC algorithm: {algorithm}")
+            digest = hmac.new(key, data, algorithm.removeprefix("hmac-")).digest()
+        elif operation == "verify":
+            if algorithm not in hmac_algorithms:
+                raise ValueError(f"unsupported HMAC algorithm: {algorithm}")
+            expected = hmac.new(key, data, algorithm.removeprefix("hmac-")).digest()
+            return "1" if hmac.compare_digest(expected, signature) else "0"
+        else:
+            raise ValueError(f"unsupported crypto operation: {operation}")
+        return base64.b64encode(digest).decode("ascii")
+
+    interpreter.createcommand("::itest::semantic::py_crypto", crypto_callback)
+    setattr(session, "_testcl_crypto_callback", crypto_callback)
 
 
 def _install_python_codec_helper(session: Any) -> None:

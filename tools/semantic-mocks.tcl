@@ -14172,6 +14172,109 @@ namespace eval ::itest::semantic {
         }
         return $decoded
     }
+
+    proc _crypto_parse {args command_name operation} {
+        set parsed [dict create algorithm "" key "" signature "" data "" has_data 0 key_set 0 signature_set 0]
+        set index 0
+        set end_options 0
+        while {$index < [llength $args]} {
+            set token [lindex $args $index]
+            if {!$end_options && $token eq "--"} {
+                set end_options 1
+                incr index
+                continue
+            }
+            if {!$end_options && [string match -* $token]} {
+                switch -exact -- $token {
+                    -alg - -key - -keyhex - -signature {
+                        if {$index + 1 >= [llength $args]} {
+                            error "$command_name option $token requires a value"
+                        }
+                        set value [lindex $args [incr index]]
+                        if {$token eq "-alg"} {
+                            if {[dict get $parsed algorithm] ne ""} {
+                                error "$command_name accepts -alg only once"
+                            }
+                            dict set parsed algorithm $value
+                        } elseif {$token eq "-signature"} {
+                            if {[dict get $parsed signature_set]} {
+                                error "$command_name accepts -signature only once"
+                            }
+                            dict set parsed signature $value
+                            dict set parsed signature_set 1
+                        } else {
+                            if {[dict get $parsed key_set]} {
+                                error "$command_name accepts only one key option"
+                            }
+                            if {$token eq "-keyhex"} {
+                                if {[catch {binary decode hex $value} value]} {
+                                    error "$command_name -keyhex requires an even hexadecimal value"
+                                }
+                            }
+                            dict set parsed key $value
+                            dict set parsed key_set 1
+                        }
+                    }
+                    -ctx - -final {
+                        error "$command_name context mode is not implemented in this emulator slice"
+                    }
+                    default {
+                        error "$command_name does not support option $token"
+                    }
+                }
+            } else {
+                if {[dict get $parsed has_data]} {
+                    error "$command_name accepts at most one data value"
+                }
+                dict set parsed data $token
+                dict set parsed has_data 1
+            }
+            incr index
+        }
+        if {[dict get $parsed algorithm] eq ""} {
+            error "$command_name requires -alg"
+        }
+        if {$operation in {sign verify} && ![dict get $parsed key_set]} {
+            error "$command_name requires -key or -keyhex"
+        }
+        if {$operation eq "verify" && ![dict get $parsed signature_set]} {
+            error "$command_name requires -signature"
+        }
+        return $parsed
+    }
+
+    proc _crypto_encoded {value} {
+        return [binary encode base64 $value]
+    }
+
+    proc crypto_hash_command {args} {
+        set parsed [_crypto_parse $args CRYPTO::hash hash]
+        set encoded [::itest::semantic::py_crypto hash \
+            [dict get $parsed algorithm] \
+            [_crypto_encoded [dict get $parsed key]] \
+            [_crypto_encoded [dict get $parsed data]] \
+            [_crypto_encoded [dict get $parsed signature]]]
+        return [binary decode base64 $encoded]
+    }
+
+    proc crypto_sign_command {args} {
+        set parsed [_crypto_parse $args CRYPTO::sign sign]
+        set encoded [::itest::semantic::py_crypto sign \
+            [dict get $parsed algorithm] \
+            [_crypto_encoded [dict get $parsed key]] \
+            [_crypto_encoded [dict get $parsed data]] \
+            [_crypto_encoded [dict get $parsed signature]]]
+        return [binary decode base64 $encoded]
+    }
+
+    proc crypto_verify_command {args} {
+        set parsed [_crypto_parse $args CRYPTO::verify verify]
+        return [::itest::semantic::py_crypto verify \
+            [dict get $parsed algorithm] \
+            [_crypto_encoded [dict get $parsed key]] \
+            [_crypto_encoded [dict get $parsed data]] \
+            [_crypto_encoded [dict get $parsed signature]]]
+    }
 }
 
 # Preserve the upstream pool behavior and replace only its member choice.
@@ -14896,6 +14999,9 @@ foreach {name proc_name} {
     STATS::set ::itest::semantic::stats_set
     STATS::setmax ::itest::semantic::stats_setmax
     STATS::setmin ::itest::semantic::stats_setmin
+    CRYPTO::hash ::itest::semantic::crypto_hash_command
+    CRYPTO::sign ::itest::semantic::crypto_sign_command
+    CRYPTO::verify ::itest::semantic::crypto_verify_command
     ISTATS::get ::itest::semantic::istats_get
     ISTATS::incr ::itest::semantic::istats_incr
     ISTATS::remove ::itest::semantic::istats_remove
