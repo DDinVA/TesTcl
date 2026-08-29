@@ -3792,6 +3792,74 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         self.assertEqual(result["trace"][0]["http2_frames"][0]["frame_type"], "SETTINGS")
         self.assertTrue(result["trace"][1]["http2_frames"][0]["continued"])
 
+    def test_tcp_payload_hex_detects_split_http2_prior_knowledge(self) -> None:
+        request_block = Encoder().encode(
+            [
+                (":method", "GET"),
+                (":path", "/raw-tcp"),
+                (":scheme", "https"),
+                (":authority", "raw.example.com"),
+            ]
+        )
+        response_block = Encoder().encode([(':status', '204')])
+        client_bytes = (
+            HTTP2_CLIENT_PREFACE
+            + _http2_frame(0x4, 0x0, 0)
+            + _http2_frame(0x1, 0x5, 1, request_block)
+        )
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": 'when HTTP_REQUEST { log local0. "raw=[HTTP2::header :authority]" }',
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "payload_hex": client_bytes[:7].hex(),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "payload_hex": (
+                            client_bytes[7:]
+                            + _http2_frame(0x0, 0x1, 1, b"")
+                        ).hex(),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "payload_hex": _http2_frame(0x1, 0x5, 1, response_block).hex(),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["request"]["uri"], "/raw-tcp")
+        self.assertTrue(any("raw=raw.example.com" in log for log in result["results"][0]["logs"]))
+        self.assertEqual(result["trace"][0]["protocol"], "tcp")
+        self.assertTrue(result["trace"][0]["buffered"])
+        self.assertEqual(result["trace"][1]["protocol"], "http2")
+        self.assertEqual(result["trace"][1]["http2_frames"][0]["frame_type"], "SETTINGS")
+        self.assertEqual(result["trace"][2]["protocol"], "http2")
+
+    def test_tcp_payload_hex_rejects_text_payload_ambiguity(self) -> None:
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "payload or payload_hex"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP"],
+                    "irule": "when CLIENT_ACCEPTED { return }",
+                    "packets": [
+                        {
+                            "protocol": "tcp",
+                            "payload": "text",
+                            "payload_hex": "74657874",
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_http2_wire_frames_reject_oversized_frame_headers(self) -> None:
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "frame exceeds"):
             self.adapter.run_scenario(

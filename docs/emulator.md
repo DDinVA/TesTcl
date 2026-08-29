@@ -244,7 +244,10 @@ frame/data events, and the raw TCP/PCAP path decodes RFC 6455 frames after a
 successful upgrade. Compressed frames using unsupported RSV extensions are
 rejected; pcapng and IPv4 fragment handling remain outside this slice.
 HTTP/2 wire packets use `protocol: "http2"` and a lossless `payload_hex`
-field. The decoder accepts the client connection preface, frame boundaries
+field. Binary TCP captures can instead use `protocol: "tcp"` with
+`payload_hex`; the adapter recognizes a client HTTP/2 prior-knowledge preface
+even when that preface is split across TCP segments, then routes both TCP
+directions through the same decoder. The decoder accepts frame boundaries
 split across packets, HEADERS plus CONTINUATION blocks, per-direction HPACK
 dynamic tables, DATA frames, SETTINGS, PRIORITY, and other control frames.
 Decoded request and response streams are joined by stream ID and then pass
@@ -254,7 +257,8 @@ malformed padding, stream-zero data/header frames, invalid continuation order,
 uppercase headers, duplicate pseudo-headers, and invalid HPACK fail closed.
 This is still a bounded transaction adapter, not a full HTTP/2 endpoint: it
 does not implement live flow-control negotiation, server push emission, or
-TCP/IPv4 wire detection of HTTP/2 without an explicit packet protocol.
+HTTP/2 detection inside encrypted TLS payloads or arbitrary TCP streams that
+do not begin with the prior-knowledge preface.
 
 ```json
 {

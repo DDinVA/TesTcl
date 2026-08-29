@@ -62,11 +62,12 @@ mutation, stream ID and priority state, active/version/request/concurrency
 queries, enable/disable, and disconnect decisions through the `HTTP2::*`
 surface. It does not parse HTTP/2 frames, implement HPACK or live stream
 multiplexing, or model `HTTP2::push` response emission.
-The packet adapter now also accepts explicit `protocol: "http2"` payloads,
-decodes bounded HTTP/2 frames and HPACK blocks across packet boundaries, and
-joins request/response DATA and HEADERS by stream ID. It remains explicit
-about the boundary: it does not infer HTTP/2 from generic TCP/IPv4 payloads,
-negotiate live flow control, or emit server-push streams.
+The packet adapter now also accepts explicit `protocol: "http2"` payloads and
+binary TCP `payload_hex` captures. It recognizes a split HTTP/2 prior-knowledge
+client preface, decodes bounded frames and HPACK blocks across packet
+boundaries, and joins request/response DATA and HEADERS by stream ID. It does
+not inspect encrypted TLS payloads, negotiate live flow control, or emit
+server-push streams.
 GTP packets expose bounded GTPv1 and GTPv2 header/IE state, G-PDU payloads,
 GTP signaling/G-PDU/Prime ingress and egress events, and the catalogued
 `GTP::` command family. GTP-C and GTP-U use UDP ports 2123 and 2152; GTP-Prime

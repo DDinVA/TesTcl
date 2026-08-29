@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 
 try:
-    from http2_wire import Http2ConnectionDecoder, Http2DecodeError
+    from http2_wire import HTTP2_CLIENT_PREFACE, Http2ConnectionDecoder, Http2DecodeError
 except ModuleNotFoundError:  # test modules load this script by absolute path
     _http2_spec = importlib.util.spec_from_file_location(
         "testcl_http2_wire", Path(__file__).with_name("http2_wire.py")
@@ -46,6 +46,7 @@ except ModuleNotFoundError:  # test modules load this script by absolute path
     _http2_spec.loader.exec_module(_http2_module)
     Http2ConnectionDecoder = _http2_module.Http2ConnectionDecoder
     Http2DecodeError = _http2_module.Http2DecodeError
+    HTTP2_CLIENT_PREFACE = _http2_module.HTTP2_CLIENT_PREFACE
 
 
 TMOS_VERSION = "17.5"
@@ -1749,7 +1750,9 @@ PACKET_COMMON_FIELDS = {
     "ack",
 }
 PACKET_PROTOCOL_FIELDS = {
-    "tcp": set(),
+    "tcp": {
+        "payload_hex",
+    },
     "udp": set(),
     "tls": {
         "type",
@@ -4676,6 +4679,10 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             raise EmulatorInputError(
                 f"unsupported packet {index} field(s): {', '.join(unknown)}"
             )
+        if protocol == "tcp" and "payload" in packet and "payload_hex" in packet:
+            raise EmulatorInputError(
+                f"packet {index} TCP packets must use payload or payload_hex, not both"
+            )
 
         normalised: dict[str, Any] = {
             "protocol": protocol,
@@ -4759,6 +4766,24 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = _normalise_http2_state(
                     packet[field], f"packet {index} http2"
                 )
+            elif protocol == "tcp" and field == "payload_hex":
+                value = _require_string(packet[field], f"packet {index} payload_hex")
+                if len(value) % 2:
+                    raise EmulatorInputError(
+                        f"packet {index} payload_hex must contain complete bytes"
+                    )
+                try:
+                    payload_bytes = bytes.fromhex(value)
+                except ValueError as exc:
+                    raise EmulatorInputError(
+                        f"packet {index} payload_hex must be hexadecimal"
+                    ) from exc
+                if len(payload_bytes) > STREAM_MAX_BYTES:
+                    raise EmulatorInputError(
+                        f"packet {index} TCP payload exceeds {STREAM_MAX_BYTES} bytes"
+                    )
+                normalised[field] = payload_bytes.hex()
+                normalised["_wire_payload"] = payload_bytes
             elif protocol == "http2" and field == "payload_hex":
                 value = _require_string(packet[field], f"packet {index} payload_hex")
                 if len(value) % 2:
@@ -5546,6 +5571,7 @@ class EmulatorSession:
         self._packet_streams: dict[tuple[Any, ...], _TcpStream] = {}
         self._http2_decoder: Http2ConnectionDecoder | None = None
         self._http2_streams: dict[int, dict[str, Any]] = {}
+        self._http2_tcp_active = False
         self._websocket_raw_active = False
         self._mqtt_raw_active = any(
             str(profile).upper() == "MQTT" for profile in self._profiles
@@ -6480,6 +6506,7 @@ class EmulatorSession:
         self._packet_streams.clear()
         self._http2_decoder = None
         self._http2_streams.clear()
+        self._http2_tcp_active = False
         self._tcp_buffers = {"client": "", "server": ""}
         self._websocket_raw_active = False
         self._connection_open = False
@@ -6574,6 +6601,16 @@ class EmulatorSession:
             return True
         methods = (b"GET", b"POST", b"PUT", b"PATCH", b"DELETE", b"HEAD", b"OPTIONS", b"CONNECT", b"TRACE")
         return any(method.startswith(payload) or payload.startswith(method + b" ") for method in methods)
+
+    @staticmethod
+    def _http2_tcp_packet(packet: dict[str, Any], payload: bytes) -> dict[str, Any]:
+        merged = dict(packet)
+        merged["protocol"] = "http2"
+        merged["payload_hex"] = payload.hex()
+        merged["_http2_payload"] = payload
+        merged.pop("payload", None)
+        merged.pop("_wire_payload", None)
+        return merged
 
     @staticmethod
     def _looks_like_mqtt_prefix(payload: bytes) -> bool:
@@ -6725,6 +6762,23 @@ class EmulatorSession:
 
         if not combined and has_gap:
             return None, stream.buffered_bytes
+        if self._http2_tcp_active:
+            stream.buffer = b""
+            if not has_gap:
+                stream.segments.clear()
+            return self._http2_tcp_packet(packet, combined), len(combined)
+        if packet["direction"] == "client_to_server":
+            if combined.startswith(HTTP2_CLIENT_PREFACE):
+                self._http2_tcp_active = True
+                stream.buffer = b""
+                if not has_gap:
+                    stream.segments.clear()
+                return self._http2_tcp_packet(packet, combined), len(combined)
+            if HTTP2_CLIENT_PREFACE.startswith(combined):
+                stream.buffer = combined
+                if not has_gap:
+                    stream.segments.clear()
+                return None, stream.buffered_bytes
         if self._websocket_raw_active:
             decoded_frames, remaining = _decode_websocket_frames(
                 combined, packet["direction"]
@@ -8035,7 +8089,7 @@ class McpProtocolServer:
             {
                 "name": "irule_session_trace",
                 "title": "Replay a packet trace",
-                "description": "Replay a bounded structured TCP, TLS, HTTP, UDP, or DNS packet trace on a persistent emulator session.",
+                "description": "Replay a bounded TCP/TLS/HTTP/HTTP2/UDP/DNS packet trace on a persistent emulator session.",
                 "inputSchema": _mcp_object_schema(
                     {
                         "session_id": {"type": "string", "minLength": 1},
