@@ -180,6 +180,8 @@ disable actions. Structured records are deterministic test data; the emulator
 does not run DNS-Express, recursive resolution, DNSSEC signing, or a live
 nameserver. `RESOLVER::name_lookup` and the `DNSMSG::*` commands can consume
 scenario-supplied resolver records without making network requests.
+`DNS::tsig exists` and `DNS::tsig remove` expose and clear deterministic TSIG
+presence state; the adapter does not calculate or validate TSIG signatures.
 TLS packet state supports common SNI, cipher, session, certificate, X509
 subject/issuer, verification-result, and SSL enable/disable inspection paths;
 the remaining high-value TMOS 17.5 SSL paths include client-cert-on-demand,

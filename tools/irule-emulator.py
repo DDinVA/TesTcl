@@ -394,6 +394,7 @@ EVENT_STATE_FIELDS = {
         "rpz_policy",
         "wideips",
         "response_sent",
+        "tsig_present",
     },
     "websocket": {
         "request_headers",
@@ -748,6 +749,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "DNS::scrape",
     "DNS::ttl",
     "DNS::type",
+    "DNS::tsig",
     "DNSMSG::header",
     "DNSMSG::record",
     "DNSMSG::section",
@@ -4150,6 +4152,7 @@ PACKET_PROTOCOL_FIELDS = {
         "rpz_policy",
         "wideips",
         "response_sent",
+        "tsig_present",
     },
     "websocket": {
         "type",
@@ -9058,6 +9061,9 @@ class EmulatorSession:
                         dns_state[field] = _dns_edns0_tcl(packet[field])
                     else:
                         dns_state[field] = _packet_scalar(packet[field], field)
+            dns_state["tsig_present"] = _packet_scalar(
+                packet.get("tsig_present", False), "tsig_present"
+            )
             if dns_state:
                 state["dns"] = dns_state
         elif protocol == "websocket":

@@ -833,6 +833,10 @@ AAAA, CNAME, NS, PTR, MX, SRV, and TXT resource records. See the F5
 [`DNS::scrape`](https://clouddocs.f5.com/api/irules/DNS__scrape.html)
 references for the production command contract.
 
+`DNS::tsig exists` and `DNS::tsig remove` provide a deterministic TSIG
+presence/removal state for structured DNS messages. The adapter records the
+message-level mutation but does not calculate or validate TSIG MACs.
+
 TLS packet state also drives the common SSL inspection path. In
 `CLIENTSSL_*` and `SERVERSSL_*` events, the semantic overlay supports
 `SSL::sni`, `SSL::cipher`, `SSL::sessionid`, `SSL::cert`,

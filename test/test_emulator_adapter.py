@@ -5495,6 +5495,52 @@ when DNS_RESPONSE { DNS::drop }
         self.assertTrue(event["state"]["dns"]["message_hex"])
         self.assertEqual(result["trace"][0]["events"][1]["event"], "DNS_RESPONSE")
 
+    def test_dns_tsig_exists_and_remove_are_connection_safe(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP", "DNS"],
+                "irule": """
+when DNS_REQUEST {
+    log local0. "before=[DNS::tsig exists]"
+    if {[DNS::question name] eq "signed.example.com"} { DNS::tsig remove }
+    log local0. "after=[DNS::tsig exists]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "dns",
+                        "direction": "client_to_server",
+                        "qname": "signed.example.com",
+                        "qtype": "A",
+                        "tsig_present": True,
+                    },
+                    {
+                        "protocol": "dns",
+                        "direction": "client_to_server",
+                        "qname": "unsigned.example.com",
+                        "qtype": "A",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = result["trace"][0]["events"][0]
+        unsigned_event = result["trace"][1]["events"][0]
+        self.assertTrue(any("before=1" in entry for entry in event["logs"]))
+        self.assertTrue(any("after=0" in entry for entry in event["logs"]))
+        self.assertEqual(event["state"]["dns"]["tsig_present"], "0")
+        self.assertTrue(any("before=0" in entry for entry in unsigned_event["logs"]))
+        self.assertEqual(unsigned_event["state"]["dns"]["tsig_present"], "0")
+        self.assertTrue(any("tsig_remove" in entry for entry in event["decisions"]))
+        self.assertEqual(
+            {
+                entry["name"]: entry["runtime_status"]
+                for entry in result["fidelity"]["commands"]
+                if entry["name"] == "DNS::tsig"
+            },
+            {"DNS::tsig": "semantic-mock"},
+        )
+
     def test_raw_dns_response_decodes_compressed_answer_records(self) -> None:
         qname = b"\x07example\x03com\x00"
         dns_payload = (

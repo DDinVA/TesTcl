@@ -11836,7 +11836,7 @@ namespace eval ::itest::semantic {
             qr 0 rcode 0 opcode 0 id 0 aa 0 tc 0 rd 1 ra 0 cd 0 ad 0
             qdcount 1 ancount 0 nscount 0 arcount 0 ptype QUESTION
             message_length 0 message_hex "" disabled 0 dropped 0 last_act "" edns0 ""
-            rpz_policy "" wideips {} response_sent 0
+            rpz_policy "" wideips {} response_sent 0 tsig_present 0
         } {
             if {![info exists ::state::dns::$field]} {
                 set ::state::dns::$field $default
@@ -12059,6 +12059,19 @@ namespace eval ::itest::semantic {
             if {[string tolower [string trimright $candidate .]] eq $wanted} { return 1 }
         }
         return 0
+    }
+
+    proc dns_tsig_command {args} {
+        if {[llength $args] != 1 || [lindex $args 0] ni {exists remove}} {
+            error "DNS::tsig requires exists or remove"
+        }
+        if {[lindex $args 0] eq "exists"} {
+            if {![info exists ::state::dns::tsig_present]} { return 0 }
+            return [expr {$::state::dns::tsig_present in {1 true TRUE}}]
+        }
+        set ::state::dns::tsig_present 0
+        ::itest::log_decision dns tsig_remove
+        return ""
     }
 
     proc dns_log_command {args} {
@@ -13434,6 +13447,7 @@ foreach {name proc_name} {
     DNS::rr ::itest::semantic::dns_rr_command
     DNS::scrape ::itest::semantic::dns_scrape_command
     DNS::ttl ::itest::semantic::dns_ttl_command
+    DNS::tsig ::itest::semantic::dns_tsig_command
     DNS::type ::itest::semantic::dns_type_command
     DNSMSG::header ::itest::semantic::dnsmsg_header_command
     DNSMSG::record ::itest::semantic::dnsmsg_record_command
