@@ -49,6 +49,16 @@ namespace eval ::itest::semantic {
     variable rewrite_payload_side ""
     variable rewrite_payload_replaced 0
     variable rewrite_injecting 0
+    variable html_enabled 0
+    variable html_processing 0
+    variable html_current_type ""
+    variable html_current_name ""
+    variable html_current_raw ""
+    variable html_current_prepend ""
+    variable html_current_append ""
+    variable html_current_removed 0
+    variable html_token_count 0
+    variable html_mutated 0
     variable psm_enabled
     array set psm_enabled {FTP 1 HTTP 1 SMTP 1}
     variable ws_enabled 1
@@ -1252,6 +1262,271 @@ namespace eval ::itest::semantic {
             return ""
         }
         error "unsupported REWRITE::payload syntax"
+    }
+
+    proc html_reset_connection {} {
+        html_prepare_request
+    }
+
+    proc html_prepare_request {} {
+        variable html_enabled
+        variable html_processing
+        variable html_current_type
+        variable html_current_name
+        variable html_current_raw
+        variable html_current_prepend
+        variable html_current_append
+        variable html_current_removed
+        variable html_token_count
+        variable html_mutated
+        set html_enabled 0
+        set html_processing 0
+        set html_current_type ""
+        set html_current_name ""
+        set html_current_raw ""
+        set html_current_prepend ""
+        set html_current_append ""
+        set html_current_removed 0
+        set html_token_count 0
+        set html_mutated 0
+    }
+
+    proc html_snapshot {} {
+        variable html_enabled
+        variable html_processing
+        variable html_current_type
+        variable html_current_name
+        variable html_current_removed
+        variable html_token_count
+        variable html_mutated
+        return [list \
+            enabled $html_enabled processing $html_processing \
+            current_type $html_current_type current_name $html_current_name \
+            current_removed $html_current_removed token_count $html_token_count \
+            mutated $html_mutated]
+    }
+
+    proc _html_require_event {allowed command_name} {
+        if {$::itest::current_event ni $allowed} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc html_enable_command {args} {
+        variable html_enabled
+        _html_require_event {HTTP_RESPONSE HTML_TAG_MATCHED HTML_COMMENT_MATCHED} HTML::enable
+        if {[llength $args] != 0} {
+            error "HTML::enable takes no arguments"
+        }
+        set html_enabled 1
+        ::itest::log_decision html enable
+        return ""
+    }
+
+    proc html_disable_command {args} {
+        variable html_enabled
+        _html_require_event {HTTP_RESPONSE HTML_TAG_MATCHED HTML_COMMENT_MATCHED} HTML::disable
+        if {[llength $args] != 0} {
+            error "HTML::disable takes no arguments"
+        }
+        set html_enabled 0
+        ::itest::log_decision html disable
+        return ""
+    }
+
+    proc html_encode_command {args} {
+        if {[llength $args] != 1} {
+            error "HTML::encode requires one string"
+        }
+        set value [lindex $args 0]
+        set value [string map [list & {&amp;} < {&lt;} > {&gt;} \" {&quot;} ' {&#39;}] $value]
+        ::itest::log_decision html encode $value
+        return $value
+    }
+
+    proc _html_current_value {} {
+        variable html_current_type
+        variable html_current_raw
+        if {$html_current_type eq "tag" || $html_current_type eq "comment"} {
+            return $html_current_raw
+        }
+        error "HTML command is not active outside an HTML match event"
+    }
+
+    proc html_tag_command {args} {
+        variable html_current_type
+        variable html_current_name
+        variable html_current_prepend
+        variable html_current_append
+        variable html_current_removed
+        variable html_mutated
+        _html_require_event {HTML_TAG_MATCHED} HTML::tag
+        if {$html_current_type ne "tag"} {
+            error "HTML::tag has no active tag"
+        }
+        if {[llength $args] == 0 || ([llength $args] == 1 && [lindex $args 0] eq "name")} {
+            if {[llength $args] == 1} { return $html_current_name }
+            error "HTML::tag requires append, name, prepend, or remove"
+        }
+        if {[llength $args] == 1 && [lindex $args 0] eq "remove"} {
+            set html_current_removed 1
+            set html_mutated 1
+            ::itest::log_decision html tag_remove
+            return ""
+        }
+        if {[llength $args] == 2 && [lindex $args 0] in {append prepend}} {
+            set operation [lindex $args 0]
+            if {$operation eq "append"} {
+                append html_current_append [lindex $args 1]
+            } else {
+                append html_current_prepend [lindex $args 1]
+            }
+            set html_mutated 1
+            ::itest::log_decision html tag_$operation [lindex $args 1]
+            return ""
+        }
+        error "unsupported HTML::tag syntax"
+    }
+
+    proc html_comment_command {args} {
+        variable html_current_type
+        variable html_current_prepend
+        variable html_current_append
+        variable html_current_removed
+        variable html_mutated
+        _html_require_event {HTML_COMMENT_MATCHED} HTML::comment
+        if {$html_current_type ne "comment"} {
+            error "HTML::comment has no active comment"
+        }
+        if {[llength $args] == 0} {
+            return [_html_current_value]
+        }
+        if {[llength $args] == 1 && [lindex $args 0] eq "remove"} {
+            set html_current_removed 1
+            set html_mutated 1
+            ::itest::log_decision html comment_remove
+            return ""
+        }
+        if {[llength $args] == 2 && [lindex $args 0] in {append prepend}} {
+            set operation [lindex $args 0]
+            if {$operation eq "append"} {
+                append html_current_append [lindex $args 1]
+            } else {
+                append html_current_prepend [lindex $args 1]
+            }
+            set html_mutated 1
+            ::itest::log_decision html comment_$operation [lindex $args 1]
+            return ""
+        }
+        error "unsupported HTML::comment syntax"
+    }
+
+    proc _html_token_name {raw} {
+        set content [string trim [string range $raw 1 end-1]]
+        if {[string index $content 0] eq "/"} {
+            set content [string range $content 1 end]
+            return "/[lindex [split $content] 0]"
+        }
+        return [string trimright [lindex [split $content] 0] /]
+    }
+
+    proc _html_render_current {} {
+        variable html_current_type
+        variable html_current_raw
+        variable html_current_prepend
+        variable html_current_append
+        variable html_current_removed
+        if {$html_current_removed} { return "" }
+        return "${html_current_prepend}${html_current_raw}${html_current_append}"
+    }
+
+    proc _html_fire_if_registered {event_name} {
+        if {[lsearch -exact [::itest::registered_events] $event_name] < 0} {
+            return ""
+        }
+        set result [::itest::_testcl_fire_event_orig $event_name]
+        ::itest::semantic::event_errors_record $event_name $result
+        return $result
+    }
+
+    proc html_process_response {} {
+        variable html_enabled
+        variable html_processing
+        variable html_current_type
+        variable html_current_name
+        variable html_current_raw
+        variable html_current_prepend
+        variable html_current_append
+        variable html_current_removed
+        variable html_token_count
+        if {!$html_enabled || $html_processing} { return }
+        set body $::state::http::response::payload
+        set cursor 0
+        set output [list]
+        set body_length [string length $body]
+        set html_processing 1
+        while {$cursor < $body_length} {
+            set comment_start [string first "<!--" $body $cursor]
+            set comment_end -1
+            if {$comment_start >= 0} {
+                set comment_end [string first "-->" $body [expr {$comment_start + 4}]]
+                if {$comment_end >= 0} { set comment_end [expr {$comment_end + 3}] }
+            }
+            set tag_match {}
+            set tag_start -1
+            set tag_end -1
+            if {[regexp -indices -start $cursor {<[^>]*>} $body tag_match]} {
+                set tag_start [lindex $tag_match 0]
+                set tag_end [expr {[lindex $tag_match 1] + 1}]
+            }
+            if {$comment_start >= 0 && $comment_end >= 0 &&
+                ($tag_start < 0 || $comment_start <= $tag_start)} {
+                set token_start $comment_start
+                set token_end $comment_end
+                set token_type comment
+                set event_name HTML_COMMENT_MATCHED
+            } elseif {$tag_start >= 0} {
+                set token_start $tag_start
+                set token_end $tag_end
+                set token_type tag
+                set event_name HTML_TAG_MATCHED
+            } else {
+                append output [string range $body $cursor end]
+                break
+            }
+            append output [string range $body $cursor [expr {$token_start - 1}]]
+            set html_current_type $token_type
+            set html_current_raw [string range $body $token_start [expr {$token_end - 1}]]
+            if {$token_type eq "tag"} {
+                set html_current_name [_html_token_name $html_current_raw]
+            } else {
+                set html_current_name ""
+            }
+            set html_current_prepend ""
+            set html_current_append ""
+            set html_current_removed 0
+            incr html_token_count
+            _html_fire_if_registered $event_name
+            append output [_html_render_current]
+            set cursor $token_end
+            if {!$html_enabled} {
+                append output [string range $body $cursor end]
+                break
+            }
+        }
+        set ::state::http::response::payload $output
+        set html_current_type ""
+        set html_current_name ""
+        set html_current_raw ""
+        set html_current_prepend ""
+        set html_current_append ""
+        set html_current_removed 0
+        set html_processing 0
+        set header_value [::state::http::response::header get content-length]
+        if {$header_value ne ""} {
+            ::state::http::response::header set content-length \
+                [::itest::cmd::_payload_bytelength $::state::http::response::payload]
+        }
     }
 
     proc psm_reset_connection {} {
@@ -13618,6 +13893,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::antifraud_reset_connection
             ::itest::semantic::auth_reset_connection
             ::itest::semantic::rewrite_reset_connection
+            ::itest::semantic::html_reset_connection
         }
         set rewrite_auto [expr {$gated && !$::itest::semantic::rewrite_injecting &&
             [::itest::semantic::_profile_enabled REWRITE]}]
@@ -13648,6 +13924,9 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::_maybe_fire_lb_failed
             ::itest::semantic::cache_request_event
         } elseif {$gated && $event_name eq "HTTP_RESPONSE"} {
+            if {[::itest::semantic::_profile_enabled HTML]} {
+                ::itest::semantic::html_process_response
+            }
             ::itest::semantic::cache_update_event
             if {$rewrite_auto && $::itest::semantic::rewrite_post_process &&
                 [lsearch -exact [::itest::registered_events] REWRITE_RESPONSE_DONE] >= 0} {
@@ -14228,6 +14507,11 @@ foreach {name proc_name} {
     REWRITE::enable ::itest::semantic::rewrite_enable_command
     REWRITE::payload ::itest::semantic::rewrite_payload_command
     REWRITE::post_process ::itest::semantic::rewrite_post_process_command
+    HTML::comment ::itest::semantic::html_comment_command
+    HTML::disable ::itest::semantic::html_disable_command
+    HTML::enable ::itest::semantic::html_enable_command
+    HTML::encode ::itest::semantic::html_encode_command
+    HTML::tag ::itest::semantic::html_tag_command
     ROUTE::age ::itest::semantic::route_age_command
     ROUTE::bandwidth ::itest::semantic::route_bandwidth_command
     ROUTE::clear ::itest::semantic::route_clear_command

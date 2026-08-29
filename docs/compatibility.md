@@ -87,6 +87,12 @@ the high-level HTTP lifecycle exposes `REWRITE_REQUEST_DONE` and conditionally
 `REWRITE_RESPONSE_DONE`; payload reads and replacements use byte offsets and
 update an existing `Content-Length` header. It does not implement the full
 REWRITE profile/plugin, APM policy processing, or URL/file rewrite tables.
+The TMOS 17.5 HTML surface models `HTML::comment`, `HTML::disable`,
+`HTML::enable`, `HTML::encode`, and `HTML::tag`. With the HTML profile and
+`HTML::enable` in `HTTP_RESPONSE`, the adapter scans the uncompressed response
+body and exposes ordered tag/comment match events with deterministic token
+mutations. It does not implement a DOM, script execution, compression
+decoding, or the full TMM HTML filter.
 The IP semantic layer models the seven TMOS 17.5 commands `IP::hops`,
 `IP::idle_timeout`, `IP::ingress_drop_rate`, `IP::ingress_rate_limit`,
 `IP::intelligence`, `IP::reputation`, and `IP::stats`. Path hops, directional

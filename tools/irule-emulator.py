@@ -870,6 +870,11 @@ SEMANTIC_MOCK_COMMANDS = {
     "REWRITE::enable",
     "REWRITE::payload",
     "REWRITE::post_process",
+    "HTML::comment",
+    "HTML::disable",
+    "HTML::enable",
+    "HTML::encode",
+    "HTML::tag",
     "WS::collect",
     "WS::disconnect",
     "WS::enabled",
@@ -2241,6 +2246,34 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         if value < 0:
             raise EmulatorInputError(f"invalid REWRITE {name} state")
         rewrite_lengths[name] = value
+    html_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::html_snapshot")
+    )
+    if len(html_parts) % 2:
+        raise EmulatorInputError("invalid HTML state")
+    html_keys = html_parts[::2]
+    if len(set(html_keys)) != len(html_keys):
+        raise EmulatorInputError("duplicate HTML state field")
+    html_values = dict(zip(html_parts[::2], html_parts[1::2]))
+    expected_html_fields = {
+        "enabled", "processing", "current_type", "current_name",
+        "current_removed", "token_count", "mutated",
+    }
+    if set(html_values) != expected_html_fields:
+        raise EmulatorInputError("invalid HTML state fields")
+    if any(
+        html_values[name] not in {"0", "1"}
+        for name in ("enabled", "processing", "current_removed", "mutated")
+    ):
+        raise EmulatorInputError("invalid HTML boolean state")
+    if html_values["current_type"] not in {"", "tag", "comment"}:
+        raise EmulatorInputError("invalid HTML current type state")
+    try:
+        html_token_count = int(html_values["token_count"])
+    except (KeyError, TypeError, ValueError):
+        raise EmulatorInputError("invalid HTML token count state") from None
+    if html_token_count < 0:
+        raise EmulatorInputError("invalid HTML token count state")
     cache_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::cache_snapshot"))
     if len(cache_parts) % 2:
         raise EmulatorInputError("invalid cache state")
@@ -2757,6 +2790,15 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "payload_replaced": rewrite_values["payload_replaced"] == "1",
             "request_payload_length": rewrite_lengths["request_payload_length"],
             "response_payload_length": rewrite_lengths["response_payload_length"],
+        },
+        "html": {
+            "enabled": html_values["enabled"] == "1",
+            "processing": html_values["processing"] == "1",
+            "current_type": html_values["current_type"],
+            "current_name": html_values["current_name"],
+            "current_removed": html_values["current_removed"] == "1",
+            "token_count": html_token_count,
+            "mutated": html_values["mutated"] == "1",
         },
         "cache": cache,
         "profile_settings": profile_settings,
@@ -8881,6 +8923,7 @@ class EmulatorSession:
                 _configure_route(session, self._route_config)
                 _configure_http_proxy(session, self._http_proxy_config)
                 session.eval_tcl("::itest::semantic::rewrite_reset_connection")
+                session.eval_tcl("::itest::semantic::html_reset_connection")
                 session.eval_tcl("::itest::semantic::flow_reset_connection")
                 if any(str(profile).upper() == "REWRITE" for profile in self._profiles):
                     session.eval_tcl("::itest::semantic::rewrite_install_flow_hooks")
@@ -8940,6 +8983,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::route_reset_connection")
                 session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
                 session.eval_tcl("::itest::semantic::rewrite_reset_connection")
+                session.eval_tcl("::itest::semantic::html_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         if not self._connection_open:
@@ -8958,6 +9002,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::route_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
             session.eval_tcl("::itest::semantic::rewrite_reset_connection")
+            session.eval_tcl("::itest::semantic::html_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -8983,6 +9028,7 @@ class EmulatorSession:
             while True:
                 session.eval_tcl("::itest::semantic::http_proxy_prepare_request")
                 session.eval_tcl("::itest::semantic::rewrite_prepare_request")
+                session.eval_tcl("::itest::semantic::html_prepare_request")
                 attempt_failure = lb_failure if retry_count == 0 else ""
                 dosl7_mitigated = "0"
                 if dosl7_request is not None and dosl7_request["mitigated"]:
@@ -9114,6 +9160,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::route_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
             session.eval_tcl("::itest::semantic::rewrite_reset_connection")
+            session.eval_tcl("::itest::semantic::html_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         result["decisions"] = decision_history
@@ -9131,6 +9178,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
             session.eval_tcl("::itest::semantic::rewrite_reset_connection")
+            session.eval_tcl("::itest::semantic::html_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         return result
@@ -9312,6 +9360,7 @@ class EmulatorSession:
                 "ip": semantic_snapshot["ip"],
                 "http_proxy": semantic_snapshot["http_proxy"],
                 "rewrite": semantic_snapshot["rewrite"],
+                "html": semantic_snapshot["html"],
             },
         }
         if mqtt_forwarded is not None:
@@ -10126,6 +10175,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::route_reset_connection")
         session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
         session.eval_tcl("::itest::semantic::rewrite_reset_connection")
+        session.eval_tcl("::itest::semantic::html_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
@@ -10167,6 +10217,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
         session.eval_tcl("::itest::semantic::rewrite_reset_connection")
+        session.eval_tcl("::itest::semantic::html_reset_connection")
         self._packet_streams.clear()
         self._http2_decoder = None
         self._http2_streams.clear()

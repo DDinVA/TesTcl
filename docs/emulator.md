@@ -122,6 +122,14 @@ updated after replacement. `REWRITE::enable` and `REWRITE::disable` model the
 connection-level passthrough switch. This is a deterministic iRule event and
 payload model, not the full URL/file rewrite plugin or a live APM policy.
 
+The HTML profile adds a bounded response-body filter. A rule enables it during
+`HTTP_RESPONSE`, after which the adapter scans comments and tags in order and
+fires `HTML_COMMENT_MATCHED` or `HTML_TAG_MATCHED`. `HTML::comment` and
+`HTML::tag` can query, prepend, append, or remove the current token;
+`HTML::encode` returns escaped text. The parser intentionally handles complete
+`<!-- ... -->` comments and simple `< ... >` tags only; it is not a browser,
+DOM parser, JavaScript engine, or compression-aware HTML filter.
+
 ```json
 {
   "route": {

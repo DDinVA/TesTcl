@@ -478,7 +478,7 @@ when HTTP_REQUEST {
         }
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
-        self.assertGreaterEqual(queue["command_count"], 362)
+        self.assertGreaterEqual(queue["command_count"], 357)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -5958,6 +5958,63 @@ when REWRITE_RESPONSE_DONE {
         self.assertTrue(any("response=hello length=5" in entry for entry in request_result["logs"]))
         usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
         for command in ("REWRITE::disable", "REWRITE::enable", "REWRITE::payload", "REWRITE::post_process"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+    def test_html_filter_fires_token_events_and_applies_bounded_mutations(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "HTML"],
+                "irule": """
+when HTTP_RESPONSE {
+    HTML::enable
+    log local0. "encoded=[HTML::encode {<x>&\"'}]"
+}
+when HTML_TAG_MATCHED {
+    if {[HTML::tag name] eq "html"} {
+        HTML::disable
+        HTML::enable
+    }
+    if {[HTML::tag name] eq "title"} {
+        HTML::tag prepend {<!--title-start-->}
+        HTML::tag append {<!--title-end-->}
+    }
+    if {[string trimleft [HTML::tag name] /] eq "p"} {
+        HTML::tag remove
+    }
+    if {[HTML::tag name] eq "br"} {
+        HTML::tag append {<!--br-marker-->}
+    }
+}
+when HTML_COMMENT_MATCHED {
+    if {[HTML::comment] eq {<!--remove-->}} {
+        HTML::comment remove
+    }
+}
+""",
+                "request": {
+                    "host": "html.example.com",
+                    "response_body": "<html><title>Hi</title><!--remove--><p>x</p><br/></html>",
+                    "response_headers": {"Content-Length": "52"},
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_result = result["results"][0]
+        self.assertIn("HTML_TAG_MATCHED", request_result["events_fired"])
+        self.assertIn("HTML_COMMENT_MATCHED", request_result["events_fired"])
+        self.assertEqual(
+            request_result["response"]["body"],
+            "<html><!--title-start--><title><!--title-end-->Hi</title>x<br/><!--br-marker--></html>",
+        )
+        self.assertEqual(
+            request_result["response"]["headers"]["content-length"],
+            str(len(request_result["response"]["body"].encode("utf-8"))),
+        )
+        self.assertEqual(request_result["semantic"]["html"]["token_count"], 8)
+        self.assertTrue(request_result["semantic"]["html"]["mutated"])
+        self.assertTrue(any("encoded=&lt;x&gt;&amp;&quot;&#39;" in entry for entry in request_result["logs"]))
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in ("HTML::comment", "HTML::disable", "HTML::enable", "HTML::encode", "HTML::tag"):
             self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
 
     def test_tls_semantics_expose_sni_cipher_and_peer_certificate(self) -> None:
