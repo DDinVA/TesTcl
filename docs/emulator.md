@@ -266,6 +266,41 @@ reset on a new connection. This is an offline IVS model: it does not contact a
 real AAA virtual server, transmit credentials, implement asynchronous
 completion, or perform authentication/accounting policy.
 
+### ACCESS sessions and policy
+
+With the `ACCESS` profile attached, the emulator provides a deterministic
+APM-style session and policy model for all 15 catalogued TMOS 17.5 `ACCESS::`
+commands. `ACCESS::session create -flow` creates a connection-scoped session
+with a deterministic ID, `ACCESS::session data` reads or writes session
+variables, and `ACCESS::policy evaluate` applies the configured policy result
+and emits `ACCESS_POLICY_COMPLETED`. Session creation and removal emit
+`ACCESS_SESSION_STARTED` and `ACCESS_SESSION_CLOSED`, respectively.
+
+Scenario configuration can seed ACL results and lists, policy result and
+profile metadata, session data, per-flow variables, flow ID, SAML values, and
+the deterministic ephemeral-auth password prefix:
+
+```json
+{
+  "profiles": ["TCP", "HTTP", "ACCESS"],
+  "access": {
+    "acl_result": "Allow",
+    "policy_result": "allow",
+    "session_data": {"session.logon.last.username": "alice"},
+    "perflow": {"perflow.custom": "example"}
+  },
+  "irule": "when CLIENT_ACCEPTED { set ::sid [ACCESS::session create -flow] }\nwhen HTTP_REQUEST { ACCESS::policy evaluate -sid $::sid -profile /Common/access; log local0. [ACCESS::policy result -sid $::sid] }",
+  "request": {"uri": "/protected"}
+}
+```
+
+`ACCESS::disable`, `ACCESS::enable`, `ACCESS::respond`, ACL evaluation,
+per-flow mutation, SAML getters/setters, OAuth signing placeholders, and
+ephemeral-auth create/verify are represented as deterministic test behavior.
+Session snapshots redact values whose keys look like passwords, secrets, or
+tokens. This does not run APM policy evaluation, ACL enforcement, SAML/OAuth
+cryptography, external authentication, or production session expiry.
+
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose

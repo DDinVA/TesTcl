@@ -145,6 +145,9 @@ ANTIFRAUD_ALERT_LOG_LEVELS = frozenset(
 )
 ANTIFRAUD_RESULTS = frozenset({"passed", "failed"})
 AAA_RESULTS = frozenset({"OK", "FAIL", "INPROGRESS", "ERROR"})
+ACCESS_ACL_RESULTS = frozenset({"Allow", "Reject"})
+ACCESS_POLICY_RESULTS = frozenset({"allow", "deny", "redirect"})
+ACCESS_PERFLOW_SET_KEYS = frozenset({"perflow.custom", "perflow.scratchpad"})
 AUTH_RESULTS = frozenset({"success", "failure", "error", "wantcredential"})
 AUTH_PROMPT_STYLES = frozenset({"echo_on", "echo_off", "unknown"})
 DEFAULT_PROFILES = ["TCP", "HTTP"]
@@ -1105,6 +1108,21 @@ SEMANTIC_MOCK_COMMANDS = {
     "AAA::acct_send",
     "AAA::auth_result",
     "AAA::auth_send",
+    "ACCESS::acl",
+    "ACCESS::disable",
+    "ACCESS::enable",
+    "ACCESS::ephemeral-auth",
+    "ACCESS::flowid",
+    "ACCESS::log",
+    "ACCESS::oauth",
+    "ACCESS::perflow",
+    "ACCESS::policy",
+    "ACCESS::respond",
+    "ACCESS::restrict_irule_events",
+    "ACCESS::saml",
+    "ACCESS::session",
+    "ACCESS::user",
+    "ACCESS::uuid",
     "AUTH::abort",
     "AUTH::authenticate",
     "AUTH::authenticate_continue",
@@ -1777,6 +1795,37 @@ def _configure_aaa(session: Any, aaa: dict[str, Any]) -> None:
     session.eval_tcl("::itest::semantic::aaa_configure " + _tcl_list(values))
 
 
+def _configure_access(session: Any, access: dict[str, Any]) -> None:
+    """Install deterministic APM access-policy and session defaults."""
+    scalar_values = [
+        "1" if access["enabled"] else "0",
+        access["acl_result"],
+        access["policy_result"],
+        access["policy_agent_id"],
+        "1" if access["policy_uri"] else "0",
+        access["flow_id"],
+        access["ephemeral_auth_password"],
+    ]
+    session_data: list[str] = []
+    for key, value in access["session_data"].items():
+        session_data.extend((key, value))
+    perflow_data: list[str] = []
+    for key, value in access["perflow"].items():
+        perflow_data.extend((key, value))
+    session.eval_tcl(
+        "::itest::semantic::access_configure "
+        + _tcl_list(scalar_values)
+        + " "
+        + _tcl_list(access["acl_lookup"])
+        + " "
+        + _tcl_list(access["acl_matched"])
+        + " "
+        + _tcl_list(session_data)
+        + " "
+        + _tcl_list(perflow_data)
+    )
+
+
 def _split_tcl_list(value: Any) -> list[str]:
     """Parse a Tcl list returned by the bridge using a temporary interpreter."""
     try:
@@ -2095,6 +2144,86 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         })
     if len(aaa_requests) != aaa_request_count:
         raise EmulatorInputError("inconsistent AAA request count")
+    access_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::access_snapshot"))
+    if len(access_parts) % 2:
+        raise EmulatorInputError("invalid ACCESS state")
+    access_keys = access_parts[::2]
+    if len(set(access_keys)) != len(access_keys):
+        raise EmulatorInputError("duplicate ACCESS state field")
+    access_values = dict(zip(access_parts[::2], access_parts[1::2]))
+    expected_access_fields = {
+        "enabled", "acl_result", "acl_lookup", "acl_matched", "acl_evaluated",
+        "policy_result", "policy_agent_id", "policy_uri", "flow_id",
+        "request_enabled", "restrict_irule_events", "current_sid", "session_count",
+        "sessions", "perflow", "saml",
+    }
+    if set(access_values) != expected_access_fields:
+        raise EmulatorInputError("invalid ACCESS state fields")
+    access_bool_fields = {"enabled", "policy_uri", "request_enabled", "restrict_irule_events"}
+    if any(access_values[name] not in {"0", "1"} for name in access_bool_fields):
+        raise EmulatorInputError("invalid ACCESS boolean state")
+    if access_values["acl_result"] not in ACCESS_ACL_RESULTS:
+        raise EmulatorInputError("invalid ACCESS ACL result state")
+    if access_values["policy_result"] not in ACCESS_POLICY_RESULTS:
+        raise EmulatorInputError("invalid ACCESS policy result state")
+    try:
+        access_session_count = int(access_values["session_count"])
+    except (KeyError, TypeError, ValueError):
+        raise EmulatorInputError("invalid ACCESS session count") from None
+    if access_session_count < 0:
+        raise EmulatorInputError("invalid ACCESS session count")
+    access_sessions: list[dict[str, Any]] = []
+    seen_access_ids: set[str] = set()
+    for raw_session in _split_tcl_list(access_values["sessions"]):
+        session_parts = _split_tcl_list(raw_session)
+        if len(session_parts) != 7 or session_parts[0] in seen_access_ids:
+            raise EmulatorInputError("invalid ACCESS session state")
+        seen_access_ids.add(session_parts[0])
+        if session_parts[1] not in {"0", "1"}:
+            raise EmulatorInputError("invalid ACCESS session validity state")
+        if session_parts[2] not in {"allow", "deny", "redirect", "inprogress"}:
+            raise EmulatorInputError("invalid ACCESS session policy state")
+        try:
+            timeout, lifetime, remaining = (int(value) for value in session_parts[3:6])
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid ACCESS session timing state") from None
+        if min(timeout, lifetime, remaining) < 0:
+            raise EmulatorInputError("invalid ACCESS session timing state")
+        data_parts = _split_tcl_list(session_parts[6])
+        if len(data_parts) % 2:
+            raise EmulatorInputError("invalid ACCESS session data state")
+        data: dict[str, str] = {}
+        for key, value in zip(data_parts[::2], data_parts[1::2]):
+            if key in data:
+                raise EmulatorInputError("duplicate ACCESS session data key")
+            data[key] = value
+        access_sessions.append({
+            "id": session_parts[0],
+            "valid": session_parts[1] == "1",
+            "state": session_parts[2],
+            "timeout": timeout,
+            "lifetime": lifetime,
+            "remaining": remaining,
+            "data": data,
+        })
+    if len(access_sessions) != access_session_count:
+        raise EmulatorInputError("inconsistent ACCESS session count")
+
+    def parse_access_map(raw: str, label: str) -> dict[str, str]:
+        parts = _split_tcl_list(raw)
+        if len(parts) % 2:
+            raise EmulatorInputError(f"invalid ACCESS {label} state")
+        result: dict[str, str] = {}
+        for key, value in zip(parts[::2], parts[1::2]):
+            if key in result:
+                raise EmulatorInputError(f"duplicate ACCESS {label} key")
+            result[key] = value
+        return result
+
+    access_perflow = parse_access_map(access_values["perflow"], "perflow")
+    access_saml = parse_access_map(access_values["saml"], "SAML")
+    if set(access_saml) != {"authn", "assertion", "slo_req", "slo_resp"}:
+        raise EmulatorInputError("invalid ACCESS SAML state fields")
     dosl7_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::dosl7_snapshot"))
     if len(dosl7_parts) % 2:
         raise EmulatorInputError("invalid DOSL7 state")
@@ -2232,6 +2361,24 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "acct_result": aaa_values["acct_result"],
             "request_count": aaa_request_count,
             "requests": aaa_requests,
+        },
+        "access": {
+            "enabled": access_values["enabled"] == "1",
+            "acl_result": access_values["acl_result"],
+            "acl_lookup": _split_tcl_list(access_values["acl_lookup"]),
+            "acl_matched": _split_tcl_list(access_values["acl_matched"]),
+            "acl_evaluated": _split_tcl_list(access_values["acl_evaluated"]),
+            "policy_result": access_values["policy_result"],
+            "policy_agent_id": access_values["policy_agent_id"],
+            "policy_uri": access_values["policy_uri"] == "1",
+            "flow_id": access_values["flow_id"],
+            "request_enabled": access_values["request_enabled"] == "1",
+            "restrict_irule_events": access_values["restrict_irule_events"] == "1",
+            "current_sid": access_values["current_sid"],
+            "session_count": access_session_count,
+            "sessions": access_sessions,
+            "perflow": access_perflow,
+            "saml": access_saml,
         },
         "dosl7": {
             "enabled": dosl7_values["enabled"] == "1",
@@ -2990,6 +3137,82 @@ def _normalise_aaa(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalise_access(raw: Any) -> dict[str, Any]:
+    """Normalize deterministic APM access-policy and session inputs."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("access must be an object")
+    if any(not isinstance(key, str) for key in raw):
+        raise EmulatorInputError("access field names must be strings")
+    allowed = {
+        "enabled", "acl_result", "acl_lookup", "acl_matched", "policy_result",
+        "policy_agent_id", "policy_uri", "flow_id", "session_data", "perflow",
+        "ephemeral_auth_password",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError("access unsupported field(s): " + ", ".join(unknown))
+
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise EmulatorInputError("access.enabled must be a boolean")
+
+    def string_field(name: str, default: str = "") -> str:
+        return _normalise_asm_string(raw.get(name, default), f"access.{name}")
+
+    acl_result = string_field("acl_result", "Allow")
+    if acl_result not in ACCESS_ACL_RESULTS:
+        raise EmulatorInputError(
+            "access.acl_result must be one of: " + ", ".join(sorted(ACCESS_ACL_RESULTS))
+        )
+    policy_result = string_field("policy_result", "allow")
+    if policy_result not in ACCESS_POLICY_RESULTS:
+        raise EmulatorInputError(
+            "access.policy_result must be one of: "
+            + ", ".join(sorted(ACCESS_POLICY_RESULTS))
+        )
+    policy_uri = raw.get("policy_uri", False)
+    if not isinstance(policy_uri, bool):
+        raise EmulatorInputError("access.policy_uri must be a boolean")
+
+    def string_list(name: str) -> list[str]:
+        value = raw.get(name, [])
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise EmulatorInputError(f"access.{name} must be an array of strings")
+        if any("\x00" in item for item in value):
+            raise EmulatorInputError(f"access.{name} values cannot contain NUL")
+        return list(value)
+
+    def string_map(name: str) -> dict[str, str]:
+        value = raw.get(name, {})
+        if not isinstance(value, dict):
+            raise EmulatorInputError(f"access.{name} must be an object")
+        result: dict[str, str] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key or "\x00" in key:
+                raise EmulatorInputError(f"access.{name} keys must be non-empty strings without NUL")
+            result[key] = _normalise_asm_string(item, f"access.{name}.{key}")
+        return result
+
+    ephemeral_password = string_field("ephemeral_auth_password", "temporary-password")
+    if not ephemeral_password:
+        raise EmulatorInputError("access.ephemeral_auth_password must not be empty")
+    return {
+        "enabled": enabled,
+        "acl_result": acl_result,
+        "acl_lookup": string_list("acl_lookup"),
+        "acl_matched": string_list("acl_matched"),
+        "policy_result": policy_result,
+        "policy_agent_id": string_field("policy_agent_id"),
+        "policy_uri": policy_uri,
+        "flow_id": string_field("flow_id"),
+        "session_data": string_map("session_data"),
+        "perflow": string_map("perflow"),
+        "ephemeral_auth_password": ephemeral_password,
+    }
+
+
 def _normalise_resolvers(raw: Any) -> dict[str, list[dict[str, Any]]]:
     """Normalize deterministic DNS records used by RESOLVER::name_lookup."""
     if raw is None:
@@ -3281,6 +3504,7 @@ def _normalise_scenario_config(
         "antifraud",
         "auth",
         "aaa",
+        "access",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -3328,6 +3552,7 @@ def _normalise_scenario_config(
         _normalise_antifraud(scenario.get("antifraud")),
         _normalise_auth(scenario.get("auth")),
         _normalise_aaa(scenario.get("aaa")),
+        _normalise_access(scenario.get("access")),
     )
 
 
@@ -7605,6 +7830,7 @@ class EmulatorSession:
             antifraud,
             auth,
             aaa,
+            access,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -7626,6 +7852,7 @@ class EmulatorSession:
         self._antifraud = antifraud
         self._auth = auth
         self._aaa = aaa
+        self._access = access
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -7737,6 +7964,7 @@ class EmulatorSession:
                 _configure_antifraud(session, self._antifraud)
                 _configure_auth(session, self._auth)
                 _configure_aaa(session, self._aaa)
+                _configure_access(session, self._access)
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
                     for profile in self._profiles
@@ -7800,6 +8028,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::antifraud_reset_connection")
             session.eval_tcl("::itest::semantic::auth_reset_connection")
             session.eval_tcl("::itest::semantic::aaa_reset_connection")
+            session.eval_tcl("::itest::semantic::access_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
@@ -7844,6 +8073,7 @@ class EmulatorSession:
                     f"{_tcl_quote('1' if antifraud_login else '0')} "
                     f"{_tcl_quote('1' if antifraud_alert else '0')}"
                 )
+                session.eval_tcl("::itest::semantic::access_prepare_request")
                 session.eval_tcl(
                     f"::itest::semantic::prepare_lb_failure {_tcl_quote(attempt_failure)}"
                 )
@@ -8749,6 +8979,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::antifraud_reset_connection")
         session.eval_tcl("::itest::semantic::auth_reset_connection")
         session.eval_tcl("::itest::semantic::aaa_reset_connection")
+        session.eval_tcl("::itest::semantic::access_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
@@ -8783,6 +9014,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::antifraud_reset_connection")
         session.eval_tcl("::itest::semantic::auth_reset_connection")
         session.eval_tcl("::itest::semantic::aaa_reset_connection")
+        session.eval_tcl("::itest::semantic::access_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")

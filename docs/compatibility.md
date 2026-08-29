@@ -126,6 +126,17 @@ connection-scoped request IDs and expose configurable `OK`, `FAIL`,
 model keeps request metadata for inspection but never stores the supplied
 password and does not contact an AAA virtual server or reproduce asynchronous
 completion.
+The 15 catalogued TMOS 17.5 `ACCESS::` commands are represented by a
+deterministic APM-style session and policy model. Session creation, policy
+evaluation, and removal can emit `ACCESS_SESSION_STARTED`,
+`ACCESS_POLICY_COMPLETED`, and `ACCESS_SESSION_CLOSED`; session data, per-flow
+variables, ACL lookups/results, policy metadata, SAML values, request
+enable/disable, and response commitment are inspectable in the semantic
+snapshot. Password-like session keys are redacted there. Ephemeral-auth and
+OAuth operations use deterministic placeholders and do not perform external
+authentication or cryptographic signing. The model does not execute an APM
+policy graph, enforce production ACLs, expire sessions against wall-clock
+time, or reproduce SAML/OAuth/AAA network behavior.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

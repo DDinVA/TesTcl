@@ -1214,6 +1214,133 @@ when HTTP_REQUEST {
                 with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
                     self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
 
+    def test_access_sessions_policy_acl_and_perflow(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ACCESS"],
+                "access": {
+                    "acl_result": "Reject",
+                    "acl_lookup": ["/Common/web", "/Common/admin"],
+                    "acl_matched": ["/Common/admin"],
+                    "policy_result": "deny",
+                    "policy_agent_id": "logon-agent",
+                    "policy_uri": True,
+                    "session_data": {
+                        "session.logon.last.username": "alice",
+                        "session.logon.last.password": "secret",
+                    },
+                    "perflow": {"perflow.custom": "seed"},
+                },
+                "irule": (
+                    "when CLIENT_ACCEPTED { "
+                    "set ::access_sid [ACCESS::session create -flow -timeout 600 -lifetime 3600]; "
+                    "ACCESS::flowid test-flow; "
+                    "ACCESS::perflow set perflow.custom changed "
+                    "}\n"
+                    "when HTTP_REQUEST { "
+                    "ACCESS::acl eval /Common/admin; "
+                    "ACCESS::policy evaluate -sid $::access_sid -profile /Common/access "
+                    "session.logon.last.username alice; "
+                    "log local0. \"sid=[ACCESS::session sid] "
+                    "exists=[ACCESS::session exists -sid $::access_sid] "
+                    "allowed=[ACCESS::session exists -sid $::access_sid -state_allow] "
+                    "acl=[ACCESS::acl result] "
+                    "perflow=[ACCESS::perflow get perflow.custom] "
+                    "flow=[ACCESS::flowid] "
+                    "policy=[ACCESS::policy result -sid $::access_sid]\" "
+                    "}\n"
+                    "when ACCESS_SESSION_STARTED { log local0. \"started=[ACCESS::session sid]\" }\n"
+                    "when ACCESS_POLICY_COMPLETED { log local0. \"completed=[ACCESS::policy result]\" }"
+                ),
+                "request": {"uri": "/protected"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        self.assertIn("ACCESS_SESSION_STARTED", item["events_fired"])
+        self.assertIn("ACCESS_POLICY_COMPLETED", item["events_fired"])
+        self.assertTrue(any("started=sid-1" in log for log in item["logs"]))
+        self.assertTrue(any("completed=deny" in log for log in item["logs"]))
+        self.assertTrue(any("sid=sid-1 exists=TRUE allowed=FALSE" in log for log in item["logs"]))
+        self.assertTrue(any("acl=Reject perflow=changed flow=test-flow policy=deny" in log for log in item["logs"]))
+        access = item["semantic"]["access"]
+        self.assertEqual(access["session_count"], 1)
+        self.assertEqual(access["current_sid"], "sid-1")
+        self.assertEqual(access["acl_evaluated"], ["/Common/admin"])
+        self.assertEqual(access["perflow"]["perflow.custom"], "changed")
+        self.assertEqual(access["sessions"][0]["state"], "deny")
+        self.assertEqual(access["sessions"][0]["data"]["session.logon.last.username"], "alice")
+        self.assertEqual(access["sessions"][0]["data"]["session.logon.last.password"], "<redacted>")
+        self.assertNotIn("secret", json.dumps(item["semantic"]))
+
+    def test_access_ephemeral_auth_respond_and_session_close(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ACCESS"],
+                "irule": (
+                    "when CLIENT_ACCEPTED { "
+                    "set ::access_sid [ACCESS::session create -flow] "
+                    "}\n"
+                    "when HTTP_REQUEST { "
+                    "set ::ephemeral [ACCESS::ephemeral-auth create -user bob -sid $::access_sid]; "
+                    "set ::verified [ACCESS::ephemeral-auth verify -user bob "
+                    "-password $::ephemeral -protocol http]; "
+                    "ACCESS::session data set -sid $::access_sid session.logon.last.password secret; "
+                    "ACCESS::saml assertion assertion-value; "
+                    "ACCESS::restrict_irule_events disable; "
+                    "ACCESS::disable; "
+                    "ACCESS::respond 403 content denied; "
+                    "ACCESS::session remove -sid $::access_sid; "
+                    "log local0. \"verified=$::verified\" "
+                    "}\n"
+                    "when ACCESS_SESSION_CLOSED { "
+                    "log local0. \"closed=[ACCESS::session exists -sid $::access_sid]\" "
+                    "}"
+                ),
+                "request": {"uri": "/ephemeral"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        self.assertEqual(item["response"]["status"], 403)
+        self.assertEqual(item["response"]["body"], "denied")
+        self.assertIn("ACCESS_SESSION_STARTED", item["events_fired"])
+        self.assertIn("ACCESS_SESSION_CLOSED", item["events_fired"])
+        self.assertTrue(any("verified=sid-1" in log for log in item["logs"]))
+        self.assertTrue(any("closed=TRUE" in log for log in item["logs"]))
+        access = item["semantic"]["access"]
+        self.assertEqual(access["session_count"], 0)
+        self.assertFalse(access["request_enabled"])
+        self.assertFalse(access["restrict_irule_events"])
+        self.assertEqual(access["saml"]["assertion"], "assertion-value")
+        self.assertNotIn("temporary-password", json.dumps(item))
+        self.assertNotIn("secret", json.dumps(item))
+
+    def test_access_input_validation(self) -> None:
+        base = {
+            "profiles": ["TCP", "HTTP", "ACCESS"],
+            "irule": "when HTTP_REQUEST { ACCESS::enable }",
+            "request": {"uri": "/"},
+        }
+        invalid_cases = (
+            ({"enabled": "yes"}, "access.enabled must be a boolean"),
+            ({"acl_result": "allow"}, "access.acl_result must be one of"),
+            ({"policy_result": "permit"}, "access.policy_result must be one of"),
+            ({"policy_uri": 1}, "access.policy_uri must be a boolean"),
+            ({"acl_lookup": "not-a-list"}, "access.acl_lookup must be an array of strings"),
+            ({"session_data": ["key", "value"]}, "access.session_data must be an object"),
+            ({"ephemeral_auth_password": ""}, "access.ephemeral_auth_password must not be empty"),
+            ({1: "invalid-field-name"}, "access field names must be strings"),
+        )
+        for access, message in invalid_cases:
+            scenario = dict(base)
+            scenario["access"] = access
+            with self.subTest(access=access):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
     def test_semantic_overlay_implements_profiles_auth_uri_stats_and_hsl(self) -> None:
         result = self.adapter.run_scenario(
             {

@@ -261,6 +261,39 @@ namespace eval ::itest::semantic {
     variable aaa_requests [dict create]
     variable aaa_next_id 0
 
+    variable access_default_enabled 1
+    variable access_enabled 1
+    variable access_default_acl_result Allow
+    variable access_acl_result Allow
+    variable access_default_acl_lookup {}
+    variable access_acl_lookup {}
+    variable access_default_acl_matched {}
+    variable access_acl_matched {}
+    variable access_acl_evaluated {}
+    variable access_default_policy_result allow
+    variable access_policy_result allow
+    variable access_default_policy_agent_id ""
+    variable access_policy_agent_id ""
+    variable access_default_policy_uri 0
+    variable access_policy_uri 0
+    variable access_default_flow_id ""
+    variable access_flow_id ""
+    variable access_request_enabled 1
+    variable access_restrict_irule_events 1
+    variable access_default_session_data [dict create]
+    variable access_session_data [dict create]
+    variable access_default_perflow [dict create]
+    variable access_perflow [dict create]
+    variable access_sessions [dict create]
+    variable access_current_sid ""
+    variable access_next_sid 0
+    variable access_ephemeral_auth_password temporary-password
+    variable access_ephemeral [dict create]
+    variable access_ephemeral_next 0
+    variable access_oauth_next 0
+    variable access_user_keys [dict create]
+    variable access_saml [dict create authn "" assertion "" slo_req "" slo_resp ""]
+
     variable sip_discarded 0
     variable sip_response_requested 0
     variable sip_response_code ""
@@ -5836,6 +5869,618 @@ namespace eval ::itest::semantic {
         return $result
     }
 
+    proc access_configure {raw acl_lookup acl_matched session_data perflow} {
+        variable access_default_enabled
+        variable access_enabled
+        variable access_default_acl_result
+        variable access_acl_result
+        variable access_default_acl_lookup
+        variable access_acl_lookup
+        variable access_default_acl_matched
+        variable access_acl_matched
+        variable access_default_policy_result
+        variable access_policy_result
+        variable access_default_policy_agent_id
+        variable access_policy_agent_id
+        variable access_default_policy_uri
+        variable access_policy_uri
+        variable access_default_flow_id
+        variable access_flow_id
+        variable access_ephemeral_auth_password
+        variable access_default_session_data
+        variable access_session_data
+        variable access_default_perflow
+        variable access_perflow
+        if {[llength $raw] != 7} { error "invalid ACCESS configuration" }
+        lassign $raw enabled acl_result policy_result policy_agent_id policy_uri flow_id ephemeral_password
+        if {$enabled ni {0 1}} { error "ACCESS enabled state must be boolean" }
+        if {$acl_result ni {Allow Reject}} { error "ACCESS ACL result is invalid" }
+        if {$policy_result ni {allow deny redirect}} { error "ACCESS policy result is invalid" }
+        if {$policy_uri ni {0 1}} { error "ACCESS policy URI state must be boolean" }
+        if {$ephemeral_password eq ""} { error "ACCESS ephemeral auth password cannot be empty" }
+        if {[llength $session_data] % 2 || [llength $perflow] % 2} {
+            error "ACCESS data requires key/value pairs"
+        }
+        set access_default_enabled $enabled
+        set access_enabled $enabled
+        set access_default_acl_result $acl_result
+        set access_acl_result $acl_result
+        set access_default_acl_lookup $acl_lookup
+        set access_acl_lookup $acl_lookup
+        set access_default_acl_matched $acl_matched
+        set access_acl_matched $acl_matched
+        set access_default_policy_result $policy_result
+        set access_policy_result $policy_result
+        set access_default_policy_agent_id $policy_agent_id
+        set access_policy_agent_id $policy_agent_id
+        set access_default_policy_uri $policy_uri
+        set access_policy_uri $policy_uri
+        set access_default_flow_id $flow_id
+        set access_flow_id $flow_id
+        set access_ephemeral_auth_password $ephemeral_password
+        set access_default_session_data [dict create {*}$session_data]
+        set access_session_data $access_default_session_data
+        set access_default_perflow [dict create {*}$perflow]
+        set access_perflow $access_default_perflow
+    }
+
+    proc access_reset_connection {} {
+        variable access_default_enabled
+        variable access_enabled
+        variable access_default_acl_result
+        variable access_acl_result
+        variable access_default_acl_lookup
+        variable access_acl_lookup
+        variable access_default_acl_matched
+        variable access_acl_matched
+        variable access_acl_evaluated
+        variable access_default_policy_result
+        variable access_policy_result
+        variable access_default_policy_agent_id
+        variable access_policy_agent_id
+        variable access_default_policy_uri
+        variable access_policy_uri
+        variable access_default_flow_id
+        variable access_flow_id
+        variable access_request_enabled
+        variable access_restrict_irule_events
+        variable access_default_session_data
+        variable access_session_data
+        variable access_default_perflow
+        variable access_perflow
+        variable access_sessions
+        variable access_current_sid
+        variable access_next_sid
+        variable access_ephemeral
+        variable access_ephemeral_next
+        variable access_oauth_next
+        variable access_user_keys
+        variable access_saml
+        set access_enabled $access_default_enabled
+        set access_acl_result $access_default_acl_result
+        set access_acl_lookup $access_default_acl_lookup
+        set access_acl_matched $access_default_acl_matched
+        set access_acl_evaluated {}
+        set access_policy_result $access_default_policy_result
+        set access_policy_agent_id $access_default_policy_agent_id
+        set access_policy_uri $access_default_policy_uri
+        set access_flow_id $access_default_flow_id
+        set access_request_enabled 1
+        set access_restrict_irule_events 1
+        set access_session_data $access_default_session_data
+        set access_perflow $access_default_perflow
+        set access_sessions [dict create]
+        set access_current_sid ""
+        set access_next_sid 0
+        set access_ephemeral [dict create]
+        set access_ephemeral_next 0
+        set access_oauth_next 0
+        set access_user_keys [dict create]
+        set access_saml [dict create authn "" assertion "" slo_req "" slo_resp ""]
+    }
+
+    proc access_prepare_request {} {
+        variable access_request_enabled
+        variable access_acl_evaluated
+        set access_request_enabled 1
+        set access_acl_evaluated {}
+    }
+
+    proc _access_current_sid {command args} {
+        variable access_current_sid
+        if {[llength $args] > 0} {
+            if {[llength $args] != 2 || [lindex $args 0] ne "-sid"} {
+                error "$command accepts optional -sid SESSION_ID"
+            }
+            return [lindex $args 1]
+        }
+        return $access_current_sid
+    }
+
+    proc _access_require_enabled {command} {
+        variable access_enabled
+        if {![_profile_enabled ACCESS]} { error "$command requires the ACCESS profile" }
+        if {!$access_enabled} { error "$command is disabled" }
+    }
+
+    proc _access_require_session {sid command} {
+        variable access_sessions
+        if {$sid eq "" || ![dict exists $access_sessions $sid]} {
+            error "$command received an unknown ACCESS session"
+        }
+        set session [dict get $access_sessions $sid]
+        if {![dict get $session valid]} { error "$command received an invalid ACCESS session" }
+        return $session
+    }
+
+    proc _access_set_session {sid session} {
+        variable access_sessions
+        dict set access_sessions $sid $session
+    }
+
+    proc _access_event {event sid} {
+        variable access_current_sid
+        set previous_sid $access_current_sid
+        set access_current_sid $sid
+        set rc [catch {::itest::fire_event $event} result options]
+        set access_current_sid $previous_sid
+        if {$rc} { return -options $options $result }
+        return $result
+    }
+
+    proc _access_safe_data {data} {
+        set result [dict create]
+        dict for {key value} $data {
+            if {[regexp -nocase {(password|passwd|secret|token)} $key]} {
+                set value "<redacted>"
+            }
+            dict set result $key $value
+        }
+        return $result
+    }
+
+    proc access_acl {args} {
+        variable access_acl_result
+        variable access_acl_lookup
+        variable access_acl_matched
+        variable access_acl_evaluated
+        _access_require_enabled ACCESS::acl
+        if {[llength $args] < 1} { error "ACCESS::acl requires result, lookup, matched, or eval" }
+        switch -exact -- [lindex $args 0] {
+            result { return $access_acl_result }
+            lookup { return $access_acl_lookup }
+            matched { return $access_acl_matched }
+            eval {
+                if {[llength $args] != 2 || [lindex $args 1] eq ""} {
+                    error "ACCESS::acl eval requires ACL_NAME"
+                }
+                lappend access_acl_evaluated [lindex $args 1]
+                ::itest::log_decision access acl_eval [lindex $args 1]
+                return $access_acl_result
+            }
+            default { error "ACCESS::acl requires result, lookup, matched, or eval ACL_NAME" }
+        }
+    }
+
+    proc access_disable {args} {
+        variable access_request_enabled
+        _access_require_enabled ACCESS::disable
+        if {[llength $args] != 0} { error "ACCESS::disable takes no arguments" }
+        set access_request_enabled 0
+        ::itest::log_decision access disable
+        return ""
+    }
+
+    proc access_enable {args} {
+        variable access_request_enabled
+        _access_require_enabled ACCESS::enable
+        if {[llength $args] != 0} { error "ACCESS::enable takes no arguments" }
+        set access_request_enabled 1
+        ::itest::log_decision access enable
+        return ""
+    }
+
+    proc access_flowid {args} {
+        variable access_flow_id
+        _access_require_enabled ACCESS::flowid
+        if {[llength $args] > 1} { error "ACCESS::flowid accepts an optional flow ID" }
+        if {[llength $args] == 1} { set access_flow_id [lindex $args 0] }
+        if {$access_flow_id eq ""} { set access_flow_id flow-1 }
+        ::itest::log_decision access flowid $access_flow_id
+        return $access_flow_id
+    }
+
+    proc access_log {args} {
+        _access_require_enabled ACCESS::log
+        if {[llength $args] ni {1 2}} { error "ACCESS::log requires a message and optional component/level" }
+        set message [lindex $args end]
+        ::state::log_capture::add "access" "notice" $message
+        ::itest::log_decision access log [lindex $args 0]
+        return ""
+    }
+
+    proc access_perflow {args} {
+        variable access_perflow
+        _access_require_enabled ACCESS::perflow
+        if {[llength $args] < 2} { error "ACCESS::perflow requires get/set and a key" }
+        set operation [lindex $args 0]
+        set key [lindex $args 1]
+        switch -exact -- $operation {
+            get {
+                if {[llength $args] != 2} { error "ACCESS::perflow get requires KEY" }
+                if {[dict exists $access_perflow $key]} { return [dict get $access_perflow $key] }
+                return ""
+            }
+            set {
+                if {[llength $args] != 3 || $key ni {perflow.custom perflow.scratchpad}} {
+                    error "ACCESS::perflow set supports perflow.custom or perflow.scratchpad"
+                }
+                dict set access_perflow $key [lindex $args 2]
+                ::itest::log_decision access perflow_set [list $key [lindex $args 2]]
+                return ""
+            }
+            default { error "ACCESS::perflow requires get or set" }
+        }
+    }
+
+    proc access_policy {args} {
+        variable access_policy_agent_id
+        variable access_policy_result
+        variable access_policy_uri
+        variable access_sessions
+        _access_require_enabled ACCESS::policy
+        switch -exact -- [lindex $args 0] {
+            agent_id {
+                if {[llength $args] != 1} { error "ACCESS::policy agent_id takes no arguments" }
+                return $access_policy_agent_id
+            }
+            uri {
+                if {[llength $args] != 1} { error "ACCESS::policy uri takes no arguments" }
+                return $access_policy_uri
+            }
+            result {
+                set sid [_access_current_sid ACCESS::policy {*}[lrange $args 1 end]]
+                if {$sid ne "" && [dict exists $access_sessions $sid]} {
+                    return [dict get [dict get $access_sessions $sid] policy_result]
+                }
+                return $access_policy_result
+            }
+            evaluate {
+                set rest [lrange $args 1 end]
+                set sid ""
+                set profile ""
+                set index 0
+                while {$index < [llength $rest]} {
+                    set option [lindex $rest $index]
+                    if {$option eq "-sid" && $index + 1 < [llength $rest]} {
+                        incr index
+                        set sid [lindex $rest $index]
+                    } elseif {$option eq "-profile" && $index + 1 < [llength $rest]} {
+                        incr index
+                        set profile [lindex $rest $index]
+                    } else { break }
+                    incr index
+                }
+                if {$sid eq "" || $profile eq "" || ![dict exists $access_sessions $sid]} {
+                    error "ACCESS::policy evaluate requires -sid SESSION_ID and -profile PROFILE"
+                }
+                set pairs [lrange $rest $index end]
+                if {[llength $pairs] % 2} { error "ACCESS::policy evaluate requires key/value variables" }
+                set session [dict get $access_sessions $sid]
+                foreach {key value} $pairs { dict set session data $key $value }
+                dict set session policy_profile $profile
+                dict set session policy_result $access_policy_result
+                dict set session state $access_policy_result
+                _access_set_session $sid $session
+                _access_event ACCESS_POLICY_COMPLETED $sid
+                ::itest::log_decision access policy_evaluate [list $sid $profile]
+                return ""
+            }
+            default { error "ACCESS::policy requires agent_id, result, uri, or evaluate" }
+        }
+    }
+
+    proc access_respond {args} {
+        _access_require_enabled ACCESS::respond
+        if {[llength $args] < 1 || ![string is integer -strict [lindex $args 0]]} {
+            error "ACCESS::respond requires a numeric status code"
+        }
+        set status [lindex $args 0]
+        if {$status < 100 || $status > 599} {
+            error "ACCESS::respond status code must be between 100 and 599"
+        }
+        set content_index [lsearch -exact $args content]
+        if {$content_index < 0} { set content_index [lsearch -exact $args -content] }
+        set payload ""
+        if {$content_index >= 0 && $content_index + 1 < [llength $args]} {
+            set payload [lindex $args [expr {$content_index + 1}]]
+        }
+        set ::state::http::response::status $status
+        set ::state::http::response::payload $payload
+        set ::state::http::response_committed 1
+        ::itest::log_decision access respond [list $status $payload]
+        return ""
+    }
+
+    proc access_restrict_irule_events {args} {
+        variable access_restrict_irule_events
+        _access_require_enabled ACCESS::restrict_irule_events
+        if {[llength $args] != 1 || [lindex $args 0] ni {enable disable}} {
+            error "ACCESS::restrict_irule_events requires enable or disable"
+        }
+        set access_restrict_irule_events [expr {[lindex $args 0] eq "enable"}]
+        ::itest::log_decision access restrict_irule_events $access_restrict_irule_events
+        return ""
+    }
+
+    proc access_saml {args} {
+        variable access_saml
+        _access_require_enabled ACCESS::saml
+        if {[llength $args] ni {1 2} || [lindex $args 0] ni {authn assertion slo_req slo_resp}} {
+            error "ACCESS::saml requires authn, assertion, slo_req, or slo_resp"
+        }
+        set field [lindex $args 0]
+        if {[llength $args] == 2} { dict set access_saml $field [lindex $args 1] }
+        return [dict get $access_saml $field]
+    }
+
+    proc access_ephemeral_auth {args} {
+        variable access_ephemeral_auth_password
+        variable access_ephemeral
+        variable access_ephemeral_next
+        variable access_current_sid
+        _access_require_enabled ACCESS::ephemeral-auth
+        if {[llength $args] < 1 || [lindex $args 0] ni {create verify}} {
+            error "ACCESS::ephemeral-auth requires create or verify"
+        }
+        set operation [lindex $args 0]
+        set rest [lrange $args 1 end]
+        if {[llength $rest] % 2} {
+            error "ACCESS::ephemeral-auth requires option/value pairs"
+        }
+        set values [dict create]
+        foreach {option value} $rest {
+            if {$option ni {-user -auth_cfg -sid -password -protocol}} {
+                error "ACCESS::ephemeral-auth received unsupported option $option"
+            }
+            dict set values [string range $option 1 end] $value
+        }
+        if {$operation eq "create"} {
+            if {![dict exists $values user]} { error "ACCESS::ephemeral-auth create requires -user USER" }
+            incr access_ephemeral_next
+            set password "${access_ephemeral_auth_password}-${access_ephemeral_next}"
+            set sid [expr {[dict exists $values sid] ? [dict get $values sid] : ($access_current_sid ne "" ? $access_current_sid : "sid-ephemeral-$access_ephemeral_next")}]
+            dict set access_ephemeral [dict get $values user] [list $password $sid]
+            ::itest::log_decision access ephemeral_create [dict get $values user]
+            return $password
+        }
+        if {![dict exists $values user] || ![dict exists $values password] || ![dict exists $values protocol]} {
+            error "ACCESS::ephemeral-auth verify requires -user, -password, and -protocol"
+        }
+        set user [dict get $values user]
+        if {[dict exists $access_ephemeral $user]} {
+            lassign [dict get $access_ephemeral $user] password sid
+            if {$password eq [dict get $values password]} { return $sid }
+        }
+        return ""
+    }
+
+    proc access_oauth {args} {
+        variable access_oauth_next
+        _access_require_enabled ACCESS::oauth
+        if {[llength $args] < 1 || [lindex $args 0] ne "sign"} {
+            error "ACCESS::oauth supports sign"
+        }
+        incr access_oauth_next
+        ::itest::log_decision access oauth_sign $access_oauth_next
+        return "mock-jws-$access_oauth_next"
+    }
+
+    proc access_user {args} {
+        variable access_user_keys
+        _access_require_enabled ACCESS::user
+        if {[llength $args] < 1} { error "ACCESS::user requires a subcommand" }
+        switch -exact -- [lindex $args 0] {
+            getkey {
+                if {[llength $args] != 2} { error "ACCESS::user getkey requires SID_HASH" }
+                set key "userkey-[lindex $args 1]"
+                dict set access_user_keys $key [lindex $args 1]
+                return $key
+            }
+            getsid {
+                if {[llength $args] != 2} { error "ACCESS::user getsid requires KEY" }
+                if {[dict exists $access_user_keys [lindex $args 1]]} {
+                    return [dict get $access_user_keys [lindex $args 1]]
+                }
+                return ""
+            }
+            default { return "" }
+        }
+    }
+
+    proc access_uuid {args} {
+        _access_require_enabled ACCESS::uuid
+        if {[llength $args] < 1 || [lindex $args 0] ne "getsid"} {
+            error "ACCESS::uuid supports getsid SESSION_ID"
+        }
+        if {[llength $args] != 2} { error "ACCESS::uuid getsid requires SESSION_ID" }
+        return [lindex $args 1]
+    }
+
+    proc access_session {args} {
+        variable access_sessions
+        variable access_current_sid
+        variable access_next_sid
+        variable access_session_data
+        _access_require_enabled ACCESS::session
+        if {[llength $args] < 1} { error "ACCESS::session requires a subcommand" }
+        set operation [lindex $args 0]
+        set rest [lrange $args 1 end]
+        switch -exact -- $operation {
+            sid {
+                if {[llength $rest] != 0} { error "ACCESS::session sid takes no arguments" }
+                return $access_current_sid
+            }
+            create {
+                set flow 0
+                set timeout 0
+                set lifetime 0
+                set index 0
+                while {$index < [llength $rest]} {
+                    set option [lindex $rest $index]
+                    if {$option eq "-flow"} { set flow 1
+                    } elseif {$option in {-timeout -lifetime} && $index + 1 < [llength $rest]} {
+                        incr index
+                        set value [lindex $rest $index]
+                        if {![string is integer -strict $value] || $value < 0} { error "ACCESS::session create timeout values must be non-negative integers" }
+                        if {$option eq "-timeout"} { set timeout $value } else { set lifetime $value }
+                    } else { error "ACCESS::session create received an invalid option" }
+                    incr index
+                }
+                incr access_next_sid
+                set sid "sid-$access_next_sid"
+                set session [dict create valid 1 state allow timeout $timeout lifetime $lifetime remaining $timeout data $access_session_data policy_result allow policy_profile ""]
+                dict set access_sessions $sid $session
+                if {$flow} { set access_current_sid $sid }
+                _access_event ACCESS_SESSION_STARTED $sid
+                ::itest::log_decision access session_create [list $sid $flow]
+                return $sid
+            }
+            exists {
+                set sid ""
+                set state ""
+                set index 0
+                while {$index < [llength $rest]} {
+                    set option [lindex $rest $index]
+                    if {$option eq "-sid"} {
+                        if {$index + 1 >= [llength $rest]} { error "ACCESS::session exists requires a value after -sid" }
+                        incr index
+                        set sid [lindex $rest $index]
+                    } elseif {$option in {-state_allow -state_deny -state_redirect -state_inprogress}} { set state [string range $option 7 end]
+                    } elseif {$sid eq ""} { set sid $option
+                    } else { error "ACCESS::session exists received an invalid option" }
+                    incr index
+                }
+                if {$sid eq ""} { set sid $access_current_sid }
+                if {![dict exists $access_sessions $sid]} { return FALSE }
+                set session [dict get $access_sessions $sid]
+                if {![dict get $session valid]} { return FALSE }
+                if {$state ne "" && [dict get $session state] ne $state} { return FALSE }
+                return TRUE
+            }
+            remove {
+                set sid [_access_current_sid ACCESS::session {*}$rest]
+                set session [_access_require_session $sid ACCESS::session]
+                _access_event ACCESS_SESSION_CLOSED $sid
+                dict unset access_sessions $sid
+                if {$access_current_sid eq $sid} { set access_current_sid "" }
+                ::itest::log_decision access session_remove $sid
+                return ""
+            }
+            modify {
+                set sid ""
+                set timeout ""
+                set lifetime ""
+                set remaining ""
+                set index 0
+                while {$index < [llength $rest]} {
+                    set option [lindex $rest $index]
+                    if {$option in {-sid -timeout -lifetime -remaining} && $index + 1 < [llength $rest]} {
+                        incr index
+                        set value [lindex $rest $index]
+                        if {$option ne "-sid" && (![string is integer -strict $value] || $value < 0)} {
+                            error "ACCESS::session modify timing values must be non-negative integers"
+                        }
+                        if {$option eq "-sid"} { set sid $value } elseif {$option eq "-timeout"} { set timeout $value } elseif {$option eq "-lifetime"} { set lifetime $value } else { set remaining $value }
+                    } else { error "ACCESS::session modify received an invalid option" }
+                    incr index
+                }
+                if {$sid eq ""} { set sid $access_current_sid }
+                if {$lifetime ne "" && $remaining ne ""} { error "ACCESS::session modify cannot use lifetime and remaining together" }
+                set session [_access_require_session $sid ACCESS::session]
+                if {$timeout ne ""} { dict set session timeout $timeout }
+                if {$lifetime ne ""} { dict set session lifetime $lifetime }
+                if {$remaining ne ""} { dict set session remaining $remaining }
+                _access_set_session $sid $session
+                return ""
+            }
+            data {
+                if {[llength $rest] < 1 || [lindex $rest 0] ni {get set}} { error "ACCESS::session data requires get or set" }
+                set data_operation [lindex $rest 0]
+                set options [lrange $rest 1 end]
+                set sid ""
+                set key ""
+                set value ""
+                set value_set 0
+                set index 0
+                while {$index < [llength $options]} {
+                    set option [lindex $options $index]
+                    if {$option eq "-sid"} {
+                        if {$index + 1 >= [llength $options]} { error "ACCESS::session data requires a value after -sid" }
+                        incr index
+                        set sid [lindex $options $index]
+                    } elseif {$option in {-secure -config} || $option eq "-ssid"} {
+                        if {$option eq "-ssid"} {
+                            if {$index + 1 >= [llength $options]} { error "ACCESS::session data requires a value after -ssid" }
+                            incr index
+                        }
+                    } elseif {$key eq ""} { set key $option
+                    } elseif {$data_operation eq "set" && !$value_set} {
+                        set value $option
+                        set value_set 1
+                    } else { error "ACCESS::session data received an invalid argument" }
+                    incr index
+                }
+                if {$sid eq ""} { set sid $access_current_sid }
+                set session [_access_require_session $sid ACCESS::session]
+                if {$key eq ""} { error "ACCESS::session data requires KEY" }
+                if {$data_operation eq "get"} {
+                    if {[dict exists [dict get $session data] $key]} { return [dict get [dict get $session data] $key] }
+                    return ""
+                }
+                if {!$value_set} { error "ACCESS::session data set requires KEY and VALUE" }
+                dict set session data $key $value
+                _access_set_session $sid $session
+                return ""
+            }
+            default { error "ACCESS::session requires create, data, exists, modify, remove, or sid" }
+        }
+    }
+
+    proc access_snapshot {} {
+        variable access_enabled
+        variable access_acl_result
+        variable access_acl_lookup
+        variable access_acl_matched
+        variable access_acl_evaluated
+        variable access_policy_result
+        variable access_policy_agent_id
+        variable access_policy_uri
+        variable access_flow_id
+        variable access_request_enabled
+        variable access_restrict_irule_events
+        variable access_current_sid
+        variable access_sessions
+        variable access_perflow
+        variable access_saml
+        set result [list enabled $access_enabled acl_result $access_acl_result \
+            acl_lookup $access_acl_lookup acl_matched $access_acl_matched \
+            acl_evaluated $access_acl_evaluated \
+            policy_result $access_policy_result policy_agent_id $access_policy_agent_id \
+            policy_uri $access_policy_uri flow_id $access_flow_id \
+            request_enabled $access_request_enabled restrict_irule_events $access_restrict_irule_events \
+            current_sid $access_current_sid session_count [dict size $access_sessions]]
+        set sessions [list]
+        foreach sid [lsort -dictionary [dict keys $access_sessions]] {
+            set session [dict get $access_sessions $sid]
+            lappend sessions [list $sid [dict get $session valid] [dict get $session state] \
+                [dict get $session timeout] [dict get $session lifetime] \
+                [dict get $session remaining] [_access_safe_data [dict get $session data]]]
+        }
+        lappend result sessions $sessions perflow $access_perflow saml $access_saml
+        return $result
+    }
+
     proc profile_clientssl {args} { return [_profile_enabled CLIENTSSL] }
     proc profile_fastL4 {args} { return [_profile_enabled FASTL4] }
     proc profile_fasthttp {args} { return [_profile_enabled FASTHTTP] }
@@ -10865,6 +11510,21 @@ foreach {name proc_name} {
     AAA::acct_send ::itest::semantic::aaa_acct_send
     AAA::auth_result ::itest::semantic::aaa_auth_result
     AAA::auth_send ::itest::semantic::aaa_auth_send
+    ACCESS::acl ::itest::semantic::access_acl
+    ACCESS::disable ::itest::semantic::access_disable
+    ACCESS::enable ::itest::semantic::access_enable
+    ACCESS::ephemeral-auth ::itest::semantic::access_ephemeral_auth
+    ACCESS::flowid ::itest::semantic::access_flowid
+    ACCESS::log ::itest::semantic::access_log
+    ACCESS::oauth ::itest::semantic::access_oauth
+    ACCESS::perflow ::itest::semantic::access_perflow
+    ACCESS::policy ::itest::semantic::access_policy
+    ACCESS::respond ::itest::semantic::access_respond
+    ACCESS::restrict_irule_events ::itest::semantic::access_restrict_irule_events
+    ACCESS::saml ::itest::semantic::access_saml
+    ACCESS::session ::itest::semantic::access_session
+    ACCESS::user ::itest::semantic::access_user
+    ACCESS::uuid ::itest::semantic::access_uuid
     AUTH::abort ::itest::semantic::auth_abort
     AUTH::authenticate ::itest::semantic::auth_authenticate
     AUTH::authenticate_continue ::itest::semantic::auth_authenticate_continue
