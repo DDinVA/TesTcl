@@ -251,10 +251,15 @@ directions through the same decoder. The decoder accepts frame boundaries
 split across packets, HEADERS plus CONTINUATION blocks, per-direction HPACK
 dynamic tables, DATA frames, SETTINGS, PRIORITY, and other control frames.
 Decoded request and response streams are joined by stream ID and then pass
-through the existing HTTP iRule lifecycle, including `HTTP2::*` state. Frame
-payloads are capped at 1 MiB, header blocks at 1 MiB, and header count at 128;
-malformed padding, stream-zero data/header frames, invalid continuation order,
-uppercase headers, duplicate pseudo-headers, and invalid HPACK fail closed.
+through the existing HTTP iRule lifecycle, including `HTTP2::*` state. Later
+HEADERS blocks are modeled as request/response trailers, and one or more
+informational responses are retained on the completed response. SETTINGS,
+RST_STREAM, PING, GOAWAY, and WINDOW_UPDATE metadata remains visible in the
+packet trace and stream-associated control frames are included in the result.
+Frame payloads are capped at 1 MiB, header blocks at 1 MiB, and header count at
+128; malformed padding, stream-zero data/header frames, invalid continuation
+order, uppercase or invalid-token headers, duplicate pseudo-headers, and
+invalid HPACK fail closed.
 This is still a bounded transaction adapter, not a full HTTP/2 endpoint: it
 does not implement live flow-control negotiation, server push emission, or
 HTTP/2 detection inside encrypted TLS payloads or arbitrary TCP streams that

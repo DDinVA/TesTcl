@@ -65,9 +65,10 @@ multiplexing, or model `HTTP2::push` response emission.
 The packet adapter now also accepts explicit `protocol: "http2"` payloads and
 binary TCP `payload_hex` captures. It recognizes a split HTTP/2 prior-knowledge
 client preface, decodes bounded frames and HPACK blocks across packet
-boundaries, and joins request/response DATA and HEADERS by stream ID. It does
-not inspect encrypted TLS payloads, negotiate live flow control, or emit
-server-push streams.
+boundaries, joins request/response DATA and HEADERS by stream ID, and retains
+trailers, informational responses, and bounded control-frame metadata. It does
+not inspect encrypted TLS payloads, implement a full flow-control scheduler,
+or emit server-push streams.
 GTP packets expose bounded GTPv1 and GTPv2 header/IE state, G-PDU payloads,
 GTP signaling/G-PDU/Prime ingress and egress events, and the catalogued
 `GTP::` command family. GTP-C and GTP-U use UDP ports 2123 and 2152; GTP-Prime

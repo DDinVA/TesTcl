@@ -3805,7 +3805,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         client_bytes = (
             HTTP2_CLIENT_PREFACE
             + _http2_frame(0x4, 0x0, 0)
-            + _http2_frame(0x1, 0x5, 1, request_block)
+            + _http2_frame(0x1, 0x4, 1, request_block)
         )
         result = self.adapter.run_scenario(
             {
@@ -3859,6 +3859,128 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
                 },
                 tcl_lsp_root=self.tcl_lsp_root,
             )
+
+    def test_http2_stream_trailers_and_informational_responses(self) -> None:
+        request_headers = Encoder().encode(
+            [(':method', 'POST'), (':path', '/trailers'), (':scheme', 'https')]
+        )
+        request_trailers = Encoder().encode([('x-request-trailer', 'complete')])
+        informational = Encoder().encode([(':status', '103'), ('link', '</style.css>')])
+        response_headers = Encoder().encode([(':status', '200'), ('content-type', 'text/plain')])
+        response_trailers = Encoder().encode([('x-response-trailer', 'complete')])
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { log local0. trailers=[HTTP::path] }",
+                "packets": [
+                    {
+                        "protocol": "http2",
+                        "direction": "client_to_server",
+                        "payload_hex": (
+                            HTTP2_CLIENT_PREFACE
+                            + _http2_frame(0x4, 0x0, 0)
+                            + _http2_frame(0x1, 0x4, 1, request_headers)
+                            + _http2_frame(0x0, 0x0, 1, b"request")
+                            + _http2_frame(0x1, 0x5, 1, request_trailers)
+                        ).hex(),
+                    },
+                    {
+                        "protocol": "http2",
+                        "direction": "server_to_client",
+                        "payload_hex": (
+                            _http2_frame(0x4, 0x0, 0)
+                            + _http2_frame(0x1, 0x4, 1, informational)
+                            + _http2_frame(0x1, 0x4, 1, response_headers)
+                            + _http2_frame(0x0, 0x0, 1, b"response")
+                            + _http2_frame(0x1, 0x5, 1, response_trailers)
+                        ).hex(),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        transaction = result["results"][0]
+        self.assertEqual(transaction["request"]["trailers"]["x-request-trailer"], "complete")
+        self.assertEqual(transaction["response"]["trailers"]["x-response-trailer"], "complete")
+        self.assertEqual(transaction["response"]["informational"][0]["status"], 103)
+        self.assertTrue(any("trailers=/trailers" in log for log in transaction["logs"]))
+
+    def test_http2_control_frames_are_decoded_and_bounded(self) -> None:
+        settings = (5).to_bytes(2, "big") + (16384).to_bytes(4, "big")
+        decoder = Http2ConnectionDecoder()
+        events = decoder.feed(
+            HTTP2_CLIENT_PREFACE
+            + _http2_frame(0x4, 0x0, 0, settings)
+            + _http2_frame(0x6, 0x1, 0, b"12345678")
+            + _http2_frame(0x8, 0x0, 1, (7).to_bytes(4, "big"))
+            + _http2_frame(0x7, 0x0, 0, (1).to_bytes(4, "big") + (0).to_bytes(4, "big") + b"debug"),
+            "client_to_server",
+        )
+        self.assertEqual(events[0]["settings"]["5"], 16384)
+        self.assertTrue(events[1]["ack"])
+        self.assertEqual(events[2]["increment"], 7)
+        self.assertEqual(events[3]["last_stream_id"], 1)
+        with self.assertRaisesRegex(ValueError, "RST_STREAM"):
+            decoder.feed(
+                _http2_frame(0x3, 0x0, 1, b"\x00\x00\x00"),
+                "client_to_server",
+            )
+
+        decoder = Http2ConnectionDecoder()
+        decoder.feed(
+            _http2_frame(0x4, 0x0, 0, (5).to_bytes(2, "big") + (16384).to_bytes(4, "big")),
+            "client_to_server",
+        )
+        with self.assertRaisesRegex(ValueError, "frame exceeds"):
+            decoder.feed(
+                _http2_frame(0x0, 0x0, 1, b"x" * 16385),
+                "server_to_client",
+            )
+
+    def test_http2_interleaves_multiple_streams_without_crossing_state(self) -> None:
+        client_encoder = Encoder()
+        server_encoder = Encoder()
+        request_one = client_encoder.encode(
+            [(':method', 'GET'), (':path', '/one'), (':scheme', 'https')]
+        )
+        request_two = client_encoder.encode(
+            [(':method', 'GET'), (':path', '/two'), (':scheme', 'https')]
+        )
+        response_one = server_encoder.encode([(':status', '200')])
+        response_two = server_encoder.encode([(':status', '201')])
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { log local0. [HTTP::path] }",
+                "packets": [
+                    {
+                        "protocol": "http2",
+                        "direction": "client_to_server",
+                        "payload_hex": (
+                            HTTP2_CLIENT_PREFACE
+                            + _http2_frame(0x4, 0x0, 0)
+                            + _http2_frame(0x1, 0x5, 1, request_one)
+                            + _http2_frame(0x1, 0x5, 3, request_two)
+                        ).hex(),
+                    },
+                    {
+                        "protocol": "http2",
+                        "direction": "server_to_client",
+                        "payload_hex": (
+                            _http2_frame(0x1, 0x5, 3, response_two)
+                            + _http2_frame(0x1, 0x5, 1, response_one)
+                        ).hex(),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            [(item["request"]["uri"], item["response"]["status"]) for item in result["results"]],
+            [('/two', 201), ('/one', 200)],
+        )
+        self.assertTrue(any("/two" in log for log in result["results"][0]["logs"]))
+        self.assertTrue(any("/one" in log for log in result["results"][1]["logs"]))
 
     def test_http2_wire_frames_reject_oversized_frame_headers(self) -> None:
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "frame exceeds"):
@@ -3930,6 +4052,13 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         with self.assertRaisesRegex(ValueError, "SETTINGS"):
             decoder.feed(
                 HTTP2_CLIENT_PREFACE + _http2_frame(0x4, 0x1, 0, b"\x00\x01\x00\x00\x00\x00"),
+                "client_to_server",
+            )
+
+        decoder = Http2ConnectionDecoder()
+        with self.assertRaisesRegex(ValueError, "invalid HTTP/2 DATA flags"):
+            decoder.feed(
+                HTTP2_CLIENT_PREFACE + _http2_frame(0x0, 0x4, 1, b"data"),
                 "client_to_server",
             )
 

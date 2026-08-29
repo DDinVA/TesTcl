@@ -6373,6 +6373,14 @@ class EmulatorSession:
         stream_id = int(event["stream_id"])
         if stream_id == 0:
             return None
+        direction = event["direction"]
+        if event["kind"] == "control":
+            existing = self._http2_streams.get(stream_id)
+            if existing is not None:
+                existing["control_frames"].append(self._http2_trace_event(event))
+            if event["frame_type"] == "RST_STREAM":
+                self._http2_streams.pop(stream_id, None)
+            return None
         context = self._http2_streams.setdefault(
             stream_id,
             {
@@ -6383,50 +6391,79 @@ class EmulatorSession:
                 "response_body": bytearray(),
                 "response_end": False,
                 "priority": 0,
+                "request_trailers": {},
+                "response_trailers": {},
+                "response_informational": [],
+                "control_frames": [],
             },
         )
-        direction = event["direction"]
         if event["kind"] == "headers":
             pseudo_headers = dict(event["pseudo_headers"])
             if direction == "client_to_server":
-                if context["request_headers"] is not None:
-                    raise EmulatorInputError(
-                        f"HTTP/2 stream {stream_id} has duplicate request headers"
-                    )
-                if ":method" not in pseudo_headers or ":path" not in pseudo_headers:
-                    raise EmulatorInputError(
-                        f"HTTP/2 request stream {stream_id} is missing :method or :path"
-                    )
-                context["request_headers"] = {
-                    "method": pseudo_headers[":method"],
-                    "uri": pseudo_headers[":path"],
-                    "host": pseudo_headers.get(":authority", ""),
-                    "headers": dict(event["headers"]),
-                }
-                context["request_pseudo_headers"] = pseudo_headers
-                context["request_end"] = bool(event["end_stream"])
-                context["priority"] = int(event.get("priority", 0))
+                if context["request_headers"] is None:
+                    if ":method" not in pseudo_headers or ":path" not in pseudo_headers:
+                        raise EmulatorInputError(
+                            f"HTTP/2 request stream {stream_id} is missing :method or :path"
+                        )
+                    context["request_headers"] = {
+                        "method": pseudo_headers[":method"],
+                        "uri": pseudo_headers[":path"],
+                        "host": pseudo_headers.get(":authority", ""),
+                        "headers": dict(event["headers"]),
+                    }
+                    context["request_pseudo_headers"] = pseudo_headers
+                    context["request_end"] = bool(event["end_stream"])
+                    context["priority"] = int(event.get("priority", 0))
+                else:
+                    if context["request_end"]:
+                        raise EmulatorInputError(
+                            f"HTTP/2 stream {stream_id} has headers after request end"
+                        )
+                    if pseudo_headers or not event["end_stream"]:
+                        raise EmulatorInputError(
+                            f"HTTP/2 request trailers on stream {stream_id} must be regular headers with END_STREAM"
+                        )
+                    context["request_trailers"] = dict(event["headers"])
+                    context["request_end"] = True
             else:
-                if context["response_headers"] is not None:
-                    raise EmulatorInputError(
-                        f"HTTP/2 stream {stream_id} has duplicate response headers"
-                    )
-                status = pseudo_headers.get(":status")
-                if status is None or not status.isdigit() or not 100 <= int(status) <= 999:
-                    raise EmulatorInputError(
-                        f"HTTP/2 response stream {stream_id} has an invalid :status"
-                    )
-                context["response_headers"] = {
-                    "status": int(status),
-                    "headers": dict(event["headers"]),
-                }
-                context["response_end"] = bool(event["end_stream"])
-                context["response_pseudo_headers"] = pseudo_headers
+                if context["response_headers"] is None:
+                    status = pseudo_headers.get(":status")
+                    if status is None or not status.isdigit() or not 100 <= int(status) <= 999:
+                        raise EmulatorInputError(
+                            f"HTTP/2 response stream {stream_id} has an invalid :status"
+                        )
+                    status_code = int(status)
+                    if status_code < 200:
+                        if event["end_stream"]:
+                            raise EmulatorInputError(
+                                f"HTTP/2 informational response on stream {stream_id} cannot end the stream"
+                            )
+                        context["response_informational"].append(
+                            {"status": status_code, "headers": dict(event["headers"])}
+                        )
+                    else:
+                        context["response_headers"] = {
+                            "status": status_code,
+                            "headers": dict(event["headers"]),
+                        }
+                        context["response_end"] = bool(event["end_stream"])
+                        context["response_pseudo_headers"] = pseudo_headers
+                else:
+                    if pseudo_headers or not event["end_stream"]:
+                        raise EmulatorInputError(
+                            f"HTTP/2 response trailers on stream {stream_id} must be regular headers with END_STREAM"
+                        )
+                    context["response_trailers"] = dict(event["headers"])
+                    context["response_end"] = True
         elif event["kind"] == "data":
             if direction == "client_to_server":
                 if context["request_headers"] is None:
                     raise EmulatorInputError(
                         f"HTTP/2 DATA arrived before request headers on stream {stream_id}"
+                    )
+                if context["request_end"]:
+                    raise EmulatorInputError(
+                        f"HTTP/2 request stream {stream_id} received DATA after END_STREAM"
                     )
                 context["request_body"].extend(event["data"])
                 context["request_end"] = bool(event["end_stream"])
@@ -6434,6 +6471,10 @@ class EmulatorSession:
                 if context["response_headers"] is None:
                     raise EmulatorInputError(
                         f"HTTP/2 DATA arrived before response headers on stream {stream_id}"
+                    )
+                if context["response_end"]:
+                    raise EmulatorInputError(
+                        f"HTTP/2 response stream {stream_id} received DATA after END_STREAM"
                     )
                 context["response_body"].extend(event["data"])
                 context["response_end"] = bool(event["end_stream"])
@@ -6454,6 +6495,14 @@ class EmulatorSession:
             "pseudo_headers": context["request_pseudo_headers"],
         }
         result = self._run_request_on_worker(session, request)
+        if context["request_trailers"]:
+            result["request"]["trailers"] = dict(context["request_trailers"])
+        if context["response_trailers"]:
+            result["response"]["trailers"] = dict(context["response_trailers"])
+        if context["response_informational"]:
+            result["response"]["informational"] = list(context["response_informational"])
+        if context["control_frames"]:
+            result["http2"]["control_frames"] = list(context["control_frames"])
         self._http2_streams.pop(stream_id, None)
         return result
 

@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - exercised only in incomplete installs
 HTTP2_CLIENT_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 HTTP2_MAX_FRAME_PAYLOAD = 1 << 20
 HTTP2_MAX_HEADER_BLOCK = 1 << 20
+HTTP2_MAX_HEADER_TABLE_SIZE = 1 << 20
 HTTP2_MAX_HEADERS = 128
 HTTP2_MAX_HEADER_VALUE_BYTES = 1 << 20
 
@@ -125,6 +126,10 @@ class Http2ConnectionDecoder:
             "client_to_server": Decoder(max_header_list_size=HTTP2_MAX_HEADER_BLOCK),
             "server_to_client": Decoder(max_header_list_size=HTTP2_MAX_HEADER_BLOCK),
         }
+        self._max_frame_payload = {
+            "client_to_server": HTTP2_MAX_FRAME_PAYLOAD,
+            "server_to_client": HTTP2_MAX_FRAME_PAYLOAD,
+        }
         self._continuations: dict[str, _HeaderContinuation | None] = {
             "client_to_server": None,
             "server_to_client": None,
@@ -133,6 +138,14 @@ class Http2ConnectionDecoder:
 
     def reset(self) -> None:
         self.__init__()
+
+    @staticmethod
+    def _opposite_direction(direction: str) -> str:
+        return (
+            "server_to_client"
+            if direction == "client_to_server"
+            else "client_to_server"
+        )
 
     def _decode_headers(
         self,
@@ -190,6 +203,8 @@ class Http2ConnectionDecoder:
         if frame.frame_type == FRAME_HEADERS:
             if frame.stream_id == 0:
                 raise Http2DecodeError("HTTP/2 HEADERS frame requires a stream")
+            if frame.flags & ~(FLAG_END_STREAM | FLAG_END_HEADERS | FLAG_PADDED | FLAG_PRIORITY):
+                raise Http2DecodeError("invalid HTTP/2 HEADERS flags")
             payload = _unpad(frame.payload, frame.flags)
             priority = 0
             if frame.flags & FLAG_PRIORITY:
@@ -220,6 +235,8 @@ class Http2ConnectionDecoder:
         if frame.frame_type == FRAME_CONTINUATION:
             if frame.stream_id == 0:
                 raise Http2DecodeError("HTTP/2 CONTINUATION frame requires a stream")
+            if frame.flags & ~FLAG_END_HEADERS:
+                raise Http2DecodeError("invalid HTTP/2 CONTINUATION flags")
             continuation = self._continuations[frame.direction]
             if continuation is None or continuation.stream_id != frame.stream_id:
                 raise Http2DecodeError("unexpected HTTP/2 CONTINUATION frame")
@@ -244,6 +261,8 @@ class Http2ConnectionDecoder:
         if frame.frame_type == FRAME_DATA:
             if frame.stream_id == 0:
                 raise Http2DecodeError("HTTP/2 DATA frame requires a stream")
+            if frame.flags & ~(FLAG_END_STREAM | FLAG_PADDED):
+                raise Http2DecodeError("invalid HTTP/2 DATA flags")
             data = _unpad(frame.payload, frame.flags)
             return {
                 "kind": "data",
@@ -254,16 +273,38 @@ class Http2ConnectionDecoder:
                 "end_stream": bool(frame.flags & FLAG_END_STREAM),
             }
         if frame.frame_type == FRAME_SETTINGS:
+            if frame.flags & ~0x1:
+                raise Http2DecodeError("invalid HTTP/2 SETTINGS flags")
             if frame.stream_id != 0 or len(frame.payload) % 6 or (
                 frame.flags & 0x1 and frame.payload
             ):
                 raise Http2DecodeError("invalid HTTP/2 SETTINGS frame")
-            settings = {
-                str(int.from_bytes(frame.payload[index : index + 2], "big")): int.from_bytes(
-                    frame.payload[index + 2 : index + 6], "big"
+            settings: dict[str, int] = {}
+            for index in range(0, len(frame.payload), 6):
+                setting_id = int.from_bytes(frame.payload[index : index + 2], "big")
+                value = int.from_bytes(frame.payload[index + 2 : index + 6], "big")
+                if str(setting_id) in settings:
+                    raise Http2DecodeError("duplicate HTTP/2 SETTINGS parameter")
+                if setting_id == 2 and value not in {0, 1}:
+                    raise Http2DecodeError("HTTP/2 ENABLE_PUSH must be zero or one")
+                if setting_id == 4 and value > 0x7FFF_FFFF:
+                    raise Http2DecodeError("HTTP/2 INITIAL_WINDOW_SIZE is too large")
+                if setting_id == 5 and not 16_384 <= value <= 0x00FF_FFFF:
+                    raise Http2DecodeError("HTTP/2 MAX_FRAME_SIZE is outside the valid range")
+                if setting_id == 1 and value > HTTP2_MAX_HEADER_TABLE_SIZE:
+                    raise Http2DecodeError("HTTP/2 header table size exceeds the bound")
+                settings[str(setting_id)] = value
+            peer_direction = self._opposite_direction(frame.direction)
+            if "1" in settings:
+                self._decoders[peer_direction].header_table_size = settings["1"]
+            if "5" in settings:
+                self._max_frame_payload[peer_direction] = min(
+                    settings["5"], HTTP2_MAX_FRAME_PAYLOAD
                 )
-                for index in range(0, len(frame.payload), 6)
-            }
+            if "6" in settings:
+                self._decoders[peer_direction].max_header_list_size = min(
+                    settings["6"], HTTP2_MAX_HEADER_BLOCK
+                )
             return {
                 "kind": "control",
                 "direction": frame.direction,
@@ -271,8 +312,54 @@ class Http2ConnectionDecoder:
                 "stream_id": 0,
                 "settings": settings,
             }
+        if frame.frame_type == FRAME_RST_STREAM:
+            if frame.flags or frame.stream_id == 0 or len(frame.payload) != 4:
+                raise Http2DecodeError("invalid HTTP/2 RST_STREAM frame")
+            return {
+                "kind": "control",
+                "direction": frame.direction,
+                "frame_type": name,
+                "stream_id": frame.stream_id,
+                "error_code": int.from_bytes(frame.payload, "big"),
+            }
+        if frame.frame_type == FRAME_PING:
+            if frame.flags & ~0x1 or frame.stream_id != 0 or len(frame.payload) != 8:
+                raise Http2DecodeError("invalid HTTP/2 PING frame")
+            return {
+                "kind": "control",
+                "direction": frame.direction,
+                "frame_type": name,
+                "stream_id": 0,
+                "ack": bool(frame.flags & 0x1),
+                "opaque_data_hex": frame.payload.hex(),
+            }
+        if frame.frame_type == FRAME_GOAWAY:
+            if frame.flags or frame.stream_id != 0 or len(frame.payload) < 8:
+                raise Http2DecodeError("invalid HTTP/2 GOAWAY frame")
+            return {
+                "kind": "control",
+                "direction": frame.direction,
+                "frame_type": name,
+                "stream_id": 0,
+                "last_stream_id": _u31(frame.payload[:4]),
+                "error_code": int.from_bytes(frame.payload[4:8], "big"),
+                "debug_data_hex": frame.payload[8:].hex(),
+            }
+        if frame.frame_type == FRAME_WINDOW_UPDATE:
+            if frame.flags or len(frame.payload) != 4:
+                raise Http2DecodeError("invalid HTTP/2 WINDOW_UPDATE frame")
+            increment = _u31(frame.payload)
+            if increment == 0:
+                raise Http2DecodeError("HTTP/2 WINDOW_UPDATE increment must be nonzero")
+            return {
+                "kind": "control",
+                "direction": frame.direction,
+                "frame_type": name,
+                "stream_id": frame.stream_id,
+                "increment": increment,
+            }
         if frame.frame_type == FRAME_PRIORITY:
-            if frame.stream_id == 0 or len(frame.payload) != 5:
+            if frame.flags or frame.stream_id == 0 or len(frame.payload) != 5:
                 raise Http2DecodeError("invalid HTTP/2 PRIORITY frame")
             return {
                 "kind": "control",
@@ -308,7 +395,7 @@ class Http2ConnectionDecoder:
         events: list[dict[str, Any]] = []
         while len(buffer) >= 9:
             length = _u24(bytes(buffer[:3]))
-            if length > HTTP2_MAX_FRAME_PAYLOAD:
+            if length > self._max_frame_payload[direction]:
                 raise Http2DecodeError("HTTP/2 frame exceeds the payload limit")
             total = 9 + length
             if len(buffer) < total:
