@@ -1907,7 +1907,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 42)
+        self.assertEqual(queue["command_count"], 41)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -9359,6 +9359,43 @@ when HTTP_REQUEST {
                     invalid.fire_event("HTTP_REQUEST")
             finally:
                 invalid.close()
+
+    def test_vlan_id_reads_packet_vlan_state_through_legacy_global(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "irule": "when HTTP_REQUEST { log local0. \"vlan=[vlan_id]\" }",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = session.fire_event("HTTP_REQUEST", {"link": {"vlan_id": 4094}})
+            self.assertTrue(any("vlan=4094" in entry for entry in result["logs"]))
+            self.assertTrue(
+                any("toplevel vlan_id 4094" in entry for entry in result["decisions"])
+            )
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            self.assertEqual(usage["vlan_id"]["runtime_status"], "semantic-mock")
+        finally:
+            session.close()
+
+        invalid = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {"profiles": ["HTTP"], "irule": "when HTTP_REQUEST { vlan_id 1 }"},
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, "vlan_id takes no arguments"
+            ):
+                invalid.fire_event("HTTP_REQUEST")
+        finally:
+            invalid.close()
 
     def test_qoe_commands_model_video_metrics_and_connection_control(self) -> None:
         session = self.adapter.EmulatorSession(

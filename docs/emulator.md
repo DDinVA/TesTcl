@@ -675,6 +675,13 @@ provide repeatable off-box results; F5 does not guarantee the same `fasthash`
 value across BIG-IP versions or reboots, so callers must not treat this as a
 bit-compatible TMM hash.
 
+### `vlan_id`
+
+The legacy global `vlan_id` command is modeled as a no-argument getter over
+the event's `link.vlan_id` packet state. It shares the value with
+`LINK::vlan_id`, allowing older rules to be exercised without maintaining a
+separate VLAN model. See the F5 [`vlan_id` reference](https://clouddocs.f5.com/api/irules/vlan_id.html).
+
 ### `rmd160`
 
 `rmd160` accepts exactly one value and returns the binary RIPEMD-160 digest,

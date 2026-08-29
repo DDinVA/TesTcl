@@ -1745,6 +1745,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "sha384",
     "sha512",
     "rmd160",
+    "vlan_id",
     "substr",
     "URI::basename",
     "URI::compare",

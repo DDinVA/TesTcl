@@ -21276,6 +21276,13 @@ namespace eval ::itest::semantic {
         return [::itest::semantic::py_fasthash $value]
     }
 
+    proc vlan_id_command {args} {
+        if {[llength $args] != 0} { error "vlan_id takes no arguments" }
+        set result $::state::link::vlan_id
+        ::itest::log_decision toplevel vlan_id $result
+        return $result
+    }
+
     proc md5_command {args} { return [_digest_command md5 {*}$args] }
     proc md4_command {args} { return [_digest_command md4 {*}$args] }
     proc rmd160_command {args} { return [_digest_command ripemd160 {*}$args] }
@@ -22771,6 +22778,7 @@ foreach {original replacement} {
     sha384 sha384_command
     sha512 sha512_command
     substr substr_command
+    vlan_id vlan_id_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::cmd_$original] ne ""} {
         ::tmm::_orig_rename ::itest::cmd::cmd_$original ::itest::cmd::_testcl_${original}_orig
