@@ -398,6 +398,25 @@ EVENT_STATE_FIELDS = {
         "discarded",
         "responded",
     },
+    "udp": {
+        "payload",
+        "payload_length",
+        "client_port",
+        "server_port",
+        "local_port",
+        "remote_port",
+        "mss",
+        "max_buf_pkts",
+        "max_rate",
+        "sendbuffer",
+        "debug_queue",
+        "dropped",
+        "held",
+        "released",
+        "responded",
+        "response",
+        "response_length",
+    },
 }
 EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
@@ -413,6 +432,7 @@ EVENT_STATE_NAMESPACES = {
     "message": "::state::message",
     "mr": "::state::mr",
     "gtp": "::state::gtp",
+    "udp": "::state::udp",
 }
 
 
@@ -766,6 +786,21 @@ SEMANTIC_MOCK_COMMANDS = {
     "PSM::HTTP::enable",
     "PSM::SMTP::disable",
     "PSM::SMTP::enable",
+    "UDP::client_port",
+    "UDP::debug_queue",
+    "UDP::drop",
+    "UDP::hold",
+    "UDP::local_port",
+    "UDP::max_buf_pkts",
+    "UDP::max_rate",
+    "UDP::mss",
+    "UDP::payload",
+    "UDP::release",
+    "UDP::remote_port",
+    "UDP::respond",
+    "UDP::sendbuffer",
+    "UDP::server_port",
+    "UDP::unused_port",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1979,11 +2014,11 @@ PACKET_PROTOCOL_FIELDS = {
 }
 PACKET_EVENT_ADAPTERS = {
     "RULE_INIT": "trace initialization",
-    "CLIENT_ACCEPTED": "tcp SYN/connection start",
+    "CLIENT_ACCEPTED": "connection start (TCP or generic UDP)",
     "CLIENT_CLOSED": "tcp FIN/RST from client",
     "SERVER_CLOSED": "tcp FIN/RST from server",
-    "CLIENT_DATA": "tcp client payload",
-    "SERVER_DATA": "tcp server payload",
+    "CLIENT_DATA": "client payload (TCP or generic UDP)",
+    "SERVER_DATA": "server payload (TCP or generic UDP)",
     "CLIENTSSL_CLIENTHELLO": "TLS client hello",
     "CLIENTSSL_CLIENTCERT": "TLS client certificate",
     "CLIENTSSL_HANDSHAKE": "TLS client handshake",
@@ -6122,6 +6157,8 @@ class EmulatorSession:
         state: dict[str, dict[str, str]],
     ) -> dict[str, Any]:
         session.eval_tcl("::itest::semantic::tcp_clear_event_state")
+        if "udp" in state:
+            session.eval_tcl("::itest::semantic::udp_prepare_event")
         required_profiles = self._event_profiles.get(event_name, set())
         attached_profiles = {profile.upper() for profile in self._profiles}
         if required_profiles and not required_profiles.intersection(attached_profiles):
@@ -6137,7 +6174,7 @@ class EmulatorSession:
         for layer, values in state.items():
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp"} and field in {"payload", "message", "authenticator"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp"} and field in {"payload", "message", "authenticator"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -6271,6 +6308,27 @@ class EmulatorSession:
             if packet.get("type") in {"handshake", "server_handshake"}:
                 tls_state["handshake_done"] = "1"
             state[layer] = tls_state
+        elif protocol == "udp":
+            source = packet.get("source", {})
+            destination = packet.get("destination", {})
+            if direction == "client_to_server":
+                client, server = source, destination
+                local, remote = destination, source
+            else:
+                client, server = destination, source
+                local, remote = source, destination
+            payload = packet.get("_wire_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                payload = str(packet.get("payload", "")).encode("utf-8")
+            udp_state: dict[str, Any] = {
+                "payload": bytes(payload),
+                "payload_length": str(len(payload)),
+                "client_port": str(client.get("port", 0)),
+                "server_port": str(server.get("port", 0)),
+                "local_port": str(local.get("port", 0)),
+                "remote_port": str(remote.get("port", 0)),
+            }
+            state["udp"] = udp_state
         elif protocol == "http" and "http2" in packet:
             http2_state: dict[str, str] = {}
             metadata = packet["http2"]
@@ -6845,7 +6903,7 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
@@ -6856,10 +6914,16 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::gtp_reset_connection")
         session.eval_tcl("::itest::semantic::psm_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
+        session.eval_tcl("::itest::semantic::udp_reset_connection")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
+        accepted_state = (
+            self._packet_event_state(packet)
+            if packet["protocol"] == "udp"
+            else {"connection": self._packet_connection_state(packet)}
+        )
         events.append(
             self._fire_event_on_worker(
-                session, "CLIENT_ACCEPTED", {"connection": self._packet_connection_state(packet)}
+                session, "CLIENT_ACCEPTED", accepted_state
             )
         )
         # Direct packet events bypass ::orch::run_http_request, so mark the
@@ -6873,6 +6937,7 @@ class EmulatorSession:
         session.eval_tcl("::state::reset_connection_state")
         session.eval_tcl("::itest::semantic::psm_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
+        session.eval_tcl("::itest::semantic::udp_reset_connection")
         self._packet_streams.clear()
         self._http2_decoder = None
         self._http2_streams.clear()
@@ -8093,6 +8158,82 @@ class EmulatorSession:
                         entry["disabled"] = True
                     if response_dns.get("response_sent") in {"1", "true"}:
                         entry["responded"] = True
+                continue
+            elif protocol == "udp":
+                self._activate_packet_connection(session, packet, entry["events"])
+                accepted_event = next(
+                    (
+                        event
+                        for event in reversed(entry["events"])
+                        if event.get("event") == "CLIENT_ACCEPTED"
+                    ),
+                    None,
+                )
+                accepted_udp = (
+                    accepted_event.get("state", {}).get("udp", {})
+                    if accepted_event is not None
+                    else {}
+                )
+                if accepted_udp.get("dropped") in {"1", "true"}:
+                    entry["dropped"] = True
+                    entry["drop_reason"] = "udp"
+                if accepted_udp.get("held") in {"1", "true"}:
+                    entry["held"] = True
+                if accepted_udp.get("responded") in {"1", "true"} and not entry.get("dropped"):
+                    response = accepted_udp.get("response", "")
+                    entry["responded"] = True
+                    entry["response"] = response
+                    accepted_event.setdefault("emissions", []).append(
+                        {
+                            "protocol": "udp",
+                            "direction": "server_to_client",
+                            "payload": response,
+                            "byte_length": len(response.encode("utf-8")),
+                        }
+                    )
+                if entry.get("dropped"):
+                    continue
+                if direction == "server_to_client" and not self._server_connection_open:
+                    self._configure_packet_connection(session, packet)
+                    entry["events"].append(
+                        self._fire_event_on_worker(
+                            session,
+                            "SERVER_CONNECTED",
+                            {"connection": self._packet_connection_state(packet)},
+                        )
+                    )
+                    self._server_connection_open = True
+                event_name = "CLIENT_DATA" if direction == "client_to_server" else "SERVER_DATA"
+                event_result = self._fire_event_on_worker(
+                    session, event_name, self._packet_event_state(packet)
+                )
+                entry["events"].append(event_result)
+                udp_state = event_result.get("state", {}).get("udp", {})
+                if udp_state.get("dropped") in {"1", "true"}:
+                    entry["dropped"] = True
+                    entry["drop_reason"] = "udp"
+                if udp_state.get("held") in {"1", "true"}:
+                    entry["held"] = True
+                if udp_state.get("released") in {"1", "true"}:
+                    entry["released"] = True
+                if udp_state.get("responded") in {"1", "true"} and not entry.get("dropped"):
+                    response = udp_state.get("response", "")
+                    entry["responded"] = True
+                    entry["response"] = response
+                    event_result.setdefault("emissions", []).append(
+                        {
+                            "protocol": "udp",
+                            "direction": (
+                                "server_to_client"
+                                if direction == "client_to_server"
+                                else "client_to_server"
+                            ),
+                            "payload": response,
+                            "byte_length": len(response.encode("utf-8")),
+                        }
+                    )
+                if "payload" in udp_state:
+                    entry["payload_after"] = udp_state["payload"]
                 continue
             else:  # Generic UDP has no single catalogued iRule data event.
                 entry["ignored"] = "generic UDP packet has no protocol-specific event adapter"

@@ -5349,6 +5349,120 @@ when GTP_GPDU_INGRESS {
         self.assertTrue(event["fired"])
         self.assertEqual(event["state"]["gtp"]["type"], "255")
 
+    def test_generic_udp_events_model_payload_ports_and_flow_controls(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    UDP::hold
+    UDP::max_buf_pkts 5
+    UDP::max_rate 1000
+    UDP::sendbuffer 4096
+    UDP::debug_queue enable
+    set unused [UDP::unused_port 192.0.2.10 9999 10.0.0.5]
+    log local0. "mss=[UDP::mss] unused=$unused"
+}
+when CLIENT_DATA {
+    log local0. "p=[UDP::payload] len=[UDP::payload length] ports=[UDP::client_port]:[UDP::server_port] local=[UDP::local_port] remote=[UDP::remote_port]"
+    UDP::payload replace 0 4 PONG
+    UDP::release
+    UDP::respond reply
+}
+when SERVER_DATA {
+    if {[UDP::payload] contains "drop"} { UDP::drop }
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "udp",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 9999},
+                        "payload": "ping",
+                    },
+                    {
+                        "protocol": "udp",
+                        "direction": "server_to_client",
+                        "source": {"address": "192.0.2.10", "port": 9999},
+                        "destination": {"address": "10.0.0.5", "port": 51000},
+                        "payload": "drop",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        accepted = next(
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] == "CLIENT_ACCEPTED"
+        )
+        client_data = next(
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] == "CLIENT_DATA"
+        )
+        server_data = next(
+            event
+            for event in result["trace"][1]["events"]
+            if event["event"] == "SERVER_DATA"
+        )
+        self.assertEqual(accepted["state"]["udp"]["held"], "1")
+        self.assertEqual(accepted["state"]["udp"]["max_buf_pkts"], "5")
+        self.assertTrue(any("mss=1460 unused=40000" in log for log in accepted["logs"]))
+        self.assertEqual(client_data["state"]["udp"]["payload"], "PONG")
+        self.assertEqual(client_data["state"]["udp"]["payload_length"], "4")
+        self.assertEqual(client_data["state"]["udp"]["released"], "1")
+        self.assertEqual(client_data["state"]["udp"]["responded"], "1")
+        self.assertEqual(result["trace"][0]["payload_after"], "PONG")
+        self.assertEqual(result["trace"][0]["response"], "reply")
+        self.assertTrue(result["trace"][1]["dropped"])
+        self.assertEqual(server_data["state"]["udp"]["dropped"], "1")
+        self.assertEqual(result["emitted"][0]["payload"], "reply")
+        self.assertEqual(
+            {
+                entry["name"]: entry["runtime_status"]
+                for entry in result["fidelity"]["commands"]
+                if entry["name"].startswith("UDP::")
+            },
+            {
+                "UDP::client_port": "semantic-mock",
+                "UDP::debug_queue": "semantic-mock",
+                "UDP::drop": "semantic-mock",
+                "UDP::hold": "semantic-mock",
+                "UDP::local_port": "semantic-mock",
+                "UDP::max_buf_pkts": "semantic-mock",
+                "UDP::max_rate": "semantic-mock",
+                "UDP::mss": "semantic-mock",
+                "UDP::payload": "semantic-mock",
+                "UDP::release": "semantic-mock",
+                "UDP::remote_port": "semantic-mock",
+                "UDP::respond": "semantic-mock",
+                "UDP::sendbuffer": "semantic-mock",
+                "UDP::server_port": "semantic-mock",
+                "UDP::unused_port": "semantic-mock",
+            },
+        )
+
+    def test_generic_udp_drop_on_accept_stops_datagram_dispatch(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": """
+when CLIENT_ACCEPTED { UDP::drop }
+when CLIENT_DATA { log local0. "must-not-fire" }
+""",
+                "packets": [{"protocol": "udp", "payload": "blocked"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        events = result["trace"][0]["events"]
+        self.assertNotIn("CLIENT_DATA", [event["event"] for event in events])
+        self.assertTrue(result["trace"][0]["dropped"])
+        self.assertEqual(result["trace"][0]["drop_reason"], "udp")
+        self.assertFalse(any("must-not-fire" in log for event in events for log in event["logs"]))
+
 
 if __name__ == "__main__":
     unittest.main()

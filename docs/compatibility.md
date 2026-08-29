@@ -28,7 +28,7 @@ references rather than maintained as an unqualified list of mocked commands.
 The optional TMOS 17.5 emulator exposes the pinned `tcl-lsp` registry in
 bounded chunks and reports static command-handler and packet-event coverage
 through its conformance endpoint. Structured packet traces currently cover
-TCP, TLS, HTTP, UDP/DNS, SIP over TCP or UDP, Diameter over TCP, RADIUS over UDP, GTP over UDP or GTP-Prime over TCP, Message Routing Framework messages over TCP, and raw IPv4 transport records. Fragmented IPv4
+TCP, TLS, HTTP, generic UDP, DNS, SIP over TCP or UDP, Diameter over TCP, RADIUS over UDP, GTP over UDP or GTP-Prime over TCP, Message Routing Framework messages over TCP, and raw IPv4 transport records. Fragmented IPv4
 packets remain outside the current boundary. Classic PCAP and bounded pcapng
 ingestion are supported, and TCP stream reassembly includes bounded gap,
 overlap, and retransmission de-duplication handling. Diameter validates and
@@ -41,6 +41,11 @@ The TMOS 17.5 `PSM::FTP::*`, `PSM::HTTP::*`, and `PSM::SMTP::*` enable/disable
 commands are modeled as connection-scoped protocol controls and appear in
 semantic state and decision output; they do not run a real Protocol Security
 Module inspection engine.
+Generic UDP traces expose datagram payload bytes, client/server/local/remote
+ports, and the `CLIENT_DATA`/`SERVER_DATA` path. The UDP semantic layer models
+payload replacement, drop, hold/release, response emission, and bounded buffer,
+rate, send-buffer, debug-queue, MSS, and unused-port controls. It does not run
+TMM queue scheduling, NAT, connection tracking, or a live upstream UDP socket.
 RADIUS packet handling validates standard and Vendor-Specific attributes and
 exposes the four TMOS 17.5 AAA request/response events. It intentionally does
 not implement shared-secret cryptography, password obfuscation, live AAA

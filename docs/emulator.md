@@ -58,6 +58,12 @@ Connection endpoint getters (`client_addr`, `client_port`, `local_addr`,
 `local_port`, `remote_addr`, `remote_port`, `server_addr`, and `server_port`)
 read the configured connection endpoints; server getters switch to the
 selected pool member after `pool` or `LB::reselect` establishes one.
+Generic UDP packet traces fire `CLIENT_ACCEPTED`, `CLIENT_DATA`,
+`SERVER_CONNECTED`, and `SERVER_DATA` as applicable. `UDP::payload` is mutable
+by wire-byte offset, and the adapter records UDP drop, hold/release, respond,
+port, buffer, rate, and debug-queue controls in the event trace. This is a
+bounded datagram model: it does not implement TMM queue scheduling, NAT, or a
+real upstream UDP socket.
 
 ## HTTP API
 

@@ -52,6 +52,7 @@ namespace eval ::itest::semantic {
     variable ssl_cert_counter 0
     variable ssl_cert_objects [dict create]
     variable http2_pending [dict create]
+    variable udp_unused_port_next 40000
 
     variable sip_discarded 0
     variable sip_response_requested 0
@@ -77,6 +78,26 @@ namespace eval ::itest::semantic {
         variable mask ""
         variable payload ""
         variable payload_length 0
+    }
+
+    namespace eval ::state::udp {
+        variable payload ""
+        variable payload_length 0
+        variable client_port 0
+        variable server_port 0
+        variable local_port 0
+        variable remote_port 0
+        variable mss 1460
+        variable max_buf_pkts 0
+        variable max_rate 0
+        variable sendbuffer 0
+        variable debug_queue 0
+        variable dropped 0
+        variable held 0
+        variable released 0
+        variable responded 0
+        variable response ""
+        variable response_length 0
     }
 
     foreach tls_side {client server} {
@@ -3901,6 +3922,186 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc udp_reset_connection {} {
+        namespace eval ::state::udp {
+            variable payload ""
+            variable payload_length 0
+            variable client_port 0
+            variable server_port 0
+            variable local_port 0
+            variable remote_port 0
+            variable mss 1460
+            variable max_buf_pkts 0
+            variable max_rate 0
+            variable sendbuffer 0
+            variable debug_queue 0
+            variable dropped 0
+            variable held 0
+            variable released 0
+            variable responded 0
+            variable response ""
+            variable response_length 0
+        }
+    }
+
+    proc udp_prepare_event {} {
+        namespace eval ::state::udp {
+            variable payload ""
+            variable payload_length 0
+            variable dropped 0
+            variable released 0
+            variable responded 0
+            variable response ""
+            variable response_length 0
+        }
+    }
+
+    proc udp_payload_command {args} {
+        if {[llength $args] == 0} {
+            return $::state::udp::payload
+        }
+        set subcmd [lindex $args 0]
+        switch -exact -- $subcmd {
+            length {
+                if {[llength $args] != 1} { error "UDP::payload length takes no arguments" }
+                return [::itest::cmd::_payload_bytelength $::state::udp::payload]
+            }
+            replace {
+                if {[llength $args] != 4} {
+                    error "UDP::payload replace requires offset, length, and data"
+                }
+                set offset [lindex $args 1]
+                set length [lindex $args 2]
+                if {![string is integer -strict $offset] || $offset < 0 ||
+                    ![string is integer -strict $length] || $length < 0} {
+                    error "UDP::payload replace offsets must be non-negative integers"
+                }
+                set ::state::udp::payload [::itest::cmd::_payload_splice \
+                    $::state::udp::payload $offset $length [lindex $args 3]]
+                set ::state::udp::payload_length \
+                    [::itest::cmd::_payload_bytelength $::state::udp::payload]
+                ::itest::log_decision udp payload_replace [list $offset $length]
+                return ""
+            }
+            default {
+                if {![string is integer -strict $subcmd] || $subcmd < 0 ||
+                    [llength $args] != 1} {
+                    error "UDP::payload accepts length, replace, or an optional non-negative size"
+                }
+                return [::itest::cmd::_payload_first $::state::udp::payload $subcmd]
+            }
+        }
+    }
+
+    proc udp_port_command {which args} {
+        if {[llength $args] != 0} { error "UDP::$which takes no arguments" }
+        return [set ::state::udp::$which]
+    }
+
+    proc udp_client_port_command {args} { return [udp_port_command client_port {*}$args] }
+    proc udp_server_port_command {args} { return [udp_port_command server_port {*}$args] }
+
+    proc udp_local_port_command {args} {
+        if {[llength $args] > 1} { error "UDP::local_port accepts an optional side" }
+        if {[llength $args] == 1} {
+            set side [string tolower [lindex $args 0]]
+            if {$side ni {clientside serverside}} {
+                error "UDP::local_port side must be clientside or serverside"
+            }
+            return [expr {$side eq "clientside" ? $::state::udp::client_port : $::state::udp::server_port}]
+        }
+        return $::state::udp::local_port
+    }
+
+    proc udp_remote_port_command {args} {
+        if {[llength $args] > 1} { error "UDP::remote_port accepts an optional side" }
+        if {[llength $args] == 1} {
+            set side [string tolower [lindex $args 0]]
+            if {$side ni {clientside serverside}} {
+                error "UDP::remote_port side must be clientside or serverside"
+            }
+            return [expr {$side eq "clientside" ? $::state::udp::server_port : $::state::udp::client_port}]
+        }
+        return $::state::udp::remote_port
+    }
+
+    proc udp_integer_setting {name args} {
+        if {[llength $args] > 1} { error "UDP::$name accepts an optional non-negative integer" }
+        if {[llength $args] == 1} {
+            set value [lindex $args 0]
+            if {![string is integer -strict $value] || $value < 0} {
+                error "UDP::$name requires a non-negative integer"
+            }
+            set ::state::udp::$name $value
+            ::itest::log_decision udp $name $value
+        }
+        return [set ::state::udp::$name]
+    }
+
+    proc udp_max_buf_pkts_command {args} { return [udp_integer_setting max_buf_pkts {*}$args] }
+    proc udp_max_rate_command {args} { return [udp_integer_setting max_rate {*}$args] }
+    proc udp_sendbuffer_command {args} { return [udp_integer_setting sendbuffer {*}$args] }
+
+    proc udp_mss_command {args} {
+        if {[llength $args] != 0} { error "UDP::mss takes no arguments" }
+        return $::state::udp::mss
+    }
+
+    proc udp_debug_queue_command {args} {
+        if {[llength $args] != 1 || [lindex $args 0] ni {enable disable}} {
+            error "UDP::debug_queue requires enable or disable"
+        }
+        set ::state::udp::debug_queue [expr {[lindex $args 0] eq "enable"}]
+        ::itest::log_decision udp debug_queue $::state::udp::debug_queue
+        return ""
+    }
+
+    proc udp_flag_command {name args} {
+        if {[llength $args] != 0} { error "UDP::$name takes no arguments" }
+        set ::state::udp::$name 1
+        ::itest::log_decision udp $name 1
+        return ""
+    }
+
+    proc udp_drop_command {args} { return [udp_flag_command dropped {*}$args] }
+    proc udp_hold_command {args} { return [udp_flag_command held {*}$args] }
+
+    proc udp_release_command {args} {
+        if {[llength $args] != 0} { error "UDP::release takes no arguments" }
+        set ::state::udp::held 0
+        set ::state::udp::released 1
+        ::itest::log_decision udp release 1
+        return ""
+    }
+
+    proc udp_respond_command {args} {
+        if {[llength $args] != 1} { error "UDP::respond requires a payload" }
+        set ::state::udp::responded 1
+        set ::state::udp::response [lindex $args 0]
+        set ::state::udp::response_length [string bytelength $::state::udp::response]
+        ::itest::log_decision udp respond $::state::udp::response
+        return ""
+    }
+
+    proc udp_unused_port_command {args} {
+        variable udp_unused_port_next
+        if {[llength $args] != 3} {
+            error "UDP::unused_port requires remote address, remote port, and local address"
+        }
+        set remote_port [lindex $args 1]
+        if {![string is integer -strict $remote_port] || $remote_port < 0 || $remote_port > 65535} {
+            error "UDP::unused_port remote port must be an integer from 0 to 65535"
+        }
+        foreach address [list [lindex $args 0] [lindex $args 2]] {
+            if {$address eq ""} { error "UDP::unused_port addresses must not be empty" }
+        }
+        set result $udp_unused_port_next
+        incr udp_unused_port_next
+        if {$udp_unused_port_next > 65535} { set udp_unused_port_next 1024 }
+        ::itest::log_decision udp unused_port [list [lindex $args 0] $remote_port [lindex $args 2] $result]
+        return $result
+    }
+
     proc _cookie_in_response {} {
         return [expr {$::itest::current_event in {
             HTTP_RESPONSE HTTP_RESPONSE_DATA HTTP_RESPONSE_RELEASE
@@ -6976,6 +7177,21 @@ foreach {name proc_name} {
     TCP::payload ::itest::cmd::tcp_payload
     TCP::release ::itest::cmd::tcp_release
     TCP::respond ::itest::cmd::tcp_respond
+    UDP::client_port ::itest::semantic::udp_client_port_command
+    UDP::debug_queue ::itest::semantic::udp_debug_queue_command
+    UDP::drop ::itest::semantic::udp_drop_command
+    UDP::hold ::itest::semantic::udp_hold_command
+    UDP::local_port ::itest::semantic::udp_local_port_command
+    UDP::max_buf_pkts ::itest::semantic::udp_max_buf_pkts_command
+    UDP::max_rate ::itest::semantic::udp_max_rate_command
+    UDP::mss ::itest::semantic::udp_mss_command
+    UDP::payload ::itest::semantic::udp_payload_command
+    UDP::release ::itest::semantic::udp_release_command
+    UDP::remote_port ::itest::semantic::udp_remote_port_command
+    UDP::respond ::itest::semantic::udp_respond_command
+    UDP::sendbuffer ::itest::semantic::udp_sendbuffer_command
+    UDP::server_port ::itest::semantic::udp_server_port_command
+    UDP::unused_port ::itest::semantic::udp_unused_port_command
     peer ::itest::cmd::cmd_peer
     clientside ::itest::cmd::cmd_clientside
     serverside ::itest::cmd::cmd_serverside
