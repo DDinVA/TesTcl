@@ -1961,7 +1961,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 19)
+        self.assertEqual(queue["command_count"], 18)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -6441,6 +6441,69 @@ when HTTP_REQUEST {
             result["results"][0]["request"]["headers"]["x-session-modes"],
             "{simple value} {source\nvalue} sticky-value dest-value ssl-value uie-value hash-value sip-value",
         )
+
+    def test_sharedvar_binds_connection_variable_and_resets_with_connection(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    sharedvar public
+    if {[HTTP::uri] eq "/seed"} {
+        set public shared-value
+    } else {
+        HTTP::header insert X-Shared $public
+    }
+}
+""",
+                "requests": [
+                    {"uri": "/seed"},
+                    {"uri": "/read"},
+                    {"uri": "/read", "new_connection": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        seeded, same_connection, new_connection = result["results"]
+        self.assertEqual(same_connection["request"]["headers"]["x-shared"], "shared-value")
+        self.assertEqual(new_connection["request"]["headers"]["x-shared"], "")
+        self.assertEqual(
+            seeded["semantic"]["sharedvar"]["names"],
+            [{"name": "public", "value": "shared-value"}],
+        )
+        self.assertEqual(
+            new_connection["semantic"]["sharedvar"]["names"],
+            [{"name": "public", "value": ""}],
+        )
+        self.assertEqual(
+            {
+                entry["name"]: entry["runtime_status"]
+                for entry in result["fidelity"]["commands"]
+                if entry["name"] == "sharedvar"
+            },
+            {"sharedvar": "semantic-mock"},
+        )
+
+    def test_sharedvar_rejects_ambiguous_or_unsafe_variable_names(self) -> None:
+        for irule in (
+            "when HTTP_REQUEST { sharedvar }",
+            "when HTTP_REQUEST { sharedvar public extra }",
+            "when HTTP_REQUEST { sharedvar {public name} }",
+            "when HTTP_REQUEST { sharedvar 1public }",
+        ):
+            with self.subTest(irule=irule), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "sharedvar",
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "requests": [{"uri": "/"}],
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
 
     def test_semantic_overlay_models_connection_table_subtables_and_mutations(self) -> None:
         result = self.adapter.run_scenario(

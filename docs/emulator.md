@@ -65,6 +65,13 @@ record and restart its timeout, while timeout `0` disables expiry. The table
 is bounded to 1,024 records, 1 MiB per value, and 16 MiB total value data.
 Session records survive emulated connection teardown but are isolated from
 other emulator sessions and do not select a pool member.
+The [TMOS 17.5 `sharedvar` command](https://clouddocs.f5.com/api/irules/sharedvar.html)
+binds a declared Tcl identifier to the current connection's shared-variable
+store. A later handler can call `sharedvar` for the same name and observe
+updates made by an earlier handler or event; the binding is cleared when the
+emulated client connection is reset. This supports VIP-to-VIP-style rule
+logic within one interpreter, but does not create a second virtual server or
+claim to emulate cross-TMM/shared-memory scheduling.
 The legacy global helpers `http_client_ip`, `http_content_len_max`,
 `http_cookie`, `http_header`, `http_host`, `http_method`, `http_uri`,
 `http_version`, `ip_addr`, `ip_protocol`, `ip_tos`, `ip_ttl`, `htonl`, `htons`,

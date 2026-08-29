@@ -60,6 +60,12 @@ and refresh the timeout on lookup. Records survive connection resets and are
 bounded to 1,024 entries, 1 MiB per value, and 16 MiB of total value data.
 This is session-table behavior for iRule control-flow testing; it is not a
 shared BIG-IP persistence database or a cross-process store.
+The TMOS 17.5 [`sharedvar`](https://clouddocs.f5.com/api/irules/sharedvar.html)
+command binds valid Tcl identifiers to connection-scoped shared storage, so
+handlers can exchange values across events and connection sides represented
+by the emulator. The binding resets with the emulated client connection; the
+adapter does not instantiate a second VIP, cross-TMM shared memory, or live
+virtual-to-virtual forwarding path.
 The related legacy connection controls are deterministic as well: `forward`
 records strict-forwarding intent, `translate` tracks address/port/service
 translation toggles, `rateclass` records the selected rate class, and

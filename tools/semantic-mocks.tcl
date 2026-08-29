@@ -53,6 +53,10 @@ namespace eval ::itest::semantic {
     variable session_max_records 1024
     variable session_max_value_bytes 1048576
     variable session_max_total_bytes 16777216
+    # Names declared with sharedvar in the current client-side connection.
+    # Values live in the upstream connection-variable array so the normal
+    # state-layer connection reset clears them with other unqualified vars.
+    variable sharedvar_names {}
     # IPFIX templates and destinations are session-scoped, like the static
     # objects an iRule normally keeps in static variables. Messages are
     # connection-scoped and are cleared by ipfix_reset_connection.
@@ -1639,6 +1643,49 @@ namespace eval ::itest::semantic {
                 timeout [dict get $record timeout]]
         }
         return [list count [llength $records] records $records accesses $session_accesses]
+    }
+
+    proc sharedvar_reset_connection {} {
+        variable sharedvar_names
+        foreach name $sharedvar_names {
+            unset -nocomplain ::state::vars::connection_vars($name)
+        }
+        set sharedvar_names {}
+    }
+
+    proc sharedvar_prepare {args} {
+        variable sharedvar_names
+        if {[llength $args] != 1} {
+            error "sharedvar requires exactly one variable name"
+        }
+        set name [lindex $args 0]
+        if {$name eq "" || [string first "\x00" $name] >= 0} {
+            error "sharedvar variable name must be non-empty and must not contain NUL"
+        }
+        if {[string bytelength $name] > 256 || ![regexp {^[A-Za-z_][A-Za-z0-9_]*$} $name]} {
+            error "sharedvar variable name must be a Tcl identifier of at most 256 bytes"
+        }
+        if {![info exists ::state::vars::connection_vars($name)]} {
+            set ::state::vars::connection_vars($name) ""
+        }
+        if {[lsearch -exact $sharedvar_names $name] < 0} {
+            lappend sharedvar_names $name
+        }
+        ::itest::log_decision sharedvar declare $name
+        return $name
+    }
+
+    proc sharedvar_snapshot {} {
+        variable sharedvar_names
+        set values {}
+        foreach name [lsort -ascii $sharedvar_names] {
+            set value ""
+            if {[info exists ::state::vars::connection_vars($name)]} {
+                set value $::state::vars::connection_vars($name)
+            }
+            lappend values [list name $name value $value]
+        }
+        return [list names $values]
     }
 
     proc prepare_lb_failure {cause} {
@@ -23448,6 +23495,17 @@ if {[::tmm::_orig_info commands ::itest::cmd::cmd_session] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::cmd_session ::itest::cmd::_testcl_session_orig
     proc ::itest::cmd::cmd_session {args} {
         return [eval [linsert $args 0 ::itest::semantic::session_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_sharedvar] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_sharedvar ::itest::cmd::_testcl_sharedvar_orig
+    proc ::itest::cmd::cmd_sharedvar {args} {
+        set name [::itest::semantic::sharedvar_prepare {*}$args]
+        # iRule commands are resolved through ::unknown, so the handler is
+        # two frames above this generated command proc (cmd_sharedvar ->
+        # unknown -> handler).  Execute upvar in that handler frame so the
+        # alias remains active for the rest of the handler body.
+        return [uplevel 2 [list upvar #0 ::state::vars::connection_vars($name) $name]]
     }
 }
 if {[::tmm::_orig_info commands ::itest::cmd::cmd_table] ne ""} {
