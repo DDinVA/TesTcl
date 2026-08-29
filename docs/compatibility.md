@@ -41,6 +41,12 @@ The TMOS 17.5 `PSM::FTP::*`, `PSM::HTTP::*`, and `PSM::SMTP::*` enable/disable
 commands are modeled as connection-scoped protocol controls and appear in
 semantic state and decision output; they do not run a real Protocol Security
 Module inspection engine.
+The TMOS 17.5 `STREAM::*` commands are available on a direct
+`STREAM_MATCHED` event with a caller-supplied match. Encoding, expression,
+maximum match size, connection enable/disable, and one-shot replacement intent
+are deterministic state; the adapter does not scan/reassemble raw stream
+matches, enforce the production buffer/connection lifecycle, or rewrite wire
+payloads.
 Generic UDP traces expose datagram payload bytes, client/server/local/remote
 ports, and the `CLIENT_DATA`/`SERVER_DATA` path. The UDP semantic layer models
 payload replacement, drop, hold/release, response emission, and bounded buffer,

@@ -363,6 +363,17 @@ EVENT_STATE_FIELDS = {
         "pushes",
         "pseudo_headers",
     },
+    "stream": {
+        "match",
+        "encoding",
+        "expression",
+        "max_matchsize",
+        "enabled",
+        "disabled",
+        "replacement",
+        "replacement_requested",
+        "replaced",
+    },
     "dns": {
         "qname",
         "qtype",
@@ -643,6 +654,7 @@ EVENT_STATE_NAMESPACES = {
     "tls_client": "::state::tls::client",
     "tls_server": "::state::tls::server",
     "http2": "::state::http2",
+    "stream": "::state::stream",
     "dns": "::state::dns",
     "websocket": "::state::websocket",
     "mqtt": "::state::mqtt",
@@ -813,6 +825,13 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTTP2::push",
     "HTTP2::stream",
     "HTTP2::version",
+    "STREAM::disable",
+    "STREAM::enable",
+    "STREAM::encoding",
+    "STREAM::expression",
+    "STREAM::match",
+    "STREAM::max_matchsize",
+    "STREAM::replace",
     "event",
     "HTTP::passthrough_reason",
     "HTTP::password",
@@ -8579,6 +8598,7 @@ class EmulatorSession:
         if request.get("close_before") or request.get("new_connection"):
             if self._connection_open:
                 session.close_connection()
+                session.eval_tcl("::itest::semantic::stream_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         if not self._connection_open:
@@ -8593,6 +8613,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::aaa_reset_connection")
             session.eval_tcl("::itest::semantic::access_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
+            session.eval_tcl("::itest::semantic::stream_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -8743,6 +8764,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::psm_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
             session.eval_tcl("::itest::semantic::flow_reset_connection")
+            session.eval_tcl("::itest::semantic::stream_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         result["decisions"] = decision_history
@@ -8757,6 +8779,7 @@ class EmulatorSession:
             }
         if request.get("close_after"):
             session.close_connection()
+            session.eval_tcl("::itest::semantic::stream_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         return result
@@ -8823,6 +8846,8 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::udp_prepare_event")
         if "rtsp" in state:
             session.eval_tcl("::itest::semantic::rtsp_prepare_event")
+        if "stream" in state or event_name == "STREAM_MATCHED":
+            session.eval_tcl("::itest::semantic::stream_prepare_event")
         required_profiles = self._event_profiles.get(event_name, set())
         attached_profiles = {profile.upper() for profile in self._profiles}
         if required_profiles and not required_profiles.intersection(attached_profiles):
@@ -9741,6 +9766,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::access_reset_connection")
         session.eval_tcl("::itest::semantic::flow_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
+        session.eval_tcl("::itest::semantic::stream_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))

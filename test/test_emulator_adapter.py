@@ -478,7 +478,7 @@ when HTTP_REQUEST {
         }
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
-        self.assertGreater(queue["command_count"], 380)
+        self.assertGreaterEqual(queue["command_count"], 378)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -5797,6 +5797,108 @@ when HTTP_REQUEST {
         self.assertEqual(request_result["http2"]["pseudo_headers"][":path"], "/rewritten")
         self.assertEqual(request_result["http2"]["pseudo_headers"][":authority"], "h2.example.com")
         self.assertTrue(any("header_replace" in entry for entry in request_result["decisions"]))
+
+    def test_stream_match_state_and_connection_controls(self) -> None:
+        session = self.adapter.EmulatorSession(
+            Path(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "STREAM"],
+                "irule": """
+when STREAM_MATCHED {
+    if {[STREAM::match] eq "first"} {
+        STREAM::encoding utf-8
+        STREAM::expression {foo bar}
+        STREAM::max_matchsize 2048
+        STREAM::replace rewritten
+        STREAM::disable
+        log local0. "first=[STREAM::match] replacement=[set ::state::stream::replacement] disabled=[set ::state::stream::disabled]"
+        STREAM::enable
+    } elseif {[STREAM::match] eq "clear"} {
+        STREAM::replace
+    } else {
+        log local0. "match=[STREAM::match] replacement=[set ::state::stream::replacement]"
+    }
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            first = session.fire_event("STREAM_MATCHED", {"stream": {"match": "first"}})
+            second = session.fire_event("STREAM_MATCHED", {"stream": {"match": "second"}})
+            no_state = session.fire_event("STREAM_MATCHED")
+            cleared = session.fire_event("STREAM_MATCHED", {"stream": {"match": "clear"}})
+        finally:
+            session.close()
+
+        self.assertTrue(first["fired"])
+        self.assertTrue(second["fired"])
+        self.assertTrue(no_state["fired"])
+        self.assertTrue(cleared["fired"])
+        self.assertEqual(first["state"]["stream"]["encoding"], "utf-8")
+        self.assertEqual(first["state"]["stream"]["expression"], "foo bar")
+        self.assertEqual(first["state"]["stream"]["max_matchsize"], "2048")
+        self.assertEqual(first["state"]["stream"]["replacement"], "rewritten")
+        self.assertEqual(first["state"]["stream"]["replacement_requested"], "1")
+        self.assertEqual(first["state"]["stream"]["replaced"], "1")
+        self.assertEqual(first["state"]["stream"]["disabled"], "0")
+        self.assertEqual(first["state"]["stream"]["enabled"], "1")
+        self.assertEqual(second["state"]["stream"]["replacement"], "")
+        self.assertEqual(second["state"]["stream"]["replacement_requested"], "0")
+        self.assertEqual(cleared["state"]["stream"]["replacement_requested"], "0")
+        self.assertTrue(any("first=first replacement=rewritten disabled=1" in log for log in first["logs"]))
+        self.assertTrue(any("match=second replacement=" in log for log in second["logs"]))
+        self.assertTrue(any("match= replacement=" in log for log in no_state["logs"]))
+
+        stream_statuses = {
+            entry["name"]: entry["runtime_status"]
+            for entry in session.fidelity["commands"]
+            if entry["name"].startswith("STREAM::")
+        }
+        self.assertEqual(
+            set(stream_statuses.values()),
+            {"semantic-mock"},
+        )
+
+    def test_stream_connection_settings_reset_after_close(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "STREAM"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/first"} {
+        STREAM::encoding utf-8
+        STREAM::disable
+    }
+    log local0. "[HTTP::uri] [set ::state::stream::encoding] [set ::state::stream::disabled]"
+}
+""",
+                "requests": [
+                    {"uri": "/first", "close_after": True},
+                    {"uri": "/second"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        first_logs = result["results"][0]["logs"]
+        second_logs = result["results"][1]["logs"]
+        self.assertTrue(any("/first utf-8 1" in log for log in first_logs))
+        self.assertTrue(any("/second ascii 0" in log for log in second_logs))
+
+    def test_stream_max_matchsize_rejects_non_positive_values(self) -> None:
+        for value in ("0", "-1"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, "positive integer"):
+                    self.adapter.run_scenario(
+                        {
+                            "profiles": ["TCP", "HTTP", "STREAM"],
+                            "irule": f"when HTTP_REQUEST {{ STREAM::max_matchsize {value} }}",
+                            "requests": [{"uri": "/invalid"}],
+                        },
+                        tcl_lsp_root=self.tcl_lsp_root,
+                    )
 
     def test_http2_push_records_promise_and_inline_response_metadata(self) -> None:
         result = self.adapter.run_scenario(

@@ -538,6 +538,18 @@ namespace eval ::itest::semantic {
             variable pseudo_headers {}
     }
 
+    namespace eval ::state::stream {
+        variable match ""
+        variable encoding ascii
+        variable expression ""
+        variable max_matchsize 4096
+        variable enabled 1
+        variable disabled 0
+        variable replacement ""
+        variable replacement_requested 0
+        variable replaced 0
+    }
+
     namespace eval ::state::mqtt {
         variable type ""
         variable protocol_name "MQTT"
@@ -10745,6 +10757,93 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc stream_prepare_event {} {
+        set ::state::stream::match ""
+        set ::state::stream::replacement ""
+        set ::state::stream::replacement_requested 0
+        set ::state::stream::replaced 0
+    }
+
+    proc stream_reset_connection {} {
+        set ::state::stream::match ""
+        set ::state::stream::encoding ascii
+        set ::state::stream::expression ""
+        set ::state::stream::max_matchsize 4096
+        set ::state::stream::enabled 1
+        set ::state::stream::disabled 0
+        stream_prepare_event
+    }
+
+    proc stream_disable_command {args} {
+        if {[llength $args] != 0} { error "STREAM::disable takes no arguments" }
+        set ::state::stream::enabled 0
+        set ::state::stream::disabled 1
+        ::itest::log_decision stream disable
+        return ""
+    }
+
+    proc stream_enable_command {args} {
+        if {[llength $args] != 0} { error "STREAM::enable takes no arguments" }
+        set ::state::stream::enabled 1
+        set ::state::stream::disabled 0
+        ::itest::log_decision stream enable
+        return ""
+    }
+
+    proc stream_encoding_command {args} {
+        if {[llength $args] != 1 || [lindex $args 0] ni {ascii utf-8 unicode}} {
+            error "STREAM::encoding requires ascii, utf-8, or unicode"
+        }
+        set ::state::stream::encoding [lindex $args 0]
+        ::itest::log_decision stream encoding $::state::stream::encoding
+        return ""
+    }
+
+    proc stream_expression_command {args} {
+        if {[llength $args] != 1 || [string first "\x00" [lindex $args 0]] >= 0} {
+            error "STREAM::expression requires one expression without NUL bytes"
+        }
+        set ::state::stream::expression [lindex $args 0]
+        ::itest::log_decision stream expression $::state::stream::expression
+        return ""
+    }
+
+    proc stream_match_command {args} {
+        if {[llength $args] != 0} { error "STREAM::match takes no arguments" }
+        return $::state::stream::match
+    }
+
+    proc stream_max_matchsize_command {args} {
+        if {[llength $args] != 1 || ![string is integer -strict [lindex $args 0]]} {
+            error "STREAM::max_matchsize requires a positive integer"
+        }
+        set value [lindex $args 0]
+        if {$value < 1} {
+            error "STREAM::max_matchsize must be a positive integer"
+        }
+        set ::state::stream::max_matchsize $value
+        ::itest::log_decision stream max_matchsize $value
+        return ""
+    }
+
+    proc stream_replace_command {args} {
+        if {[llength $args] > 1} { error "STREAM::replace accepts an optional target string" }
+        if {[llength $args] == 0} {
+            set ::state::stream::replacement ""
+            set ::state::stream::replacement_requested 0
+            return ""
+        }
+        set value [lindex $args 0]
+        if {[string first "\x00" $value] >= 0} {
+            error "STREAM::replace target cannot contain NUL bytes"
+        }
+        set ::state::stream::replacement $value
+        set ::state::stream::replacement_requested 1
+        set ::state::stream::replaced 1
+        ::itest::log_decision stream replace $value
+        return ""
+    }
+
     # ── TLS/SSL inspection and control semantics ─────────────────────
     proc _ssl_namespace {{side ""}} {
         if {$side eq "serverside" || [string match "SERVERSSL_*" $::itest::current_event] ||
@@ -13512,6 +13611,13 @@ foreach {name proc_name} {
     HTTP2::push ::itest::semantic::http2_push_command
     HTTP2::stream ::itest::semantic::http2_stream_command
     HTTP2::version ::itest::semantic::http2_version_command
+    STREAM::disable ::itest::semantic::stream_disable_command
+    STREAM::enable ::itest::semantic::stream_enable_command
+    STREAM::encoding ::itest::semantic::stream_encoding_command
+    STREAM::expression ::itest::semantic::stream_expression_command
+    STREAM::match ::itest::semantic::stream_match_command
+    STREAM::max_matchsize ::itest::semantic::stream_max_matchsize_command
+    STREAM::replace ::itest::semantic::stream_replace_command
     class ::itest::cmd::cmd_class
     MQTT::clean_session ::itest::cmd::mqtt_clean_session
     MQTT::client_id ::itest::cmd::mqtt_client_id

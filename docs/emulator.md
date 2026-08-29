@@ -600,6 +600,15 @@ does not implement live flow-control negotiation, server push emission, or
 HTTP/2 detection inside encrypted TLS payloads or arbitrary TCP streams that
 do not begin with the prior-knowledge preface.
 
+`STREAM_MATCHED` can be fired directly with a structured `stream.match` value.
+The TMOS 17.5 `STREAM::*` surface then models connection-scoped enable/disable,
+encoding, expression, and maximum-match-size settings, plus the current
+one-shot replacement request. The resulting stream state and decisions are
+returned with the event. This slice does not scan raw TCP payloads for stream
+matches, schedule partial matches across packets, tear down an over-limit
+connection, or mutate forwarded wire bytes; callers provide the match that
+would have been found by a production stream filter.
+
 ```json
 {
   "profiles": ["TCP", "HTTP"],
