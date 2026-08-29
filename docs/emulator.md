@@ -323,6 +323,16 @@ with unknown methods returning an empty string. Histories are capped at 1024
 entries. This does not launch an iRulesLX Node.js worker or attempt to model
 extension process scheduling, IPC, or network failures.
 
+The NSH layer models the six TMOS 17.5 `NSH::*` commands as connection-scoped
+state. `NSH::chain` stores a direction-specific chain name; `NSH::context`,
+`NSH::path_id`, and `NSH::service_index` provide bounded unsigned field
+access; `NSH::md1` stores binary-safe metadata; and `NSH::mocksf` records the
+mock-service-function option. The resulting state is available under
+`semantic.nsh`, and unset context, path, and service values read as `0` while
+unset metadata reads as an empty value. Metadata is bounded to 16 MiB by the
+portable adapter. This is a rule-behavior model: it does not perform NSH
+encapsulation, service-function forwarding, or wire-level packet mutation.
+
 The ADAPT layer models the 17.5 request/response static and dynamic context
 surface. `ADAPT::context_create` returns deterministic opaque handles whose
 attributes inherit from the static context; the remaining ADAPT commands can

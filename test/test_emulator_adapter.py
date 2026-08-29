@@ -1856,7 +1856,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("CRYPTO", "generated-stub"), queue_buckets)
         self.assertNotIn(("ASN1", "generated-stub"), queue_buckets)
         self.assertNotIn(("ILX", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 101)
+        self.assertNotIn(("NSH", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 95)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -4595,6 +4596,107 @@ when HTTP_REQUEST {
                     scenario["request"]["headers"] = {"Content-Length": "bad"}
                     with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
                         self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+    def test_nsh_stateful_fields_and_connection_scope(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[NSH::path_id clientside_ingress] == 0} {
+        if {[HTTP::uri] eq "/first"} {
+            NSH::path_id clientside_ingress 10
+        } else {
+            NSH::path_id clientside_ingress 20
+        }
+        NSH::chain serverside_egress chain-a
+        NSH::context 1 serverside_egress 1111
+        NSH::md1 serverside_egress 1 4 [binary format H* 00ff1020]
+        NSH::mocksf
+        NSH::service_index serverside_egress 7
+    }
+    log local0. "path=[NSH::path_id clientside_ingress] service=[NSH::service_index serverside_egress] context=[NSH::context 1 serverside_egress] md1=[b64encode [NSH::md1 serverside_egress 1 4]]"
+}
+""",
+                "requests": [
+                    {"uri": "/first"},
+                    {"uri": "/same"},
+                    {"uri": "/second", "close_before": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        logs = [result["results"][index]["logs"] for index in range(3)]
+        self.assertTrue(any("path=10 service=7 context=1111 md1=AP8QIA==" in entry for entry in logs[0]))
+        self.assertTrue(any("path=10 service=7 context=1111 md1=AP8QIA==" in entry for entry in logs[1]))
+        self.assertTrue(any("path=20 service=7 context=1111 md1=AP8QIA==" in entry for entry in logs[2]))
+
+        first_nsh = result["results"][0]["semantic"]["nsh"]
+        second_nsh = result["results"][1]["semantic"]["nsh"]
+        third_nsh = result["results"][2]["semantic"]["nsh"]
+        for nsh_state, path_id in ((first_nsh, 10), (second_nsh, 10), (third_nsh, 20)):
+            self.assertEqual(nsh_state["chains"], [{"direction": "serverside_egress", "chain": "chain-a"}])
+            self.assertEqual(nsh_state["contexts"], [{"index": 1, "direction": "serverside_egress", "context": 1111}])
+            self.assertEqual(nsh_state["md1"], [{
+                "direction": "serverside_egress",
+                "offset": 1,
+                "length": 4,
+                "metadata_base64": "AP8QIA==",
+            }])
+            self.assertTrue(nsh_state["mocksf"])
+            self.assertEqual(nsh_state["path_ids"], [{"direction": "clientside_ingress", "value": path_id}])
+            self.assertEqual(nsh_state["service_indices"], [{"direction": "serverside_egress", "value": 7}])
+
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in (
+            "NSH::chain", "NSH::context", "NSH::md1", "NSH::mocksf",
+            "NSH::path_id", "NSH::service_index",
+        ):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+    def test_nsh_unset_values_and_bounds(self) -> None:
+        defaults = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { log local0. \"context=[NSH::context 1 clientside_ingress] md1=[b64encode [NSH::md1 clientside_ingress 0 0]] path=[NSH::path_id clientside_ingress] service=[NSH::service_index clientside_ingress]\" }",
+                "request": {"uri": "/"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any(
+            "context=0 md1= path=0 service=0" in entry
+            for entry in defaults["results"][0]["logs"]
+        ))
+
+        for irule, message in (
+            (
+                "when HTTP_REQUEST { NSH::context 1 invalid 2 }",
+                "NSH::context direction must be clientside_ingress, clientside_egress, serverside_ingress, or serverside_egress",
+            ),
+            (
+                "when HTTP_REQUEST { NSH::md1 clientside_ingress 0 2 [binary format H* 00] }",
+                "NSH::md1 metadata length must equal the requested length",
+            ),
+            (
+                "when HTTP_REQUEST { NSH::path_id clientside_ingress 16777216 }",
+                "NSH::path_id value must be an unsigned integer from 0 to 16777215",
+            ),
+            (
+                "when HTTP_REQUEST { NSH::service_index clientside_ingress 256 }",
+                "NSH::service_index value must be an unsigned integer from 0 to 255",
+            ),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, message
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "request": {"uri": "/"},
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
 
     def test_aes_key_encrypt_decrypt_round_trip_and_validation(self) -> None:
         result = self.adapter.run_scenario(

@@ -1459,6 +1459,12 @@ SEMANTIC_MOCK_COMMANDS = {
     "ISTATS::set",
     "ntohl",
     "ntohs",
+    "NSH::chain",
+    "NSH::context",
+    "NSH::md1",
+    "NSH::mocksf",
+    "NSH::path_id",
+    "NSH::service_index",
     "ONECONNECT::detach",
     "ONECONNECT::label",
     "ONECONNECT::reuse",
@@ -3124,6 +3130,126 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "args": _split_tcl_list(parts[4]),
         })
     ilx = {"handles": ilx_handles, "calls": ilx_calls, "notifies": ilx_notifies}
+    nsh_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::nsh_snapshot")
+    )
+    if len(nsh_parts) % 2:
+        raise EmulatorInputError("invalid NSH state")
+    nsh_keys = nsh_parts[::2]
+    if len(set(nsh_keys)) != len(nsh_keys):
+        raise EmulatorInputError("duplicate NSH state field")
+    nsh_values = dict(zip(nsh_keys, nsh_parts[1::2]))
+    expected_nsh_fields = {
+        "chains", "contexts", "md1", "mocksf", "path_ids", "service_indices",
+    }
+    if set(nsh_values) != expected_nsh_fields:
+        raise EmulatorInputError("invalid NSH state fields")
+    nsh_directions = {
+        "clientside_ingress", "clientside_egress",
+        "serverside_ingress", "serverside_egress",
+    }
+    nsh_chains: list[dict[str, str]] = []
+    seen_nsh_chain_directions: set[str] = set()
+    for raw_chain in _split_tcl_list(nsh_values["chains"]):
+        parts = _split_tcl_list(raw_chain)
+        if (
+            len(parts) != 2
+            or parts[0] not in nsh_directions
+            or parts[0] in seen_nsh_chain_directions
+            or not parts[1]
+        ):
+            raise EmulatorInputError("invalid NSH chain state")
+        seen_nsh_chain_directions.add(parts[0])
+        nsh_chains.append({"direction": parts[0], "chain": parts[1]})
+
+    nsh_contexts: list[dict[str, Any]] = []
+    seen_nsh_contexts: set[tuple[int, str]] = set()
+    for raw_context in _split_tcl_list(nsh_values["contexts"]):
+        parts = _split_tcl_list(raw_context)
+        if len(parts) != 3 or parts[1] not in nsh_directions:
+            raise EmulatorInputError("invalid NSH context state")
+        try:
+            index, context = int(parts[0]), int(parts[2])
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid NSH context numeric state") from None
+        if not 0 <= index <= 0xFFFFFFFF or not 0 <= context <= 0xFFFFFFFF:
+            raise EmulatorInputError("invalid NSH context numeric state")
+        context_key = (index, parts[1])
+        if context_key in seen_nsh_contexts:
+            raise EmulatorInputError("duplicate NSH context state")
+        seen_nsh_contexts.add(context_key)
+        nsh_contexts.append({
+            "index": index,
+            "direction": parts[1],
+            "context": context,
+        })
+
+    nsh_md1: list[dict[str, Any]] = []
+    seen_nsh_md1: set[tuple[str, int, int]] = set()
+    for raw_md1 in _split_tcl_list(nsh_values["md1"]):
+        parts = _split_tcl_list(raw_md1)
+        if len(parts) != 4 or parts[0] not in nsh_directions:
+            raise EmulatorInputError("invalid NSH md1 state")
+        try:
+            offset, length = int(parts[1]), int(parts[2])
+            encoded_metadata = parts[3].encode("ascii")
+            metadata = base64.b64decode(encoded_metadata, validate=True)
+        except (binascii.Error, UnicodeError, TypeError, ValueError):
+            raise EmulatorInputError("invalid NSH md1 metadata state") from None
+        if (
+            not 0 <= offset <= 0xFFFFFFFF
+            or not 0 <= length <= 16 * 1024 * 1024
+            or len(metadata) != length
+            or base64.b64encode(metadata).decode("ascii") != parts[3]
+        ):
+            raise EmulatorInputError("invalid NSH md1 metadata state")
+        md1_key = (parts[0], offset, length)
+        if md1_key in seen_nsh_md1:
+            raise EmulatorInputError("duplicate NSH md1 state")
+        seen_nsh_md1.add(md1_key)
+        nsh_md1.append({
+            "direction": parts[0],
+            "offset": offset,
+            "length": length,
+            "metadata_base64": parts[3],
+        })
+
+    if nsh_values["mocksf"] not in {"0", "1"}:
+        raise EmulatorInputError("invalid NSH mocksf state")
+
+    def parse_nsh_direction_values(
+        raw_values: str, field_name: str, maximum: int
+    ) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        seen_directions: set[str] = set()
+        for raw_value in _split_tcl_list(raw_values):
+            parts = _split_tcl_list(raw_value)
+            if (
+                len(parts) != 2
+                or parts[0] not in nsh_directions
+                or parts[0] in seen_directions
+            ):
+                raise EmulatorInputError(f"invalid NSH {field_name} state")
+            try:
+                value = int(parts[1])
+            except (TypeError, ValueError):
+                raise EmulatorInputError(f"invalid NSH {field_name} numeric state") from None
+            if not 0 <= value <= maximum:
+                raise EmulatorInputError(f"invalid NSH {field_name} numeric state")
+            seen_directions.add(parts[0])
+            result.append({"direction": parts[0], "value": value})
+        return result
+
+    nsh = {
+        "chains": nsh_chains,
+        "contexts": nsh_contexts,
+        "md1": nsh_md1,
+        "mocksf": nsh_values["mocksf"] == "1",
+        "path_ids": parse_nsh_direction_values(nsh_values["path_ids"], "path ID", 0xFFFFFF),
+        "service_indices": parse_nsh_direction_values(
+            nsh_values["service_indices"], "service index", 0xFF
+        ),
+    }
     adapt_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::adapt_snapshot")
     )
@@ -3952,6 +4078,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "bwc": bwc,
         "ipfix": ipfix,
         "ilx": ilx,
+        "nsh": nsh,
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "lb": lb_control,
@@ -11683,6 +11810,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::compression_reset_connection")
                 session.eval_tcl("::itest::semantic::httplog_reset_connection")
             session.eval_tcl("::itest::semantic::ilx_reset_connection")
+            session.eval_tcl("::itest::semantic::nsh_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         if not self._connection_open:

@@ -256,6 +256,15 @@ Handles, calls, and notifications are exposed under `semantic.ilx` with
 bounded 1024-entry histories. No Node.js extension worker or networked ILX
 runtime is started by the emulator.
 
+The six catalogued TMOS 17.5 `NSH::*` commands are modeled as connection-
+scoped rule state. `NSH::chain` records a direction-specific chain name;
+`NSH::context`, `NSH::path_id`, and `NSH::service_index` validate and retain
+their unsigned header fields; `NSH::md1` stores binary-safe metadata by
+direction, offset, and length; and `NSH::mocksf` records the mock-service-
+function switch. The state is exposed under `semantic.nsh` and resets at a
+connection boundary. This does not encapsulate packets, forward traffic
+through a service-function chain, or emulate an NSH-aware TMM data path.
+
 The complete TMOS 17.5 `BWC::` family is represented by deterministic
 connection-scoped flow state. Policy attachment, category assignment, rate and
 PPS overrides, TOS/QoS marks, priority weights, debug state, and measurement

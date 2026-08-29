@@ -34,6 +34,13 @@ namespace eval ::itest::semantic {
     variable ilx_calls {}
     variable ilx_notifies {}
     variable ilx_max_messages 1024
+    variable nsh_chains {}
+    variable nsh_contexts {}
+    variable nsh_md1 {}
+    variable nsh_mocksf 0
+    variable nsh_path_ids {}
+    variable nsh_service_indices {}
+    variable nsh_max_bytes 16777216
     variable hsl_handles
     array set hsl_handles {}
     variable hsl_messages {}
@@ -12276,6 +12283,7 @@ namespace eval ::itest::semantic {
         set asn1_elements {}
         set asn1_counter 0
         ilx_reset_connection
+        nsh_reset_connection
     }
 
     proc ilx_reset_connection {} {
@@ -12287,6 +12295,145 @@ namespace eval ::itest::semantic {
         set ilx_handle_counter 0
         set ilx_calls {}
         set ilx_notifies {}
+    }
+
+    proc nsh_reset_connection {} {
+        variable nsh_chains
+        variable nsh_contexts
+        variable nsh_md1
+        variable nsh_mocksf
+        variable nsh_path_ids
+        variable nsh_service_indices
+        set nsh_chains {}
+        set nsh_contexts {}
+        set nsh_md1 {}
+        set nsh_mocksf 0
+        set nsh_path_ids {}
+        set nsh_service_indices {}
+    }
+
+    proc _nsh_direction {value command_name} {
+        if {$value ni {clientside_ingress clientside_egress serverside_ingress serverside_egress}} {
+            error "$command_name direction must be clientside_ingress, clientside_egress, serverside_ingress, or serverside_egress"
+        }
+        return $value
+    }
+
+    proc _nsh_unsigned {value maximum command_name} {
+        if {![string is integer -strict $value] || $value < 0 || $value > $maximum} {
+            error "$command_name value must be an unsigned integer from 0 to $maximum"
+        }
+        return $value
+    }
+
+    proc nsh_chain_command {args} {
+        variable nsh_chains
+        if {[llength $args] != 2} { error "NSH::chain requires direction and chain name" }
+        set direction [_nsh_direction [lindex $args 0] NSH::chain]
+        set chain [lindex $args 1]
+        if {$chain eq "" || [string first "\x00" $chain] >= 0} { error "NSH::chain name must be non-empty and contain no NUL" }
+        dict set nsh_chains $direction $chain
+        ::itest::log_decision nsh chain [list $direction $chain]
+        return ""
+    }
+
+    proc nsh_context_command {args} {
+        variable nsh_contexts
+        if {[llength $args] ni {2 3}} { error "NSH::context requires index, direction, and optional context" }
+        set index [_nsh_unsigned [lindex $args 0] 4294967295 NSH::context]
+        set direction [_nsh_direction [lindex $args 1] NSH::context]
+        set key "$index|$direction"
+        if {[llength $args] == 2} {
+            if {![dict exists $nsh_contexts $key]} { return 0 }
+            return [dict get $nsh_contexts $key]
+        }
+        set context [_nsh_unsigned [lindex $args 2] 4294967295 NSH::context]
+        dict set nsh_contexts $key $context
+        ::itest::log_decision nsh context [list $index $direction $context]
+        return ""
+    }
+
+    proc nsh_md1_command {args} {
+        variable nsh_md1
+        variable nsh_max_bytes
+        if {[llength $args] ni {3 4}} { error "NSH::md1 requires direction, offset, length, and optional metadata" }
+        set direction [_nsh_direction [lindex $args 0] NSH::md1]
+        set offset [_nsh_unsigned [lindex $args 1] 4294967295 NSH::md1]
+        set length [_nsh_unsigned [lindex $args 2] $nsh_max_bytes NSH::md1]
+        set key "$direction|$offset|$length"
+        if {[llength $args] == 3} {
+            if {![dict exists $nsh_md1 $key]} { return "" }
+            return [dict get $nsh_md1 $key]
+        }
+        set metadata [lindex $args 3]
+        if {[string length $metadata] != $length} {
+            error "NSH::md1 metadata length must equal the requested length"
+        }
+        dict set nsh_md1 $key $metadata
+        ::itest::log_decision nsh md1 [list $direction $offset $length]
+        return ""
+    }
+
+    proc nsh_mocksf_command {args} {
+        variable nsh_mocksf
+        if {[llength $args] != 0} { error "NSH::mocksf takes no arguments" }
+        set nsh_mocksf 1
+        ::itest::log_decision nsh mocksf
+        return ""
+    }
+
+    proc nsh_path_id_command {args} {
+        variable nsh_path_ids
+        if {[llength $args] ni {1 2}} { error "NSH::path_id requires direction and optional path ID" }
+        set direction [_nsh_direction [lindex $args 0] NSH::path_id]
+        if {[llength $args] == 1} {
+            if {![dict exists $nsh_path_ids $direction]} { return 0 }
+            return [dict get $nsh_path_ids $direction]
+        }
+        set path_id [_nsh_unsigned [lindex $args 1] 16777215 NSH::path_id]
+        dict set nsh_path_ids $direction $path_id
+        ::itest::log_decision nsh path_id [list $direction $path_id]
+        return ""
+    }
+
+    proc nsh_service_index_command {args} {
+        variable nsh_service_indices
+        if {[llength $args] ni {1 2}} { error "NSH::service_index requires direction and optional service index" }
+        set direction [_nsh_direction [lindex $args 0] NSH::service_index]
+        if {[llength $args] == 1} {
+            if {![dict exists $nsh_service_indices $direction]} { return 0 }
+            return [dict get $nsh_service_indices $direction]
+        }
+        set service_index [_nsh_unsigned [lindex $args 1] 255 NSH::service_index]
+        dict set nsh_service_indices $direction $service_index
+        ::itest::log_decision nsh service_index [list $direction $service_index]
+        return ""
+    }
+
+    proc nsh_snapshot {} {
+        variable nsh_chains
+        variable nsh_contexts
+        variable nsh_md1
+        variable nsh_mocksf
+        variable nsh_path_ids
+        variable nsh_service_indices
+        set chains {}
+        dict for {direction chain} $nsh_chains { lappend chains [list $direction $chain] }
+        set contexts {}
+        dict for {key context} $nsh_contexts {
+            lassign [split $key |] index direction
+            lappend contexts [list $index $direction $context]
+        }
+        set md1 {}
+        dict for {key metadata} $nsh_md1 {
+            lassign [split $key |] direction offset length
+            lappend md1 [list $direction $offset $length [binary encode base64 $metadata]]
+        }
+        set paths {}
+        dict for {direction path_id} $nsh_path_ids { lappend paths [list $direction $path_id] }
+        set services {}
+        dict for {direction service_index} $nsh_service_indices { lappend services [list $direction $service_index] }
+        return [list chains $chains contexts $contexts md1 $md1 mocksf $nsh_mocksf path_ids $paths service_indices $services]
     }
 
     proc _ilx_handle {handle command_name} {
@@ -22467,6 +22614,12 @@ foreach {name proc_name} {
     ILX::call ::itest::semantic::ilx_call_command
     ILX::init ::itest::semantic::ilx_init_command
     ILX::notify ::itest::semantic::ilx_notify_command
+    NSH::chain ::itest::semantic::nsh_chain_command
+    NSH::context ::itest::semantic::nsh_context_command
+    NSH::md1 ::itest::semantic::nsh_md1_command
+    NSH::mocksf ::itest::semantic::nsh_mocksf_command
+    NSH::path_id ::itest::semantic::nsh_path_id_command
+    NSH::service_index ::itest::semantic::nsh_service_index_command
     AES::decrypt ::itest::semantic::aes_decrypt_command
     AES::encrypt ::itest::semantic::aes_encrypt_command
     AES::key ::itest::semantic::aes_key_command
