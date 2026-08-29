@@ -675,6 +675,13 @@ provide repeatable off-box results; F5 does not guarantee the same `fasthash`
 value across BIG-IP versions or reboots, so callers must not treat this as a
 bit-compatible TMM hash.
 
+### `rmd160`
+
+`rmd160` accepts exactly one value and returns the binary RIPEMD-160 digest,
+so it can be consumed by Tcl binary commands such as `binary encode hex` or
+`binary scan`. The digest is computed by the bounded Python standard-library
+bridge and is available in any event context supported by the catalog.
+
 ### AM acceleration metadata
 
 The seven catalogued `AM::*` commands are available with deterministic

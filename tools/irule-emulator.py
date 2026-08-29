@@ -1743,6 +1743,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "sha256",
     "sha384",
     "sha512",
+    "rmd160",
     "substr",
     "URI::basename",
     "URI::compare",

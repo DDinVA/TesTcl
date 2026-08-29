@@ -1907,7 +1907,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 44)
+        self.assertEqual(queue["command_count"], 43)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -9242,6 +9242,53 @@ when HTTP_REQUEST {
             try:
                 with self.assertRaisesRegex(
                     self.adapter.EmulatorInputError, "fasthash requires one value"
+                ):
+                    invalid.fire_event("HTTP_REQUEST")
+            finally:
+                invalid.close()
+
+    def test_rmd160_returns_binary_digest_for_one_value(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    log local0. "digest=[binary encode hex [rmd160 abc]]"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = session.fire_event("HTTP_REQUEST")
+            self.assertTrue(
+                any(
+                    "digest=8eb208f7e05d987a9b044a8e98c6b087f15a0bfc" in entry
+                    for entry in result["logs"]
+                )
+            )
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            self.assertEqual(usage["rmd160"]["runtime_status"], "semantic-mock")
+        finally:
+            session.close()
+
+        for invalid_rule in (
+            "when HTTP_REQUEST { rmd160 }",
+            "when HTTP_REQUEST { rmd160 one two }",
+        ):
+            invalid = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {"profiles": ["HTTP"], "irule": invalid_rule},
+                allow_irule_file=True,
+                allow_requests=False,
+                allow_packets=False,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError, "ripemd160 requires one value"
                 ):
                     invalid.fire_event("HTTP_REQUEST")
             finally:

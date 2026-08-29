@@ -449,6 +449,9 @@ The global `fasthash` command is modeled with one string argument and a
 deterministic non-negative 63-bit result. It is suitable for repeatable
 off-box tests, but is not expected to match BIG-IP's implementation-specific
 hash values.
+The global `rmd160` command is modeled as a one-value binary RIPEMD-160 digest
+using the existing bounded digest bridge. It does not add BIG-IP-specific
+digest behavior beyond the documented hash operation.
 The seven catalogued `AM::*` commands are represented by a deterministic
 acceleration-metadata layer: the six no-argument readers return caller-supplied
 metadata and `AM::disable` records connection-scoped disable state. The

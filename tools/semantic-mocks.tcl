@@ -21277,6 +21277,7 @@ namespace eval ::itest::semantic {
     }
 
     proc md5_command {args} { return [_digest_command md5 {*}$args] }
+    proc rmd160_command {args} { return [_digest_command ripemd160 {*}$args] }
     proc sha1_command {args} { return [_digest_command sha1 {*}$args] }
     proc sha256_command {args} { return [_digest_command sha256 {*}$args] }
     proc sha384_command {args} { return [_digest_command sha384 {*}$args] }
@@ -22759,6 +22760,7 @@ foreach {original replacement} {
     local_port local_port_command
     remote_addr remote_addr_command
     remote_port remote_port_command
+    rmd160 rmd160_command
     serverside serverside_command
     server_addr server_addr_command
     server_port server_port_command
