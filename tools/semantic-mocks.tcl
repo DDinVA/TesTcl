@@ -524,6 +524,25 @@ namespace eval ::itest::semantic {
         variable payload_length 0
     }
 
+    namespace eval ::state::ftp {
+        variable allow_active_mode disable
+        variable command ""
+        variable disabled 0
+        variable enabled 1
+        variable enforce_tls_session_reuse disable
+        variable ftps_mode allow
+        variable payload ""
+        variable payload_length 0
+        variable port_first 1024
+        variable port_last 65535
+        variable response_code 0
+        variable tls_active 0
+        variable tls_session_reused 0
+        variable type command
+        variable dropped 0
+        variable rejected 0
+    }
+
     namespace eval ::state::datagram {
         variable ip_version 4
         variable ip_tos 0
@@ -11638,6 +11657,114 @@ namespace eval ::itest::semantic {
     proc dhcpv6_reject_command {args} { return [dhcp_flag_command v6 reject {*}$args] }
     proc dhcpv6_transaction_id_command {args} { return [dhcp_field_command v6 transaction_id {*}$args] }
 
+    proc ftp_reset_connection {} {
+        foreach {name value} {
+            allow_active_mode disable
+            command ""
+            disabled 0
+            enabled 1
+            enforce_tls_session_reuse disable
+            ftps_mode allow
+            payload ""
+            payload_length 0
+            port_first 1024
+            port_last 65535
+            response_code 0
+            tls_active 0
+            tls_session_reused 0
+            type command
+            dropped 0
+            rejected 0
+        } {
+            set ::state::ftp::$name $value
+        }
+    }
+
+    proc ftp_prepare_event {} {
+        set ::state::ftp::dropped 0
+        set ::state::ftp::rejected 0
+    }
+
+    proc ftp_toggle_command {field command_name args} {
+        if {[llength $args] > 1} {
+            error "$command_name accepts zero or one argument"
+        }
+        set variable_name ::state::ftp::$field
+        if {[llength $args] == 0} {
+            return [set $variable_name]
+        }
+        set value [string tolower [lindex $args 0]]
+        if {$value ni {enable disable}} {
+            error "$command_name requires enable or disable"
+        }
+        set $variable_name $value
+        ::itest::log_decision ftp ${field}_set $value
+        return $value
+    }
+
+    proc ftp_disable_command {args} {
+        if {[llength $args] != 0} { error "FTP::disable takes no arguments" }
+        set ::state::ftp::enabled 0
+        set ::state::ftp::disabled 1
+        ::itest::log_decision ftp disable 1
+        return ""
+    }
+
+    proc ftp_enable_command {args} {
+        if {[llength $args] != 0} { error "FTP::enable takes no arguments" }
+        set ::state::ftp::enabled 1
+        set ::state::ftp::disabled 0
+        ::itest::log_decision ftp enable 1
+        return ""
+    }
+
+    proc ftp_allow_active_mode_command {args} {
+        return [ftp_toggle_command allow_active_mode FTP::allow_active_mode {*}$args]
+    }
+
+    proc ftp_enforce_tls_session_reuse_command {args} {
+        return [ftp_toggle_command enforce_tls_session_reuse FTP::enforce_tls_session_reuse {*}$args]
+    }
+
+    proc ftp_ftps_mode_command {args} {
+        if {[llength $args] > 1} {
+            error "FTP::ftps_mode accepts zero or one argument"
+        }
+        if {[llength $args] == 0} {
+            return $::state::ftp::ftps_mode
+        }
+        set mode [string tolower [lindex $args 0]]
+        if {$mode ni {disallow allow require}} {
+            error "FTP::ftps_mode requires disallow, allow, or require"
+        }
+        set ::state::ftp::ftps_mode $mode
+        ::itest::log_decision ftp ftps_mode $mode
+        return $mode
+    }
+
+    proc ftp_port_command {args} {
+        if {[llength $args] ni {1 2}} {
+            error "FTP::port requires FIRST and optional LAST"
+        }
+        set first [lindex $args 0]
+        set last $first
+        if {[llength $args] == 2} {
+            set last [lindex $args 1]
+        }
+        foreach {name value} [list FIRST $first LAST $last] {
+            if {![string is integer -strict $value] || $value < 1 || $value > 65535} {
+                error "FTP::port $name must be an integer from 1 to 65535"
+            }
+        }
+        if {$first > $last} {
+            error "FTP::port FIRST must not exceed LAST"
+        }
+        set ::state::ftp::port_first $first
+        set ::state::ftp::port_last $last
+        ::itest::log_decision ftp port [list $first $last]
+        return ""
+    }
+
     proc tcp_reset_transport {} {
         namespace eval ::state::tcp {
             set abc enable
@@ -16211,6 +16338,12 @@ foreach {name proc_name} {
     DHCPv6::peer_address ::itest::semantic::dhcpv6_peer_address_command
     DHCPv6::reject ::itest::semantic::dhcpv6_reject_command
     DHCPv6::transaction_id ::itest::semantic::dhcpv6_transaction_id_command
+    FTP::allow_active_mode ::itest::semantic::ftp_allow_active_mode_command
+    FTP::disable ::itest::semantic::ftp_disable_command
+    FTP::enable ::itest::semantic::ftp_enable_command
+    FTP::enforce_tls_session_reuse ::itest::semantic::ftp_enforce_tls_session_reuse_command
+    FTP::ftps_mode ::itest::semantic::ftp_ftps_mode_command
+    FTP::port ::itest::semantic::ftp_port_command
     peer ::itest::cmd::cmd_peer
     clientside ::itest::cmd::cmd_clientside
     serverside ::itest::cmd::cmd_serverside

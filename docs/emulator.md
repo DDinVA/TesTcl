@@ -99,6 +99,15 @@ an optional `options` object. `DHCPv4::option` supports lookup/set while
 the trace. The adapter fires the normal client/server data path and preserves
 option mutations as deterministic state. It does not parse raw DHCP wire
 formats, allocate leases, or emit real ICMP rejection packets.
+Structured FTP packet traces expose the TCP control-channel path through
+`CLIENT_ACCEPTED`, `CLIENT_DATA`, `SERVER_CONNECTED`, and `SERVER_DATA`. The
+six TMOS 17.5 `FTP::*` commands model active-mode enablement, FTP handler
+enable/disable, FTPS mode, TLS session-reuse enforcement, and passive-port
+range selection. Packet inputs may provide a control message type, command,
+response code, TLS flags, and text or hexadecimal payload; the adapter keeps
+the controls connection-scoped and records disabled processing in the trace.
+It does not parse FTP commands, open a data-channel socket, negotiate TLS, or
+allocate real passive ports.
 The ROUTE layer accepts scenario-seeded route-domain and congestion-metric
 entries. `ROUTE::age`, `ROUTE::bandwidth`, `ROUTE::cwnd`, `ROUTE::expiration`,
 `ROUTE::mtu`, `ROUTE::rtt`, and `ROUTE::rttvar` read deterministic entries, and

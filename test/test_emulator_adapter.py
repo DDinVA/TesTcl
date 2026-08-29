@@ -485,7 +485,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("DHCP", "generated-stub"), queue_buckets)
         self.assertNotIn(("DHCPV4", "generated-stub"), queue_buckets)
         self.assertNotIn(("DHCPV6", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 279)
+        self.assertNotIn(("FTP", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 273)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1026,6 +1027,104 @@ when CLIENT_DATA {
         self.assertEqual(data["state"]["dhcp"]["version"], "6")
         self.assertNotIn("18 relay-id", data["state"]["dhcpv6"]["options"])
         self.assertTrue(result["trace"][0]["dropped"])
+
+    def test_ftp_packet_controls_and_connection_lifecycle(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    FTP::allow_active_mode enable
+    FTP::enforce_tls_session_reuse enable
+    FTP::ftps_mode require
+    FTP::port 5000 5999
+}
+when CLIENT_DATA {
+    log local0. "client mode=[FTP::ftps_mode] active=[FTP::allow_active_mode] reuse=[FTP::enforce_tls_session_reuse]"
+}
+when SERVER_CONNECTED {
+    FTP::port 6000 6099
+}
+when SERVER_DATA {
+    log local0. "server mode=[FTP::ftps_mode]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "ftp",
+                        "source": {"address": "192.0.2.10", "port": 40000},
+                        "destination": {"address": "198.51.100.20", "port": 21},
+                        "type": "command",
+                        "command": "USER",
+                        "payload": "USER alice\r\n",
+                    },
+                    {
+                        "protocol": "ftp",
+                        "direction": "server_to_client",
+                        "source": {"address": "198.51.100.20", "port": 21},
+                        "destination": {"address": "192.0.2.10", "port": 40000},
+                        "type": "response",
+                        "response_code": 331,
+                        "payload_hex": "333331204e656564206163636f756e7420666f7220616c6963650d0a",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        client_data = next(
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] == "CLIENT_DATA"
+        )
+        server_data = next(
+            event
+            for event in result["trace"][1]["events"]
+            if event["event"] == "SERVER_DATA"
+        )
+        self.assertTrue(any("client mode=require active=enable reuse=enable" in line
+                            for line in client_data["logs"]))
+        self.assertEqual(client_data["state"]["ftp"]["port_first"], "5000")
+        self.assertEqual(server_data["state"]["ftp"]["type"], "response")
+        self.assertEqual(server_data["state"]["ftp"]["response_code"], "331")
+        self.assertEqual(server_data["state"]["ftp"]["port_first"], "6000")
+        self.assertEqual(server_data["state"]["ftp"]["port_last"], "6099")
+
+        disabled = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": "when CLIENT_DATA { FTP::disable }",
+                "packets": [
+                    {"protocol": "ftp", "payload": "first"},
+                    {"protocol": "ftp", "payload": "second"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(disabled["trace"][0]["disabled"])
+        self.assertEqual(disabled["trace"][1]["ignored"], "FTP processing is disabled")
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "FIRST must not exceed LAST"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP"],
+                    "irule": "when CLIENT_ACCEPTED { FTP::port 6000 5000 }",
+                    "packets": [{"protocol": "ftp", "payload": "noop"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "must use payload or payload_hex"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP"],
+                    "irule": "when CLIENT_DATA { log local0. ok }",
+                    "packets": [{
+                        "protocol": "ftp",
+                        "payload": "text",
+                        "payload_hex": "74657874",
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_post_tmos_17_5_features_are_reported_and_rejected(self) -> None:
         with self.assertRaisesRegex(

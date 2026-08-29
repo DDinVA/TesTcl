@@ -85,6 +85,13 @@ surfaces for structured client/server data events, DHCP header readers, option
 lookup/mutation, and drop/reject decisions. DHCPv6 option deletion is modeled
 explicitly. It does not parse raw DHCP messages, run a lease allocator, or
 send real ICMP rejection traffic.
+The FTP adapter models the six 17.5 `FTP::*` controls for structured TCP
+control-channel traces, including active-mode permission, FTP handler state,
+FTPS activation mode, TLS session-reuse enforcement, and passive-port range
+selection. It dispatches the client-accepted, client-data, server-connected,
+and server-data path and preserves those controls across messages on one
+connection. It does not parse FTP commands, negotiate TLS, create a data
+channel, or allocate live passive ports.
 The TMOS 17.5 `ROUTE::*` surface uses scenario-seeded route-domain and
 congestion-metric entries. Metric getters return deterministic values and
 `ROUTE::clear` removes a matching entry for the session; connection lifecycle
