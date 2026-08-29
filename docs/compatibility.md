@@ -289,6 +289,12 @@ parse X.509 certificates, or process IPsec packets. `IKE_AUTH` is included as
 a transparent 17.5 event compatibility override because it is documented by
 F5 but absent from the pinned tcl-lsp event registry.
 
+The three catalogued TMOS 17.5 `QOE::*` commands are modeled for direct
+`QOE_PARSE_DONE` and `CLIENT_CLOSED` events. `QOE::video` reads caller-supplied
+video measurements, while `QOE::enable` and `QOE::disable` update a
+connection-scoped enable flag exposed under `semantic.qoe`. The model does not
+parse media, calculate quality scores, or emulate a live QOE engine.
+
 The legacy XML command family is intentionally not implemented for the
 TMOS 17.5 target. F5 documents those commands and XML events as unavailable
 beginning in v10, except for `XML_CONTENT_BASED_ROUTING`; the catalog retains

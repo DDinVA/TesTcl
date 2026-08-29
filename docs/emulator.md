@@ -1529,6 +1529,15 @@ The pinned tcl-lsp registry does not currently list `IKE_AUTH`, so the
 emulator reports it as a documented TMOS 17.5 event compatibility override in
 the catalog metadata. See the F5 [`IKE` reference](https://clouddocs.f5.com/api/irules/IKE.html)
 and [`IKE_AUTH` event reference](https://clouddocs.f5.com/api/irules/IKE_AUTH.html).
+The QOE surface is available through direct `QOE_PARSE_DONE` and
+`CLIENT_CLOSED` events. Supply a `qoe` object with video measurements such as
+`width`, `height`, `duration`, `available`, `framerate`, `nominal_bitrate`,
+`average_bitrate`, and `mos`; `QOE::video` exposes those values only in its
+documented event contexts. `QOE::enable` and `QOE::disable` update a
+connection-scoped control flag, returned under `semantic.qoe`. This is a
+deterministic metric/control model: it does not parse media, calculate MOS,
+or reproduce a live QOE engine. See the F5
+[`QOE::video`](https://clouddocs.f5.com/api/irules/QOE__video.html) reference.
 Diameter support is pinned to the 17.5 catalog. Structured
 `protocol: "diameter"` packets and raw Diameter-over-TCP packets drive
 `DIAMETER_INGRESS` or `DIAMETER_EGRESS`; a packet with the retransmit flag also

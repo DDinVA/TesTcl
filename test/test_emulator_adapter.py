@@ -1870,9 +1870,10 @@ when HTTP_REQUEST {
         self.assertNotIn(("SIPALG", "generated-stub"), queue_buckets)
         self.assertNotIn(("REST", "generated-stub"), queue_buckets)
         self.assertNotIn(("TDS", "generated-stub"), queue_buckets)
+        self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 58)
+        self.assertEqual(queue["command_count"], 55)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -8827,6 +8828,109 @@ when IKE_AUTH {
             result["state"]["ike"]["subjectAltName"],
             "DNS:vpn.example.test,email:vpn@example.test",
         )
+
+    def test_qoe_commands_model_video_metrics_and_connection_control(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["QOE"],
+                "irule": """
+when QOE_PARSE_DONE {
+    log local0. "video=[QOE::video width]/[QOE::video height]/[QOE::video duration]/[QOE::video available]/[QOE::video framerate]/[QOE::video nominal_bitrate]/[QOE::video average_bitrate]/[QOE::video mos]"
+    QOE::disable
+}
+when CLIENT_CLOSED {
+    log local0. "available=[QOE::video available]"
+    QOE::enable
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            parsed = session.fire_event(
+                "QOE_PARSE_DONE",
+                {
+                    "qoe": {
+                        "width": 1920,
+                        "height": 1080,
+                        "duration": "00:01:30",
+                        "available": True,
+                        "framerate": "59.94",
+                        "nominal_bitrate": 8000000,
+                        "average_bitrate": 6500000,
+                        "mos": "4.7",
+                    }
+                },
+            )
+            closed = session.fire_event(
+                "CLIENT_CLOSED",
+                {"qoe": {"available": False}},
+            )
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            for command in ("QOE::disable", "QOE::enable", "QOE::video"):
+                self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+        finally:
+            session.close()
+
+        self.assertTrue(
+            any(
+                "video=1920/1080/00:01:30/1/59.94/8000000/6500000/4.7" in entry
+                for entry in parsed["logs"]
+            )
+        )
+        self.assertTrue(any("available=0" in entry for entry in closed["logs"]))
+        self.assertEqual(parsed["semantic"]["qoe"]["enabled"], False)
+        self.assertEqual(parsed["semantic"]["qoe"]["video"]["available"], "1")
+        self.assertEqual(closed["semantic"]["qoe"]["enabled"], True)
+        self.assertEqual(closed["semantic"]["qoe"]["video"]["available"], "0")
+
+        fresh = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {"profiles": ["QOE"], "irule": "when QOE_PARSE_DONE { QOE::disable }"},
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            reset = fresh.fire_event("QOE_PARSE_DONE")
+        finally:
+            fresh.close()
+        self.assertEqual(reset["semantic"]["qoe"]["enabled"], False)
+
+        for irule, event, message in (
+            (
+                "when QOE_PARSE_DONE { QOE::video bitrate }",
+                "QOE_PARSE_DONE",
+                "QOE::video field is invalid",
+            ),
+            (
+                "when QOE_PARSE_DONE { QOE::video width height }",
+                "QOE_PARSE_DONE",
+                "QOE::video requires width",
+            ),
+            (
+                "when CLIENT_ACCEPTED { QOE::video width }",
+                "CLIENT_ACCEPTED",
+                "QOE::video is not valid during CLIENT_ACCEPTED",
+            ),
+        ):
+            invalid = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {"profiles": ["QOE"], "irule": irule},
+                allow_irule_file=True,
+                allow_requests=False,
+                allow_packets=False,
+            )
+            try:
+                with self.subTest(message=message), self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError, message
+                ):
+                    invalid.fire_event(event)
+            finally:
+                invalid.close()
 
     def test_sdp_commands_model_fields_media_and_session_id(self) -> None:
         session = self.adapter.EmulatorSession(

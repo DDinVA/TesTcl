@@ -624,6 +624,18 @@ namespace eval ::itest::semantic {
         variable version ""
     }
 
+    namespace eval ::state::qoe {
+        variable enabled 1
+        variable width 0
+        variable height 0
+        variable duration 0
+        variable available 0
+        variable framerate 0
+        variable nominal_bitrate 0
+        variable average_bitrate 0
+        variable mos 0
+    }
+
     namespace eval ::state::ike {
         variable auth_success 0
         variable cert ""
@@ -3774,6 +3786,63 @@ namespace eval ::itest::semantic {
 
     proc ike_subject_alt_name_command {args} {
         return [ike_san_command subjectAltName IKE::subjectAltName {*}$args]
+    }
+
+    proc qoe_reset_connection {} {
+        set ::state::qoe::enabled 1
+        set ::state::qoe::width 0
+        set ::state::qoe::height 0
+        set ::state::qoe::duration 0
+        set ::state::qoe::available 0
+        set ::state::qoe::framerate 0
+        set ::state::qoe::nominal_bitrate 0
+        set ::state::qoe::average_bitrate 0
+        set ::state::qoe::mos 0
+    }
+
+    proc qoe_enable_command {args} {
+        if {[llength $args] != 0} {
+            error "QOE::enable takes no arguments"
+        }
+        set ::state::qoe::enabled 1
+        ::itest::log_decision qoe enable 1
+        return ""
+    }
+
+    proc qoe_disable_command {args} {
+        if {[llength $args] != 0} {
+            error "QOE::disable takes no arguments"
+        }
+        set ::state::qoe::enabled 0
+        ::itest::log_decision qoe disable 1
+        return ""
+    }
+
+    proc qoe_video_command {args} {
+        if {$::itest::current_event ni {QOE_PARSE_DONE CLIENT_CLOSED}} {
+            error "QOE::video is not valid during $::itest::current_event"
+        }
+        if {[llength $args] != 1} {
+            error "QOE::video requires width, height, duration, available, framerate, nominal_bitrate, average_bitrate, or mos"
+        }
+        set field [lindex $args 0]
+        if {$field ni {width height duration available framerate nominal_bitrate average_bitrate mos}} {
+            error "QOE::video field is invalid"
+        }
+        return [set ::state::qoe::$field]
+    }
+
+    proc qoe_snapshot {} {
+        return [list \
+            enabled $::state::qoe::enabled \
+            width $::state::qoe::width \
+            height $::state::qoe::height \
+            duration $::state::qoe::duration \
+            available $::state::qoe::available \
+            framerate $::state::qoe::framerate \
+            nominal_bitrate $::state::qoe::nominal_bitrate \
+            average_bitrate $::state::qoe::average_bitrate \
+            mos $::state::qoe::mos]
     }
 
     proc feature_controls_reset_connection {} {
@@ -22813,6 +22882,9 @@ foreach {name proc_name} {
     REST::send ::itest::semantic::rest_send_command
     TDS::msg ::itest::semantic::tds_msg_command
     TDS::session ::itest::semantic::tds_session_command
+    QOE::disable ::itest::semantic::qoe_disable_command
+    QOE::enable ::itest::semantic::qoe_enable_command
+    QOE::video ::itest::semantic::qoe_video_command
     IKE::auth_success ::itest::semantic::ike_auth_success_command
     IKE::cert ::itest::semantic::ike_cert_command
     IKE::san_dirname ::itest::semantic::ike_san_dirname_command

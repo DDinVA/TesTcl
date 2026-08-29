@@ -896,6 +896,17 @@ EVENT_STATE_FIELDS = {
         "loginoption",
         "version",
     },
+    "qoe": {
+        "enabled",
+        "width",
+        "height",
+        "duration",
+        "available",
+        "framerate",
+        "nominal_bitrate",
+        "average_bitrate",
+        "mos",
+    },
     "ike": {
         "auth_success",
         "cert",
@@ -1151,6 +1162,7 @@ EVENT_STATE_NAMESPACES = {
     "dhcpv4": "::state::dhcpv4",
     "dhcpv6": "::state::dhcpv6",
     "tds": "::state::tds",
+    "qoe": "::state::qoe",
     "ike": "::state::ike",
     "ftp": "::state::ftp",
     "imap": "::state::imap",
@@ -1317,6 +1329,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "REST::send",
     "TDS::msg",
     "TDS::session",
+    "QOE::disable",
+    "QOE::enable",
+    "QOE::video",
     "IKE::auth_success",
     "IKE::cert",
     "IKE::san_dirname",
@@ -3602,6 +3617,31 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "version": tds_values["version"],
         },
     }
+    qoe_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::qoe_snapshot"))
+    if len(qoe_parts) % 2:
+        raise EmulatorInputError("invalid QOE state")
+    qoe_keys = qoe_parts[::2]
+    if len(set(qoe_keys)) != len(qoe_keys):
+        raise EmulatorInputError("duplicate QOE state field")
+    qoe_values = dict(zip(qoe_keys, qoe_parts[1::2]))
+    expected_qoe_fields = {
+        "enabled", "width", "height", "duration", "available", "framerate",
+        "nominal_bitrate", "average_bitrate", "mos",
+    }
+    if set(qoe_values) != expected_qoe_fields:
+        raise EmulatorInputError("invalid QOE state fields")
+    if any(qoe_values[name] not in {"0", "1"} for name in ("enabled", "available")):
+        raise EmulatorInputError("invalid QOE boolean state")
+    qoe = {
+        "enabled": qoe_values["enabled"] == "1",
+        "video": {
+            name: qoe_values[name]
+            for name in (
+                "width", "height", "duration", "available", "framerate",
+                "nominal_bitrate", "average_bitrate", "mos",
+            )
+        },
+    }
     adapt_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::adapt_snapshot")
     )
@@ -4435,6 +4475,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "feature_controls": feature_controls,
         "rest": rest,
         "tds": tds,
+        "qoe": qoe,
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "lb": lb_control,
@@ -12036,6 +12077,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::sdp_reset_connection")
                 session.eval_tcl("::itest::semantic::dhcp_reset_connection")
                 session.eval_tcl("::itest::semantic::tds_reset_connection")
+                session.eval_tcl("::itest::semantic::qoe_reset_connection")
                 session.eval_tcl("::itest::semantic::ike_reset_event")
                 session.eval_tcl("::itest::semantic::ftp_reset_connection")
                 session.eval_tcl("::itest::semantic::imap_reset_connection")
@@ -12719,6 +12761,7 @@ class EmulatorSession:
                 "feature_controls": semantic_snapshot["feature_controls"],
                 "rest": semantic_snapshot["rest"],
                 "tds": semantic_snapshot["tds"],
+                "qoe": semantic_snapshot["qoe"],
             },
         }
         if mqtt_forwarded is not None:
