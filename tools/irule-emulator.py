@@ -876,6 +876,8 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTML::enable",
     "HTML::encode",
     "HTML::tag",
+    "HTTPLOG::disable",
+    "HTTPLOG::enable",
     "COMPRESS::buffer_size",
     "COMPRESS::disable",
     "COMPRESS::enable",
@@ -2362,6 +2364,68 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
     ):
         if not 8 <= compression_ints[name] <= 15:
             raise EmulatorInputError(f"invalid compression {name} state")
+    httplog_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::httplog_snapshot")
+    )
+    if len(httplog_parts) % 2:
+        raise EmulatorInputError("invalid HTTPLOG state")
+    httplog_keys = httplog_parts[::2]
+    if len(set(httplog_keys)) != len(httplog_keys):
+        raise EmulatorInputError("duplicate HTTPLOG state field")
+    httplog_values = dict(zip(httplog_keys, httplog_parts[1::2]))
+    if set(httplog_values) != {"enabled", "records"}:
+        raise EmulatorInputError("invalid HTTPLOG state fields")
+    if httplog_values["enabled"] not in {"0", "1"}:
+        raise EmulatorInputError("invalid HTTPLOG enabled state")
+    httplog_records: list[dict[str, Any]] = []
+    record_fields = {
+        "phase", "method", "uri", "host", "status", "bytes", "headers",
+    }
+    for raw_record in _split_tcl_list(httplog_values["records"]):
+        record_parts = _split_tcl_list(raw_record)
+        if len(record_parts) % 2:
+            raise EmulatorInputError("invalid HTTPLOG record")
+        record_keys = record_parts[::2]
+        if len(set(record_keys)) != len(record_keys):
+            raise EmulatorInputError("duplicate HTTPLOG record field")
+        record_values = dict(zip(record_parts[::2], record_parts[1::2]))
+        if set(record_values) != record_fields:
+            raise EmulatorInputError("invalid HTTPLOG record fields")
+        phase = record_values["phase"]
+        if phase not in {"request", "response"}:
+            raise EmulatorInputError("invalid HTTPLOG record phase")
+        status: int | None
+        if phase == "request":
+            if record_values["status"] != "":
+                raise EmulatorInputError("invalid HTTPLOG request status")
+            status = None
+        else:
+            try:
+                status = int(record_values["status"])
+            except (TypeError, ValueError):
+                raise EmulatorInputError("invalid HTTPLOG response status") from None
+            if not 100 <= status <= 999:
+                raise EmulatorInputError("invalid HTTPLOG response status")
+        try:
+            byte_count = int(record_values["bytes"])
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid HTTPLOG byte count") from None
+        if byte_count < 0:
+            raise EmulatorInputError("invalid HTTPLOG byte count")
+        header_parts = _split_tcl_list(record_values["headers"])
+        if len(header_parts) % 2:
+            raise EmulatorInputError("invalid HTTPLOG headers")
+        httplog_records.append(
+            {
+                "phase": phase,
+                "method": record_values["method"],
+                "uri": record_values["uri"],
+                "host": record_values["host"],
+                "status": status,
+                "bytes": byte_count,
+                "headers": _header_dict(record_values["headers"]),
+            }
+        )
     cache_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::cache_snapshot"))
     if len(cache_parts) % 2:
         raise EmulatorInputError("invalid cache state")
@@ -2914,6 +2978,10 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "decompress_input_length": compression_ints["decompress_input_length"],
             "decompress_output_length": compression_ints["decompress_output_length"],
             "codec_error": compression_values["codec_error"],
+        },
+        "http_log": {
+            "enabled": httplog_values["enabled"] == "1",
+            "records": httplog_records,
         },
         "cache": cache,
         "profile_settings": profile_settings,
@@ -8769,6 +8837,12 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
         """
         session.eval_tcl(script)
 
+    # The upstream orchestrator only invokes fire_event for events with an
+    # iRule handler.  Fill in any enabled HTTPLOG phases that therefore did
+    # not pass through the wrapper, while avoiding duplicates for handled
+    # HTTP_REQUEST/HTTP_RESPONSE events.
+    session.eval_tcl("::itest::semantic::httplog_record_if_missing request")
+    session.eval_tcl("::itest::semantic::httplog_record_if_missing response")
     request_state = session.get_state("http_request")
     response_state = session.get_state("http_response")
     committed = session.eval_tcl("set ::state::http::response_committed")
@@ -8813,6 +8887,7 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
             "headers": _header_dict(response_state.get("headers", "")),
             "body": session.eval_tcl("set ::state::http::response::payload"),
         },
+        "http_log": semantic["http_log"]["records"],
         "http2": _http2_snapshot(session),
     }
     if lb_failure.get("cause", ""):
@@ -9109,6 +9184,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::rewrite_reset_connection")
                 session.eval_tcl("::itest::semantic::html_reset_connection")
                 session.eval_tcl("::itest::semantic::compression_reset_connection")
+                session.eval_tcl("::itest::semantic::httplog_reset_connection")
                 session.eval_tcl("::itest::semantic::flow_reset_connection")
                 if any(str(profile).upper() == "REWRITE" for profile in self._profiles):
                     session.eval_tcl("::itest::semantic::rewrite_install_flow_hooks")
@@ -9170,6 +9246,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::rewrite_reset_connection")
                 session.eval_tcl("::itest::semantic::html_reset_connection")
                 session.eval_tcl("::itest::semantic::compression_reset_connection")
+                session.eval_tcl("::itest::semantic::httplog_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         if not self._connection_open:
@@ -9217,6 +9294,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::rewrite_prepare_request")
                 session.eval_tcl("::itest::semantic::html_prepare_request")
                 session.eval_tcl("::itest::semantic::compression_prepare_request")
+                session.eval_tcl("::itest::semantic::httplog_prepare_request")
                 attempt_failure = lb_failure if retry_count == 0 else ""
                 dosl7_mitigated = "0"
                 if dosl7_request is not None and dosl7_request["mitigated"]:
@@ -9350,6 +9428,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::rewrite_reset_connection")
             session.eval_tcl("::itest::semantic::html_reset_connection")
             session.eval_tcl("::itest::semantic::compression_reset_connection")
+            session.eval_tcl("::itest::semantic::httplog_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         result["decisions"] = decision_history
@@ -9369,6 +9448,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::rewrite_reset_connection")
             session.eval_tcl("::itest::semantic::html_reset_connection")
             session.eval_tcl("::itest::semantic::compression_reset_connection")
+            session.eval_tcl("::itest::semantic::httplog_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         return result
@@ -10367,6 +10447,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::rewrite_reset_connection")
         session.eval_tcl("::itest::semantic::html_reset_connection")
         session.eval_tcl("::itest::semantic::compression_reset_connection")
+        session.eval_tcl("::itest::semantic::httplog_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
@@ -10410,6 +10491,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::rewrite_reset_connection")
         session.eval_tcl("::itest::semantic::html_reset_connection")
         session.eval_tcl("::itest::semantic::compression_reset_connection")
+        session.eval_tcl("::itest::semantic::httplog_reset_connection")
         self._packet_streams.clear()
         self._http2_decoder = None
         self._http2_streams.clear()

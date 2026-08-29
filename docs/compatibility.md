@@ -99,6 +99,12 @@ The TMOS 17.5 compression surface models `COMPRESS::buffer_size`,
 bounded gzip/deflate transforms and content-encoding/length updates. It does
 not implement content negotiation, streaming flush behavior, or compression
 resource timing.
+The TMOS 17.5 `HTTPLOG::enable` and `HTTPLOG::disable` commands control a
+deterministic connection-scoped audit stream. Enabled transactions expose
+structured request and response records containing phase, method, URI, host,
+status, byte length, and headers; records are reset between transactions while
+the toggle persists across keep-alive requests. The adapter does not connect to
+a BIG-IP request-logging profile, syslog destination, or external logging sink.
 The IP semantic layer models the seven TMOS 17.5 commands `IP::hops`,
 `IP::idle_timeout`, `IP::ingress_drop_rate`, `IP::ingress_rate_limit`,
 `IP::intelligence`, `IP::reputation`, and `IP::stats`. Path hops, directional

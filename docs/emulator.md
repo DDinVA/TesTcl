@@ -144,6 +144,19 @@ The adapter records buffer and no-delay controls but does not emulate
 streaming flush boundaries, Accept-Encoding negotiation, chunk scheduling, or
 compression CPU/memory timing.
 
+The HTTPLOG layer models `HTTPLOG::enable` and `HTTPLOG::disable` as a
+connection-scoped toggle with a structured, deterministic audit stream. When
+enabled, the result contains `http_log` records for the request and response;
+each record includes `phase`, `method`, `uri`, `host`, `status`, `bytes`, and
+`headers`. Request records use `status: null`, while response records contain
+the numeric response status. Records reflect the final adapter-visible headers
+and byte length, including mutations performed by the modeled response
+pipeline. The records reset for each transaction, while the enablement persists
+across keep-alive requests until `HTTPLOG::disable` or connection close. This is
+intentionally an observable emulator output: it does not
+create a BIG-IP request-logging profile, send syslog, or contact an external
+logging service.
+
 ```json
 {
   "route": {

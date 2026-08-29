@@ -84,6 +84,8 @@ namespace eval ::itest::semantic {
     variable decompress_input_length 0
     variable decompress_output_length 0
     variable compression_codec_error ""
+    variable httplog_enabled 0
+    variable httplog_records {}
     variable psm_enabled
     array set psm_enabled {FTP 1 HTTP 1 SMTP 1}
     variable ws_enabled 1
@@ -1843,6 +1845,80 @@ namespace eval ::itest::semantic {
     proc compression_process_response {} {
         compression_process_decompress response
         compression_process_compress response
+    }
+
+    proc httplog_reset_connection {} {
+        variable httplog_enabled
+        set httplog_enabled 0
+        httplog_prepare_request
+    }
+
+    proc httplog_prepare_request {} {
+        variable httplog_records
+        set httplog_records {}
+    }
+
+    proc httplog_enable_command {args} {
+        variable httplog_enabled
+        if {[llength $args] != 0} {
+            error "HTTPLOG::enable takes no arguments"
+        }
+        set httplog_enabled 1
+        ::itest::log_decision httplog enable
+        return ""
+    }
+
+    proc httplog_disable_command {args} {
+        variable httplog_enabled
+        if {[llength $args] != 0} {
+            error "HTTPLOG::disable takes no arguments"
+        }
+        set httplog_enabled 0
+        ::itest::log_decision httplog disable
+        return ""
+    }
+
+    proc httplog_record {phase} {
+        variable httplog_enabled
+        variable httplog_records
+        if {!$httplog_enabled || $phase ni {request response}} { return }
+        if {$phase eq "request"} {
+            set method $::state::http::request::method
+            set uri $::state::http::request::uri
+            set host $::state::http::request::host
+            set status ""
+            set bytes [::itest::cmd::_payload_bytelength $::state::http::request::payload]
+            set headers $::state::http::request::headers
+        } else {
+            set method $::state::http::request::method
+            set uri $::state::http::request::uri
+            set host $::state::http::request::host
+            set status $::state::http::response::status
+            set bytes [::itest::cmd::_payload_bytelength $::state::http::response::payload]
+            set headers $::state::http::response::headers
+        }
+        lappend httplog_records [list \
+            phase $phase method $method uri $uri host $host status $status \
+            bytes $bytes headers $headers]
+    }
+
+    proc httplog_record_if_missing {phase} {
+        variable httplog_records
+        if {$phase ni {request response}} {
+            error "invalid HTTPLOG record phase"
+        }
+        foreach record $httplog_records {
+            if {[lindex $record 1] eq $phase} {
+                return
+            }
+        }
+        httplog_record $phase
+    }
+
+    proc httplog_snapshot {} {
+        variable httplog_enabled
+        variable httplog_records
+        return [list enabled $httplog_enabled records $httplog_records]
     }
 
     proc psm_reset_connection {} {
@@ -14211,6 +14287,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::rewrite_reset_connection
             ::itest::semantic::html_reset_connection
             ::itest::semantic::compression_reset_connection
+            ::itest::semantic::httplog_reset_connection
         }
         set rewrite_auto [expr {$gated && !$::itest::semantic::rewrite_injecting &&
             [::itest::semantic::_profile_enabled REWRITE]}]
@@ -14246,6 +14323,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::_maybe_fire_lb_failed
             ::itest::semantic::cache_request_event
             ::itest::semantic::compression_process_request
+            ::itest::semantic::httplog_record request
         } elseif {$gated && $event_name eq "HTTP_RESPONSE"} {
             if {[::itest::semantic::_profile_enabled HTML]} {
                 ::itest::semantic::html_process_response
@@ -14259,6 +14337,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                 ::itest::semantic::event_errors_record REWRITE_RESPONSE_DONE $rewrite_result
             }
             ::itest::semantic::compression_process_response
+            ::itest::semantic::httplog_record response
         }
         return $result
     }
@@ -14836,6 +14915,8 @@ foreach {name proc_name} {
     HTML::enable ::itest::semantic::html_enable_command
     HTML::encode ::itest::semantic::html_encode_command
     HTML::tag ::itest::semantic::html_tag_command
+    HTTPLOG::disable ::itest::semantic::httplog_disable_command
+    HTTPLOG::enable ::itest::semantic::httplog_enable_command
     COMPRESS::buffer_size ::itest::semantic::compression_buffer_size_command
     COMPRESS::disable ::itest::semantic::compression_disable_command
     COMPRESS::enable ::itest::semantic::compression_enable_command

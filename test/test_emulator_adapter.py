@@ -479,7 +479,7 @@ when HTTP_REQUEST {
         }
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
-        self.assertGreaterEqual(queue["command_count"], 349)
+        self.assertGreaterEqual(queue["command_count"], 347)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -6106,6 +6106,99 @@ when HTTP_RESPONSE {{
             "DECOMPRESS::disable", "DECOMPRESS::enable",
         ):
             self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+    def test_httplog_enable_disable_emits_request_and_response_audit_records(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/logged"} {
+        HTTPLOG::enable
+    } else {
+        HTTPLOG::disable
+    }
+}
+""",
+                "requests": [
+                    {
+                        "uri": "/logged",
+                        "host": "log.example.com",
+                        "headers": {"X-Request": "one"},
+                        "body": "abc",
+                        "response_status": 201,
+                        "response_headers": {
+                            "Content-Type": "text/plain",
+                            "Content-Length": "5",
+                        },
+                        "response_body": "hello",
+                    },
+                    {
+                        "uri": "/plain",
+                        "host": "log.example.com",
+                        "body": "xy",
+                        "response_body": "no audit",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        logged, plain = result["results"]
+        self.assertEqual(
+            logged["http_log"],
+            [
+                {
+                    "phase": "request",
+                    "method": "GET",
+                    "uri": "/logged",
+                    "host": "log.example.com",
+                    "status": None,
+                    "bytes": 3,
+                    "headers": {
+                        "host": "log.example.com",
+                        "x-request": "one",
+                    },
+                },
+                {
+                    "phase": "response",
+                    "method": "GET",
+                    "uri": "/logged",
+                    "host": "log.example.com",
+                    "status": 201,
+                    "bytes": 5,
+                    "headers": {
+                        "content-type": "text/plain",
+                        "content-length": "5",
+                    },
+                },
+            ],
+        )
+        self.assertEqual(plain["http_log"], [])
+        self.assertFalse(plain["semantic"]["http_log"]["enabled"])
+        self.assertTrue(logged["semantic"]["http_log"]["enabled"])
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in ("HTTPLOG::disable", "HTTPLOG::enable"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+        inherited = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when CLIENT_ACCEPTED { HTTPLOG::enable }",
+                "requests": [
+                    {"uri": "/first", "host": "keep.example.com", "response_body": "one"},
+                    {"uri": "/second", "host": "keep.example.com", "response_body": "two"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        for request_result, uri, body in zip(
+            inherited["results"], ("/first", "/second"), ("one", "two")
+        ):
+            self.assertEqual(len(request_result["http_log"]), 2)
+            self.assertEqual(request_result["http_log"][0]["uri"], uri)
+            self.assertEqual(request_result["http_log"][1]["uri"], uri)
+            self.assertEqual(request_result["http_log"][1]["bytes"], len(body))
 
     def test_tls_semantics_expose_sni_cipher_and_peer_certificate(self) -> None:
         result = self.adapter.run_scenario(
