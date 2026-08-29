@@ -491,7 +491,9 @@ when HTTP_REQUEST {
         self.assertNotIn(("POP3", "generated-stub"), queue_buckets)
         self.assertNotIn(("LDAP", "generated-stub"), queue_buckets)
         self.assertNotIn(("SMTPS", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 257)
+        self.assertNotIn(("NTLM", "generated-stub"), queue_buckets)
+        self.assertNotIn(("PROTOCOL_INSPECTION", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 253)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1337,6 +1339,192 @@ when CLIENT_ACCEPTED {{
                     "irule": "when CLIENT_DATA { log local0. ok }",
                     "packets": [{
                         "protocol": "smtps",
+                        "payload": "x" * (2 * 1024 * 1024 + 1),
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_ntlm_and_protocol_inspection_packet_controls(self) -> None:
+        enabled = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED { NTLM::enable }
+""",
+                "packets": [
+                    {"protocol": "ntlm", "payload_hex": "4e544c4d"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        ntlm_event = next(
+            event
+            for event in enabled["trace"][0]["events"]
+            if event["event"] == "CLIENT_DATA"
+        )
+        self.assertEqual(ntlm_event["state"]["ntlm"]["enabled"], "1")
+        self.assertEqual(ntlm_event["state"]["ntlm"]["payload"], "NTLM")
+        self.assertEqual(ntlm_event["state"]["ntlm"]["payload_length"], "4")
+
+        reopened = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": "when CLIENT_ACCEPTED { NTLM::enable }",
+                "packets": [
+                    {"protocol": "ntlm", "payload": "closed", "flags": ["FIN"]},
+                    {"protocol": "ntlm", "payload": "fresh"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertIn(
+            "CLIENT_CLOSED",
+            [event["event"] for event in reopened["trace"][0]["events"]],
+        )
+        accepted_events = [
+            event
+            for packet in reopened["trace"]
+            for event in packet["events"]
+            if event["event"] == "CLIENT_ACCEPTED"
+        ]
+        self.assertEqual(len(accepted_events), 2)
+        self.assertEqual(reopened["trace"][1]["events"][-1]["event"], "CLIENT_DATA")
+
+        disabled = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": "when CLIENT_ACCEPTED { NTLM::disable }",
+                "packets": [
+                    {"protocol": "ntlm", "payload": "first"},
+                    {"protocol": "ntlm", "payload": "second"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(disabled["trace"][0]["ignored"], "NTLM processing is disabled")
+        self.assertTrue(disabled["trace"][0]["disabled"])
+        self.assertEqual(disabled["trace"][1]["ignored"], "NTLM processing is disabled")
+
+        inspection = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "PROTOCOL_INSPECTION"],
+                "irule": """
+when PROTOCOL_INSPECTION_MATCH {
+    log local0. "ids=[PROTOCOL_INSPECTION::id]"
+    PROTOCOL_INSPECTION::disable
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "protocol_inspection",
+                        "ids": ["tls handshake", "http"],
+                        "matched": True,
+                        "payload": "candidate",
+                    },
+                    {
+                        "protocol": "protocol_inspection",
+                        "ids": ["later"],
+                        "matched": True,
+                        "payload": "not inspected",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        match_event = next(
+            event
+            for event in inspection["trace"][0]["events"]
+            if event["event"] == "PROTOCOL_INSPECTION_MATCH"
+        )
+        self.assertEqual(
+            match_event["state"]["protocol_inspection"]["ids"],
+            '{"tls handshake" "http"}',
+        )
+        self.assertTrue(any('ids={"tls handshake" "http"}' in line for line in match_event["logs"]))
+        self.assertEqual(inspection["trace"][0]["inspection_ids"], '{"tls handshake" "http"}')
+        self.assertTrue(inspection["trace"][0]["disabled"])
+        self.assertEqual(
+            inspection["trace"][1]["ignored"],
+            "protocol inspection is disabled",
+        )
+
+        unmatched = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "PROTOCOL_INSPECTION"],
+                "irule": "when PROTOCOL_INSPECTION_MATCH { log local0. matched }",
+                "packets": [{
+                    "protocol": "protocol_inspection",
+                    "matched": False,
+                    "ids": ["signature"],
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            unmatched["trace"][0]["ignored"],
+            "protocol inspection packet did not match",
+        )
+        self.assertNotIn(
+            "PROTOCOL_INSPECTION_MATCH",
+            [event["event"] for event in unmatched["trace"][0]["events"]],
+        )
+
+        gated = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": "when PROTOCOL_INSPECTION_MATCH { log local0. matched }",
+                "packets": [{"protocol": "protocol_inspection", "matched": True}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            gated["trace"][0]["ignored"],
+            "PROTOCOL_INSPECTION profile is not attached",
+        )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "PROTOCOL_INSPECTION packets must be client_to_server",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "PROTOCOL_INSPECTION"],
+                    "irule": "when PROTOCOL_INSPECTION_MATCH { return }",
+                    "packets": [{
+                        "protocol": "protocol_inspection",
+                        "direction": "server_to_client",
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "PROTOCOL_INSPECTION id exceeds 4096 bytes",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "PROTOCOL_INSPECTION"],
+                    "irule": "when PROTOCOL_INSPECTION_MATCH { return }",
+                    "packets": [{
+                        "protocol": "protocol_inspection",
+                        "ids": ["x" * 4097],
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "NTLM payload exceeds 2 MiB",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP"],
+                    "irule": "when CLIENT_DATA { return }",
+                    "packets": [{
+                        "protocol": "ntlm",
                         "payload": "x" * (2 * 1024 * 1024 + 1),
                     }],
                 },

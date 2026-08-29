@@ -103,6 +103,14 @@ The ICAP adapter models the four 17.5 `ICAP::*` commands and dispatches
 It supports method, URI, status, and case-insensitive header reads and
 mutations, including complete header replacement. It does not implement an
 ICAP server, encapsulated HTTP-body parsing, or license/control-plane behavior.
+The NTLM adapter models the connection-scoped `NTLM::enable` and
+`NTLM::disable` controls on bounded structured TCP payloads; it does not parse
+NTLM messages or negotiate authentication. The protocol-inspection adapter
+requires the `PROTOCOL_INSPECTION` profile, dispatches
+`PROTOCOL_INSPECTION_MATCH`, and models supplied match IDs, match status,
+payload bytes, `PROTOCOL_INSPECTION::id`, and `PROTOCOL_INSPECTION::disable`.
+It does not provide a Protocol Inspection signature engine or infer matches
+from raw traffic.
 The TMOS 17.5 `ROUTE::*` surface uses scenario-seeded route-domain and
 congestion-metric entries. Metric getters return deterministic values and
 `ROUTE::clear` removes a matching entry for the session; connection lifecycle

@@ -728,6 +728,20 @@ EVENT_STATE_FIELDS = {
         "tls_active",
         "type",
     },
+    "ntlm": {
+        "disabled",
+        "enabled",
+        "payload",
+        "payload_length",
+    },
+    "protocol_inspection": {
+        "disabled",
+        "enabled",
+        "ids",
+        "matched",
+        "payload",
+        "payload_length",
+    },
     "icap": {
         "headers",
         "method",
@@ -838,6 +852,8 @@ EVENT_STATE_NAMESPACES = {
     "pop3": "::state::pop3",
     "ldap": "::state::ldap",
     "smtps": "::state::smtps",
+    "ntlm": "::state::ntlm",
+    "protocol_inspection": "::state::protocol_inspection",
     "icap": "::state::icap",
     "tcp": "::state::tcp",
     "rtsp": "::state::rtsp",
@@ -983,6 +999,10 @@ SEMANTIC_MOCK_COMMANDS = {
     "SMTPS::activation_mode",
     "SMTPS::disable",
     "SMTPS::enable",
+    "NTLM::disable",
+    "NTLM::enable",
+    "PROTOCOL_INSPECTION::disable",
+    "PROTOCOL_INSPECTION::id",
     "ICAP::header",
     "ICAP::method",
     "ICAP::status",
@@ -5135,7 +5155,9 @@ STARTTLS_PROTOCOLS = frozenset({"imap", "pop3", "ldap", "smtps"})
 STARTTLS_PACKET_TYPES = frozenset({"command", "response", "data"})
 STARTTLS_COMMAND_MAX_BYTES = 64 * 1024
 STARTTLS_PAYLOAD_MAX_BYTES = 2 * 1024 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "wire"}
+PROTOCOL_INSPECTION_ID_MAX_BYTES = 4 * 1024
+PROTOCOL_INSPECTION_IDS_MAX_BYTES = 64 * 1024
+PACKET_PROTOCOLS = {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -5237,6 +5259,14 @@ PACKET_PROTOCOL_FIELDS = {
         "type",
         "command",
         "tls_active",
+    },
+    "ntlm": {
+        "payload_hex",
+    },
+    "protocol_inspection": {
+        "payload_hex",
+        "ids",
+        "matched",
     },
     "tls": {"type"}
     | (EVENT_STATE_FIELDS["tls_client"] | EVENT_STATE_FIELDS["tls_server"])
@@ -8663,7 +8693,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             raise EmulatorInputError(
                 f"unsupported packet {index} field(s): {', '.join(unknown)}"
             )
-        if protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS} and "payload" in packet and "payload_hex" in packet:
+        if protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection"} and "payload" in packet and "payload_hex" in packet:
             raise EmulatorInputError(
                 f"packet {index} {protocol.upper()} packets must use payload or payload_hex, not both"
             )
@@ -8731,6 +8761,13 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 raise EmulatorInputError(
                     f"packet {index} {protocol.upper()} payload exceeds "
                     f"{STARTTLS_PAYLOAD_MAX_BYTES} bytes"
+                )
+            if protocol in {"ntlm", "protocol_inspection"} and len(
+                normalised["payload"].encode("utf-8")
+            ) > STREAM_MAX_BYTES:
+                raise EmulatorInputError(
+                    f"packet {index} {protocol.upper()} payload exceeds "
+                    f"{STREAM_MAX_BYTES // (1024 * 1024)} MiB"
                 )
             if protocol == "tls" and "\x00" in normalised["payload"]:
                 raise EmulatorInputError(
@@ -8812,7 +8849,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     else:
                         options[canonical_id] = _packet_scalar(option_value, "options")
                 normalised[field] = options
-            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS} and field == "payload_hex":
+            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection"} and field == "payload_hex":
                 value = _require_string(packet[field], f"packet {index} payload_hex")
                 if len(value) % 2:
                     raise EmulatorInputError(
@@ -9011,6 +9048,36 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = command
             elif protocol in STARTTLS_PROTOCOLS and field == "tls_active":
                 normalised[field] = _packet_bool(packet[field], f"packet {index} tls_active")
+            elif protocol == "protocol_inspection" and field == "ids":
+                value = packet[field]
+                if not isinstance(value, list) or len(value) > 128:
+                    raise EmulatorInputError(
+                        f"packet {index} PROTOCOL_INSPECTION ids must be a list of at most 128 strings"
+                    )
+                ids = []
+                for item_index, item in enumerate(value):
+                    item_value = _require_string(
+                        item, f"packet {index} PROTOCOL_INSPECTION ids[{item_index}]"
+                    )
+                    if not item_value:
+                        raise EmulatorInputError(
+                            f"packet {index} PROTOCOL_INSPECTION ids cannot contain empty strings"
+                        )
+                    if len(item_value.encode("utf-8")) > PROTOCOL_INSPECTION_ID_MAX_BYTES:
+                        raise EmulatorInputError(
+                            f"packet {index} PROTOCOL_INSPECTION id exceeds "
+                            f"{PROTOCOL_INSPECTION_ID_MAX_BYTES} bytes"
+                        )
+                    ids.append(item_value)
+                encoded_ids = _tcl_list(ids)
+                if len(encoded_ids.encode("utf-8")) > PROTOCOL_INSPECTION_IDS_MAX_BYTES:
+                    raise EmulatorInputError(
+                        f"packet {index} PROTOCOL_INSPECTION ids exceed "
+                        f"{PROTOCOL_INSPECTION_IDS_MAX_BYTES} bytes"
+                    )
+                normalised[field] = encoded_ids
+            elif protocol == "protocol_inspection" and field == "matched":
+                normalised[field] = _packet_bool(packet[field], f"packet {index} matched")
             elif protocol == "icap" and field == "status":
                 value = packet[field]
                 if isinstance(value, bool) or not isinstance(value, int) or not 100 <= value <= 999:
@@ -9142,6 +9209,15 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 )
             normalised.setdefault("command", "")
             normalised.setdefault("tls_active", "0")
+        if protocol == "ntlm":
+            normalised.setdefault("payload_hex", "")
+        if protocol == "protocol_inspection":
+            if direction != "client_to_server":
+                raise EmulatorInputError(
+                    f"packet {index} PROTOCOL_INSPECTION packets must be client_to_server"
+                )
+            normalised.setdefault("ids", _tcl_list([]))
+            normalised.setdefault("matched", "1")
         if protocol == "http" and direction == "client_to_server" and "status" in normalised:
             raise EmulatorInputError(f"packet {index} HTTP requests cannot specify status")
         if protocol == "http" and direction == "server_to_client" and "method" in normalised:
@@ -9971,6 +10047,8 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::pop3_reset_connection")
                 session.eval_tcl("::itest::semantic::ldap_reset_connection")
                 session.eval_tcl("::itest::semantic::smtps_reset_connection")
+                session.eval_tcl("::itest::semantic::ntlm_reset_connection")
+                session.eval_tcl("::itest::semantic::protocol_inspection_reset_connection")
                 session.eval_tcl("::itest::semantic::icap_reset_connection")
                 session.eval_tcl("::itest::semantic::profile_settings_clear")
                 for profile_name, attributes in self._profile_settings.items():
@@ -10411,6 +10489,11 @@ class EmulatorSession:
             session.eval_tcl(
                 f"::itest::semantic::{protocol}_prepare_event"
             )
+        for protocol in ("ntlm", "protocol_inspection"):
+            if protocol in state:
+                session.eval_tcl(
+                    f"::itest::semantic::{protocol}_prepare_event"
+                )
         session.eval_tcl("::itest::semantic::datagram_prepare_event")
         if "rtsp" in state:
             session.eval_tcl("::itest::semantic::rtsp_prepare_event")
@@ -10435,7 +10518,7 @@ class EmulatorSession:
         def install_state_layer(layer: str, values: dict[str, str]) -> None:
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "rtsp", "cache", "datagram", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "rtsp", "cache", "datagram", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -10581,7 +10664,7 @@ class EmulatorSession:
         protocol = packet["protocol"]
         if protocol == "sip" and packet.get("transport", "tcp") == "udp":
             connection.update({"protocol": "17", "transport": "udp"})
-        elif protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "rtsp", "ftp", "icap", *STARTTLS_PROTOCOLS}:
+        elif protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "rtsp", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection"}:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol == "sctp":
             connection.update({"protocol": "132", "transport": "sctp"})
@@ -10756,6 +10839,25 @@ class EmulatorSession:
             protocol_state["payload"] = bytes(payload)
             protocol_state["payload_length"] = str(len(payload))
             state[protocol] = protocol_state
+        elif protocol == "ntlm":
+            ntlm_state: dict[str, Any] = {}
+            payload = packet.get("_wire_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                payload = str(packet.get("payload", "")).encode("utf-8")
+            ntlm_state["payload"] = bytes(payload)
+            ntlm_state["payload_length"] = str(len(payload))
+            state["ntlm"] = ntlm_state
+        elif protocol == "protocol_inspection":
+            inspection_state: dict[str, Any] = {}
+            for field in ("ids", "matched"):
+                if field in packet:
+                    inspection_state[field] = _packet_scalar(packet[field], field)
+            payload = packet.get("_wire_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                payload = str(packet.get("payload", "")).encode("utf-8")
+            inspection_state["payload"] = bytes(payload)
+            inspection_state["payload_length"] = str(len(payload))
+            state["protocol_inspection"] = inspection_state
         elif protocol == "ftp":
             ftp_state: dict[str, Any] = {}
             for field in EVENT_STATE_FIELDS["ftp"] - {"payload"}:
@@ -11455,7 +11557,7 @@ class EmulatorSession:
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
-        if packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp", "ftp", "icap", *STARTTLS_PROTOCOLS}:
+        if packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection"}:
             return
         source = packet["source"]
         destination = packet["destination"]
@@ -11533,7 +11635,7 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
@@ -11571,12 +11673,14 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::pop3_reset_connection")
         session.eval_tcl("::itest::semantic::ldap_reset_connection")
         session.eval_tcl("::itest::semantic::smtps_reset_connection")
+        session.eval_tcl("::itest::semantic::ntlm_reset_connection")
+        session.eval_tcl("::itest::semantic::protocol_inspection_reset_connection")
         session.eval_tcl("::itest::semantic::icap_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
         packet_has_tcp_layer = (
-            packet["protocol"] in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp", "ftp", *STARTTLS_PROTOCOLS}
+            packet["protocol"] in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp", "ftp", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection"}
             or (packet["protocol"] == "sip" and packet.get("transport", "tcp") == "tcp")
         )
         accepted_state = (
@@ -11620,6 +11724,8 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::pop3_reset_connection")
         session.eval_tcl("::itest::semantic::ldap_reset_connection")
         session.eval_tcl("::itest::semantic::smtps_reset_connection")
+        session.eval_tcl("::itest::semantic::ntlm_reset_connection")
+        session.eval_tcl("::itest::semantic::protocol_inspection_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
@@ -12137,6 +12243,23 @@ class EmulatorSession:
                 trace[trace_index]["completed_at"] = at_index
             http_results.append(result)
             pending_http = None
+
+        def finish_packet_connection(packet: dict[str, Any], entry: dict[str, Any], at_index: int) -> None:
+            """Apply FIN/RST lifecycle events before a protocol branch returns."""
+            if not set(packet.get("flags", [])).intersection({"FIN", "RST"}):
+                return
+            finish_http(at_index=at_index)
+            event_name = (
+                "CLIENT_CLOSED"
+                if packet["direction"] == "client_to_server"
+                else "SERVER_CLOSED"
+            )
+            entry["events"].append(
+                self._fire_event_on_worker(
+                    session, event_name, self._packet_event_state(packet)
+                )
+            )
+            self._close_packet_connection(session)
 
         packet_queue = list(enumerate(packets))
         queue_index = 0
@@ -13036,6 +13159,57 @@ class EmulatorSession:
                     entry["payload_after"] = dhcp_state["payload"]
                 if "options" in dhcp_state:
                     entry["options_after"] = dhcp_state["options"]
+                continue
+            elif protocol == "ntlm":
+                self._activate_packet_connection(session, packet, entry["events"])
+                if session.eval_tcl("set ::state::ntlm::enabled") == "0":
+                    entry["ignored"] = "NTLM processing is disabled"
+                    entry["disabled"] = True
+                    finish_packet_connection(packet, entry, index)
+                    continue
+                event_name = "CLIENT_DATA" if direction == "client_to_server" else "SERVER_DATA"
+                event_result = self._fire_event_on_worker(
+                    session, event_name, self._packet_event_state(packet)
+                )
+                entry["events"].append(event_result)
+                ntlm_state = event_result.get("state", {}).get("ntlm", {})
+                if ntlm_state.get("enabled") == "0":
+                    entry["disabled"] = True
+                if "payload" in ntlm_state:
+                    entry["payload_after"] = ntlm_state["payload"]
+                finish_packet_connection(packet, entry, index)
+                continue
+            elif protocol == "protocol_inspection":
+                self._activate_packet_connection(session, packet, entry["events"])
+                if packet.get("matched") == "0":
+                    entry["ignored"] = "protocol inspection packet did not match"
+                    finish_packet_connection(packet, entry, index)
+                    continue
+                if session.eval_tcl("set ::state::protocol_inspection::enabled") == "0":
+                    entry["ignored"] = "protocol inspection is disabled"
+                    entry["disabled"] = True
+                    finish_packet_connection(packet, entry, index)
+                    continue
+                event_result = self._fire_event_on_worker(
+                    session,
+                    "PROTOCOL_INSPECTION_MATCH",
+                    self._packet_event_state(packet),
+                )
+                entry["events"].append(event_result)
+                if not event_result.get("fired") and event_result.get("reason") == "profile_gate":
+                    entry["ignored"] = "PROTOCOL_INSPECTION profile is not attached"
+                    finish_packet_connection(packet, entry, index)
+                    continue
+                inspection_state = event_result.get("state", {}).get(
+                    "protocol_inspection", {}
+                )
+                if inspection_state.get("enabled") == "0":
+                    entry["disabled"] = True
+                if "ids" in inspection_state:
+                    entry["inspection_ids"] = inspection_state["ids"]
+                if "payload" in inspection_state:
+                    entry["payload_after"] = inspection_state["payload"]
+                finish_packet_connection(packet, entry, index)
                 continue
             elif protocol in STARTTLS_PROTOCOLS:
                 self._activate_packet_connection(session, packet, entry["events"])

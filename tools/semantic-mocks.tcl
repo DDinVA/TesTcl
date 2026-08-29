@@ -587,6 +587,22 @@ namespace eval ::itest::semantic {
         variable type command
     }
 
+    namespace eval ::state::ntlm {
+        variable disabled 0
+        variable enabled 1
+        variable payload ""
+        variable payload_length 0
+    }
+
+    namespace eval ::state::protocol_inspection {
+        variable disabled 0
+        variable enabled 1
+        variable ids {}
+        variable matched 0
+        variable payload ""
+        variable payload_length 0
+    }
+
     namespace eval ::state::icap {
         variable headers {Host icap.example.net}
         variable method REQMOD
@@ -11930,6 +11946,70 @@ namespace eval ::itest::semantic {
         return [starttls_toggle_command smtps SMTPS::disable {ANY_EVENT} 0 {*}$args]
     }
 
+    proc ntlm_reset_connection {} {
+        set ::state::ntlm::disabled 0
+        set ::state::ntlm::enabled 1
+        set ::state::ntlm::payload ""
+        set ::state::ntlm::payload_length 0
+    }
+
+    proc ntlm_prepare_event {} {}
+
+    proc ntlm_toggle_command {command_name enabled args} {
+        if {[llength $args] != 0} {
+            error "$command_name takes no arguments"
+        }
+        set enabled_value [expr {$enabled ? 1 : 0}]
+        set ::state::ntlm::enabled $enabled_value
+        set ::state::ntlm::disabled [expr {!$enabled_value}]
+        ::itest::log_decision ntlm [expr {$enabled_value ? "enable" : "disable"}] 1
+        return ""
+    }
+
+    proc ntlm_enable_command {args} {
+        return [ntlm_toggle_command NTLM::enable 1 {*}$args]
+    }
+
+    proc ntlm_disable_command {args} {
+        return [ntlm_toggle_command NTLM::disable 0 {*}$args]
+    }
+
+    proc protocol_inspection_reset_connection {} {
+        set ::state::protocol_inspection::disabled 0
+        set ::state::protocol_inspection::enabled 1
+        set ::state::protocol_inspection::ids {}
+        set ::state::protocol_inspection::matched 0
+        set ::state::protocol_inspection::payload ""
+        set ::state::protocol_inspection::payload_length 0
+    }
+
+    proc protocol_inspection_prepare_event {} {}
+
+    proc _protocol_inspection_require_match {command_name} {
+        if {$::itest::current_event ne "PROTOCOL_INSPECTION_MATCH"} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc protocol_inspection_disable_command {args} {
+        _protocol_inspection_require_match PROTOCOL_INSPECTION::disable
+        if {[llength $args] != 0} {
+            error "PROTOCOL_INSPECTION::disable takes no arguments"
+        }
+        set ::state::protocol_inspection::enabled 0
+        set ::state::protocol_inspection::disabled 1
+        ::itest::log_decision protocol_inspection disable 1
+        return ""
+    }
+
+    proc protocol_inspection_id_command {args} {
+        _protocol_inspection_require_match PROTOCOL_INSPECTION::id
+        if {[llength $args] != 0} {
+            error "PROTOCOL_INSPECTION::id takes no arguments"
+        }
+        return $::state::protocol_inspection::ids
+    }
+
     proc icap_reset_connection {} {
         set ::state::icap::headers [list Host icap.example.net]
         set ::state::icap::method REQMOD
@@ -16703,6 +16783,10 @@ foreach {name proc_name} {
     SMTPS::activation_mode ::itest::semantic::smtps_activation_mode_command
     SMTPS::disable ::itest::semantic::smtps_disable_command
     SMTPS::enable ::itest::semantic::smtps_enable_command
+    NTLM::disable ::itest::semantic::ntlm_disable_command
+    NTLM::enable ::itest::semantic::ntlm_enable_command
+    PROTOCOL_INSPECTION::disable ::itest::semantic::protocol_inspection_disable_command
+    PROTOCOL_INSPECTION::id ::itest::semantic::protocol_inspection_id_command
     ICAP::header ::itest::semantic::icap_header_command
     ICAP::method ::itest::semantic::icap_method_command
     ICAP::status ::itest::semantic::icap_status_command

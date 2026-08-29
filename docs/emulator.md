@@ -124,6 +124,15 @@ lookup, enumeration, insertion, replacement, removal, and replacement of
 the complete header block. Header and URI mutations are retained in the event
 trace. This is a deterministic adaptation-message model; it does not run an
 ICAP server, parse encapsulated HTTP bodies, or require an LTM/PEM license.
+Structured `ntlm` packet traces use the TCP lifecycle and model the
+connection-scoped `NTLM::enable` and `NTLM::disable` controls. They expose
+bounded payload bytes and enablement state, but do not parse NTLM messages or
+perform authentication negotiation. Structured `protocol_inspection` traces
+require the `PROTOCOL_INSPECTION` profile and dispatch
+`PROTOCOL_INSPECTION_MATCH`; supplied match IDs, match status, payload bytes,
+`PROTOCOL_INSPECTION::id`, and `PROTOCOL_INSPECTION::disable` are modeled with
+bounded deterministic state. The adapter does not implement the BIG-IP
+signature/inspection engine.
 The ROUTE layer accepts scenario-seeded route-domain and congestion-metric
 entries. `ROUTE::age`, `ROUTE::bandwidth`, `ROUTE::cwnd`, `ROUTE::expiration`,
 `ROUTE::mtu`, `ROUTE::rtt`, and `ROUTE::rttvar` read deterministic entries, and
