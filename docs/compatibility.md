@@ -81,6 +81,12 @@ to later HTTP proxy events. Destination getters return empty values until the
 seeded resolution is marked present. The adapter does not perform DNS, proxy
 CONNECT negotiation, URI rewriting on forwarded bytes, or live downstream
 proxy chaining.
+The TMOS 17.5 REWRITE surface models `REWRITE::enable`, `REWRITE::disable`,
+`REWRITE::payload`, and `REWRITE::post_process`. With the `REWRITE` profile,
+the high-level HTTP lifecycle exposes `REWRITE_REQUEST_DONE` and conditionally
+`REWRITE_RESPONSE_DONE`; payload reads and replacements use byte offsets and
+update an existing `Content-Length` header. It does not implement the full
+REWRITE profile/plugin, APM policy processing, or URL/file rewrite tables.
 The IP semantic layer models the seven TMOS 17.5 commands `IP::hops`,
 `IP::idle_timeout`, `IP::ingress_drop_rate`, `IP::ingress_rate_limit`,
 `IP::intelligence`, `IP::reputation`, and `IP::stats`. Path hops, directional

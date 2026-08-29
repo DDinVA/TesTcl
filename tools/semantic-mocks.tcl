@@ -43,6 +43,12 @@ namespace eval ::itest::semantic {
     variable http_proxy_chain_host ""
     variable http_proxy_chain_port 0
     variable http_proxy_chain_retry_requested 0
+    variable rewrite_default_enabled 1
+    variable rewrite_enabled 1
+    variable rewrite_post_process 0
+    variable rewrite_payload_side ""
+    variable rewrite_payload_replaced 0
+    variable rewrite_injecting 0
     variable psm_enabled
     array set psm_enabled {FTP 1 HTTP 1 SMTP 1}
     variable ws_enabled 1
@@ -1069,6 +1075,183 @@ namespace eval ::itest::semantic {
                 error "unsupported HTTP::proxy operation $command"
             }
         }
+    }
+
+    proc rewrite_reset_connection {} {
+        variable rewrite_default_enabled
+        variable rewrite_enabled
+        variable rewrite_post_process
+        variable rewrite_payload_side
+        variable rewrite_payload_replaced
+        set rewrite_enabled $rewrite_default_enabled
+        set rewrite_post_process 0
+        set rewrite_payload_side ""
+        set rewrite_payload_replaced 0
+    }
+
+    proc rewrite_prepare_request {} {
+        variable rewrite_post_process
+        variable rewrite_payload_side
+        variable rewrite_payload_replaced
+        set rewrite_post_process 0
+        set rewrite_payload_side ""
+        set rewrite_payload_replaced 0
+    }
+
+    proc rewrite_snapshot {} {
+        variable rewrite_enabled
+        variable rewrite_post_process
+        variable rewrite_payload_side
+        variable rewrite_payload_replaced
+        set request_length [::itest::cmd::_payload_bytelength $::state::http::request::payload]
+        set response_length [::itest::cmd::_payload_bytelength $::state::http::response::payload]
+        return [list \
+            enabled $rewrite_enabled \
+            post_process $rewrite_post_process \
+            payload_side $rewrite_payload_side \
+            payload_replaced $rewrite_payload_replaced \
+            request_payload_length $request_length \
+            response_payload_length $response_length]
+    }
+
+    proc rewrite_flow_hook {} {
+        return ""
+    }
+
+    proc rewrite_install_flow_hooks {} {
+        set rewrite_events [::itest::registered_events]
+        if {[lsearch -exact $rewrite_events REWRITE_REQUEST_DONE] < 0 &&
+            [lsearch -exact $rewrite_events REWRITE_RESPONSE_DONE] < 0} {
+            return
+        }
+        foreach event_name {HTTP_REQUEST HTTP_RESPONSE} {
+            set handlers {}
+            if {[info exists ::itest::event_handlers($event_name)]} {
+                set handlers $::itest::event_handlers($event_name)
+            }
+            set already_installed 0
+            foreach handler $handlers {
+                if {[lindex $handler 1] eq "::itest::semantic::rewrite_flow_hook"} {
+                    set already_installed 1
+                    break
+                }
+            }
+            if {!$already_installed} {
+                lappend handlers [list 100001 ::itest::semantic::rewrite_flow_hook]
+                set ::itest::event_handlers($event_name) $handlers
+            }
+        }
+    }
+
+    proc _rewrite_require_event {allowed command_name} {
+        if {$::itest::current_event ni $allowed} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc _rewrite_payload_var {} {
+        if {$::itest::current_event eq "REWRITE_REQUEST_DONE"} {
+            return ::state::http::request::payload
+        }
+        if {$::itest::current_event eq "REWRITE_RESPONSE_DONE"} {
+            return ::state::http::response::payload
+        }
+        error "REWRITE::payload is not valid during $::itest::current_event"
+    }
+
+    proc _rewrite_adjust_content_length {var} {
+        if {$var eq "::state::http::request::payload"} {
+            set header_var ::state::http::request::header
+        } else {
+            set header_var ::state::http::response::header
+        }
+        set current [${header_var} get content-length]
+        if {$current ne ""} {
+            ${header_var} set content-length \
+                [::itest::cmd::_payload_bytelength [set $var]]
+        }
+    }
+
+    proc rewrite_enable_command {args} {
+        variable rewrite_enabled
+        _rewrite_require_event {
+            ACCESS_ACL_ALLOWED HTTP_RESPONSE REWRITE_REQUEST_DONE REWRITE_RESPONSE_DONE
+        } REWRITE::enable
+        if {[llength $args] != 0} {
+            error "REWRITE::enable takes no arguments"
+        }
+        set rewrite_enabled 1
+        ::itest::log_decision rewrite enable
+        return ""
+    }
+
+    proc rewrite_disable_command {args} {
+        variable rewrite_enabled
+        _rewrite_require_event {
+            ACCESS_ACL_ALLOWED HTTP_RESPONSE REWRITE_REQUEST_DONE REWRITE_RESPONSE_DONE
+        } REWRITE::disable
+        if {[llength $args] != 0} {
+            error "REWRITE::disable takes no arguments"
+        }
+        set rewrite_enabled 0
+        ::itest::log_decision rewrite disable
+        return ""
+    }
+
+    proc rewrite_post_process_command {args} {
+        variable rewrite_post_process
+        _rewrite_require_event {REWRITE_REQUEST_DONE} REWRITE::post_process
+        if {[llength $args] == 0} {
+            return $rewrite_post_process
+        }
+        if {[llength $args] != 1 || [lindex $args 0] ni {0 1}} {
+            error "REWRITE::post_process accepts only 0 or 1"
+        }
+        set rewrite_post_process [lindex $args 0]
+        ::itest::log_decision rewrite post_process $rewrite_post_process
+        return $rewrite_post_process
+    }
+
+    proc rewrite_payload_command {args} {
+        variable rewrite_payload_side
+        variable rewrite_payload_replaced
+        set var [_rewrite_payload_var]
+        set payload [set $var]
+        set payload_bytes [::itest::cmd::_payload_bytes $payload]
+        if {[llength $args] == 0} {
+            return $payload
+        }
+        if {[llength $args] == 1 && [lindex $args 0] eq "length"} {
+            return [::itest::cmd::_payload_bytelength $payload]
+        }
+        if {[llength $args] in {1 2}} {
+            foreach value $args {
+                if {![string is integer -strict $value] || $value < 0} {
+                    error "REWRITE::payload offsets and lengths must be non-negative integers"
+                }
+            }
+            set offset [expr {[llength $args] == 1 ? 0 : [lindex $args 0]}]
+            set length [expr {[llength $args] == 1 ? [lindex $args 0] : [lindex $args 1]}]
+            if {$length == 0} {
+                return [::itest::cmd::_payload_bytes ""]
+            }
+            return [string range $payload_bytes $offset [expr {$offset + $length - 1}]]
+        }
+        if {[llength $args] == 4 && [lindex $args 0] eq "replace"} {
+            set offset [lindex $args 1]
+            set length [lindex $args 2]
+            if {![string is integer -strict $offset] || $offset < 0 ||
+                ![string is integer -strict $length] || $length < 0} {
+                error "REWRITE::payload replace offsets and lengths must be non-negative integers"
+            }
+            set $var [::itest::cmd::_payload_splice $payload $offset $length [lindex $args 3]]
+            _rewrite_adjust_content_length $var
+            set rewrite_payload_side [expr {$var eq "::state::http::request::payload" ? "request" : "response"}]
+            set rewrite_payload_replaced 1
+            ::itest::log_decision rewrite payload_replace [list $offset $length [lindex $args 3]]
+            return ""
+        }
+        error "unsupported REWRITE::payload syntax"
     }
 
     proc psm_reset_connection {} {
@@ -13434,12 +13617,22 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::botdefense_reset_connection
             ::itest::semantic::antifraud_reset_connection
             ::itest::semantic::auth_reset_connection
+            ::itest::semantic::rewrite_reset_connection
         }
+        set rewrite_auto [expr {$gated && !$::itest::semantic::rewrite_injecting &&
+            [::itest::semantic::_profile_enabled REWRITE]}]
         if {$gated && $event_name eq "HTTP_REQUEST" && [::itest::semantic::_cache_profile_enabled]} {
             ::itest::semantic::cache_prepare_request
         }
         set result [uplevel 1 [list ::itest::_testcl_fire_event_orig $event_name]]
         if {$gated && $event_name eq "HTTP_REQUEST"} {
+            if {$rewrite_auto &&
+                [lsearch -exact [::itest::registered_events] REWRITE_REQUEST_DONE] >= 0} {
+                set ::itest::semantic::rewrite_injecting 1
+                set rewrite_result [::itest::_testcl_fire_event_orig REWRITE_REQUEST_DONE]
+                set ::itest::semantic::rewrite_injecting 0
+                ::itest::semantic::event_errors_record REWRITE_REQUEST_DONE $rewrite_result
+            }
             if {[::itest::semantic::_profile_enabled BOTDEFENSE]} {
                 uplevel 1 [list ::itest::_testcl_fire_event_orig BOTDEFENSE_REQUEST]
                 uplevel 1 [list ::itest::_testcl_fire_event_orig BOTDEFENSE_ACTION]
@@ -13456,6 +13649,13 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::cache_request_event
         } elseif {$gated && $event_name eq "HTTP_RESPONSE"} {
             ::itest::semantic::cache_update_event
+            if {$rewrite_auto && $::itest::semantic::rewrite_post_process &&
+                [lsearch -exact [::itest::registered_events] REWRITE_RESPONSE_DONE] >= 0} {
+                set ::itest::semantic::rewrite_injecting 1
+                set rewrite_result [::itest::_testcl_fire_event_orig REWRITE_RESPONSE_DONE]
+                set ::itest::semantic::rewrite_injecting 0
+                ::itest::semantic::event_errors_record REWRITE_RESPONSE_DONE $rewrite_result
+            }
         }
         return $result
     }
@@ -14024,6 +14224,10 @@ foreach {name proc_name} {
     HTTP2::stream ::itest::semantic::http2_stream_command
     HTTP2::version ::itest::semantic::http2_version_command
     HTTP::proxy ::itest::semantic::http_proxy_command
+    REWRITE::disable ::itest::semantic::rewrite_disable_command
+    REWRITE::enable ::itest::semantic::rewrite_enable_command
+    REWRITE::payload ::itest::semantic::rewrite_payload_command
+    REWRITE::post_process ::itest::semantic::rewrite_post_process_command
     ROUTE::age ::itest::semantic::route_age_command
     ROUTE::bandwidth ::itest::semantic::route_bandwidth_command
     ROUTE::clear ::itest::semantic::route_clear_command

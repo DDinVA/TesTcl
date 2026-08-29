@@ -866,6 +866,10 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTTP::request_num",
     "HTTP::cookie",
     "HTTP::proxy",
+    "REWRITE::disable",
+    "REWRITE::enable",
+    "REWRITE::payload",
+    "REWRITE::post_process",
     "WS::collect",
     "WS::disconnect",
     "WS::enabled",
@@ -2206,6 +2210,37 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         if value < 0:
             raise EmulatorInputError(f"invalid HTTP proxy {name} state")
         http_proxy_ints[name] = value
+    rewrite_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::rewrite_snapshot")
+    )
+    if len(rewrite_parts) % 2:
+        raise EmulatorInputError("invalid REWRITE state")
+    rewrite_keys = rewrite_parts[::2]
+    if len(set(rewrite_keys)) != len(rewrite_keys):
+        raise EmulatorInputError("duplicate REWRITE state field")
+    rewrite_values = dict(zip(rewrite_parts[::2], rewrite_parts[1::2]))
+    expected_rewrite_fields = {
+        "enabled", "post_process", "payload_side", "payload_replaced",
+        "request_payload_length", "response_payload_length",
+    }
+    if set(rewrite_values) != expected_rewrite_fields:
+        raise EmulatorInputError("invalid REWRITE state fields")
+    if any(
+        rewrite_values[name] not in {"0", "1"}
+        for name in ("enabled", "post_process", "payload_replaced")
+    ):
+        raise EmulatorInputError("invalid REWRITE boolean state")
+    if rewrite_values["payload_side"] not in {"", "request", "response"}:
+        raise EmulatorInputError("invalid REWRITE payload side state")
+    rewrite_lengths: dict[str, int] = {}
+    for name in ("request_payload_length", "response_payload_length"):
+        try:
+            value = int(rewrite_values[name])
+        except (KeyError, TypeError, ValueError):
+            raise EmulatorInputError(f"invalid REWRITE {name} state") from None
+        if value < 0:
+            raise EmulatorInputError(f"invalid REWRITE {name} state")
+        rewrite_lengths[name] = value
     cache_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::cache_snapshot"))
     if len(cache_parts) % 2:
         raise EmulatorInputError("invalid cache state")
@@ -2714,6 +2749,14 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "chain_host": http_proxy_values["chain_host"],
             "chain_port": http_proxy_ints["chain_port"],
             "chain_retry_requested": http_proxy_values["chain_retry_requested"] == "1",
+        },
+        "rewrite": {
+            "enabled": rewrite_values["enabled"] == "1",
+            "post_process": rewrite_values["post_process"] == "1",
+            "payload_side": rewrite_values["payload_side"],
+            "payload_replaced": rewrite_values["payload_replaced"] == "1",
+            "request_payload_length": rewrite_lengths["request_payload_length"],
+            "response_payload_length": rewrite_lengths["response_payload_length"],
         },
         "cache": cache,
         "profile_settings": profile_settings,
@@ -8482,8 +8525,12 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
         body_value = _tcl_quote(body)
         script = f"""
             set ::orch::_testcl_request_payload {body_value}
+            set ::orch::_testcl_request_payload_seeded 0
             proc ::orch::_testcl_request_payload_trace {{name1 name2 op}} {{
-                set ::state::http::request::payload $::orch::_testcl_request_payload
+                if {{!$::orch::_testcl_request_payload_seeded}} {{
+                    set ::orch::_testcl_request_payload_seeded 1
+                    set ::state::http::request::payload $::orch::_testcl_request_payload
+                }}
             }}
             ::trace add variable ::state::http::request::payload write ::orch::_testcl_request_payload_trace
             set ::orch::_testcl_request_rc [catch {{set ::orch::_testcl_request_result [{command}]}} ::orch::_testcl_request_error ::orch::_testcl_request_options]
@@ -8833,7 +8880,10 @@ class EmulatorSession:
                 _configure_ip(session, self._ip_config)
                 _configure_route(session, self._route_config)
                 _configure_http_proxy(session, self._http_proxy_config)
+                session.eval_tcl("::itest::semantic::rewrite_reset_connection")
                 session.eval_tcl("::itest::semantic::flow_reset_connection")
+                if any(str(profile).upper() == "REWRITE" for profile in self._profiles):
+                    session.eval_tcl("::itest::semantic::rewrite_install_flow_hooks")
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
                     for profile in self._profiles
@@ -8889,6 +8939,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::stream_reset_connection")
                 session.eval_tcl("::itest::semantic::route_reset_connection")
                 session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
+                session.eval_tcl("::itest::semantic::rewrite_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         if not self._connection_open:
@@ -8906,6 +8957,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::route_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
+            session.eval_tcl("::itest::semantic::rewrite_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -8930,6 +8982,7 @@ class EmulatorSession:
         try:
             while True:
                 session.eval_tcl("::itest::semantic::http_proxy_prepare_request")
+                session.eval_tcl("::itest::semantic::rewrite_prepare_request")
                 attempt_failure = lb_failure if retry_count == 0 else ""
                 dosl7_mitigated = "0"
                 if dosl7_request is not None and dosl7_request["mitigated"]:
@@ -9060,6 +9113,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::route_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
+            session.eval_tcl("::itest::semantic::rewrite_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         result["decisions"] = decision_history
@@ -9076,6 +9130,7 @@ class EmulatorSession:
             session.close_connection()
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
+            session.eval_tcl("::itest::semantic::rewrite_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         return result
@@ -9256,6 +9311,7 @@ class EmulatorSession:
                 "psm": semantic_snapshot["psm"],
                 "ip": semantic_snapshot["ip"],
                 "http_proxy": semantic_snapshot["http_proxy"],
+                "rewrite": semantic_snapshot["rewrite"],
             },
         }
         if mqtt_forwarded is not None:
@@ -10069,6 +10125,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::stream_reset_connection")
         session.eval_tcl("::itest::semantic::route_reset_connection")
         session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
+        session.eval_tcl("::itest::semantic::rewrite_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
@@ -10109,6 +10166,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
+        session.eval_tcl("::itest::semantic::rewrite_reset_connection")
         self._packet_streams.clear()
         self._http2_decoder = None
         self._http2_streams.clear()

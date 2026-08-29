@@ -112,6 +112,16 @@ values. `HTTP::proxy chain retry` records intent in semantic state; the
 adapter does not perform DNS, proxy CONNECT negotiation, URI rewriting on
 forwarded bytes, or live downstream proxy chaining.
 
+The REWRITE layer is available when the `REWRITE` profile is attached. The
+high-level HTTP flow fires `REWRITE_REQUEST_DONE` after request processing. A
+rule may use `REWRITE::payload` to read or replace request content and call
+`REWRITE::post_process 1` to enable the later `REWRITE_RESPONSE_DONE` event;
+that event can inspect or replace response content. Payload lengths and
+replacement offsets are byte-based, and an existing `Content-Length` header is
+updated after replacement. `REWRITE::enable` and `REWRITE::disable` model the
+connection-level passthrough switch. This is a deterministic iRule event and
+payload model, not the full URL/file rewrite plugin or a live APM policy.
+
 ```json
 {
   "route": {

@@ -478,7 +478,7 @@ when HTTP_REQUEST {
         }
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
-        self.assertGreaterEqual(queue["command_count"], 366)
+        self.assertGreaterEqual(queue["command_count"], 362)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -5908,6 +5908,57 @@ when HTTP_REQUEST {
                         allow_irule_file=False,
                         allow_requests=False,
                     )
+
+    def test_rewrite_events_modify_request_and_response_payloads(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "REWRITE"],
+                "irule": """
+when REWRITE_REQUEST_DONE {
+    log local0. "request=[REWRITE::payload] length=[REWRITE::payload length] first=[REWRITE::payload 2] window=[REWRITE::payload 1 2] post=[REWRITE::post_process]"
+    REWRITE::disable
+    REWRITE::enable
+    REWRITE::payload replace 0 4 pong!
+    REWRITE::post_process 1
+}
+when REWRITE_RESPONSE_DONE {
+    log local0. "response=[REWRITE::payload] length=[REWRITE::payload length]"
+    REWRITE::payload replace 0 5 world
+}
+""",
+                "request": {
+                    "host": "rewrite.example.com",
+                    "body": "ping",
+                    "headers": {"Content-Length": "4"},
+                    "response_body": "hello",
+                    "response_headers": {"Content-Length": "5"},
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_result = result["results"][0]
+        self.assertIn("REWRITE_REQUEST_DONE", request_result["events_fired"])
+        self.assertIn("REWRITE_RESPONSE_DONE", request_result["events_fired"])
+        self.assertEqual(request_result["request"]["body"], "pong!")
+        self.assertEqual(request_result["response"]["body"], "world")
+        self.assertEqual(request_result["request"]["headers"]["content-length"], "5")
+        self.assertEqual(request_result["response"]["headers"]["content-length"], "5")
+        self.assertEqual(
+            request_result["semantic"]["rewrite"],
+            {
+                "enabled": True,
+                "post_process": True,
+                "payload_side": "response",
+                "payload_replaced": True,
+                "request_payload_length": 5,
+                "response_payload_length": 5,
+            },
+        )
+        self.assertTrue(any("request=ping length=4 first=pi window=in post=0" in entry for entry in request_result["logs"]))
+        self.assertTrue(any("response=hello length=5" in entry for entry in request_result["logs"]))
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in ("REWRITE::disable", "REWRITE::enable", "REWRITE::payload", "REWRITE::post_process"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
 
     def test_tls_semantics_expose_sni_cipher_and_peer_certificate(self) -> None:
         result = self.adapter.run_scenario(
