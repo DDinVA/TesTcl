@@ -53,6 +53,8 @@ namespace eval ::itest::semantic {
     variable ssl_cert_objects [dict create]
     variable http2_pending [dict create]
     variable udp_unused_port_next 40000
+    variable tcp_unused_port_next 49152
+    variable tcp_unused_ports [dict create]
     variable rtsp_collection_requested 0
     variable rtsp_collection_length 0
     variable rtsp_release_requested 0
@@ -351,6 +353,18 @@ namespace eval ::itest::semantic {
     }
 
     namespace eval ::state::tcp {
+        variable abc enable
+        variable analytics disable
+        variable analytics_key ""
+        variable autowin enable
+        variable delayed_ack enable
+        variable dsack enable
+        variable earlyrxmit enable
+        variable ecn enable
+        variable enhanced_loss_recovery enable
+        variable limxmit enable
+        variable lossfilter_rate 0
+        variable lossfilter_burst 0
         variable nagle auto
         variable naglemode auto
         variable naglestate enabled
@@ -365,6 +379,9 @@ namespace eval ::itest::semantic {
         variable rttvar 0
         variable rexmt_thresh 3
         variable rt_metrics_timeout 0
+        variable rcv_scale 0
+        variable snd_scale 0
+        variable snd_ssthresh 1073725440
         variable pacing 0
         variable proxybuffer_high 0
         variable proxybuffer_low 0
@@ -8451,26 +8468,214 @@ namespace eval ::itest::semantic {
 
     proc tcp_reset_transport {} {
         namespace eval ::state::tcp {
-            variable nagle auto
-            variable naglemode auto
-            variable naglestate enabled
-            variable keepalive 0
-            variable idletime 300
-            variable sendbuf 0
-            variable recvwnd 0
-            variable rcv_size 65535
-            variable snd_wnd 65535
-            variable snd_cwnd 14600
-            variable rto 1000
-            variable rttvar 0
-            variable rexmt_thresh 3
-            variable rt_metrics_timeout 0
-            variable pacing 0
-            variable proxybuffer_high 0
-            variable proxybuffer_low 0
-            variable push_flag default
-            variable congestion ""
+            set abc enable
+            set analytics disable
+            set analytics_key ""
+            set autowin enable
+            set delayed_ack enable
+            set dsack enable
+            set earlyrxmit enable
+            set ecn enable
+            set enhanced_loss_recovery enable
+            set limxmit enable
+            set lossfilter_rate 0
+            set lossfilter_burst 0
+            set nagle auto
+            set naglemode auto
+            set naglestate enabled
+            set keepalive 0
+            set idletime 300
+            set sendbuf 0
+            set recvwnd 0
+            set rcv_size 65535
+            set snd_wnd 65535
+            set snd_cwnd 14600
+            set rto 1000
+            set rttvar 0
+            set rexmt_thresh 3
+            set rt_metrics_timeout 0
+            set rcv_scale 0
+            set snd_scale 0
+            set snd_ssthresh 1073725440
+            set pacing 0
+            set proxybuffer_high 0
+            set proxybuffer_low 0
+            set push_flag default
+            set congestion ""
         }
+    }
+
+    proc _tcp_bool_word {value command} {
+        set value [string tolower $value]
+        if {$value in {enable enabled 1 true yes}} { return enable }
+        if {$value in {disable disabled 0 false no}} { return disable }
+        error "$command requires enable or disable"
+    }
+
+    proc tcp_toggle_command {name args} {
+        if {[llength $args] != 1} {
+            error "TCP::$name requires enable or disable"
+        }
+        set value [_tcp_bool_word [lindex $args 0] TCP::$name]
+        set ::state::tcp::$name $value
+        ::itest::log_decision tcp $name $value
+        return ""
+    }
+
+    proc tcp_optional_toggle_command {name args} {
+        if {[llength $args] > 1} {
+            error "TCP::$name accepts an optional enable or disable"
+        }
+        if {[llength $args] == 1} {
+            set value [_tcp_bool_word [lindex $args 0] TCP::$name]
+            set ::state::tcp::$name $value
+            ::itest::log_decision tcp $name $value
+        }
+        return [set ::state::tcp::$name]
+    }
+
+    proc tcp_abc_command {args} { return [tcp_toggle_command abc {*}$args] }
+    proc tcp_autowin_command {args} { return [tcp_toggle_command autowin {*}$args] }
+    proc tcp_delayed_ack_command {args} { return [tcp_toggle_command delayed_ack {*}$args] }
+    proc tcp_dsack_command {args} { return [tcp_toggle_command dsack {*}$args] }
+    proc tcp_earlyrxmit_command {args} { return [tcp_optional_toggle_command earlyrxmit {*}$args] }
+    proc tcp_ecn_command {args} { return [tcp_toggle_command ecn {*}$args] }
+    proc tcp_enhanced_loss_recovery_command {args} {
+        return [tcp_toggle_command enhanced_loss_recovery {*}$args]
+    }
+    proc tcp_limxmit_command {args} { return [tcp_toggle_command limxmit {*}$args] }
+
+    proc tcp_analytics_command {args} {
+        if {[llength $args] < 1 || [llength $args] > 2} {
+            error "TCP::analytics accepts enable, disable, or key with an optional value"
+        }
+        set operation [string tolower [lindex $args 0]]
+        if {$operation in {enable disable}} {
+            if {[llength $args] != 1} {
+                error "TCP::analytics $operation takes no additional arguments"
+            }
+            set ::state::tcp::analytics $operation
+            ::itest::log_decision tcp analytics $operation
+            return ""
+        }
+        if {$operation eq "key"} {
+            set key ""
+            if {[llength $args] == 2} {
+                set key [lindex $args 1]
+            }
+            set ::state::tcp::analytics enable
+            set ::state::tcp::analytics_key $key
+            ::itest::log_decision tcp analytics_key $key
+            return ""
+        }
+        error "TCP::analytics requires enable, disable, or key"
+    }
+
+    proc tcp_lossfilter_command {args} {
+        if {[llength $args] != 2} {
+            error "TCP::lossfilter requires rate and burst"
+        }
+        set rate [lindex $args 0]
+        set burst [lindex $args 1]
+        if {![string is integer -strict $rate] || $rate < 0 || $rate > 1000000} {
+            error "TCP::lossfilter rate must be an integer from 0 to 1000000"
+        }
+        if {![string is integer -strict $burst] || $burst < 0 || $burst > 32} {
+            error "TCP::lossfilter burst must be an integer from 0 to 32"
+        }
+        set ::state::tcp::lossfilter_rate $rate
+        set ::state::tcp::lossfilter_burst $burst
+        ::itest::log_decision tcp lossfilter [list $rate $burst]
+        return ""
+    }
+
+    proc tcp_lossfilter_value {name args} {
+        if {[llength $args] != 0} { error "TCP::$name takes no arguments" }
+        return [set ::state::tcp::$name]
+    }
+
+    proc tcp_lossfilter_burst_command {args} {
+        return [tcp_lossfilter_value lossfilter_burst {*}$args]
+    }
+
+    proc tcp_lossfilter_rate_command {args} {
+        return [tcp_lossfilter_value lossfilter_rate {*}$args]
+    }
+
+    proc tcp_rexmt_thresh_command {args} {
+        if {[llength $args] > 1} {
+            error "TCP::rexmt_thresh accepts an optional integer"
+        }
+        if {[llength $args] == 1} {
+            set value [lindex $args 0]
+            if {![string is integer -strict $value] || $value < 3 || $value > 255} {
+                error "TCP::rexmt_thresh requires an integer from 3 to 255"
+            }
+            set ::state::tcp::rexmt_thresh $value
+            ::itest::log_decision tcp rexmt_thresh $value
+        }
+        return $::state::tcp::rexmt_thresh
+    }
+
+    proc tcp_rt_metrics_timeout_command {args} {
+        if {[llength $args] != 1} {
+            error "TCP::rt_metrics_timeout requires a non-negative integer"
+        }
+        set value [lindex $args 0]
+        if {![string is integer -strict $value] || $value < 0} {
+            error "TCP::rt_metrics_timeout requires a non-negative integer"
+        }
+        set ::state::tcp::rt_metrics_timeout $value
+        ::itest::log_decision tcp rt_metrics_timeout $value
+        return ""
+    }
+
+    proc tcp_rcv_scale_command {args} { return [tcp_readonly_numeric rcv_scale {*}$args] }
+    proc tcp_snd_scale_command {args} { return [tcp_readonly_numeric snd_scale {*}$args] }
+    proc tcp_snd_ssthresh_command {args} { return [tcp_readonly_numeric snd_ssthresh {*}$args] }
+
+    proc tcp_unused_port_command {args} {
+        variable tcp_unused_port_next
+        variable tcp_unused_ports
+        if {[llength $args] ni {3 4}} {
+            error "TCP::unused_port requires remote address, remote port, local address, and optional hint port"
+        }
+        set remote_port [lindex $args 1]
+        if {![string is integer -strict $remote_port] || $remote_port < 0 || $remote_port > 65535} {
+            error "TCP::unused_port remote port must be an integer from 0 to 65535"
+        }
+        foreach address [list [lindex $args 0] [lindex $args 2]] {
+            if {$address eq ""} { error "TCP::unused_port addresses must not be empty" }
+        }
+        set result $tcp_unused_port_next
+        set has_hint 0
+        if {[llength $args] == 4} {
+            set hint [lindex $args 3]
+            if {![string is integer -strict $hint] || $hint < 0 || $hint > 65535} {
+                error "TCP::unused_port hint port must be an integer from 0 to 65535"
+            }
+            if {$hint > 0} {
+                set result $hint
+                set has_hint 1
+            }
+        }
+        set selected 0
+        for {set attempt 0} {$attempt < 16384} {incr attempt} {
+            if {![dict exists $tcp_unused_ports $result]} {
+                set selected 1
+                break
+            }
+            incr result
+            if {$result > 65535} { set result 49152 }
+        }
+        if {!$selected} { return 0 }
+        dict set tcp_unused_ports $result 1
+        if {!$has_hint} {
+            set tcp_unused_port_next [expr {$result + 1}]
+            if {$tcp_unused_port_next > 65535} { set tcp_unused_port_next 49152 }
+        }
+        ::itest::log_decision tcp unused_port [list [lindex $args 0] $remote_port [lindex $args 2] $result]
+        return $result
     }
 
     proc tcp_nagle_command {args} {
@@ -11715,9 +11920,21 @@ foreach {name proc_name} {
     HTTP::username ::itest::semantic::http_username
     HTTP::cookie ::itest::cmd::http_cookie
     TCP::collect ::itest::cmd::tcp_collect
+    TCP::abc ::itest::semantic::tcp_abc_command
+    TCP::analytics ::itest::semantic::tcp_analytics_command
+    TCP::autowin ::itest::semantic::tcp_autowin_command
     TCP::congestion ::itest::semantic::tcp_congestion_command
+    TCP::delayed_ack ::itest::semantic::tcp_delayed_ack_command
+    TCP::dsack ::itest::semantic::tcp_dsack_command
+    TCP::earlyrxmit ::itest::semantic::tcp_earlyrxmit_command
+    TCP::ecn ::itest::semantic::tcp_ecn_command
+    TCP::enhanced_loss_recovery ::itest::semantic::tcp_enhanced_loss_recovery_command
     TCP::idletime ::itest::semantic::tcp_idletime_command
     TCP::keepalive ::itest::semantic::tcp_keepalive_command
+    TCP::limxmit ::itest::semantic::tcp_limxmit_command
+    TCP::lossfilter ::itest::semantic::tcp_lossfilter_command
+    TCP::lossfilterburst ::itest::semantic::tcp_lossfilter_burst_command
+    TCP::lossfilterrate ::itest::semantic::tcp_lossfilter_rate_command
     TCP::nagle ::itest::semantic::tcp_nagle_command
     TCP::naglemode ::itest::semantic::tcp_naglemode_command
     TCP::naglestate ::itest::semantic::tcp_naglestate_command
@@ -11729,15 +11946,21 @@ foreach {name proc_name} {
     TCP::proxybufferlow ::itest::semantic::tcp_proxybufferlow_command
     TCP::push_flag ::itest::semantic::tcp_push_flag_command
     TCP::rcv_size ::itest::semantic::tcp_rcv_size_command
+    TCP::rcv_scale ::itest::semantic::tcp_rcv_scale_command
     TCP::recvwnd ::itest::semantic::tcp_recvwnd_command
     TCP::release ::itest::cmd::tcp_release
     TCP::respond ::itest::cmd::tcp_respond
     TCP::rto ::itest::semantic::tcp_rto_command
     TCP::rttvar ::itest::semantic::tcp_rttvar_command
+    TCP::rexmt_thresh ::itest::semantic::tcp_rexmt_thresh_command
+    TCP::rt_metrics_timeout ::itest::semantic::tcp_rt_metrics_timeout_command
     TCP::sendbuf ::itest::semantic::tcp_sendbuf_command
     TCP::setmss ::itest::semantic::tcp_setmss_command
     TCP::snd_cwnd ::itest::semantic::tcp_snd_cwnd_command
+    TCP::snd_scale ::itest::semantic::tcp_snd_scale_command
+    TCP::snd_ssthresh ::itest::semantic::tcp_snd_ssthresh_command
     TCP::snd_wnd ::itest::semantic::tcp_snd_wnd_command
+    TCP::unused_port ::itest::semantic::tcp_unused_port_command
     RTSP::collect ::itest::semantic::rtsp_collect_command
     RTSP::header ::itest::semantic::rtsp_header_command
     RTSP::method ::itest::semantic::rtsp_method_command

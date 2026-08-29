@@ -6951,6 +6951,107 @@ when CLIENT_DATA {
         self.assertTrue(expected.issubset(tcp_statuses))
         self.assertTrue(all(tcp_statuses[name] == "semantic-mock" for name in expected))
 
+    def test_tcp_17_5_tuning_commands_are_semantic_and_inspectable(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    TCP::abc disable
+    TCP::analytics key api
+    TCP::autowin disable
+    TCP::delayed_ack disable
+    TCP::dsack disable
+    TCP::earlyrxmit disable
+    TCP::ecn disable
+    TCP::enhanced_loss_recovery disable
+    TCP::limxmit disable
+    TCP::lossfilter 150 10
+    set ::burst [TCP::lossfilterburst]
+    set ::rate [TCP::lossfilterrate]
+    set ::rcv_scale [TCP::rcv_scale]
+    set ::snd_scale [TCP::snd_scale]
+    set ::ssthresh [TCP::snd_ssthresh]
+    set ::rexmt [TCP::rexmt_thresh 100]
+    TCP::rt_metrics_timeout 300
+    set ::port [TCP::unused_port 192.0.2.20 80 10.0.0.5 55000]
+    set ::port2 [TCP::unused_port 192.0.2.20 80 10.0.0.5]
+    TCP::collect 1
+}
+when CLIENT_DATA {
+    log local0. "abc=[set ::state::tcp::abc] analytics=[set ::state::tcp::analytics]/[set ::state::tcp::analytics_key] autowin=[set ::state::tcp::autowin] earlyrxmit=[set ::state::tcp::earlyrxmit] ecn=[set ::state::tcp::ecn] loss=[set ::burst]/[set ::rate] rcv=[set ::rcv_scale] snd=[set ::snd_scale] ssthresh=[set ::ssthresh] rexmt=[set ::rexmt] port=[set ::port]/[set ::port2]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 9999},
+                        "flags": ["SYN"],
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 9999},
+                        "flags": ["ACK"],
+                        "payload": "x",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        accepted = result["trace"][0]["events"][-1]
+        data = result["trace"][1]["events"][-1]
+        tcp = accepted["state"]["tcp"]
+        self.assertEqual(tcp["abc"], "disable")
+        self.assertEqual(tcp["analytics"], "enable")
+        self.assertEqual(tcp["analytics_key"], "api")
+        self.assertEqual(tcp["autowin"], "disable")
+        self.assertEqual(tcp["delayed_ack"], "disable")
+        self.assertEqual(tcp["dsack"], "disable")
+        self.assertEqual(tcp["earlyrxmit"], "disable")
+        self.assertEqual(tcp["ecn"], "disable")
+        self.assertEqual(tcp["enhanced_loss_recovery"], "disable")
+        self.assertEqual(tcp["limxmit"], "disable")
+        self.assertEqual(tcp["lossfilter_rate"], "150")
+        self.assertEqual(tcp["lossfilter_burst"], "10")
+        self.assertEqual(tcp["rt_metrics_timeout"], "300")
+        self.assertTrue(any("analytics=enable/api" in log and "port=55000/49152" in log for log in data["logs"]))
+        expected = {
+            "TCP::abc", "TCP::analytics", "TCP::autowin", "TCP::delayed_ack",
+            "TCP::dsack", "TCP::earlyrxmit", "TCP::ecn",
+            "TCP::enhanced_loss_recovery", "TCP::limxmit", "TCP::lossfilter",
+            "TCP::lossfilterburst", "TCP::lossfilterrate", "TCP::rcv_scale",
+            "TCP::rexmt_thresh", "TCP::rt_metrics_timeout", "TCP::snd_scale",
+            "TCP::snd_ssthresh", "TCP::unused_port",
+        }
+        statuses = {
+            entry["name"]: entry["runtime_status"]
+            for entry in result["fidelity"]["commands"]
+            if entry["name"] in expected
+        }
+        self.assertEqual(set(statuses), expected)
+        self.assertTrue(all(value == "semantic-mock" for value in statuses.values()))
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "integer from 3 to 255"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP"],
+                    "irule": "when CLIENT_ACCEPTED { TCP::rexmt_thresh 2 }",
+                    "packets": [
+                        {
+                            "protocol": "tcp",
+                            "direction": "client_to_server",
+                            "source": {"address": "10.0.0.5", "port": 51000},
+                            "destination": {"address": "192.0.2.10", "port": 9999},
+                            "flags": ["SYN"],
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_flow_handles_track_connection_state_and_related_flows(self) -> None:
         result = self.adapter.run_scenario(
             {

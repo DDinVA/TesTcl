@@ -65,9 +65,14 @@ port, buffer, rate, and debug-queue controls in the event trace. This is a
 bounded datagram model: it does not implement TMM queue scheduling, NAT, or a
 real upstream UDP socket.
 TCP packet traces also expose a bounded transport-control state layer. Rules
-can inspect or set Nagle mode, keepalive, idle timeout, send/receive buffers,
-MSS, pacing, PUSH mode, congestion label, and proxy-buffer thresholds; those
-values persist across packet events in the emulated connection.
+can inspect or set Appropriate Byte Counting, analytics, automatic window
+tuning, delayed ACK, D-SACK, early retransmit, ECN, enhanced loss recovery,
+limited transmit, loss filters, window scales, retransmission and metrics
+timeouts, Nagle mode, keepalive, idle timeout, send/receive buffers, MSS,
+pacing, PUSH mode, congestion label, proxy-buffer thresholds, and a
+deterministic unused-port allocator; those values persist across packet
+events in the emulated connection. This is transport-control state, not a
+kernel TCP implementation or wire-level congestion/retransmission simulator.
 RTSP packet traces use the RTSP profile and expose structured request/response
 events, case-insensitive header lookup and mutation, byte-oriented payload
 collection/replacement, release, metadata getters, and deterministic

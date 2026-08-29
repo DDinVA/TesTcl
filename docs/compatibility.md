@@ -47,11 +47,15 @@ payload replacement, drop, hold/release, response emission, and bounded buffer,
 rate, send-buffer, debug-queue, MSS, and unused-port controls. It does not run
 TMM queue scheduling, NAT, connection tracking, or a live upstream UDP socket.
 The TCP semantic layer additionally models documented connection tuning
-controls including Nagle mode/state, keepalive, idle timeout, send and receive
-buffers, MSS changes, pacing, PUSH mode, congestion label, and proxy-buffer
-thresholds. These are deterministic state and inspection values; the adapter
-does not implement a kernel TCP stack, congestion-control algorithm,
-retransmission timers, or wire-level pacing.
+controls including Appropriate Byte Counting, analytics state and key,
+automatic window tuning, delayed ACK, D-SACK, early retransmit, ECN, enhanced
+loss recovery, limited transmit, loss filters, window scales, retransmission
+threshold, metrics timeout, Nagle mode/state, keepalive, idle timeout, send
+and receive buffers, MSS changes, pacing, PUSH mode, congestion label, and
+proxy-buffer thresholds. `TCP::unused_port` allocates deterministic ephemeral
+ports for a validated tuple. These are deterministic state and inspection
+values; the adapter does not implement a kernel TCP stack, congestion-control
+algorithm, retransmission timers, or wire-level pacing.
 RTSP packet traces expose the four RTSP request/response events and the
 catalogued `RTSP::` surface for structured header lookup/mutation, payload
 collection and replacement, release, metadata getters, and deterministic
