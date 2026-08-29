@@ -126,6 +126,11 @@ connection controls. Detach/reuse flags, selection mode, and the connection
 label persist across keep-alive requests and reset when the emulator starts a
 new connection. The adapter does not simulate a shared multi-client idle
 server-connection pool or perform real load-balancer connection scheduling.
+Each HTTP result also exposes a deterministic `server_connection` record with
+an identity, an `enabled` profile flag, reuse reason, post-response attachment
+state, selection mode, and label. The record models one emulator session's
+single idle slot; it is not a multi-client pool or real load-balancer
+connection scheduler.
 
 The IP semantic layer models the seven TMOS 17.5 commands `IP::hops`,
 `IP::idle_timeout`, `IP::ingress_drop_rate`, `IP::ingress_rate_limit`,

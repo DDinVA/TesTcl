@@ -181,6 +181,10 @@ The ONECONNECT layer models the four TMOS 17.5 rule controls
 persists across keep-alive requests, while a `new_connection` request restores
 the defaults. This exposes the behavior an iRule can observe without claiming
 to reproduce BIG-IP's shared idle server-connection pool or scheduling.
+Each result also includes `server_connection`, which reports whether the
+OneConnect profile is enabled, the deterministic connection identity, and
+whether the request opened, stayed attached to, or reused that session's
+server-side connection.
 
 ```json
 {

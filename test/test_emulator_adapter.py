@@ -1553,6 +1553,20 @@ when HTTP_REQUEST {
             "select": "none",
             "label": "",
         })
+        self.assertEqual(first["server_connection"], {
+            "id": 1,
+            "enabled": True,
+            "reused": False,
+            "reason": "new",
+            "state_after_response": "attached",
+            "reuse_enabled": False,
+            "select": "persist",
+            "label": "tenant-a",
+        })
+        self.assertEqual(second["server_connection"]["id"], 1)
+        self.assertEqual(second["server_connection"]["reason"], "attached")
+        self.assertEqual(new_connection["server_connection"]["id"], 2)
+        self.assertEqual(new_connection["server_connection"]["reason"], "new")
         self.assertTrue(any("reuse=0 select=persist" in entry for entry in first["logs"]))
         self.assertTrue(any("reuse=1 select=none" in entry for entry in new_connection["logs"]))
         usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
@@ -1573,6 +1587,39 @@ when HTTP_REQUEST {
                 },
                 tcl_lsp_root=self.tcl_lsp_root,
             )
+
+        reused = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ONECONNECT"],
+                "irule": 'when HTTP_REQUEST { log local0. "reuse=[ONECONNECT::reuse]" }',
+                "requests": [{"uri": "/idle-1"}, {"uri": "/idle-2"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first_idle, second_idle = reused["results"]
+        self.assertEqual(first_idle["server_connection"]["reason"], "new")
+        self.assertEqual(first_idle["server_connection"]["state_after_response"], "detached")
+        self.assertEqual(second_idle["server_connection"], {
+            "id": 1,
+            "enabled": True,
+            "reused": True,
+            "reason": "idle-reuse",
+            "state_after_response": "detached",
+            "reuse_enabled": True,
+            "select": "none",
+            "label": "",
+        })
+
+        plain = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { }",
+                "request": {"uri": "/plain"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertFalse(plain["results"][0]["server_connection"]["enabled"])
+        self.assertFalse(plain["results"][0]["server_connection"]["reuse_enabled"])
 
     def test_ip_semantics_record_packet_state_and_seeded_lookups(self) -> None:
         result = self.adapter.run_scenario(

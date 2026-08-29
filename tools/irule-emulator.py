@@ -3158,6 +3158,21 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
     }
 
 
+def _oneconnect_runtime_state(session: Any) -> dict[str, Any]:
+    """Read the small connection-control state used by the request scheduler."""
+    parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::oneconnect_snapshot")
+    )
+    if len(parts) != 4:
+        raise EmulatorInputError("invalid ONECONNECT state")
+    return {
+        "detach_enabled": parts[0] == "1",
+        "reuse_enabled": parts[1] == "1",
+        "select": parts[2],
+        "label": parts[3],
+    }
+
+
 def _install_runtime_shims(session: Any) -> None:
     """Correct small upstream mock gaps at the adapter boundary.
 
@@ -9192,6 +9207,8 @@ class EmulatorSession:
         self._connection_request_number = 0
         self._connection_open = False
         self._server_connection_open = False
+        self._server_connection_id = 0
+        self._server_connection_detached = False
         self._tcp_buffers = {"client": "", "server": ""}
         self._ssl_buffers = {"client": b"", "server": b""}
         self._packet_streams: dict[tuple[Any, ...], _TcpStream] = {}
@@ -9334,6 +9351,22 @@ class EmulatorSession:
                 raise error
             return result.get("value")
 
+    def _prepare_server_connection(
+        self, session: Any, oneconnect_enabled: bool
+    ) -> tuple[int, bool, str]:
+        """Choose a deterministic server-side connection for one request."""
+        if not self._server_connection_open:
+            self._server_connection_id += 1
+            self._server_connection_open = True
+            return self._server_connection_id, False, "new"
+        if self._server_connection_detached and oneconnect_enabled:
+            controls = _oneconnect_runtime_state(session)
+            if controls["reuse_enabled"]:
+                return self._server_connection_id, True, "idle-reuse"
+            self._server_connection_id += 1
+            return self._server_connection_id, False, "reuse-disabled"
+        return self._server_connection_id, False, "attached"
+
     def _run_request_on_worker(self, session: Any, request: dict[str, Any]) -> dict[str, Any]:
         _validate_request_flags(request)
         session.eval_tcl("::itest::semantic::event_errors_reset")
@@ -9351,6 +9384,8 @@ class EmulatorSession:
             self._connection_request_number = 0
         if not self._connection_open:
             self._connection_request_number = 0
+            self._server_connection_open = False
+            self._server_connection_detached = False
             session.eval_tcl("::itest::semantic::lb_reset_connection")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::psm_reset_connection")
@@ -9383,6 +9418,12 @@ class EmulatorSession:
             antifraud_alert = antifraud_request.get("alert", antifraud_alert)
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
         original_kwargs = dict(kwargs)
+        oneconnect_enabled = any(
+            str(profile).upper() == "ONECONNECT" for profile in self._profiles
+        )
+        server_connection_id, server_connection_reused, server_connection_reason = (
+            self._prepare_server_connection(session, oneconnect_enabled)
+        )
         retry_count = 0
         retry_exhausted = False
         http_close_requested = False
@@ -9463,6 +9504,23 @@ class EmulatorSession:
                 http2_disconnected = result.get("http2", {}).get("disconnected") == "1"
                 self._connection_open = True
                 if not retry:
+                    oneconnect = result.get("semantic", {}).get("oneconnect", {})
+                    detached = oneconnect_enabled and bool(
+                        oneconnect.get("detach_enabled", False)
+                    )
+                    self._server_connection_detached = detached
+                    result["server_connection"] = {
+                        "id": server_connection_id,
+                        "enabled": oneconnect_enabled,
+                        "reused": server_connection_reused,
+                        "reason": server_connection_reason,
+                        "state_after_response": "detached" if detached else "attached",
+                        "reuse_enabled": oneconnect_enabled and bool(
+                            oneconnect.get("reuse_enabled", False)
+                        ),
+                        "select": oneconnect.get("select", "none") if oneconnect_enabled else "none",
+                        "label": oneconnect.get("label", "") if oneconnect_enabled else "",
+                    }
                     http_close_requested = http_close or http2_disconnected
                     break
                 if retry_count >= MAX_HTTP_RETRIES:
@@ -9532,6 +9590,8 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::httplog_reset_connection")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             self._connection_open = False
+            self._server_connection_open = False
+            self._server_connection_detached = False
             self._connection_request_number = 0
         result["decisions"] = decision_history
         result["logs"] = log_history
@@ -9553,6 +9613,8 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::httplog_reset_connection")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             self._connection_open = False
+            self._server_connection_open = False
+            self._server_connection_detached = False
             self._connection_request_number = 0
         return result
 
@@ -10609,6 +10671,7 @@ class EmulatorSession:
         self._ip_virtual_age_ms = 0
         self._connection_open = False
         self._server_connection_open = False
+        self._server_connection_detached = False
 
     @staticmethod
     def _packet_stream_key(packet: dict[str, Any]) -> tuple[Any, ...]:
