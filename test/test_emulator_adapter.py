@@ -494,7 +494,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("NTLM", "generated-stub"), queue_buckets)
         self.assertNotIn(("PROTOCOL_INSPECTION", "generated-stub"), queue_buckets)
         self.assertNotIn(("CLASSIFICATION", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 245)
+        self.assertNotIn(("CATEGORY", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 239)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1645,6 +1646,186 @@ when CLASSIFICATION_DETECTED {
                         "protocol": "classification",
                         "result": [""],
                     }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_category_packet_match_lookup_and_filetype(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "CATEGORY"],
+                "irule": """
+when CATEGORY_MATCHED {
+    CATEGORY::matchtype match_type
+    set result [CATEGORY::result category -display request_default_and_custom]
+    set first_category [lindex $result 1]
+    set safe [CATEGORY::result safesearch]
+    log local0. "type=$match_type result=$result first=$first_category safe=$safe"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "category",
+                        "url": "https://example.test/watch?q=1",
+                        "categories": ["/Common/Media", "Sports & Video"],
+                        "safesearch": ["safe_key", "strict"],
+                        "matchtype": "custom",
+                        "filetype": {"mimetype": "text", "mimesubtype": "html"},
+                        "payload": "category payload",
+                    },
+                    {"protocol": "category", "matched": False},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        matched_event = next(
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] == "CATEGORY_MATCHED"
+        )
+        category_state = matched_event["state"]["category"]
+        self.assertEqual(
+            category_state["categories"], '"/Common/Media" "Sports & Video"'
+        )
+        self.assertEqual(category_state["safesearch"], '"safe_key" "strict"')
+        self.assertEqual(category_state["matchtype"], "custom")
+        self.assertEqual(category_state["matched"], "1")
+        self.assertEqual(category_state["detected"], "1")
+        self.assertEqual(category_state["url"], "https://example.test/watch?q=1")
+        self.assertEqual(
+            category_state["lookup_url"], "https://example.test/watch?q=1"
+        )
+        self.assertEqual(category_state["filetype_mimetype"], "text")
+        self.assertEqual(category_state["filetype_mimesubtype"], "html")
+        self.assertEqual(category_state["analytics"], "disable")
+        self.assertEqual(category_state["payload"], "category payload")
+        self.assertEqual(
+            result["trace"][0]["category_result"], category_state["categories"]
+        )
+        self.assertEqual(
+            result["trace"][0]["safesearch_result"], category_state["safesearch"]
+        )
+        self.assertTrue(
+            any("type=custom" in str(log) and "first=Sports & Video" in str(log)
+                and "safe_key" in str(log)
+                for log in matched_event["logs"])
+        )
+        self.assertEqual(result["trace"][1]["ignored"], "category packet did not match")
+
+        request_session = self.adapter.EmulatorSession(
+            self.tcl_lsp_root,
+            {
+                "profiles": ["HTTP", "CATEGORY"],
+                "irule": """
+when HTTP_REQUEST {
+    set lookup [CATEGORY::lookup https://lookup.example.test/path -display custom -ip 192.0.2.10 -custom_cat_match custom-category]
+    set safe [CATEGORY::safesearch https://safe.example.test/search]
+    CATEGORY::analytics enable
+    log local0. "lookup=$lookup safe=$safe"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            request_event = request_session.fire_event(
+                "HTTP_REQUEST",
+                {"category": {
+                    "categories": '"Custom Category"',
+                    "safesearch": "safe_key strict",
+                }},
+            )
+        finally:
+            request_session.close()
+        request_category_state = request_event["state"]["category"]
+        self.assertEqual(request_category_state["analytics"], "enable")
+        self.assertEqual(
+            request_category_state["lookup_url"], "https://safe.example.test/search"
+        )
+        self.assertTrue(any("lookup=" in str(log) and "Custom Category" in str(log)
+                            and "safe=safe_key strict" in str(log)
+                            for log in request_event["logs"]))
+
+        filetype_session = self.adapter.EmulatorSession(
+            self.tcl_lsp_root,
+            {
+                "profiles": ["HTTP", "CATEGORY"],
+                "irule": """
+when HTTP_RESPONSE_DATA {
+    CATEGORY::filetype payload -mimetype mime -mimesubtype subtype
+    log local0. "mime=$mime subtype=$subtype"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            filetype_event = filetype_session.fire_event(
+                "HTTP_RESPONSE_DATA",
+                {"category": {
+                    "filetype_mimetype": "application",
+                    "filetype_mimesubtype": "json",
+                }},
+            )
+        finally:
+            filetype_session.close()
+        self.assertTrue(any("mime=application subtype=json" in str(log)
+                            for log in filetype_event["logs"]))
+
+        gated = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": "when CATEGORY_MATCHED { return }",
+                "packets": [{"protocol": "category"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            gated["trace"][0]["ignored"], "CATEGORY profile is not attached"
+        )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "CATEGORY packets must be client_to_server",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "CATEGORY"],
+                    "irule": "when CATEGORY_MATCHED { return }",
+                    "packets": [{
+                        "protocol": "category",
+                        "direction": "server_to_client",
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "CATEGORY safesearch cannot contain empty strings",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "CATEGORY"],
+                    "irule": "when CATEGORY_MATCHED { return }",
+                    "packets": [{"protocol": "category", "safesearch": [""]}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "CATEGORY filetype must contain mimetype and/or mimesubtype",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "CATEGORY"],
+                    "irule": "when CATEGORY_MATCHED { return }",
+                    "packets": [{"protocol": "category", "filetype": {}}],
                 },
                 tcl_lsp_root=self.tcl_lsp_root,
             )

@@ -617,6 +617,21 @@ namespace eval ::itest::semantic {
         variable username ""
     }
 
+    namespace eval ::state::category {
+        variable analytics disable
+        variable categories {}
+        variable detected 1
+        variable filetype_mimetype application/octet-stream
+        variable filetype_mimesubtype octet-stream
+        variable lookup_url ""
+        variable matchtype request_default
+        variable matched 1
+        variable payload ""
+        variable payload_length 0
+        variable safesearch {}
+        variable url ""
+    }
+
     namespace eval ::state::icap {
         variable headers {Host icap.example.net}
         variable method REQMOD
@@ -12101,6 +12116,209 @@ namespace eval ::itest::semantic {
         return [classification_field_command username CLASSIFICATION::username {*}$args]
     }
 
+    proc category_reset_connection {} {
+        foreach {name value} {
+            analytics disable
+            categories {}
+            detected 1
+            filetype_mimetype application/octet-stream
+            filetype_mimesubtype octet-stream
+            lookup_url ""
+            matchtype request_default
+            matched 1
+            payload ""
+            payload_length 0
+            safesearch {}
+            url ""
+        } {
+            set ::state::category::$name $value
+        }
+    }
+
+    proc category_prepare_event {} {}
+
+    proc _category_require_event {allowed command_name} {
+        if {$::itest::current_event ni $allowed} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc category_analytics_command {args} {
+        _category_require_event {HTTP_REQUEST HTTP_RESPONSE} CATEGORY::analytics
+        if {[llength $args] != 1} {
+            error "CATEGORY::analytics requires enable or disable"
+        }
+        set value [string tolower [lindex $args 0]]
+        if {$value ni {enable disable}} {
+            error "CATEGORY::analytics requires enable or disable"
+        }
+        set ::state::category::analytics $value
+        ::itest::log_decision category analytics $value
+        return ""
+    }
+
+    proc category_lookup_command {args} {
+        if {[llength $args] < 1} {
+            error "CATEGORY::lookup requires a URL"
+        }
+        set lookup_url [lindex $args 0]
+        if {$lookup_url eq ""} {
+            error "CATEGORY::lookup requires a non-empty URL"
+        }
+        set display 0
+        set mode request_default
+        set mode_seen 0
+        set ip ""
+        set custom_category ""
+        set seen_display 0
+        set seen_ip 0
+        set seen_custom 0
+        for {set index 1} {$index < [llength $args]} {incr index} {
+            set option [lindex $args $index]
+            switch -- $option {
+                -display {
+                    if {$seen_display} { error "CATEGORY::lookup received duplicate -display" }
+                    set seen_display 1
+                    set display 1
+                }
+                request_default -
+                request_default_and_custom -
+                custom {
+                    if {$mode_seen} { error "CATEGORY::lookup received duplicate category type" }
+                    set mode $option
+                    set mode_seen 1
+                }
+                -ip {
+                    if {$seen_ip} { error "CATEGORY::lookup received duplicate -ip" }
+                    incr index
+                    if {$index >= [llength $args] || [lindex $args $index] eq "" ||
+                        [lindex $args $index] in {-display request_default request_default_and_custom custom -ip -custom_cat_match}} {
+                        error "CATEGORY::lookup -ip requires a value"
+                    }
+                    set ip [lindex $args $index]
+                    set seen_ip 1
+                }
+                -custom_cat_match {
+                    if {$seen_custom} { error "CATEGORY::lookup received duplicate -custom_cat_match" }
+                    incr index
+                    if {$index >= [llength $args] || [lindex $args $index] eq "" ||
+                        [lindex $args $index] in {-display request_default request_default_and_custom custom -ip -custom_cat_match}} {
+                        error "CATEGORY::lookup -custom_cat_match requires a value"
+                    }
+                    set custom_category [lindex $args $index]
+                    set seen_custom 1
+                }
+                default {
+                    error "CATEGORY::lookup received unknown option $option"
+                }
+            }
+        }
+        set ::state::category::lookup_url $lookup_url
+        ::itest::log_decision category lookup [list $lookup_url $mode $display $ip $custom_category]
+        return $::state::category::categories
+    }
+
+    proc category_safesearch_command {args} {
+        _category_require_event {HTTP_REQUEST} CATEGORY::safesearch
+        if {[llength $args] != 1 || [lindex $args 0] eq ""} {
+            error "CATEGORY::safesearch requires a non-empty URL"
+        }
+        set ::state::category::lookup_url [lindex $args 0]
+        ::itest::log_decision category safesearch $::state::category::lookup_url
+        return $::state::category::safesearch
+    }
+
+    proc _category_require_match {command_name} {
+        if {$::itest::current_event ne "CATEGORY_MATCHED"} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc category_matchtype_command {args} {
+        _category_require_match CATEGORY::matchtype
+        if {[llength $args] != 1 || [lindex $args 0] eq ""} {
+            error "CATEGORY::matchtype requires a variable name"
+        }
+        # The command reaches this proc through the unknown-command
+        # dispatcher, so the iRule handler is two frames up.
+        upvar 2 [lindex $args 0] matchtype_target
+        set matchtype_target $::state::category::matchtype
+        return $::state::category::matchtype
+    }
+
+    proc category_result_command {args} {
+        _category_require_match CATEGORY::result
+        if {[llength $args] < 1 || [llength $args] > 3} {
+            error "CATEGORY::result requires category or safesearch"
+        }
+        set result_type [lindex $args 0]
+        if {$result_type eq "safesearch"} {
+            if {[llength $args] != 1} {
+                error "CATEGORY::result safesearch takes no options"
+            }
+            return $::state::category::safesearch
+        }
+        if {$result_type ne "category"} {
+            error "CATEGORY::result requires category or safesearch"
+        }
+        set display 0
+        set mode ""
+        foreach option [lrange $args 1 end] {
+            if {$option eq "-display"} {
+                if {$display} { error "CATEGORY::result received duplicate -display" }
+                set display 1
+            } elseif {$option in {custom request_default request_default_and_custom}} {
+                if {$mode ne ""} { error "CATEGORY::result received duplicate category type" }
+                set mode $option
+            } else {
+                error "CATEGORY::result received unknown option $option"
+            }
+        }
+        return $::state::category::categories
+    }
+
+    proc category_filetype_command {args} {
+        _category_require_event {HTTP_RESPONSE_DATA} CATEGORY::filetype
+        if {[llength $args] < 3} {
+            error "CATEGORY::filetype requires a payload and an output variable"
+        }
+        set remaining [lrange $args 1 end]
+        if {[llength $remaining] % 2 != 0} {
+            error "CATEGORY::filetype options require variable names"
+        }
+        set got_option 0
+        set got_mimetype 0
+        set got_mimesubtype 0
+        foreach {option variable_name} $remaining {
+            if {$variable_name eq ""} {
+                error "CATEGORY::filetype requires a non-empty variable name"
+            }
+            switch -- $option {
+                -mimetype {
+                    if {$got_mimetype} { error "CATEGORY::filetype received duplicate -mimetype" }
+                    upvar 2 $variable_name mimetype_target
+                    set mimetype_target $::state::category::filetype_mimetype
+                    set got_mimetype 1
+                    set got_option 1
+                }
+                -mimesubtype {
+                    if {$got_mimesubtype} { error "CATEGORY::filetype received duplicate -mimesubtype" }
+                    upvar 2 $variable_name mimesubtype_target
+                    set mimesubtype_target $::state::category::filetype_mimesubtype
+                    set got_mimesubtype 1
+                    set got_option 1
+                }
+                default {
+                    error "CATEGORY::filetype received unknown option $option"
+                }
+            }
+        }
+        if {!$got_option} {
+            error "CATEGORY::filetype requires -mimetype and/or -mimesubtype"
+        }
+        return ""
+    }
+
     proc icap_reset_connection {} {
         set ::state::icap::headers [list Host icap.example.net]
         set ::state::icap::method REQMOD
@@ -16886,6 +17104,12 @@ foreach {name proc_name} {
     CLASSIFICATION::result ::itest::semantic::classification_result_command
     CLASSIFICATION::urlcat ::itest::semantic::classification_urlcat_command
     CLASSIFICATION::username ::itest::semantic::classification_username_command
+    CATEGORY::analytics ::itest::semantic::category_analytics_command
+    CATEGORY::filetype ::itest::semantic::category_filetype_command
+    CATEGORY::lookup ::itest::semantic::category_lookup_command
+    CATEGORY::matchtype ::itest::semantic::category_matchtype_command
+    CATEGORY::result ::itest::semantic::category_result_command
+    CATEGORY::safesearch ::itest::semantic::category_safesearch_command
     ICAP::header ::itest::semantic::icap_header_command
     ICAP::method ::itest::semantic::icap_method_command
     ICAP::status ::itest::semantic::icap_status_command

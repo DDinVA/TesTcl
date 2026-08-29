@@ -118,6 +118,12 @@ Supplied application, category, protocol, URL-category, username, and
 result-token values are readable in the event; enable/disable state persists
 for the connection. It does not run a DPI classifier, classification
 database, or PEM policy engine.
+The CATEGORY adapter models the six TMOS 17.5 `CATEGORY::*` commands and
+dispatches `CATEGORY_MATCHED` for supplied client-side TCP matches. Lookup,
+safe-search, cached-result, match-type, filetype, and per-request analytics
+state are bounded and deterministic; lookup options and documented command
+event restrictions are checked. It does not contact a URL categorization/SWG
+service or reproduce the licensed category engine.
 The TMOS 17.5 `ROUTE::*` surface uses scenario-seeded route-domain and
 congestion-metric entries. Metric getters return deterministic values and
 `ROUTE::clear` removes a matching entry for the session; connection lifecycle

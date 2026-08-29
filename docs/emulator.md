@@ -140,6 +140,15 @@ Structured `classification` packet traces dispatch
 URL-category, username, and result-token fields, plus connection-scoped
 enable/disable controls. Result tokens and payloads are bounded; no DPI,
 classification database, or PEM policy engine is executed.
+Structured `category` packet traces dispatch `CATEGORY_MATCHED` for
+client-to-server TCP traffic when the `CATEGORY` profile is attached and the
+scenario marks a match. The six TMOS 17.5 `CATEGORY::*` commands are modeled:
+`CATEGORY::lookup` and `CATEGORY::safesearch` return bounded scenario-supplied
+lists, `CATEGORY::result` and `CATEGORY::matchtype` expose the cached match,
+`CATEGORY::filetype` writes supplied MIME values to caller variables, and
+`CATEGORY::analytics` records the per-request enable/disable decision. Lookup
+options and command event restrictions are validated, while no live URL
+categorization or SWG engine is contacted.
 The ROUTE layer accepts scenario-seeded route-domain and congestion-metric
 entries. `ROUTE::age`, `ROUTE::bandwidth`, `ROUTE::cwnd`, `ROUTE::expiration`,
 `ROUTE::mtu`, `ROUTE::rtt`, and `ROUTE::rttvar` read deterministic entries, and
