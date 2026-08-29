@@ -955,6 +955,15 @@ namespace eval ::itest::semantic {
         variable media {}
     }
 
+    namespace eval ::state::acl {
+        # 0=default, 1=drop, 2=reset, 3=allow, 4=allow-final.
+        variable action 3
+        variable l7_present 0
+        variable evaluated 0
+        variable l7_aborted 0
+        variable applied_action 0
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -3819,6 +3828,68 @@ namespace eval ::itest::semantic {
         _sdp_require_event SDP::session_id
         if {[llength $args] != 0} { error "SDP::session_id takes no arguments" }
         return $::state::sdp::session_id
+    }
+
+    proc acl_reset_connection {} {
+        set ::state::acl::action 3
+        set ::state::acl::l7_present 0
+        set ::state::acl::evaluated 0
+        set ::state::acl::l7_aborted 0
+        set ::state::acl::applied_action 0
+    }
+
+    proc _acl_action_code {value} {
+        if {$value eq "default"} { return 0 }
+        if {$value in {drop reset allow allow-final}} {
+            return [lsearch -exact {default drop reset allow allow-final} $value]
+        }
+        if {[string is integer -strict $value] && $value in {0 1 2 3 4}} {
+            return $value
+        }
+        error "ACL action must be default, drop, reset, allow, or allow-final"
+    }
+
+    proc acl_action_command {args} {
+        if {$::itest::current_event ne "FLOW_INIT"} {
+            error "ACL::action is not valid in $::itest::current_event"
+        }
+        if {[llength $args] == 0} {
+            return [_acl_action_code $::state::acl::action]
+        }
+        if {[llength $args] != 1} {
+            error "ACL::action accepts one action"
+        }
+        set action [lindex $args 0]
+        if {$action ni {default drop reset allow allow-final}} {
+            error "ACL::action must be default, drop, reset, allow, or allow-final"
+        }
+        set ::state::acl::action $action
+        ::itest::log_decision acl action $action
+        return ""
+    }
+
+    proc acl_eval_command {args} {
+        if {$::itest::current_event ne "CLIENT_ACCEPTED"} {
+            error "ACL::eval is not valid in $::itest::current_event"
+        }
+        if {[llength $args] > 1 || ([llength $args] == 1 && [lindex $args 0] ne "-l7")} {
+            error "ACL::eval accepts an optional -l7 flag"
+        }
+        if {$::state::acl::l7_present ni {0 1 true false}} {
+            error "ACL l7_present state must be boolean"
+        }
+        set l7_present [expr {$::state::acl::l7_present in {1 true}}]
+        set ::state::acl::evaluated 1
+        set ::state::acl::l7_aborted 0
+        set ::state::acl::applied_action 0
+        if {[llength $args] == 1 && $l7_present} {
+            set ::state::acl::l7_aborted 1
+            ::itest::log_decision acl eval_l7_aborted
+            return 1
+        }
+        set ::state::acl::applied_action [_acl_action_code $::state::acl::action]
+        ::itest::log_decision acl eval $::state::acl::applied_action
+        return 0
     }
 
     proc diameter_reset_connection {} {
@@ -17883,6 +17954,8 @@ foreach {original replacement} {
     sdp_field sdp_field_command
     sdp_media sdp_media_command
     sdp_session_id sdp_session_id_command
+    acl_action acl_action_command
+    acl_eval acl_eval_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
         ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
@@ -18490,6 +18563,8 @@ foreach {name proc_name} {
     SDP::field ::itest::semantic::sdp_field_command
     SDP::media ::itest::semantic::sdp_media_command
     SDP::session_id ::itest::semantic::sdp_session_id_command
+    ACL::action ::itest::semantic::acl_action_command
+    ACL::eval ::itest::semantic::acl_eval_command
     DIAMETER::avp ::itest::semantic::diameter_avp_command
     DIAMETER::command ::itest::semantic::diameter_command_command
     DIAMETER::disconnect ::itest::semantic::diameter_disconnect_command

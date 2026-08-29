@@ -303,6 +303,12 @@ OAuth operations use deterministic placeholders and do not perform external
 authentication or cryptographic signing. The model does not execute an APM
 policy graph, enforce production ACLs, expire sessions against wall-clock
 time, or reproduce SAML/OAuth/AAA network behavior.
+The TMOS 17.5 `ACL::action` and `ACL::eval` commands are represented by a
+deterministic ACL decision state. `ACL::action` supports the documented
+`default`, `drop`, `reset`, `allow`, and `allow-final` actions in `FLOW_INIT`;
+`ACL::eval` supports L4 evaluation and the `-l7` early-return behavior in
+`CLIENT_ACCEPTED`. The model records evaluation and applied-action state but
+does not enforce AFM policy, terminate sockets, or evaluate a live ACL chain.
 The seven catalogued TMOS 17.5 `FLOW::*` commands are represented by paired
 synthetic client/server handles. `FLOW::this`, `FLOW::peer`, priority, idle
 timeout, idle duration, refresh, and validated related-flow creation update a

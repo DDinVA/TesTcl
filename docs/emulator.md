@@ -584,6 +584,34 @@ dependence. Related handles are state records only: the adapter does not
 open sockets, inject packets, perform source translation, or create a live
 TMM connection.
 
+### ACL decision state
+
+The emulator models `ACL::action` in `FLOW_INIT` and `ACL::eval` in
+`CLIENT_ACCEPTED` using deterministic state. `ACL::action` accepts
+`default`, `drop`, `reset`, `allow`, and `allow-final`; its getter returns the
+documented numeric action code (`0` through `4`). `ACL::eval` returns `0` after
+L4 evaluation, or returns `1` for `-l7` when the supplied state says an L7 ACL
+was encountered. In the latter case no action is applied.
+
+Supply the decision inputs through the event API:
+
+```json
+{
+  "event": "CLIENT_ACCEPTED",
+  "state": {
+    "acl": {
+      "action": "drop",
+      "l7_present": 1
+    }
+  }
+}
+```
+
+The resulting `acl` state exposes `evaluated`, `l7_aborted`, and
+`applied_action` for assertions and downstream tooling. This is an AFM-style
+decision model only; it does not evaluate configured ACL rules, enforce a
+drop/reset on a real connection, or reproduce AFM policy-chain behavior.
+
 ### FLOWTABLE query inputs
 
 The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,

@@ -227,6 +227,71 @@ class EmulatorAdapterTests(unittest.TestCase):
         self.assertEqual(usage["HTTP::payload"]["runtime_status"], "semantic-mock")
         self.assertEqual(result["fidelity"]["warnings"], [])
 
+    def test_acl_action_and_eval_model_l4_and_l7_decisions(self) -> None:
+        action_session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["FLOW"],
+                "irule": """
+when FLOW_INIT {
+    ACL::action drop
+    log local0. "action=[ACL::action]"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            action_result = action_session.fire_event("FLOW_INIT", {"acl": {}})
+            self.assertTrue(action_result["fired"])
+            self.assertEqual(action_result["state"]["acl"]["action"], "drop")
+            self.assertTrue(any("action=1" in entry for entry in action_result["logs"]))
+        finally:
+            action_session.close()
+
+        eval_session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "irule": 'when CLIENT_ACCEPTED { log local0. "result=[ACL::eval -l7]" }',
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            l7_result = eval_session.fire_event(
+                "CLIENT_ACCEPTED",
+                {"acl": {"action": "drop", "l7_present": 1}},
+            )
+            self.assertEqual(l7_result["state"]["acl"]["evaluated"], "1")
+            self.assertEqual(l7_result["state"]["acl"]["l7_aborted"], "1")
+            self.assertEqual(l7_result["state"]["acl"]["applied_action"], "0")
+            self.assertTrue(any("result=1" in entry for entry in l7_result["logs"]))
+
+            l4_result = eval_session.fire_event(
+                "CLIENT_ACCEPTED",
+                {"acl": {"action": "allow-final", "l7_present": 0}},
+            )
+            self.assertEqual(l4_result["state"]["acl"]["l7_aborted"], "0")
+            self.assertEqual(l4_result["state"]["acl"]["applied_action"], "4")
+            self.assertTrue(any("result=0" in entry for entry in l4_result["logs"]))
+        finally:
+            eval_session.close()
+
+        invalid_session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {"profiles": ["FLOW"], "irule": "when FLOW_INIT { ACL::eval }"},
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, "not valid in FLOW_INIT"
+            ):
+                invalid_session.fire_event("FLOW_INIT")
+        finally:
+            invalid_session.close()
+
     def test_http_data_events_require_collection_and_honor_length(self) -> None:
         no_collect = self.adapter.run_scenario(
             {
@@ -740,7 +805,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("SOCKS", "generated-stub"), queue_buckets)
         self.assertNotIn(("SDP", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 216)
+        self.assertEqual(queue["command_count"], 214)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
