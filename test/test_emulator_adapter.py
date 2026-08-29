@@ -335,11 +335,11 @@ when HTTP_RESPONSE_RELEASE {
     def test_capability_filters_produce_bounded_implementation_slices(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         auth = self.adapter._build_capabilities(
-            root, 0, 5, namespace="AUTH", runtime_status="generated-stub"
+            root, 0, 5, namespace="AUTH", runtime_status="semantic-mock"
         )
         self.assertEqual(auth["filter"], {
             "namespace": "AUTH",
-            "runtime_status": "generated-stub",
+            "runtime_status": "semantic-mock",
             "target_status": None,
         })
         self.assertEqual(auth["chunk"]["total"], 18)
@@ -347,7 +347,7 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(auth["chunk"]["count"], 5)
         self.assertTrue(auth["chunk"]["has_more"])
         self.assertTrue(all(entry["namespace"] == "AUTH" for entry in auth["commands"]))
-        self.assertTrue(all(entry["runtime_status"] == "generated-stub" for entry in auth["commands"]))
+        self.assertTrue(all(entry["runtime_status"] == "semantic-mock" for entry in auth["commands"]))
         self.assertEqual(auth["commands"][0]["documentation"]["synopsis"], ["AUTH::abort AUTH_ID"])
         self.assertIn("authentication", auth["commands"][0]["documentation"]["summary"])
 
@@ -362,7 +362,7 @@ when HTTP_RESPONSE_RELEASE {
         ))
 
         empty = self.adapter._build_capabilities(
-            root, 0, 10, namespace="AUTH", runtime_status="semantic-mock"
+            root, 0, 10, namespace="AUTH", runtime_status="generated-stub"
         )
         self.assertEqual(empty["chunk"]["total"], 0)
         self.assertFalse(empty["chunk"]["has_more"])
@@ -467,7 +467,7 @@ when HTTP_REQUEST {
             (bucket["namespace"], bucket["runtime_status"]): bucket["count"]
             for bucket in queue["buckets"]
         }
-        self.assertEqual(queue_buckets[("AUTH", "generated-stub")], 18)
+        self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertGreater(queue["command_count"], 400)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
@@ -923,6 +923,178 @@ when HTTP_REQUEST {
             scenario = dict(base)
             scenario["antifraud"] = antifraud
             with self.subTest(antifraud=antifraud):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+    def test_authentication_session_success_and_response_data(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "AUTH"],
+                "auth": {
+                    "type": "pam",
+                    "service": "default_radius",
+                    "ldap_status": "success",
+                    "ldap_username": "alice",
+                    "response_data": {"user": "alice", "role": "admin"},
+                },
+                "irule": (
+                    "when CLIENT_ACCEPTED { "
+                    "set ::auth_id [AUTH::start pam default_radius]; "
+                    "AUTH::subscribe $::auth_id; "
+                    "AUTH::username_credential $::auth_id alice"
+                    "}\n"
+                    "when HTTP_REQUEST { "
+                    "AUTH::password_credential $::auth_id secret; "
+                    "AUTH::authenticate $::auth_id"
+                    "}\n"
+                    "when AUTH_RESULT { "
+                    "log local0. \"result=[AUTH::status $::auth_id] "
+                    "data=[AUTH::response_data $::auth_id] "
+                    "id=[AUTH::last_event_session_id]\""
+                    "}\n"
+                    "when AUTH_SUCCESS { "
+                    "log local0. \"success=[AUTH::status] "
+                    "ldap=[AUTH::ssl_cc_ldap_username $::auth_id] "
+                    "prompt=[AUTH::wantcredential_prompt $::auth_id]\""
+                    "}"
+                ),
+                "request": {"uri": "/login"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        events = item["events_fired"]
+        self.assertIn("AUTH_RESULT", events)
+        self.assertIn("AUTH_SUCCESS", events)
+        self.assertLess(events.index("AUTH_RESULT"), events.index("AUTH_SUCCESS"))
+        self.assertTrue(any("result=0 data=user alice role admin id=auth-1" in log for log in item["logs"]))
+        self.assertTrue(any("success=0 ldap=alice prompt=Password:" in log for log in item["logs"]))
+        auth = item["semantic"]["auth"]
+        self.assertTrue(auth["enabled"])
+        self.assertEqual(auth["session_count"], 1)
+        self.assertEqual(auth["last_event_session_id"], "auth-1")
+        self.assertEqual(auth["last_event"], "AUTH_SUCCESS")
+        self.assertEqual(auth["sessions"], [{
+            "id": "auth-1",
+            "valid": True,
+            "status": 0,
+            "in_progress": False,
+            "subscribed": True,
+            "last_event": "AUTH_SUCCESS",
+        }])
+
+    def test_authentication_wantcredential_continuation_and_connection_reset(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "AUTH"],
+                "auth": {
+                    "result": "wantcredential",
+                    "credential_type": "otp",
+                    "prompt": "Token:",
+                    "prompt_style": "echo_on",
+                },
+                "irule": (
+                    "when CLIENT_ACCEPTED { "
+                    "set ::auth_id [AUTH::start pam radius]; "
+                    "AUTH::subscribe $::auth_id"
+                    "}\n"
+                    "when HTTP_REQUEST { AUTH::authenticate $::auth_id }\n"
+                    "when AUTH_WANTCREDENTIAL { "
+                    "log local0. \"want=[AUTH::wantcredential_type $::auth_id] "
+                    "prompt=[AUTH::wantcredential_prompt $::auth_id] "
+                    "style=[AUTH::wantcredential_prompt_style $::auth_id]\"; "
+                    "AUTH::authenticate_continue $::auth_id 123456"
+                    "}\n"
+                    "when AUTH_RESULT { log local0. \"status=[AUTH::status]\" }\n"
+                    "when AUTH_SUCCESS { log local0. continued }"
+                ),
+                "requests": [
+                    {"uri": "/first"},
+                    {"uri": "/fresh", "new_connection": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        first, fresh = result["results"]
+        for item in (first, fresh):
+            events = item["events_fired"]
+            self.assertIn("AUTH_WANTCREDENTIAL", events)
+            self.assertIn("AUTH_RESULT", events)
+            self.assertIn("AUTH_SUCCESS", events)
+            self.assertLess(events.index("AUTH_WANTCREDENTIAL"), events.index("AUTH_RESULT"))
+            self.assertLess(events.index("AUTH_RESULT"), events.index("AUTH_SUCCESS"))
+            self.assertTrue(any("want=otp prompt=Token: style=echo_on" in log for log in item["logs"]))
+            self.assertTrue(any("status=0" in log for log in item["logs"]))
+            self.assertEqual(item["semantic"]["auth"]["sessions"][0]["id"], "auth-1")
+            self.assertEqual(item["semantic"]["auth"]["sessions"][0]["status"], 0)
+
+    def test_authentication_failure_error_and_abort_outcomes(self) -> None:
+        for configured_result, event_name, status in (
+            ("failure", "AUTH_FAILURE", 1),
+            ("error", "AUTH_ERROR", -1),
+        ):
+            with self.subTest(result=configured_result):
+                result = self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP", "AUTH"],
+                        "auth": {"result": configured_result},
+                        "irule": (
+                            "when CLIENT_ACCEPTED { set ::auth_id [AUTH::start pam radius] }\n"
+                            "when HTTP_REQUEST { AUTH::authenticate $::auth_id }\n"
+                            f"when {event_name} {{ log local0. \"status=[AUTH::status $::auth_id]\" }}"
+                        ),
+                        "request": {"uri": "/login"},
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+                item = result["results"][0]
+                self.assertIn(event_name, item["events_fired"])
+                self.assertTrue(any(f"status={status}" in log for log in item["logs"]))
+                self.assertEqual(item["semantic"]["auth"]["sessions"][0]["status"], status)
+
+        aborted = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "AUTH"],
+                "auth": {"result": "wantcredential"},
+                "irule": (
+                    "when CLIENT_ACCEPTED { set ::auth_id [AUTH::start pam radius] }\n"
+                    "when HTTP_REQUEST { AUTH::authenticate $::auth_id }\n"
+                    "when AUTH_WANTCREDENTIAL { AUTH::abort $::auth_id }\n"
+                    "when AUTH_FAILURE { log local0. \"aborted=[AUTH::status]\" }"
+                ),
+                "request": {"uri": "/abort"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        item = aborted["results"][0]
+        self.assertIn("AUTH_WANTCREDENTIAL", item["events_fired"])
+        self.assertIn("AUTH_FAILURE", item["events_fired"])
+        self.assertTrue(any("aborted=1" in log for log in item["logs"]))
+        session = item["semantic"]["auth"]["sessions"][0]
+        self.assertFalse(session["valid"])
+        self.assertEqual(session["status"], 1)
+        self.assertEqual(session["last_event"], "AUTH_FAILURE")
+
+    def test_authentication_input_validation(self) -> None:
+        base = {
+            "profiles": ["TCP", "HTTP", "AUTH"],
+            "irule": "when HTTP_REQUEST { AUTH::start pam radius }",
+            "request": {"uri": "/"},
+        }
+        invalid_cases = (
+            ({"enabled": "yes"}, "auth.enabled must be a boolean"),
+            ({"result": "unknown"}, "auth.result must be one of"),
+            ({"prompt_style": "silent"}, "auth.prompt_style must be one of"),
+            ({"response_data": ["user", "alice"]}, "auth.response_data must be an object"),
+            ({"response_data": {"": "alice"}}, "auth.response_data keys must be non-empty strings"),
+            ({1: "invalid-field-name"}, "auth field names must be strings"),
+        )
+        for auth, message in invalid_cases:
+            scenario = dict(base)
+            scenario["auth"] = auth
+            with self.subTest(auth=auth):
                 with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
                     self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
 
@@ -5811,7 +5983,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
                         "name": "irule_capabilities",
                         "arguments": {
                             "namespace": "AUTH",
-                            "runtime_status": "generated-stub",
+                            "runtime_status": "semantic-mock",
                             "offset": 0,
                             "limit": 1,
                         },

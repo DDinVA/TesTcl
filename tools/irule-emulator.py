@@ -144,6 +144,8 @@ ANTIFRAUD_ALERT_LOG_LEVELS = frozenset(
     {"Error", "Warning", "Notice", "Informational", "Debug"}
 )
 ANTIFRAUD_RESULTS = frozenset({"passed", "failed"})
+AUTH_RESULTS = frozenset({"success", "failure", "error", "wantcredential"})
+AUTH_PROMPT_STYLES = frozenset({"echo_on", "echo_off", "unknown"})
 DEFAULT_PROFILES = ["TCP", "HTTP"]
 LB_FAILURE_CAUSES = frozenset(
     {"no_member", "unreachable", "queue_limit", "connection_timeout"}
@@ -1098,6 +1100,24 @@ SEMANTIC_MOCK_COMMANDS = {
     "ANTIFRAUD::guid",
     "ANTIFRAUD::result",
     "ANTIFRAUD::username",
+    "AUTH::abort",
+    "AUTH::authenticate",
+    "AUTH::authenticate_continue",
+    "AUTH::cert_credential",
+    "AUTH::cert_issuer_credential",
+    "AUTH::last_event_session_id",
+    "AUTH::password_credential",
+    "AUTH::response_data",
+    "AUTH::ssl_cc_ldap_status",
+    "AUTH::ssl_cc_ldap_username",
+    "AUTH::start",
+    "AUTH::status",
+    "AUTH::subscribe",
+    "AUTH::unsubscribe",
+    "AUTH::username_credential",
+    "AUTH::wantcredential_prompt",
+    "AUTH::wantcredential_prompt_style",
+    "AUTH::wantcredential_type",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 RUNTIME_STATUS_VALUES = frozenset(
@@ -1718,6 +1738,30 @@ def _configure_antifraud(session: Any, antifraud: dict[str, Any]) -> None:
     )
 
 
+def _configure_auth(session: Any, auth: dict[str, Any]) -> None:
+    """Install deterministic AUTH session defaults and result behavior."""
+    response_pairs: list[str] = []
+    for key, value in auth["response_data"].items():
+        response_pairs.extend((key, value))
+    scalar_values = [
+        "1" if auth["enabled"] else "0",
+        auth["result"],
+        auth["type"],
+        auth["service"],
+        auth["prompt"],
+        auth["prompt_style"],
+        auth["credential_type"],
+        auth["ldap_status"],
+        auth["ldap_username"],
+    ]
+    session.eval_tcl(
+        "::itest::semantic::auth_configure "
+        + _tcl_list(scalar_values)
+        + " "
+        + _tcl_list(response_pairs)
+    )
+
+
 def _split_tcl_list(value: Any) -> list[str]:
     """Parse a Tcl list returned by the bridge using a temporary interpreter."""
     try:
@@ -1948,6 +1992,54 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         field: antifraud_values[field]
         for field in (*ANTIFRAUD_ALERT_VALUE_FIELDS, *ANTIFRAUD_ALERT_FLAG_FIELDS)
     }
+    auth_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::auth_snapshot"))
+    if len(auth_parts) % 2:
+        raise EmulatorInputError("invalid AUTH state")
+    auth_values = dict(zip(auth_parts[::2], auth_parts[1::2]))
+    expected_auth_fields = {
+        "enabled", "result", "type", "service", "prompt", "prompt_style",
+        "credential_type", "ldap_status", "ldap_username", "last_event_session_id",
+        "last_event", "session_count", "sessions",
+    }
+    if set(auth_values) != expected_auth_fields:
+        raise EmulatorInputError("invalid AUTH state fields")
+    if auth_values["enabled"] not in {"0", "1"}:
+        raise EmulatorInputError("invalid AUTH boolean state")
+    if auth_values["result"] not in AUTH_RESULTS:
+        raise EmulatorInputError("invalid AUTH result state")
+    if auth_values["prompt_style"] not in AUTH_PROMPT_STYLES:
+        raise EmulatorInputError("invalid AUTH prompt style state")
+    try:
+        auth_session_count = int(auth_values["session_count"])
+    except (KeyError, TypeError, ValueError):
+        raise EmulatorInputError("invalid AUTH session count") from None
+    if auth_session_count < 0:
+        raise EmulatorInputError("invalid AUTH session count")
+    auth_sessions: list[dict[str, Any]] = []
+    seen_auth_ids: set[str] = set()
+    for raw_session in _split_tcl_list(auth_values["sessions"]):
+        session_parts = _split_tcl_list(raw_session)
+        if len(session_parts) != 6 or session_parts[0] in seen_auth_ids:
+            raise EmulatorInputError("invalid AUTH session state")
+        seen_auth_ids.add(session_parts[0])
+        if any(value not in {"0", "1"} for value in session_parts[1:2] + session_parts[3:5]):
+            raise EmulatorInputError("invalid AUTH session boolean state")
+        try:
+            session_status = int(session_parts[2])
+        except (IndexError, TypeError, ValueError):
+            raise EmulatorInputError("invalid AUTH session status") from None
+        if session_status not in {-1, 0, 1, 2}:
+            raise EmulatorInputError("invalid AUTH session status")
+        auth_sessions.append({
+            "id": session_parts[0],
+            "valid": session_parts[1] == "1",
+            "status": session_status,
+            "in_progress": session_parts[3] == "1",
+            "subscribed": session_parts[4] == "1",
+            "last_event": session_parts[5],
+        })
+    if len(auth_sessions) != auth_session_count:
+        raise EmulatorInputError("inconsistent AUTH session count")
     dosl7_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::dosl7_snapshot"))
     if len(dosl7_parts) % 2:
         raise EmulatorInputError("invalid DOSL7 state")
@@ -2063,6 +2155,21 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
                     "app_layer_encryption", "auto_transactions", "injection", "malware", "phishing"
                 )
             },
+        },
+        "auth": {
+            "enabled": auth_values["enabled"] == "1",
+            "result": auth_values["result"],
+            "type": auth_values["type"],
+            "service": auth_values["service"],
+            "prompt": auth_values["prompt"],
+            "prompt_style": auth_values["prompt_style"],
+            "credential_type": auth_values["credential_type"],
+            "ldap_status": auth_values["ldap_status"],
+            "ldap_username": auth_values["ldap_username"],
+            "last_event_session_id": auth_values["last_event_session_id"],
+            "last_event": auth_values["last_event"],
+            "session_count": auth_session_count,
+            "sessions": auth_sessions,
         },
         "dosl7": {
             "enabled": dosl7_values["enabled"] == "1",
@@ -2732,6 +2839,64 @@ def _normalise_antifraud_request(raw: Any) -> dict[str, bool]:
     return result
 
 
+def _normalise_auth(raw: Any) -> dict[str, Any]:
+    """Normalize deterministic authentication-session inputs."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("auth must be an object")
+    if any(not isinstance(key, str) for key in raw):
+        raise EmulatorInputError("auth field names must be strings")
+    allowed = {
+        "enabled", "result", "type", "service", "prompt", "prompt_style",
+        "credential_type", "ldap_status", "ldap_username", "response_data",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError("auth unsupported field(s): " + ", ".join(unknown))
+
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise EmulatorInputError("auth.enabled must be a boolean")
+
+    def string_field(name: str, default: str = "") -> str:
+        return _normalise_asm_string(raw.get(name, default), f"auth.{name}")
+
+    result = string_field("result", "success")
+    if result not in AUTH_RESULTS:
+        raise EmulatorInputError(
+            "auth.result must be one of: " + ", ".join(sorted(AUTH_RESULTS))
+        )
+    prompt_style = string_field("prompt_style", "echo_off")
+    if prompt_style not in AUTH_PROMPT_STYLES:
+        raise EmulatorInputError(
+            "auth.prompt_style must be one of: "
+            + ", ".join(sorted(AUTH_PROMPT_STYLES))
+        )
+    response_data = raw.get("response_data", {})
+    if not isinstance(response_data, dict):
+        raise EmulatorInputError("auth.response_data must be an object")
+    normalised_response: dict[str, str] = {}
+    for key, value in response_data.items():
+        if not isinstance(key, str) or not key or "\x00" in key:
+            raise EmulatorInputError("auth.response_data keys must be non-empty strings without NUL")
+        normalised_response[key] = _normalise_asm_string(
+            value, f"auth.response_data.{key}"
+        )
+    return {
+        "enabled": enabled,
+        "result": result,
+        "type": string_field("type", "pam"),
+        "service": string_field("service", "default_radius"),
+        "prompt": string_field("prompt", "Password:"),
+        "prompt_style": prompt_style,
+        "credential_type": string_field("credential_type", "password"),
+        "ldap_status": string_field("ldap_status"),
+        "ldap_username": string_field("ldap_username"),
+        "response_data": normalised_response,
+    }
+
+
 def _normalise_resolvers(raw: Any) -> dict[str, list[dict[str, Any]]]:
     """Normalize deterministic DNS records used by RESOLVER::name_lookup."""
     if raw is None:
@@ -3002,6 +3167,7 @@ def _normalise_scenario_config(
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
+    dict[str, Any],
 ]:
     if not isinstance(scenario, dict):
         raise EmulatorInputError("scenario must be a JSON object")
@@ -3019,6 +3185,7 @@ def _normalise_scenario_config(
         "asm",
         "botdefense",
         "antifraud",
+        "auth",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -3064,6 +3231,7 @@ def _normalise_scenario_config(
         _normalise_asm(scenario.get("asm")),
         _normalise_botdefense(scenario.get("botdefense")),
         _normalise_antifraud(scenario.get("antifraud")),
+        _normalise_auth(scenario.get("auth")),
     )
 
 
@@ -7339,6 +7507,7 @@ class EmulatorSession:
             asm,
             botdefense,
             antifraud,
+            auth,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -7358,6 +7527,7 @@ class EmulatorSession:
         self._asm = asm
         self._botdefense = botdefense
         self._antifraud = antifraud
+        self._auth = auth
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -7467,6 +7637,7 @@ class EmulatorSession:
                 _configure_asm(session, self._asm)
                 _configure_botdefense(session, self._botdefense)
                 _configure_antifraud(session, self._antifraud)
+                _configure_auth(session, self._auth)
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
                     for profile in self._profiles
@@ -7528,6 +7699,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::asm_reset_connection")
             session.eval_tcl("::itest::semantic::botdefense_reset_connection")
             session.eval_tcl("::itest::semantic::antifraud_reset_connection")
+            session.eval_tcl("::itest::semantic::auth_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
@@ -8475,6 +8647,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::asm_reset_connection")
         session.eval_tcl("::itest::semantic::botdefense_reset_connection")
         session.eval_tcl("::itest::semantic::antifraud_reset_connection")
+        session.eval_tcl("::itest::semantic::auth_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
@@ -8507,6 +8680,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::asm_reset_connection")
         session.eval_tcl("::itest::semantic::botdefense_reset_connection")
         session.eval_tcl("::itest::semantic::antifraud_reset_connection")
+        session.eval_tcl("::itest::semantic::auth_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")

@@ -110,6 +110,15 @@ rules can suppress the alert or disable the plugin first. Request context resets
 between transactions, while plugin enable/disable state resets on a new
 connection. This does not implement fraud scoring, fingerprinting, device
 intelligence, alert delivery, or a production Anti-Fraud service.
+The TMOS 17.5 `AUTH::` surface is represented by deterministic authentication
+sessions covering all 18 catalogued commands and the five AUTH events.
+Sessions can be started, supplied with credentials, subscribed to result data,
+completed with success/failure/error outcomes, or continued after an
+`AUTH_WANTCREDENTIAL` prompt. Session state is connection-scoped and IDs are
+deterministic; the scenario can seed prompt metadata, LDAP fields, and result
+data. This does not contact PAM, RADIUS, LDAP, certificates, or an external
+identity provider, and does not model production asynchronous authentication
+timing.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

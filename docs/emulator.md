@@ -218,6 +218,37 @@ reset between transactions, while plugin enable/disable state resets at a new
 connection. This is a deterministic policy/context model: it does not perform
 fraud scoring, device fingerprinting, bot detection, alert delivery, or a live
 Anti-Fraud service.
+
+### AUTH authentication sessions
+
+With the `AUTH` profile attached, the emulator provides a deterministic
+authentication-session model for all 18 catalogued TMOS 17.5 `AUTH::`
+commands and the `AUTH_ERROR`, `AUTH_FAILURE`, `AUTH_RESULT`, `AUTH_SUCCESS`,
+and `AUTH_WANTCREDENTIAL` events. A rule can create a session in
+`CLIENT_ACCEPTED`, set username, password, certificate, or issuer credentials,
+subscribe to result data, and call `AUTH::authenticate` from an HTTP event.
+The scenario-level `auth.result` selects `success`, `failure`, `error`, or
+`wantcredential`; the last option emits `AUTH_WANTCREDENTIAL` and allows a
+handler to continue with `AUTH::authenticate_continue`.
+
+```json
+{
+  "profiles": ["TCP", "HTTP", "AUTH"],
+  "auth": {
+    "result": "success",
+    "ldap_username": "alice",
+    "response_data": {"user": "alice", "role": "admin"}
+  },
+  "irule": "when CLIENT_ACCEPTED { set ::auth_id [AUTH::start pam radius]; AUTH::subscribe $::auth_id }\nwhen HTTP_REQUEST { AUTH::username_credential $::auth_id alice; AUTH::password_credential $::auth_id secret; AUTH::authenticate $::auth_id }\nwhen AUTH_SUCCESS { log local0. [AUTH::status $::auth_id] }",
+  "request": {"uri": "/login"}
+}
+```
+
+Session IDs are deterministic within a connection (`auth-1`, `auth-2`, and so
+on), session state resets when a new connection starts, and response data is
+available only to subscribed sessions. This is an offline protocol model: it
+does not contact PAM, RADIUS, LDAP, certificates, or any external identity
+provider, and it does not claim to reproduce asynchronous AAA timing.
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose
@@ -407,9 +438,9 @@ The capability response can be narrowed into deterministic implementation
 work slices without changing the catalog order:
 
 ```sh
-# First five AUTH commands that are still generated stubs
+# First five AUTH commands with semantic emulator coverage
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
-  --capabilities --namespace AUTH --runtime-status generated-stub \
+  --capabilities --namespace AUTH --runtime-status semantic-mock \
   --offset 0 --limit 5
 
 # All commands known to be newer than the target release

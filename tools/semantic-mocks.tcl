@@ -227,6 +227,31 @@ namespace eval ::itest::semantic {
         dict set antifraud_disabled_features $feature 0
     }
 
+    variable auth_default_enabled 1
+    variable auth_enabled 1
+    variable auth_default_result success
+    variable auth_configured_result success
+    variable auth_default_type pam
+    variable auth_type pam
+    variable auth_default_service default_radius
+    variable auth_service default_radius
+    variable auth_default_prompt Password:
+    variable auth_prompt Password:
+    variable auth_default_prompt_style echo_off
+    variable auth_prompt_style echo_off
+    variable auth_default_credential_type password
+    variable auth_credential_type password
+    variable auth_default_ldap_status ""
+    variable auth_ldap_status ""
+    variable auth_default_ldap_username ""
+    variable auth_ldap_username ""
+    variable auth_default_response_data [dict create]
+    variable auth_sessions [dict create]
+    variable auth_next_id 0
+    variable auth_last_event_session_id ""
+    variable auth_last_event ""
+    variable auth_current_session_id ""
+
     variable sip_discarded 0
     variable sip_response_requested 0
     variable sip_response_code ""
@@ -5271,6 +5296,405 @@ namespace eval ::itest::semantic {
         return $result
     }
 
+    proc auth_configure {raw response_data} {
+        variable auth_default_enabled
+        variable auth_enabled
+        variable auth_default_result
+        variable auth_configured_result
+        variable auth_default_type
+        variable auth_type
+        variable auth_default_service
+        variable auth_service
+        variable auth_default_prompt
+        variable auth_prompt
+        variable auth_default_prompt_style
+        variable auth_prompt_style
+        variable auth_default_credential_type
+        variable auth_credential_type
+        variable auth_default_ldap_status
+        variable auth_ldap_status
+        variable auth_default_ldap_username
+        variable auth_ldap_username
+        variable auth_default_response_data
+        if {[llength $raw] != 9} { error "invalid AUTH configuration" }
+        lassign $raw enabled result type service prompt prompt_style credential_type ldap_status ldap_username
+        if {$enabled ni {0 1}} { error "AUTH enabled state must be boolean" }
+        if {$result ni {success failure error wantcredential}} {
+            error "AUTH result must be success, failure, error, or wantcredential"
+        }
+        if {$prompt_style ni {echo_on echo_off unknown}} {
+            error "AUTH prompt style is invalid"
+        }
+        if {[llength $response_data] % 2} { error "AUTH response data requires key/value pairs" }
+        set normalised_response [dict create]
+        foreach {key value} $response_data {
+            if {$key eq ""} { error "AUTH response data keys cannot be empty" }
+            dict set normalised_response $key $value
+        }
+        set auth_default_enabled $enabled
+        set auth_enabled $enabled
+        set auth_default_result $result
+        set auth_configured_result $result
+        set auth_default_type $type
+        set auth_type $type
+        set auth_default_service $service
+        set auth_service $service
+        set auth_default_prompt $prompt
+        set auth_prompt $prompt
+        set auth_default_prompt_style $prompt_style
+        set auth_prompt_style $prompt_style
+        set auth_default_credential_type $credential_type
+        set auth_credential_type $credential_type
+        set auth_default_ldap_status $ldap_status
+        set auth_ldap_status $ldap_status
+        set auth_default_ldap_username $ldap_username
+        set auth_ldap_username $ldap_username
+        set auth_default_response_data $normalised_response
+    }
+
+    proc auth_reset_connection {} {
+        variable auth_default_enabled
+        variable auth_enabled
+        variable auth_default_type
+        variable auth_type
+        variable auth_default_service
+        variable auth_service
+        variable auth_default_prompt
+        variable auth_prompt
+        variable auth_default_prompt_style
+        variable auth_prompt_style
+        variable auth_default_credential_type
+        variable auth_credential_type
+        variable auth_default_ldap_status
+        variable auth_ldap_status
+        variable auth_default_ldap_username
+        variable auth_ldap_username
+        variable auth_sessions
+        variable auth_next_id
+        variable auth_last_event_session_id
+        variable auth_last_event
+        variable auth_current_session_id
+        set auth_enabled $auth_default_enabled
+        set auth_type $auth_default_type
+        set auth_service $auth_default_service
+        set auth_prompt $auth_default_prompt
+        set auth_prompt_style $auth_default_prompt_style
+        set auth_credential_type $auth_default_credential_type
+        set auth_ldap_status $auth_default_ldap_status
+        set auth_ldap_username $auth_default_ldap_username
+        set auth_sessions [dict create]
+        set auth_next_id 0
+        set auth_last_event_session_id ""
+        set auth_last_event ""
+        set auth_current_session_id ""
+    }
+
+    proc _auth_require_profile {command} {
+        if {![_profile_enabled AUTH]} { error "$command requires the AUTH profile" }
+    }
+
+    proc _auth_require_enabled {command} {
+        variable auth_enabled
+        _auth_require_profile $command
+        if {!$auth_enabled} { error "$command is disabled" }
+    }
+
+    proc _auth_require_session {auth_id command} {
+        variable auth_sessions
+        _auth_require_profile $command
+        if {$auth_id eq "" || ![dict exists $auth_sessions $auth_id]} {
+            error "$command received an unknown AUTH_ID"
+        }
+        set session [dict get $auth_sessions $auth_id]
+        if {![dict get $session valid]} {
+            error "$command received an invalid AUTH_ID"
+        }
+        return $session
+    }
+
+    proc _auth_set_session {auth_id session} {
+        variable auth_sessions
+        dict set auth_sessions $auth_id $session
+    }
+
+    proc _auth_event {event auth_id} {
+        variable auth_sessions
+        variable auth_last_event_session_id
+        variable auth_last_event
+        variable auth_current_session_id
+        if {$auth_id ne "" && [dict exists $auth_sessions $auth_id]} {
+            set session [dict get $auth_sessions $auth_id]
+            dict set session last_event $event
+            dict set auth_sessions $auth_id $session
+        }
+        set previous_event $::itest::current_event
+        set previous_session $auth_current_session_id
+        set auth_last_event_session_id $auth_id
+        set auth_last_event $event
+        set auth_current_session_id $auth_id
+        set rc [catch {::itest::fire_event $event} result options]
+        set ::itest::current_event $previous_event
+        set auth_current_session_id $previous_session
+        if {$rc} { return -options $options $result }
+        return $result
+    }
+
+    proc _auth_status_for_session {auth_id} {
+        variable auth_sessions
+        if {$auth_id eq "" || ![dict exists $auth_sessions $auth_id]} { return -1 }
+        set session [dict get $auth_sessions $auth_id]
+        if {![dict get $session valid]} { return -1 }
+        return [dict get $session status]
+    }
+
+    proc _auth_session_from_args {args command} {
+        variable auth_current_session_id
+        variable auth_last_event_session_id
+        if {[llength $args] > 1} { error "$command accepts an optional AUTH_ID" }
+        if {[llength $args] == 1} { return [lindex $args 0] }
+        if {$auth_current_session_id ne ""} { return $auth_current_session_id }
+        return $auth_last_event_session_id
+    }
+
+    proc _auth_complete {auth_id status event} {
+        variable auth_sessions
+        set session [_auth_require_session $auth_id AUTH::authenticate]
+        dict set session status $status
+        dict set session in_progress 0
+        dict set session last_event AUTH_RESULT
+        _auth_set_session $auth_id $session
+        if {[dict get $session subscribed]} { _auth_event AUTH_RESULT $auth_id }
+        _auth_event $event $auth_id
+    }
+
+    proc auth_start {args} {
+        variable auth_sessions
+        variable auth_next_id
+        variable auth_type
+        variable auth_service
+        variable auth_prompt
+        variable auth_prompt_style
+        variable auth_credential_type
+        variable auth_ldap_status
+        variable auth_ldap_username
+        _auth_require_enabled AUTH::start
+        if {[llength $args] != 2} { error "AUTH::start requires TYPE and SERVICE" }
+        incr auth_next_id
+        set auth_id "auth-$auth_next_id"
+        set session [dict create \
+            valid 1 type [lindex $args 0] service [lindex $args 1] status 2 \
+            in_progress 0 subscribed 0 username_credential "" password_credential "" \
+            cert_credential "" cert_issuer_credential "" response_data {} \
+            prompt $auth_prompt prompt_style $auth_prompt_style \
+            credential_type $auth_credential_type ldap_status $auth_ldap_status \
+            ldap_username $auth_ldap_username last_event ""]
+        dict set auth_sessions $auth_id $session
+        ::itest::log_decision auth start [list $auth_id [lindex $args 0] [lindex $args 1]]
+        return $auth_id
+    }
+
+    proc auth_username_credential {args} {
+        if {[llength $args] != 2} { error "AUTH::username_credential requires AUTH_ID and credential" }
+        set auth_id [lindex $args 0]
+        set session [_auth_require_session $auth_id AUTH::username_credential]
+        dict set session username_credential [lindex $args 1]
+        dict set session last_event ""
+        _auth_set_session $auth_id $session
+        ::itest::log_decision auth username_credential $auth_id
+        return ""
+    }
+
+    proc auth_password_credential {args} {
+        if {[llength $args] != 2} { error "AUTH::password_credential requires AUTH_ID and credential" }
+        if {![_profile_enabled HTTP]} { error "AUTH::password_credential requires the HTTP profile" }
+        set auth_id [lindex $args 0]
+        set session [_auth_require_session $auth_id AUTH::password_credential]
+        dict set session password_credential [lindex $args 1]
+        dict set session last_event ""
+        _auth_set_session $auth_id $session
+        ::itest::log_decision auth password_credential $auth_id
+        return ""
+    }
+
+    proc auth_cert_credential {args} {
+        if {[llength $args] != 2} { error "AUTH::cert_credential requires AUTH_ID and certificate" }
+        set auth_id [lindex $args 0]
+        set session [_auth_require_session $auth_id AUTH::cert_credential]
+        dict set session cert_credential [lindex $args 1]
+        dict set session last_event ""
+        _auth_set_session $auth_id $session
+        ::itest::log_decision auth cert_credential $auth_id
+        return ""
+    }
+
+    proc auth_cert_issuer_credential {args} {
+        if {[llength $args] != 2} { error "AUTH::cert_issuer_credential requires AUTH_ID and certificate" }
+        set auth_id [lindex $args 0]
+        set session [_auth_require_session $auth_id AUTH::cert_issuer_credential]
+        dict set session cert_issuer_credential [lindex $args 1]
+        dict set session last_event ""
+        _auth_set_session $auth_id $session
+        ::itest::log_decision auth cert_issuer_credential $auth_id
+        return ""
+    }
+
+    proc auth_authenticate {args} {
+        variable auth_configured_result
+        if {[llength $args] != 1} { error "AUTH::authenticate requires AUTH_ID" }
+        if {![_profile_enabled HTTP]} { error "AUTH::authenticate requires the HTTP profile" }
+        _auth_require_enabled AUTH::authenticate
+        set auth_id [lindex $args 0]
+        set session [_auth_require_session $auth_id AUTH::authenticate]
+        if {[dict get $session in_progress]} { error "AUTH::authenticate is already in progress" }
+        dict set session in_progress 1
+        dict set session last_event ""
+        dict set session response_data $::itest::semantic::auth_default_response_data
+        _auth_set_session $auth_id $session
+        switch -- $auth_configured_result {
+            success { _auth_complete $auth_id 0 AUTH_SUCCESS }
+            failure { _auth_complete $auth_id 1 AUTH_FAILURE }
+            error { _auth_complete $auth_id -1 AUTH_ERROR }
+            wantcredential {
+                dict set session last_event AUTH_WANTCREDENTIAL
+                _auth_set_session $auth_id $session
+                _auth_event AUTH_WANTCREDENTIAL $auth_id
+            }
+        }
+        ::itest::log_decision auth authenticate $auth_id
+        return ""
+    }
+
+    proc auth_authenticate_continue {args} {
+        if {[llength $args] != 2} { error "AUTH::authenticate_continue requires AUTH_ID and RESPONSE" }
+        set auth_id [lindex $args 0]
+        set session [_auth_require_session $auth_id AUTH::authenticate_continue]
+        if {![dict get $session in_progress] || [dict get $session last_event] ne "AUTH_WANTCREDENTIAL"} {
+            error "AUTH::authenticate_continue requires the most recent AUTH_WANTCREDENTIAL event"
+        }
+        _auth_complete $auth_id 0 AUTH_SUCCESS
+        ::itest::log_decision auth authenticate_continue $auth_id
+        return ""
+    }
+
+    proc auth_abort {args} {
+        if {[llength $args] != 1} { error "AUTH::abort requires AUTH_ID" }
+        variable auth_sessions
+        set auth_id [lindex $args 0]
+        set session [_auth_require_session $auth_id AUTH::abort]
+        set active [dict get $session in_progress]
+        dict set session status 1
+        dict set session in_progress 0
+        dict set session last_event AUTH_FAILURE
+        _auth_set_session $auth_id $session
+        if {$active} { _auth_event AUTH_FAILURE $auth_id }
+        dict set session valid 0
+        _auth_set_session $auth_id $session
+        ::itest::log_decision auth abort $auth_id
+        return ""
+    }
+
+    proc auth_status {args} {
+        _auth_require_profile AUTH::status
+        set auth_id [_auth_session_from_args $args AUTH::status]
+        return [_auth_status_for_session $auth_id]
+    }
+
+    proc auth_last_event_session_id {args} {
+        variable auth_last_event_session_id
+        _auth_require_profile AUTH::last_event_session_id
+        if {[llength $args] != 0} { error "AUTH::last_event_session_id takes no arguments" }
+        return $auth_last_event_session_id
+    }
+
+    proc auth_subscribe {args} {
+        if {[llength $args] != 1} { error "AUTH::subscribe requires AUTH_ID" }
+        set auth_id [lindex $args 0]
+        set session [_auth_require_session $auth_id AUTH::subscribe]
+        dict set session subscribed 1
+        _auth_set_session $auth_id $session
+        ::itest::log_decision auth subscribe $auth_id
+        return ""
+    }
+
+    proc auth_unsubscribe {args} {
+        if {[llength $args] != 1} { error "AUTH::unsubscribe requires AUTH_ID" }
+        set auth_id [lindex $args 0]
+        set session [_auth_require_session $auth_id AUTH::unsubscribe]
+        dict set session subscribed 0
+        _auth_set_session $auth_id $session
+        ::itest::log_decision auth unsubscribe $auth_id
+        return ""
+    }
+
+    proc auth_response_data {args} {
+        variable auth_current_session_id
+        variable auth_last_event_session_id
+        set auth_id [_auth_session_from_args $args AUTH::response_data]
+        if {$auth_id eq ""} { return "" }
+        set session [_auth_require_session $auth_id AUTH::response_data]
+        if {![dict get $session subscribed]} { return "" }
+        set response [dict get $session response_data]
+        set result [list]
+        dict for {key value} $response { lappend result $key $value }
+        return $result
+    }
+
+    proc auth_ssl_cc_ldap_status {args} {
+        if {[llength $args] != 1} { error "AUTH::ssl_cc_ldap_status requires AUTH_ID" }
+        set session [_auth_require_session [lindex $args 0] AUTH::ssl_cc_ldap_status]
+        return [dict get $session ldap_status]
+    }
+
+    proc auth_ssl_cc_ldap_username {args} {
+        if {[llength $args] != 1} { error "AUTH::ssl_cc_ldap_username requires AUTH_ID" }
+        set session [_auth_require_session [lindex $args 0] AUTH::ssl_cc_ldap_username]
+        return [dict get $session ldap_username]
+    }
+
+    proc _auth_wantcredential_field {field command args} {
+        if {[llength $args] != 1} { error "$command requires AUTH_ID" }
+        set session [_auth_require_session [lindex $args 0] $command]
+        return [dict get $session $field]
+    }
+    proc auth_wantcredential_prompt {args} {
+        return [_auth_wantcredential_field prompt AUTH::wantcredential_prompt {*}$args]
+    }
+    proc auth_wantcredential_prompt_style {args} {
+        return [_auth_wantcredential_field prompt_style AUTH::wantcredential_prompt_style {*}$args]
+    }
+    proc auth_wantcredential_type {args} {
+        return [_auth_wantcredential_field credential_type AUTH::wantcredential_type {*}$args]
+    }
+
+    proc auth_snapshot {} {
+        variable auth_enabled
+        variable auth_configured_result
+        variable auth_type
+        variable auth_service
+        variable auth_prompt
+        variable auth_prompt_style
+        variable auth_credential_type
+        variable auth_ldap_status
+        variable auth_ldap_username
+        variable auth_sessions
+        variable auth_last_event_session_id
+        variable auth_last_event
+        set result [list enabled $auth_enabled result $auth_configured_result \
+            type $auth_type service $auth_service prompt $auth_prompt \
+            prompt_style $auth_prompt_style credential_type $auth_credential_type \
+            ldap_status $auth_ldap_status ldap_username $auth_ldap_username \
+            last_event_session_id $auth_last_event_session_id last_event $auth_last_event \
+            session_count [dict size $auth_sessions]]
+        set sessions [list]
+        foreach auth_id [lsort -dictionary [dict keys $auth_sessions]] {
+            set session [dict get $auth_sessions $auth_id]
+            lappend sessions [list $auth_id [dict get $session valid] [dict get $session status] \
+                [dict get $session in_progress] [dict get $session subscribed] [dict get $session last_event]]
+        }
+        lappend result sessions $sessions
+        return $result
+    }
+
     proc profile_clientssl {args} { return [_profile_enabled CLIENTSSL] }
     proc profile_fastL4 {args} { return [_profile_enabled FASTL4] }
     proc profile_fasthttp {args} { return [_profile_enabled FASTHTTP] }
@@ -9889,6 +10313,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::asm_reset_connection
             ::itest::semantic::botdefense_reset_connection
             ::itest::semantic::antifraud_reset_connection
+            ::itest::semantic::auth_reset_connection
         }
         if {$gated && $event_name eq "HTTP_REQUEST" && [::itest::semantic::_cache_profile_enabled]} {
             ::itest::semantic::cache_prepare_request
@@ -10295,6 +10720,24 @@ foreach {name proc_name} {
     ANTIFRAUD::guid ::itest::semantic::antifraud_guid
     ANTIFRAUD::result ::itest::semantic::antifraud_result
     ANTIFRAUD::username ::itest::semantic::antifraud_username
+    AUTH::abort ::itest::semantic::auth_abort
+    AUTH::authenticate ::itest::semantic::auth_authenticate
+    AUTH::authenticate_continue ::itest::semantic::auth_authenticate_continue
+    AUTH::cert_credential ::itest::semantic::auth_cert_credential
+    AUTH::cert_issuer_credential ::itest::semantic::auth_cert_issuer_credential
+    AUTH::last_event_session_id ::itest::semantic::auth_last_event_session_id
+    AUTH::password_credential ::itest::semantic::auth_password_credential
+    AUTH::response_data ::itest::semantic::auth_response_data
+    AUTH::ssl_cc_ldap_status ::itest::semantic::auth_ssl_cc_ldap_status
+    AUTH::ssl_cc_ldap_username ::itest::semantic::auth_ssl_cc_ldap_username
+    AUTH::start ::itest::semantic::auth_start
+    AUTH::status ::itest::semantic::auth_status
+    AUTH::subscribe ::itest::semantic::auth_subscribe
+    AUTH::unsubscribe ::itest::semantic::auth_unsubscribe
+    AUTH::username_credential ::itest::semantic::auth_username_credential
+    AUTH::wantcredential_prompt ::itest::semantic::auth_wantcredential_prompt
+    AUTH::wantcredential_prompt_style ::itest::semantic::auth_wantcredential_prompt_style
+    AUTH::wantcredential_type ::itest::semantic::auth_wantcredential_type
     STATS::get ::itest::semantic::stats_get
     STATS::incr ::itest::semantic::stats_incr
     STATS::set ::itest::semantic::stats_set
