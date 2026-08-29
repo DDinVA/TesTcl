@@ -9778,6 +9778,108 @@ namespace eval ::itest::semantic {
         return [list next_id $::state::sideband::next_id connections $rows]
     }
 
+    # Scenario-backed iFiles keep the emulator hermetic: the iRule can use
+    # the documented ifile command surface, but it can never read the host
+    # filesystem. Content is marshalled as base64 so binary fixtures and Tcl
+    # values containing NUL bytes remain safe at the Python/Tcl boundary.
+    variable ifile_files [dict create]
+    variable ifile_accesses {}
+
+    proc ifile_configure {records} {
+        if {[llength $records] > 128} {
+            error "ifile fixtures cannot contain more than 128 entries"
+        }
+        set ::itest::semantic::ifile_files [dict create]
+        set ::itest::semantic::ifile_accesses {}
+        set total_bytes 0
+        foreach record $records {
+            if {[llength $record] != 6} {
+                error "ifile fixtures require six fields"
+            }
+            lassign $record name encoded updated_by update_time revision checksum
+            if {$name eq "" || [string first "\x00" $name] >= 0 ||
+                [string bytelength $name] > 4096} {
+                error "invalid ifile name"
+            }
+            if {[catch {binary decode base64 $encoded} content]} {
+                error "invalid base64 content for ifile $name"
+            }
+            if {[string bytelength $content] > 33554432} {
+                error "ifile $name exceeds the 33554432-byte limit"
+            }
+            incr total_bytes [string bytelength $content]
+            if {$total_bytes > 67108864} {
+                error "ifile fixtures exceed the 67108864-byte total limit"
+            }
+            foreach value [list $updated_by $update_time $checksum] {
+                if {[string first "\x00" $value] >= 0 || [string bytelength $value] > 4096} {
+                    error "invalid ifile metadata for $name"
+                }
+            }
+            if {![string is integer -strict $revision] || $revision < 1} {
+                error "invalid ifile revision for $name"
+            }
+            dict set ::itest::semantic::ifile_files $name [dict create \
+                content $content last_updated_by $updated_by \
+                last_update_time $update_time revision $revision \
+                checksum $checksum]
+        }
+    }
+
+    proc _ifile_entry {name} {
+        if {$name eq "" || [string first "\x00" $name] >= 0 ||
+            [string bytelength $name] > 4096} {
+            error "invalid ifile name"
+        }
+        if {![dict exists $::itest::semantic::ifile_files $name]} {
+            error "ifile $name does not exist"
+        }
+        return [dict get $::itest::semantic::ifile_files $name]
+    }
+
+    proc _ifile_record_access {operation name} {
+        lappend ::itest::semantic::ifile_accesses [list $operation $name]
+        if {[llength $::itest::semantic::ifile_accesses] > 1024} {
+            set ::itest::semantic::ifile_accesses [lrange $::itest::semantic::ifile_accesses end-1023 end]
+        }
+    }
+
+    proc ifile_command {args} {
+        if {[llength $args] == 1 && [lindex $args 0] eq "listall"} {
+            _ifile_record_access listall ""
+            return [lsort -ascii [dict keys $::itest::semantic::ifile_files]]
+        }
+        if {[llength $args] != 2} {
+            error "ifile requires listall or an operation and iFile name"
+        }
+        set operation [lindex $args 0]
+        set name [lindex $args 1]
+        if {$operation ni {get attributes size last_updated_by last_update_time revision checksum}} {
+            error "unsupported ifile operation $operation"
+        }
+        set entry [_ifile_entry $name]
+        _ifile_record_access $operation $name
+        switch -exact -- $operation {
+            get { return [dict get $entry content] }
+            attributes {
+                return [list name $name size [string bytelength [dict get $entry content]] \
+                    last_updated_by [dict get $entry last_updated_by] \
+                    last_update_time [dict get $entry last_update_time] \
+                    revision [dict get $entry revision] checksum [dict get $entry checksum]]
+            }
+            size { return [string bytelength [dict get $entry content]] }
+            last_updated_by { return [dict get $entry last_updated_by] }
+            last_update_time { return [dict get $entry last_update_time] }
+            revision { return [dict get $entry revision] }
+            checksum { return [dict get $entry checksum] }
+        }
+    }
+
+    proc ifile_snapshot {} {
+        return [list names [lsort -ascii [dict keys $::itest::semantic::ifile_files]] \
+            accesses $::itest::semantic::ifile_accesses]
+    }
+
     proc socks_reset_connection {} {
         set ::state::socks::version "5"
         set ::state::socks::allowed 1
@@ -23392,6 +23494,7 @@ foreach {original replacement} {
     findstr findstr_command
     getfield getfield_command
     ip_addr ip_addr
+    ifile ifile_command
     lasthop legacy_lasthop_command
     llookup llookup_command
     link_qos legacy_link_qos_command

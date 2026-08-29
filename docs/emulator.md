@@ -94,6 +94,30 @@ are capped at 32 destinations and 1 MiB per response, and sideband operations
 are intentionally connection-scoped and repeatable. This models iRule
 control flow and failure handling, not DNS, TLS, upstream protocol parsing,
 socket timing, or real network I/O.
+The TMOS 17.5 `ifile` command is backed by bounded scenario fixtures rather
+than host files. A fixture can be a text shorthand or an object with
+`content`/`content_base64` plus optional `last_updated_by`, `last_update_time`,
+`revision`, and `checksum` metadata:
+
+```json
+{
+  "ifiles": {
+    "/Common/maintenance.html": {
+      "content": "<h1>Maintenance</h1>",
+      "last_updated_by": "test-fixture",
+      "revision": 2
+    },
+    "/Common/logo.bin": {"content_base64": "AAEC"}
+  }
+}
+```
+
+Rules may use `ifile get`, `listall`, `attributes`, `size`,
+`last_updated_by`, `last_update_time`, `revision`, and `checksum`. Text
+content defaults to a SHA-256 hexadecimal checksum; binary fixtures use
+decoded byte sizes. The emulator accepts at most 128 fixtures and 32 MiB per
+fixture, 64 MiB in total, records recent accesses under
+`result.semantic.ifile`, and never opens or resolves a host filesystem path.
 The legacy top-level connection controls `forward`, `translate`, `rateclass`,
 and `link_qos` are also modeled against the current connection state. `forward`
 records strict forwarding intent, `translate address|port|service` supports

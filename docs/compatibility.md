@@ -46,6 +46,12 @@ state plus sent, received, and buffered byte counts. The model validates the
 documented options and status-variable forms, including `recv -peek` and
 `recv -eol`, but does not claim to reproduce DNS, TLS, socket scheduling,
 upstream protocol behavior, or real sideband timing.
+The TMOS 17.5 `ifile` command is also fixture-backed. Scenario `ifiles` entries
+support text or base64 content and the documented `get`, `listall`,
+`attributes`, `size`, `last_updated_by`, `last_update_time`, `revision`, and
+`checksum` operations. Fixtures are bounded at 128 entries, 32 MiB each, and
+64 MiB in total; the adapter records recent accesses and never reads the host
+filesystem.
 The related legacy connection controls are deterministic as well: `forward`
 records strict-forwarding intent, `translate` tracks address/port/service
 translation toggles, `rateclass` records the selected rate class, and

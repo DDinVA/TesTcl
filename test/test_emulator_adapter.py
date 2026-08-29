@@ -1961,7 +1961,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 23)
+        self.assertEqual(queue["command_count"], 22)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -9652,6 +9652,82 @@ when HTTP_REQUEST {
                 self.assertEqual(usage[command_name]["runtime_status"], "semantic-mock")
         finally:
             session.close()
+
+    def test_ifile_commands_use_bounded_scenario_fixtures(self) -> None:
+        binary = base64.b64encode(b"\x00\xff\x01").decode("ascii")
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "ifiles": {
+                    "/Common/index.html": {
+                        "content": "hello",
+                        "last_updated_by": "alice",
+                        "last_update_time": "2026-08-29T12:00:00Z",
+                        "revision": 3,
+                        "checksum": "fixture-checksum",
+                    },
+                    "/Common/blob.bin": {"content_base64": binary},
+                },
+                "irule": """
+when HTTP_REQUEST {
+    array set attrs [ifile attributes /Common/index.html]
+    set names [ifile listall]
+    set body [ifile get /Common/index.html]
+    log local0. "names=$names body=$body size=[ifile size /Common/index.html] user=$attrs(last_updated_by) time=$attrs(last_update_time) revision=[ifile revision /Common/index.html] checksum=[ifile checksum /Common/index.html] binary=[string length [ifile get /Common/blob.bin]]"
+    HTTP::respond 200 content $body
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=True,
+            allow_packets=False,
+        )
+        try:
+            result = session.run_request({"uri": "/"})
+            self.assertIn("HTTP_REQUEST", result["events_fired"])
+            self.assertEqual(result["response"]["body"], "hello")
+            self.assertTrue(
+                any(
+                    "names=/Common/blob.bin /Common/index.html body=hello size=5" in entry
+                    and "user=alice" in entry
+                    and "revision=3" in entry
+                    and "checksum=fixture-checksum" in entry
+                    and "binary=3" in entry
+                    for entry in result["logs"]
+                )
+            )
+            self.assertEqual(
+                result["semantic"]["ifile"]["names"],
+                ["/Common/blob.bin", "/Common/index.html"],
+            )
+            accesses = result["semantic"]["ifile"]["accesses"]
+            self.assertEqual(accesses[0], {"operation": "attributes", "name": "/Common/index.html"})
+            self.assertEqual(accesses[-1], {"operation": "get", "name": "/Common/blob.bin"})
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            self.assertEqual(usage["ifile"]["runtime_status"], "semantic-mock")
+        finally:
+            session.close()
+
+    def test_ifile_fixture_validation_is_strict_and_does_not_read_host_paths(self) -> None:
+        normalise = self.adapter._normalise_ifiles
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "valid base64"):
+            normalise({"/Common/bad": {"content_base64": "not base64"}})
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "only one of content"):
+            normalise({"/Common/bad": {"content": "x", "content_base64": "eA=="}})
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "unsupported field"):
+            normalise({"/Common/bad": {"host_path": "/etc/passwd"}})
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "64 MiB|67108864"):
+            normalise(
+                {
+                    f"/Common/file-{index}": {"content": "x" * (1024 * 1024)}
+                    for index in range(65)
+                }
+            )
+        self.assertEqual(
+            normalise({"/etc/passwd": "fixture"})["/etc/passwd"]["revision"],
+            "1",
+        )
 
     def test_sideband_connect_failure_and_lifecycle_validation_are_deterministic(self) -> None:
         failed = self.adapter.EmulatorSession(

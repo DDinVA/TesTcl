@@ -1330,6 +1330,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "http_method",
     "http_uri",
     "http_version",
+    "ifile",
     "ip_addr",
     "lasthop",
     "nexthop",
@@ -3160,6 +3161,24 @@ def _configure_sideband(session: Any, sideband_config: dict[str, dict[str, str]]
     )
 
 
+def _configure_ifiles(session: Any, ifiles: dict[str, dict[str, str]]) -> None:
+    """Install bounded, deterministic iFile fixtures in the Tcl session."""
+    records = [
+        _tcl_list_value(
+            [
+                name,
+                fixture["content_base64"],
+                fixture["last_updated_by"],
+                fixture["last_update_time"],
+                fixture["revision"],
+                fixture["checksum"],
+            ]
+        )
+        for name, fixture in ifiles.items()
+    ]
+    session.eval_tcl("::itest::semantic::ifile_configure " + _tcl_list(records))
+
+
 def _split_tcl_list(value: Any) -> list[str]:
     """Parse a Tcl list returned by the bridge using a temporary interpreter."""
     try:
@@ -3368,6 +3387,31 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
     sideband = {
         "next_id": sideband_next_id,
         "connections": sideband_connections,
+    }
+    ifile_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::ifile_snapshot")
+    )
+    if len(ifile_parts) != 4 or ifile_parts[::2] != ["names", "accesses"]:
+        raise EmulatorInputError("invalid iFile state")
+    ifile_names = _split_tcl_list(ifile_parts[1])
+    ifile_accesses: list[dict[str, str]] = []
+    for raw_access in _split_tcl_list(ifile_parts[3]):
+        access_parts = _split_tcl_list(raw_access)
+        if len(access_parts) != 2 or access_parts[0] not in {
+            "listall",
+            "get",
+            "attributes",
+            "size",
+            "last_updated_by",
+            "last_update_time",
+            "revision",
+            "checksum",
+        }:
+            raise EmulatorInputError("invalid iFile access state")
+        ifile_accesses.append({"operation": access_parts[0], "name": access_parts[1]})
+    ifile = {
+        "names": ifile_names,
+        "accesses": ifile_accesses,
     }
     bwc_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::bwc_snapshot")
@@ -4899,6 +4943,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "link": link,
         "legacy": legacy,
         "sideband": sideband,
+        "ifile": ifile,
         "bwc": bwc,
         "ipfix": ipfix,
         "ilx": ilx,
@@ -6889,6 +6934,121 @@ def _normalise_sideband(raw: Any) -> dict[str, dict[str, str]]:
     return result
 
 
+def _normalise_ifiles(raw: Any) -> dict[str, dict[str, str]]:
+    """Normalize scenario-owned iFile content and metadata without file I/O."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("ifiles must be an object mapping iFile names to fixtures")
+    if len(raw) > 128:
+        raise EmulatorInputError("ifiles cannot contain more than 128 fixtures")
+
+    result: dict[str, dict[str, str]] = {}
+    total_bytes = 0
+    allowed = {
+        "content",
+        "content_base64",
+        "last_updated_by",
+        "last_update_time",
+        "revision",
+        "checksum",
+    }
+    for name, fixture in raw.items():
+        if not isinstance(name, str) or not name or "\x00" in name:
+            raise EmulatorInputError("ifile names must be non-empty strings without NUL")
+        try:
+            name_bytes = name.encode("utf-8")
+        except UnicodeEncodeError:
+            name_bytes = b""
+        if not name_bytes or len(name_bytes) > 4096:
+            raise EmulatorInputError("ifile names must be at most 4096 UTF-8 bytes")
+
+        if isinstance(fixture, str):
+            fixture = {"content": fixture}
+        if not isinstance(fixture, dict):
+            raise EmulatorInputError(f"ifiles.{name} must be a string or fixture object")
+        unknown = sorted(set(fixture) - allowed)
+        if unknown:
+            raise EmulatorInputError(
+                f"ifiles.{name} unsupported field(s): {', '.join(unknown)}"
+            )
+        if "content" in fixture and "content_base64" in fixture:
+            raise EmulatorInputError(
+                f"ifiles.{name} must provide only one of content or content_base64"
+            )
+
+        if "content_base64" in fixture:
+            encoded = fixture["content_base64"]
+            if not isinstance(encoded, str):
+                raise EmulatorInputError(f"ifiles.{name}.content_base64 must be a string")
+            if len(encoded) > ((32 * 1024 * 1024 + 2) // 3) * 4:
+                raise EmulatorInputError(
+                    f"ifiles.{name}.content cannot exceed 33554432 bytes"
+                )
+            try:
+                content = base64.b64decode(encoded.encode("ascii"), validate=True)
+            except (UnicodeEncodeError, ValueError, binascii.Error):
+                raise EmulatorInputError(
+                    f"ifiles.{name}.content_base64 must be valid base64"
+                ) from None
+            content_base64 = encoded
+        else:
+            content_value = fixture.get("content", "")
+            if not isinstance(content_value, str) or "\x00" in content_value:
+                raise EmulatorInputError(
+                    f"ifiles.{name}.content must be a string without NUL"
+                )
+            try:
+                content = content_value.encode("utf-8")
+            except UnicodeEncodeError:
+                raise EmulatorInputError(
+                    f"ifiles.{name}.content must be valid UTF-8"
+                ) from None
+            content_base64 = base64.b64encode(content).decode("ascii")
+        if len(content) > 32 * 1024 * 1024:
+            raise EmulatorInputError(
+                f"ifiles.{name}.content cannot exceed 33554432 bytes"
+            )
+        total_bytes += len(content)
+        if total_bytes > 64 * 1024 * 1024:
+            raise EmulatorInputError("ifiles content cannot exceed 67108864 bytes in total")
+
+        def metadata_string(field: str, default: str) -> str:
+            value = fixture.get(field, default)
+            if not isinstance(value, str) or "\x00" in value:
+                raise EmulatorInputError(
+                    f"ifiles.{name}.{field} must be a string without NUL"
+                )
+            try:
+                value_bytes = value.encode("utf-8")
+            except UnicodeEncodeError:
+                raise EmulatorInputError(
+                    f"ifiles.{name}.{field} must be valid UTF-8"
+                ) from None
+            if len(value_bytes) > 4096:
+                raise EmulatorInputError(
+                    f"ifiles.{name}.{field} cannot exceed 4096 UTF-8 bytes"
+                )
+            return value
+
+        revision_value = fixture.get("revision", 1)
+        if isinstance(revision_value, bool) or not isinstance(revision_value, int):
+            raise EmulatorInputError(f"ifiles.{name}.revision must be a positive integer")
+        if revision_value < 1:
+            raise EmulatorInputError(f"ifiles.{name}.revision must be a positive integer")
+        checksum = metadata_string(
+            "checksum", hashlib.sha256(content).hexdigest()
+        )
+        result[name] = {
+            "content_base64": content_base64,
+            "last_updated_by": metadata_string("last_updated_by", "emulator"),
+            "last_update_time": metadata_string("last_update_time", ""),
+            "revision": str(revision_value),
+            "checksum": checksum,
+        }
+    return result
+
+
 def _normalise_ip(raw: Any) -> dict[str, Any]:
     """Normalize deterministic inputs for the bounded IP command model."""
     if raw is None:
@@ -7249,6 +7409,7 @@ def _normalise_scenario_config(
         "http_proxy",
         "flowtable",
         "sideband",
+        "ifiles",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -7302,6 +7463,7 @@ def _normalise_scenario_config(
         _normalise_http_proxy(scenario.get("http_proxy")),
         _normalise_flowtable(scenario.get("flowtable")),
         _normalise_sideband(scenario.get("sideband")),
+        _normalise_ifiles(scenario.get("ifiles")),
     )
 
 
@@ -12634,6 +12796,7 @@ class EmulatorSession:
             http_proxy_config,
             flowtable_config,
             sideband_config,
+            ifile_config,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -12662,6 +12825,7 @@ class EmulatorSession:
         self._http_proxy_config = http_proxy_config
         self._flowtable_config = flowtable_config
         self._sideband_config = sideband_config
+        self._ifile_config = ifile_config
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -12832,6 +12996,7 @@ class EmulatorSession:
                 _configure_http_proxy(session, self._http_proxy_config)
                 _configure_flowtable(session, self._flowtable_config)
                 _configure_sideband(session, self._sideband_config)
+                _configure_ifiles(session, self._ifile_config)
                 session.eval_tcl("::itest::semantic::rewrite_reset_connection")
                 session.eval_tcl("::itest::semantic::html_reset_connection")
                 session.eval_tcl("::itest::semantic::compression_reset_connection")
@@ -13465,6 +13630,7 @@ class EmulatorSession:
                 "link": semantic_snapshot["link"],
                 "legacy": semantic_snapshot["legacy"],
                 "sideband": semantic_snapshot["sideband"],
+                "ifile": semantic_snapshot["ifile"],
                 "adapt": semantic_snapshot["adapt"],
                 "psm": semantic_snapshot["psm"],
                 "ip": semantic_snapshot["ip"],
