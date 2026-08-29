@@ -294,6 +294,16 @@ namespace eval ::itest::semantic {
     variable access_user_keys [dict create]
     variable access_saml [dict create authn "" assertion "" slo_req "" slo_resp ""]
 
+    # FLOW:: is represented by deterministic synthetic handles.  The base
+    # connection always has one client and one server flow; related flows are
+    # added by FLOW::create_related.  flow_clock advances once per dispatched
+    # event so idle-duration assertions do not depend on wall-clock time.
+    variable flow_clock 0
+    variable flow_current_side client
+    variable flow_next_related 0
+    variable flow_handles [dict create]
+    variable event_errors {}
+
     variable sip_discarded 0
     variable sip_response_requested 0
     variable sip_response_code ""
@@ -3627,6 +3637,396 @@ namespace eval ::itest::semantic {
         set lb_src_tag [lindex $args 0]
         ::itest::log_decision lb src_tag $lb_src_tag
         return ""
+    }
+
+    proc _flow_require_profile {command} {
+        if {![_profile_enabled FLOW]} {
+            error "$command requires the FLOW profile"
+        }
+    }
+
+    proc _flow_require_event {command {priority_only 0}} {
+        set allowed {
+            FLOW_INIT CLIENT_ACCEPTED SA_PICKED LB_SELECTED CLIENT_DATA
+            SERVER_DATA SERVER_CONNECTED
+        }
+        if {$priority_only} {
+            set allowed {FLOW_INIT CLIENT_ACCEPTED SERVER_CONNECTED}
+        }
+        if {$::itest::current_event ni $allowed} {
+            error "$command is not valid in $::itest::current_event"
+        }
+    }
+
+    proc _flow_current_handle {} {
+        variable flow_current_side
+        if {$flow_current_side eq "server"} {
+            return flow-server-0
+        }
+        return flow-client-0
+    }
+
+    proc _flow_get {handle command} {
+        variable flow_handles
+        if {$handle eq "" || ![dict exists $flow_handles $handle]} {
+            error "$command received an unknown flow handle"
+        }
+        set flow [dict get $flow_handles $handle]
+        if {![dict get $flow active]} {
+            error "$command received an inactive flow handle"
+        }
+        return $flow
+    }
+
+    proc flow_reset_connection {} {
+        variable flow_clock
+        variable flow_current_side
+        variable flow_next_related
+        variable flow_handles
+        set flow_clock 0
+        set flow_current_side client
+        set flow_next_related 0
+        set flow_handles [dict create \
+            flow-client-0 [dict create side client peer flow-server-0 \
+                timeout 300 priority 0 last_used 0 active 1 related 0 \
+                protocol 6 local_addr "" local_port "" remote_addr "" \
+                remote_port "" vlan "" translation_loose 0 hairpin 0 inherit_vs ""] \
+            flow-server-0 [dict create side server peer flow-client-0 \
+                timeout 300 priority 0 last_used 0 active 1 related 0 \
+                protocol 6 local_addr "" local_port "" remote_addr "" \
+                remote_port "" vlan "" translation_loose 0 hairpin 0 inherit_vs ""]]
+    }
+
+    proc flow_begin_event {event} {
+        variable flow_clock
+        variable flow_current_side
+        variable flow_handles
+        if {$event in {SERVER_DATA SERVER_CONNECTED}} {
+            set flow_current_side server
+        } elseif {$event in {
+            FLOW_INIT CLIENT_ACCEPTED SA_PICKED LB_SELECTED CLIENT_DATA
+        }} {
+            set flow_current_side client
+        } else {
+            return
+        }
+        incr flow_clock
+        set handle [_flow_current_handle]
+        if {[dict exists $flow_handles $handle]} {
+            set flow [dict get $flow_handles $handle]
+            dict set flow last_used $flow_clock
+            dict set flow_handles $handle $flow
+        }
+    }
+
+    proc _flow_parse_spec {tokens label} {
+        set local_addr ""
+        set local_port ""
+        set positional [list]
+        set seen_options [dict create]
+        set index 0
+        while {$index < [llength $tokens]} {
+            set token [lindex $tokens $index]
+            if {$token eq "-local-ip" || $token eq "-local-port"} {
+                if {$index + 1 >= [llength $tokens]} {
+                    error "$label $token requires a value"
+                }
+                if {[dict exists $seen_options $token]} {
+                    error "$label received duplicate option $token"
+                }
+                dict set seen_options $token 1
+                incr index
+                set value [lindex $tokens $index]
+                if {$value eq ""} { error "$label $token cannot be empty" }
+                if {$token eq "-local-ip"} {
+                    set local_addr $value
+                } else {
+                    if {![string is integer -strict $value] || $value < 0 || $value > 65535} {
+                        error "$label -local-port must be an integer from 0 to 65535"
+                    }
+                    set local_port $value
+                }
+            } elseif {[string match -* $token]} {
+                error "$label received unsupported option $token"
+            } else {
+                lappend positional $token
+            }
+            incr index
+        }
+        if {[llength $positional] != 3} {
+            error "$label requires REMOTE_ADDR REMOTE_PORT VLAN"
+        }
+        if {[lindex $positional 0] eq "" || [lindex $positional 2] eq ""} {
+            error "$label REMOTE_ADDR and VLAN cannot be empty"
+        }
+        set remote_port [lindex $positional 1]
+        if {![string is integer -strict $remote_port] || $remote_port < 0 || $remote_port > 65535} {
+            error "$label REMOTE_PORT must be an integer from 0 to 65535"
+        }
+        return [dict create local_addr $local_addr local_port $local_port \
+            remote_addr [lindex $positional 0] remote_port $remote_port \
+            vlan [lindex $positional 2]]
+    }
+
+    proc flow_create_related {args} {
+        variable flow_handles
+        variable flow_next_related
+        variable flow_clock
+        _flow_require_profile FLOW::create_related
+        _flow_require_event FLOW::create_related
+        if {[llength $args] < 1} {
+            error "FLOW::create_related requires a flow specification"
+        }
+        set translation_loose 0
+        set hairpin 0
+        set raw ""
+        foreach argument $args {
+            if {$argument eq "-translation-loose"} {
+                set translation_loose 1
+            } elseif {$argument eq "-hairpin"} {
+                set hairpin 1
+            } elseif {$raw eq ""} {
+                set raw $argument
+            } else {
+                error "FLOW::create_related accepts one flow specification"
+            }
+        }
+        if {$raw eq ""} { error "FLOW::create_related requires a flow specification" }
+        set tokens $raw
+        set protocol 6
+        set inherit_vs ""
+        set client_spec ""
+        set server_spec ""
+        set seen [dict create]
+        set index 0
+        set flow_keys {proto clientflow serverflow inherit-vs}
+        while {$index < [llength $tokens]} {
+            set key [lindex $tokens $index]
+            if {$key eq "proto"} {
+                if {[dict exists $seen proto] || $index + 1 >= [llength $tokens]} {
+                    error "FLOW::create_related requires one proto value"
+                }
+                incr index
+                set protocol [lindex $tokens $index]
+                if {![string is integer -strict $protocol] || $protocol < 0 || $protocol > 255} {
+                    error "FLOW::create_related proto must be an integer from 0 to 255"
+                }
+                dict set seen proto 1
+            } elseif {$key in {clientflow serverflow}} {
+                if {[dict exists $seen $key]} { error "FLOW::create_related received duplicate $key" }
+                set start [expr {$index + 1}]
+                set cursor $start
+                set positional_count 0
+                while {$cursor < [llength $tokens]} {
+                    set token [lindex $tokens $cursor]
+                    if {$token in {-local-ip -local-port}} {
+                        incr cursor 2
+                        continue
+                    }
+                    if {$positional_count >= 3 && $token in $flow_keys} {
+                        break
+                    }
+                    incr positional_count
+                    incr cursor
+                }
+                set spec [_flow_parse_spec [lrange $tokens $start [expr {$cursor - 1}]] $key]
+                if {$key eq "clientflow"} { set client_spec $spec } else { set server_spec $spec }
+                dict set seen $key 1
+                set index [expr {$cursor - 1}]
+            } elseif {$key eq "inherit-vs"} {
+                if {[dict exists $seen $key] || $index + 1 >= [llength $tokens]} {
+                    error "FLOW::create_related inherit-vs requires a virtual server name"
+                }
+                incr index
+                set inherit_vs [lindex $tokens $index]
+                if {$inherit_vs eq ""} { error "FLOW::create_related inherit-vs cannot be empty" }
+                dict set seen $key 1
+            } else {
+                error "FLOW::create_related received unsupported subcommand $key"
+            }
+            incr index
+        }
+        if {$client_spec eq "" || $server_spec eq ""} {
+            error "FLOW::create_related requires clientflow and serverflow"
+        }
+        incr flow_next_related
+        set client_handle "flow-related-${flow_next_related}-client"
+        set server_handle "flow-related-${flow_next_related}-server"
+        foreach {handle side peer spec} [list \
+            $client_handle client $server_handle $client_spec \
+            $server_handle server $client_handle $server_spec] {
+            set flow [dict create side $side peer $peer timeout 300 priority 0 \
+                last_used $flow_clock active 1 related 1 protocol $protocol \
+                local_addr [dict get $spec local_addr] local_port [dict get $spec local_port] \
+                remote_addr [dict get $spec remote_addr] remote_port [dict get $spec remote_port] \
+                vlan [dict get $spec vlan] translation_loose $translation_loose \
+                hairpin $hairpin inherit_vs $inherit_vs]
+            dict set flow_handles $handle $flow
+        }
+        ::itest::log_decision flow create_related [list $client_handle $server_handle $protocol]
+        return $client_handle
+    }
+
+    proc flow_this {args} {
+        _flow_require_profile FLOW::this
+        _flow_require_event FLOW::this
+        if {[llength $args] != 0} { error "FLOW::this takes no arguments" }
+        return [_flow_current_handle]
+    }
+
+    proc flow_peer {args} {
+        variable flow_handles
+        _flow_require_profile FLOW::peer
+        _flow_require_event FLOW::peer
+        if {[llength $args] != 1} { error "FLOW::peer requires a flow handle" }
+        set flow [_flow_get [lindex $args 0] FLOW::peer]
+        set peer [dict get $flow peer]
+        if {![dict exists $flow_handles $peer]} {
+            error "FLOW::peer resolved an unknown peer handle"
+        }
+        if {![dict get [dict get $flow_handles $peer] active]} {
+            error "FLOW::peer resolved an inactive peer handle"
+        }
+        return $peer
+    }
+
+    proc flow_idle_duration {args} {
+        variable flow_clock
+        _flow_require_profile FLOW::idle_duration
+        _flow_require_event FLOW::idle_duration
+        if {[llength $args] != 1} { error "FLOW::idle_duration requires a flow handle" }
+        set flow [_flow_get [lindex $args 0] FLOW::idle_duration]
+        return [expr {$flow_clock - [dict get $flow last_used]}]
+    }
+
+    proc flow_refresh {args} {
+        variable flow_clock
+        variable flow_handles
+        _flow_require_profile FLOW::refresh
+        _flow_require_event FLOW::refresh
+        if {[llength $args] != 1} { error "FLOW::refresh requires a flow handle" }
+        set handle [lindex $args 0]
+        set flow [_flow_get $handle FLOW::refresh]
+        dict set flow last_used $flow_clock
+        dict set flow_handles $handle $flow
+        ::itest::log_decision flow refresh $handle
+        return ""
+    }
+
+    proc flow_idle_timeout {args} {
+        variable flow_handles
+        _flow_require_profile FLOW::idle_timeout
+        _flow_require_event FLOW::idle_timeout
+        if {[llength $args] ni {1 2}} {
+            error "FLOW::idle_timeout requires HANDLE and optional TIMEOUT"
+        }
+        set handle [lindex $args 0]
+        set flow [_flow_get $handle FLOW::idle_timeout]
+        if {[llength $args] == 1} { return [dict get $flow timeout] }
+        set timeout [lindex $args 1]
+        if {![string is integer -strict $timeout] || $timeout < 0} {
+            error "FLOW::idle_timeout requires a non-negative integer timeout"
+        }
+        dict set flow timeout $timeout
+        dict set flow_handles $handle $flow
+        ::itest::log_decision flow idle_timeout [list $handle $timeout]
+        return ""
+    }
+
+    proc flow_priority {args} {
+        variable flow_handles
+        _flow_require_profile FLOW::priority
+        _flow_require_event FLOW::priority 1
+        set handle [_flow_current_handle]
+        set set_value 0
+        set priority ""
+        if {[llength $args] == 0} {
+            # Getter for the current flow.
+        } elseif {[llength $args] == 1} {
+            set argument [lindex $args 0]
+            if {$argument in {clientside serverside}} {
+                set handle [expr {$argument eq "clientside" ? "flow-client-0" : "flow-server-0"}]
+            } elseif {[string is integer -strict $argument]} {
+                set priority $argument
+                set set_value 1
+            } else {
+                set handle $argument
+            }
+        } elseif {[llength $args] == 2} {
+            set selector [lindex $args 0]
+            if {$selector in {clientside serverside}} {
+                set handle [expr {$selector eq "clientside" ? "flow-client-0" : "flow-server-0"}]
+            } else {
+                set handle $selector
+            }
+            set priority [lindex $args 1]
+            set set_value 1
+        } else {
+            error "FLOW::priority accepts at most a handle and priority"
+        }
+        set flow [_flow_get $handle FLOW::priority]
+        if {!$set_value} { return [dict get $flow priority] }
+        if {![string is integer -strict $priority] || $priority < 0 || $priority > 7} {
+            error "FLOW::priority must be an integer from 0 to 7"
+        }
+        dict set flow priority $priority
+        dict set flow_handles $handle $flow
+        ::itest::log_decision flow priority [list $handle $priority]
+        return ""
+    }
+
+    proc flow_snapshot {} {
+        variable flow_clock
+        variable flow_current_side
+        variable flow_handles
+        set result [list clock $flow_clock current_side $flow_current_side \
+            current_handle [_flow_current_handle] flow_count [dict size $flow_handles]]
+        set flows [list]
+        foreach handle [lsort -dictionary [dict keys $flow_handles]] {
+            set flow [dict get $flow_handles $handle]
+            lappend flows [list $handle [dict get $flow side] [dict get $flow peer] \
+                [dict get $flow timeout] [dict get $flow priority] \
+                [dict get $flow last_used] [dict get $flow active] \
+                [dict get $flow related] [dict get $flow protocol] \
+                [dict get $flow local_addr] [dict get $flow local_port] \
+                [dict get $flow remote_addr] [dict get $flow remote_port] \
+                [dict get $flow vlan] [dict get $flow translation_loose] \
+                [dict get $flow hairpin] [dict get $flow inherit_vs]]
+        }
+        lappend result flows $flows
+        return $result
+    }
+
+    proc event_errors_reset {} {
+        variable event_errors
+        set event_errors {}
+    }
+
+    proc event_errors_record {event result} {
+        variable event_errors
+        set handlers_index [lsearch -exact $result handlers]
+        if {$handlers_index < 0 || $handlers_index + 1 >= [llength $result]} {
+            return
+        }
+        foreach handler [lindex $result [expr {$handlers_index + 1}]] {
+            set code_index [lsearch -exact $handler code]
+            if {$code_index < 0 || $code_index + 1 >= [llength $handler]} {
+                continue
+            }
+            if {[lindex $handler [expr {$code_index + 1}]] ne "1"} {
+                continue
+            }
+            set priority_index [lsearch -exact $handler priority]
+            set error_index [lsearch -exact $handler error]
+            set priority [expr {$priority_index >= 0 && $priority_index + 1 < [llength $handler] ? [lindex $handler [expr {$priority_index + 1}]] : ""}]
+            set message [expr {$error_index >= 0 && $error_index + 1 < [llength $handler] ? [lindex $handler [expr {$error_index + 1}]] : "unknown iRule handler error"}]
+            lappend event_errors [list $event $priority $message]
+        }
+    }
+
+    proc event_errors_snapshot {} {
+        variable event_errors
+        return $event_errors
     }
 
     proc _uri_input {args} {
@@ -11543,6 +11943,13 @@ foreach {name proc_name} {
     AUTH::wantcredential_prompt ::itest::semantic::auth_wantcredential_prompt
     AUTH::wantcredential_prompt_style ::itest::semantic::auth_wantcredential_prompt_style
     AUTH::wantcredential_type ::itest::semantic::auth_wantcredential_type
+    FLOW::create_related ::itest::semantic::flow_create_related
+    FLOW::idle_duration ::itest::semantic::flow_idle_duration
+    FLOW::idle_timeout ::itest::semantic::flow_idle_timeout
+    FLOW::peer ::itest::semantic::flow_peer
+    FLOW::priority ::itest::semantic::flow_priority
+    FLOW::refresh ::itest::semantic::flow_refresh
+    FLOW::this ::itest::semantic::flow_this
     STATS::get ::itest::semantic::stats_get
     STATS::incr ::itest::semantic::stats_incr
     STATS::set ::itest::semantic::stats_set
@@ -11763,6 +12170,13 @@ if {[::tmm::_orig_info commands ::itest::semantic::_testcl_fire_event_orig] eq "
     ::tmm::_orig_rename ::itest::fire_event ::itest::semantic::_testcl_fire_event_orig
     proc ::itest::fire_event {args} {
         ::itest::semantic::http2_apply_pending
-        return [eval [linsert $args 0 ::itest::semantic::_testcl_fire_event_orig]]
+        if {[llength $args] > 0} {
+            ::itest::semantic::flow_begin_event [lindex $args 0]
+        }
+        set result [eval [linsert $args 0 ::itest::semantic::_testcl_fire_event_orig]]
+        if {[llength $args] > 0} {
+            ::itest::semantic::event_errors_record [lindex $args 0] $result
+        }
+        return $result
     }
 }

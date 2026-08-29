@@ -6951,6 +6951,163 @@ when CLIENT_DATA {
         self.assertTrue(expected.issubset(tcp_statuses))
         self.assertTrue(all(tcp_statuses[name] == "semantic-mock" for name in expected))
 
+    def test_flow_handles_track_connection_state_and_related_flows(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "FLOW"],
+                "pools": {"app": ["192.0.2.20:80"]},
+                "irule": """
+when CLIENT_ACCEPTED {
+    set ::client_flow [FLOW::this]
+    set ::server_flow [FLOW::peer $::client_flow]
+    FLOW::priority clientside 2
+    FLOW::idle_timeout $::client_flow 42
+    log local0. "client=$::client_flow peer=$::server_flow"
+}
+when SERVER_CONNECTED {
+    FLOW::priority serverside 4
+    log local0. "server=[FLOW::this] priority=[FLOW::priority]"
+}
+when HTTP_REQUEST { pool app }
+""",
+                "requests": [{"uri": "/health"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request = result["results"][0]
+        flow = request["semantic"]["flow"]
+        self.assertEqual(flow["flow_count"], 2)
+        self.assertEqual(flow["current_side"], "server")
+        self.assertEqual(flow["current_handle"], "flow-server-0")
+        by_handle = {entry["handle"]: entry for entry in flow["flows"]}
+        self.assertEqual(by_handle["flow-client-0"]["peer"], "flow-server-0")
+        self.assertEqual(by_handle["flow-client-0"]["timeout"], 42)
+        self.assertEqual(by_handle["flow-client-0"]["priority"], 2)
+        self.assertEqual(by_handle["flow-server-0"]["priority"], 4)
+        self.assertTrue(any("client=flow-client-0 peer=flow-server-0" in log for log in request["logs"]))
+        self.assertTrue(any("server=flow-server-0 priority=4" in log for log in request["logs"]))
+        statuses = {
+            entry["name"]: entry["runtime_status"]
+            for entry in result["fidelity"]["commands"]
+            if entry["name"].startswith("FLOW::")
+        }
+        self.assertEqual(set(statuses), {
+            "FLOW::idle_timeout", "FLOW::peer", "FLOW::priority", "FLOW::this",
+        })
+        self.assertTrue(all(value == "semantic-mock" for value in statuses.values()))
+
+    def test_flow_related_creation_refresh_and_validation(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "FLOW"],
+                "pools": {"app": ["192.0.2.20:80"]},
+                "irule": """
+when SERVER_CONNECTED {
+    set ::related [FLOW::create_related -hairpin {
+        proto 17
+        clientflow -local-ip 10.0.0.10 -local-port 5000 10.0.0.11 6000 vlan-a
+        serverflow 10.0.0.12 7000 vlan-b
+        inherit-vs /Common/app
+    }]
+    set ::related_peer [FLOW::peer $::related]
+    FLOW::idle_timeout $::related 9
+    FLOW::priority $::related 6
+    set ::before [FLOW::idle_duration $::related]
+    FLOW::refresh $::related
+    set ::after [FLOW::idle_duration $::related]
+    log local0. "related=$::related peer=$::related_peer before=$::before after=$::after"
+}
+when HTTP_REQUEST { pool app }
+""",
+                "requests": [{"uri": "/health"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request = result["results"][0]
+        flow = request["semantic"]["flow"]
+        self.assertEqual(flow["flow_count"], 4)
+        related = next(entry for entry in flow["flows"] if entry["handle"] == "flow-related-1-client")
+        related_peer = next(entry for entry in flow["flows"] if entry["handle"] == "flow-related-1-server")
+        self.assertEqual(related["peer"], "flow-related-1-server")
+        self.assertEqual(related["protocol"], 17)
+        self.assertEqual(related["local_addr"], "10.0.0.10")
+        self.assertEqual(related["local_port"], "5000")
+        self.assertEqual(related["remote_addr"], "10.0.0.11")
+        self.assertTrue(related["hairpin"])
+        self.assertEqual(related["timeout"], 9)
+        self.assertEqual(related["priority"], 6)
+        self.assertEqual(related_peer["remote_port"], "7000")
+        self.assertTrue(any("before=0 after=0" in log for log in request["logs"]))
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "integer from 0 to 7"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP", "FLOW"],
+                    "irule": "when CLIENT_ACCEPTED { FLOW::priority 8 }",
+                    "requests": [{"uri": "/"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "requires the FLOW profile"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when CLIENT_ACCEPTED { FLOW::this }",
+                    "requests": [{"uri": "/"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "integer from 0 to 7"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "FLOW"],
+                    "irule": "when CLIENT_ACCEPTED { FLOW::priority 8 }",
+                    "packets": [
+                        {
+                            "protocol": "tcp",
+                            "direction": "client_to_server",
+                            "source": {"address": "10.0.0.5", "port": 51000},
+                            "destination": {"address": "192.0.2.10", "port": 443},
+                            "flags": ["SYN"],
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "requires one proto value"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP", "FLOW"],
+                    "pools": {"app": ["192.0.2.20:80"]},
+                    "irule": """
+when SERVER_CONNECTED {
+    FLOW::create_related {proto 6 proto 17 clientflow 10.0.0.1 1000 vlan-a serverflow 10.0.0.2 2000 vlan-b}
+}
+when HTTP_REQUEST { pool app }
+""",
+                    "requests": [{"uri": "/"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "not valid in CLIENT_CLOSED"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP", "FLOW"],
+                    "pools": {"app": ["192.0.2.20:80"]},
+                    "irule": """
+when HTTP_REQUEST { pool app }
+when HTTP_RESPONSE { HTTP::close }
+when CLIENT_CLOSED { FLOW::priority 8 }
+""",
+                    "requests": [{"uri": "/"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -301,6 +301,24 @@ Session snapshots redact values whose keys look like passwords, secrets, or
 tokens. This does not run APM policy evaluation, ACL enforcement, SAML/OAuth
 cryptography, external authentication, or production session expiry.
 
+### FLOW connection handles
+
+With the `FLOW` profile attached, the emulator models the seven catalogued
+TMOS 17.5 `FLOW::*` commands using deterministic synthetic handles. The base
+connection exposes `flow-client-0` and `flow-server-0`; `FLOW::this` selects
+the side associated with the current flow event and `FLOW::peer` resolves its
+counterpart. Priority (0 through 7), idle timeout, last-used time, endpoint
+fields, and related-flow metadata are returned under `semantic.flow`.
+
+`FLOW::create_related` validates the documented `proto`, `clientflow`,
+`serverflow`, `inherit-vs`, `-hairpin`, and `-translation-loose` forms and
+returns a paired synthetic client handle. The emulator's virtual clock
+advances one logical second for each FLOW-relevant lifecycle event, so
+`FLOW::idle_duration` and `FLOW::refresh` are repeatable without wall-clock
+dependence. Related handles are state records only: the adapter does not
+open sockets, inject packets, perform source translation, or create a live
+TMM connection.
+
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose

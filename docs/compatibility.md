@@ -137,6 +137,12 @@ OAuth operations use deterministic placeholders and do not perform external
 authentication or cryptographic signing. The model does not execute an APM
 policy graph, enforce production ACLs, expire sessions against wall-clock
 time, or reproduce SAML/OAuth/AAA network behavior.
+The seven catalogued TMOS 17.5 `FLOW::*` commands are represented by paired
+synthetic client/server handles. `FLOW::this`, `FLOW::peer`, priority, idle
+timeout, idle duration, refresh, and validated related-flow creation update a
+deterministic connection snapshot; a virtual event clock avoids wall-clock
+flakiness. This does not create sockets, perform source translation, schedule
+packets, or reproduce live TMM flow state.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

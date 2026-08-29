@@ -1141,6 +1141,13 @@ SEMANTIC_MOCK_COMMANDS = {
     "AUTH::wantcredential_prompt",
     "AUTH::wantcredential_prompt_style",
     "AUTH::wantcredential_type",
+    "FLOW::create_related",
+    "FLOW::idle_duration",
+    "FLOW::idle_timeout",
+    "FLOW::peer",
+    "FLOW::priority",
+    "FLOW::refresh",
+    "FLOW::this",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 RUNTIME_STATUS_VALUES = frozenset(
@@ -1847,6 +1854,19 @@ def _header_dict(raw: Any) -> dict[str, Any]:
     return headers
 
 
+def _event_error_snapshot(session: Any) -> list[dict[str, str]]:
+    """Decode handler errors captured by the adapter's fire_event wrapper."""
+    errors: list[dict[str, str]] = []
+    for raw_error in _split_tcl_list(
+        session.eval_tcl("::itest::semantic::event_errors_snapshot")
+    ):
+        parts = _split_tcl_list(raw_error)
+        if len(parts) != 3:
+            raise EmulatorInputError("invalid iRule handler error state")
+        errors.append({"event": parts[0], "priority": parts[1], "message": parts[2]})
+    return errors
+
+
 def _semantic_snapshot(session: Any) -> dict[str, Any]:
     stats_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::stats_snapshot"))
     stats = {
@@ -2224,6 +2244,67 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
     access_saml = parse_access_map(access_values["saml"], "SAML")
     if set(access_saml) != {"authn", "assertion", "slo_req", "slo_resp"}:
         raise EmulatorInputError("invalid ACCESS SAML state fields")
+    flow_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::flow_snapshot"))
+    if len(flow_parts) % 2:
+        raise EmulatorInputError("invalid FLOW state")
+    flow_values = dict(zip(flow_parts[::2], flow_parts[1::2]))
+    expected_flow_fields = {"clock", "current_side", "current_handle", "flow_count", "flows"}
+    if set(flow_values) != expected_flow_fields:
+        raise EmulatorInputError("invalid FLOW state fields")
+    if flow_values["current_side"] not in {"client", "server"}:
+        raise EmulatorInputError("invalid FLOW current side")
+    try:
+        flow_clock = int(flow_values["clock"])
+        flow_count = int(flow_values["flow_count"])
+    except (KeyError, TypeError, ValueError):
+        raise EmulatorInputError("invalid FLOW clock or count") from None
+    if flow_clock < 0 or flow_count < 0:
+        raise EmulatorInputError("invalid FLOW clock or count")
+    flow_rows: list[dict[str, Any]] = []
+    seen_flow_handles: set[str] = set()
+    for raw_flow in _split_tcl_list(flow_values["flows"]):
+        flow_row = _split_tcl_list(raw_flow)
+        if len(flow_row) != 17 or flow_row[0] in seen_flow_handles:
+            raise EmulatorInputError("invalid FLOW handle state")
+        seen_flow_handles.add(flow_row[0])
+        if flow_row[1] not in {"client", "server"} or flow_row[6] not in {"0", "1"}:
+            raise EmulatorInputError("invalid FLOW side or active state")
+        if flow_row[7] not in {"0", "1"}:
+            raise EmulatorInputError("invalid FLOW related state")
+        try:
+            timeout, priority, last_used, protocol = (
+                int(value) for value in (flow_row[3], flow_row[4], flow_row[5], flow_row[8])
+            )
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid FLOW numeric state") from None
+        if timeout < 0 or not 0 <= priority <= 7 or last_used < 0 or not 0 <= protocol <= 255:
+            raise EmulatorInputError("invalid FLOW numeric state")
+        if flow_row[14] not in {"0", "1"} or flow_row[15] not in {"0", "1"}:
+            raise EmulatorInputError("invalid FLOW option state")
+        flow_rows.append({
+            "handle": flow_row[0],
+            "side": flow_row[1],
+            "peer": flow_row[2],
+            "timeout": timeout,
+            "priority": priority,
+            "last_used": last_used,
+            "active": flow_row[6] == "1",
+            "related": flow_row[7] == "1",
+            "protocol": protocol,
+            "local_addr": flow_row[9],
+            "local_port": flow_row[10],
+            "remote_addr": flow_row[11],
+            "remote_port": flow_row[12],
+            "vlan": flow_row[13],
+            "translation_loose": flow_row[14] == "1",
+            "hairpin": flow_row[15] == "1",
+            "inherit_vs": flow_row[16],
+        })
+    if len(flow_rows) != flow_count or flow_values["current_handle"] not in seen_flow_handles:
+        raise EmulatorInputError("inconsistent FLOW handle state")
+    for flow in flow_rows:
+        if flow["peer"] not in seen_flow_handles:
+            raise EmulatorInputError("FLOW peer references an unknown handle")
     dosl7_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::dosl7_snapshot"))
     if len(dosl7_parts) % 2:
         raise EmulatorInputError("invalid DOSL7 state")
@@ -2379,6 +2460,13 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "sessions": access_sessions,
             "perflow": access_perflow,
             "saml": access_saml,
+        },
+        "flow": {
+            "clock": flow_clock,
+            "current_side": flow_values["current_side"],
+            "current_handle": flow_values["current_handle"],
+            "flow_count": flow_count,
+            "flows": flow_rows,
         },
         "dosl7": {
             "enabled": dosl7_values["enabled"] == "1",
@@ -7672,6 +7760,7 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
     decisions = session.get_decisions()
     logs = session.get_logs()
     semantic = _semantic_snapshot(session)
+    event_errors = _event_error_snapshot(session)
     lb_failure = _lb_failure_snapshot(session)
     http_retry = _http_retry_snapshot(session)
     http_release = _http_release_snapshot(session)
@@ -7725,6 +7814,8 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
         result["http_release"] = True
     if str(http_close_requested) == "1":
         result["http_close"] = True
+    if event_errors:
+        result["errors"] = event_errors
     return result
 
 
@@ -7965,6 +8056,7 @@ class EmulatorSession:
                 _configure_auth(session, self._auth)
                 _configure_aaa(session, self._aaa)
                 _configure_access(session, self._access)
+                session.eval_tcl("::itest::semantic::flow_reset_connection")
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
                     for profile in self._profiles
@@ -8013,6 +8105,7 @@ class EmulatorSession:
 
     def _run_request_on_worker(self, session: Any, request: dict[str, Any]) -> dict[str, Any]:
         _validate_request_flags(request)
+        session.eval_tcl("::itest::semantic::event_errors_reset")
         if request.get("close_before") or request.get("new_connection"):
             if self._connection_open:
                 session.close_connection()
@@ -8102,6 +8195,16 @@ class EmulatorSession:
                         "unset -nocomplain ::itest::semantic::automatic_http_flow"
                     )
 
+                if result.get("errors"):
+                    first_error = result["errors"][0]
+                    self._close_packet_connection(session)
+                    self._connection_request_number = 0
+                    raise EmulatorInputError(
+                        "iRule handler error in {}: {}".format(
+                            first_error["event"], first_error["message"]
+                        )
+                    )
+
                 decision_history.extend(result.get("decisions", []))
                 log_history.extend(result.get("logs", []))
                 retry = result.pop("http_retry", None)
@@ -8144,9 +8247,20 @@ class EmulatorSession:
             )
             decisions_before_close = len(session.get_decisions())
             logs_before_close = len(session.get_logs())
+            event_errors_before_close = len(_event_error_snapshot(session))
             connection_active = session.eval_tcl("set ::orch::_connection_active")
             if str(connection_active) == "1":
                 session.fire_event("CLIENT_CLOSED")
+                close_errors = _event_error_snapshot(session)
+                if len(close_errors) > event_errors_before_close:
+                    first_error = close_errors[event_errors_before_close]
+                    self._close_packet_connection(session)
+                    self._connection_request_number = 0
+                    raise EmulatorInputError(
+                        "iRule handler error in {}: {}".format(
+                            first_error["event"], first_error["message"]
+                        )
+                    )
             events_after_close = _split_tcl_list(
                 session.eval_tcl("::itest::get_fired_events")
             )
@@ -8157,6 +8271,7 @@ class EmulatorSession:
             session.eval_tcl("::state::reset_connection_state")
             session.eval_tcl("::itest::semantic::psm_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
+            session.eval_tcl("::itest::semantic::flow_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         result["decisions"] = decision_history
@@ -8220,8 +8335,19 @@ class EmulatorSession:
                     session.eval_tcl(f"set {namespace}::{field} {_tcl_quote(value)}")
         if "dns" in state:
             session.eval_tcl("::itest::semantic::dns_prepare_message")
+        event_errors_before = len(_event_error_snapshot(session))
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
         event_result = session.fire_event(event_name)
+        event_errors = _event_error_snapshot(session)
+        if len(event_errors) > event_errors_before:
+            first_error = event_errors[event_errors_before]
+            self._close_packet_connection(session)
+            self._connection_request_number = 0
+            raise EmulatorInputError(
+                "iRule handler error in {}: {}".format(
+                    first_error["event"], first_error["message"]
+                )
+            )
         if "sip" in state:
             session.eval_tcl("::itest::semantic::sip_rebuild_message")
         if "diameter" in state:
@@ -8980,6 +9106,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::auth_reset_connection")
         session.eval_tcl("::itest::semantic::aaa_reset_connection")
         session.eval_tcl("::itest::semantic::access_reset_connection")
+        session.eval_tcl("::itest::semantic::flow_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
@@ -9015,6 +9142,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::auth_reset_connection")
         session.eval_tcl("::itest::semantic::aaa_reset_connection")
         session.eval_tcl("::itest::semantic::access_reset_connection")
+        session.eval_tcl("::itest::semantic::flow_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
@@ -9503,6 +9631,7 @@ class EmulatorSession:
     def _run_packet_trace_on_worker(
         self, session: Any, packets: list[dict[str, Any]]
     ) -> dict[str, Any]:
+        session.eval_tcl("::itest::semantic::event_errors_reset")
         trace: list[dict[str, Any]] = []
         http_results: list[dict[str, Any]] = []
         pending_http: tuple[dict[str, Any], int] | None = None
