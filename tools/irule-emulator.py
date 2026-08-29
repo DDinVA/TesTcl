@@ -151,6 +151,7 @@ EVENT_STATE_FIELDS = {
         "qname",
         "qtype",
         "qclass",
+        "qr",
         "rcode",
         "opcode",
         "id",
@@ -163,6 +164,19 @@ EVENT_STATE_FIELDS = {
         "answers",
         "authority",
         "additional",
+        "qdcount",
+        "ancount",
+        "nscount",
+        "arcount",
+        "ptype",
+        "message_length",
+        "message_hex",
+        "disabled",
+        "dropped",
+        "last_act",
+        "edns0",
+        "rpz_policy",
+        "wideips",
         "response_sent",
     },
     "websocket": {
@@ -393,8 +407,31 @@ def _target_status(name: str, post_target_names: frozenset[str]) -> str:
 SEMANTIC_MOCK_COMMANDS = {
     "HSL::open",
     "HSL::send",
+    "DNS::additional",
+    "DNS::answer",
+    "DNS::authority",
+    "DNS::class",
+    "DNS::disable",
+    "DNS::drop",
+    "DNS::edns0",
+    "DNS::enable",
+    "DNS::header",
+    "DNS::is_wideip",
+    "DNS::last_act",
+    "DNS::len",
+    "DNS::log",
+    "DNS::name",
     "DNS::origin",
+    "DNS::ptype",
+    "DNS::query",
     "DNS::question",
+    "DNS::rdata",
+    "DNS::return",
+    "DNS::rpz_policy",
+    "DNS::rr",
+    "DNS::scrape",
+    "DNS::ttl",
+    "DNS::type",
     "event",
     "HTTP::passthrough_reason",
     "HTTP::password",
@@ -1489,6 +1526,42 @@ GTP_VERSION_1 = 1
 GTP_VERSION_2 = 2
 GTP_GPDU_TYPE = 255
 GTP_IE_HEADER_BYTES = 4
+DNS_RECORD_MAX_BYTES = 64 * 1024
+DNS_RR_TYPES = {
+    1: "A",
+    2: "NS",
+    5: "CNAME",
+    6: "SOA",
+    12: "PTR",
+    15: "MX",
+    16: "TXT",
+    28: "AAAA",
+    33: "SRV",
+    39: "DNAME",
+    41: "OPT",
+    43: "DS",
+    46: "RRSIG",
+    47: "NSEC",
+    48: "DNSKEY",
+    50: "NSEC3",
+    64: "SVCB",
+    65: "HTTPS",
+}
+DNS_RR_CLASSES = {1: "IN", 3: "CH", 4: "HS"}
+DNS_RCODE_NAMES = {
+    0: "NOERROR",
+    1: "FORMERR",
+    2: "SERVFAIL",
+    3: "NXDOMAIN",
+    4: "NOTIMP",
+    5: "REFUSED",
+    6: "YXDOMAIN",
+    7: "YXRRSET",
+    8: "NXRRSET",
+    9: "NOTAUTH",
+    10: "NOTZONE",
+}
+DNS_OPCODE_NAMES = {0: "QUERY", 1: "IQUERY", 2: "STATUS", 4: "NOTIFY", 5: "UPDATE"}
 MAX_PACKET_STREAMS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
@@ -1543,6 +1616,7 @@ PACKET_PROTOCOL_FIELDS = {
         "qname",
         "qtype",
         "qclass",
+        "qr",
         "rcode",
         "opcode",
         "id",
@@ -1555,6 +1629,19 @@ PACKET_PROTOCOL_FIELDS = {
         "answers",
         "authority",
         "additional",
+        "qdcount",
+        "ancount",
+        "nscount",
+        "arcount",
+        "ptype",
+        "message_length",
+        "message_hex",
+        "disabled",
+        "dropped",
+        "last_act",
+        "edns0",
+        "rpz_policy",
+        "wideips",
         "response_sent",
     },
     "websocket": {
@@ -1956,36 +2043,425 @@ def _decode_tls_payload(payload: bytes, direction: str) -> dict[str, Any] | None
     return result
 
 
+def _dns_uint(value: Any, field: str, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise EmulatorInputError(f"DNS {field} must be an integer")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        parsed = int(value, 10)
+    else:
+        raise EmulatorInputError(f"DNS {field} must be an integer")
+    if not 0 <= parsed <= maximum:
+        raise EmulatorInputError(f"DNS {field} must be between 0 and {maximum}")
+    return parsed
+
+
+def _dns_normalise_record(value: Any, field: str, index: int) -> dict[str, Any]:
+    if isinstance(value, str):
+        parts = value.split()
+        if len(parts) < 5:
+            raise EmulatorInputError(
+                f"{field} record {index} must contain name, ttl, class, type, and rdata"
+            )
+        name, ttl, rr_class, rr_type = parts[:4]
+        rdata = " ".join(parts[4:])
+    elif isinstance(value, dict):
+        unknown = sorted(set(value) - {"name", "type", "class", "ttl", "rdata"})
+        if unknown:
+            raise EmulatorInputError(
+                f"unsupported {field} record {index} field(s): {', '.join(unknown)}"
+            )
+        name = value.get("name", "")
+        rr_type = value.get("type", "A")
+        rr_class = value.get("class", "IN")
+        ttl = value.get("ttl", 0)
+        rdata = value.get("rdata", "")
+    elif isinstance(value, list) and len(value) == 5:
+        name, rr_type, rr_class, ttl, rdata = value
+    else:
+        raise EmulatorInputError(f"{field} record {index} must be a string, object, or five-item array")
+    name = _require_string(name, f"{field} record {index} name")
+    rr_type = _require_string(rr_type, f"{field} record {index} type").upper()
+    rr_class = _require_string(rr_class, f"{field} record {index} class").upper()
+    rdata = _require_string(rdata, f"{field} record {index} rdata")
+    if not name or "\x00" in name or "\x00" in rr_type or "\x00" in rr_class or "\x00" in rdata:
+        raise EmulatorInputError(f"{field} record {index} contains an empty or NUL value")
+    ttl = _dns_uint(ttl, f"{field} record {index} ttl", 0xFFFF_FFFF)
+    try:
+        encoded_size = sum(
+            len(part.encode("utf-8")) for part in (name, rr_type, rr_class, rdata)
+        )
+    except UnicodeEncodeError as exc:
+        raise EmulatorInputError(f"{field} record {index} must contain valid UTF-8") from exc
+    if encoded_size > DNS_RECORD_MAX_BYTES:
+        raise EmulatorInputError(f"{field} record {index} exceeds the {DNS_RECORD_MAX_BYTES}-byte limit")
+    return {"name": name, "type": rr_type, "class": rr_class, "ttl": ttl, "rdata": rdata}
+
+
+def _dns_normalise_records(raw: Any, field: str) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise EmulatorInputError(f"DNS {field} must be an array")
+    if len(raw) > PACKET_MAX_COUNT:
+        raise EmulatorInputError(f"DNS {field} cannot contain more than {PACKET_MAX_COUNT} records")
+    return [_dns_normalise_record(value, field, index) for index, value in enumerate(raw)]
+
+
+def _dns_normalise_edns0(raw: Any, field: str) -> dict[str, Any] | str:
+    if raw in (None, ""):
+        return ""
+    if not isinstance(raw, dict):
+        raise EmulatorInputError(f"{field} must be an object")
+    allowed = {
+        "exists",
+        "do",
+        "sz",
+        "nsid",
+        "subnet_address",
+        "subnet_source",
+        "subnet_scope",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError(f"unsupported {field} field(s): {', '.join(unknown)}")
+    return {
+        "exists": _packet_bool(raw.get("exists", False), f"{field} exists"),
+        "do": _packet_bool(raw.get("do", False), f"{field} do"),
+        "sz": _dns_uint(raw.get("sz", 512), f"{field} sz", 65535),
+        "nsid": _require_string(raw.get("nsid", ""), f"{field} nsid"),
+        "subnet_address": _require_string(
+            raw.get("subnet_address", ""), f"{field} subnet_address"
+        ),
+        "subnet_source": _dns_uint(
+            raw.get("subnet_source", 0), f"{field} subnet_source", 255
+        ),
+        "subnet_scope": _dns_uint(
+            raw.get("subnet_scope", 0), f"{field} subnet_scope", 255
+        ),
+    }
+
+
+def _dns_edns0_tcl(value: dict[str, Any] | str) -> str:
+    if value == "":
+        return ""
+    values: list[str] = []
+    for key in (
+        "exists",
+        "do",
+        "sz",
+        "nsid",
+        "subnet_address",
+        "subnet_source",
+        "subnet_scope",
+    ):
+        values.extend((key, str(value[key])))
+    return " ".join(_tcl_quote(item) for item in values)
+
+
+def _dns_records_tcl(records: list[dict[str, Any]]) -> str:
+    return " ".join(
+        "{" + " ".join(
+            _tcl_quote(str(record[key]))
+            for key in ("name", "type", "class", "ttl", "rdata")
+        ) + "}"
+        for record in records
+    )
+
+
+def _dns_read_name(payload: bytes, offset: int, index: int) -> tuple[str, int]:
+    if offset < 0 or offset >= len(payload):
+        raise EmulatorInputError(f"wire packet {index} has a DNS name outside the message")
+    labels: list[str] = []
+    cursor = offset
+    next_offset: int | None = None
+    visited: set[int] = set()
+    while True:
+        if cursor >= len(payload):
+            raise EmulatorInputError(f"wire packet {index} has a truncated DNS name")
+        length = payload[cursor]
+        if length == 0:
+            cursor += 1
+            if next_offset is None:
+                next_offset = cursor
+            break
+        if length & 0xC0 == 0xC0:
+            if cursor + 1 >= len(payload):
+                raise EmulatorInputError(f"wire packet {index} has a truncated DNS compression pointer")
+            pointer = ((length & 0x3F) << 8) | payload[cursor + 1]
+            if pointer in visited or pointer >= len(payload):
+                raise EmulatorInputError(f"wire packet {index} has an invalid DNS compression pointer")
+            visited.add(pointer)
+            if next_offset is None:
+                next_offset = cursor + 2
+            cursor = pointer
+            continue
+        if length & 0xC0:
+            raise EmulatorInputError(f"wire packet {index} has an invalid DNS label length")
+        cursor += 1
+        if length > 63 or cursor + length > len(payload):
+            raise EmulatorInputError(f"wire packet {index} has an invalid DNS label")
+        labels.append(_decode_wire_text(payload[cursor : cursor + length]))
+        cursor += length
+    return ".".join(labels), next_offset if next_offset is not None else cursor
+
+
+def _dns_rdata_text(payload: bytes, start: int, end: int, rr_type: int, index: int) -> str:
+    data = payload[start:end]
+    if rr_type == 1 and len(data) == 4:
+        return str(ipaddress.ip_address(data))
+    if rr_type == 28 and len(data) == 16:
+        return str(ipaddress.ip_address(data))
+    if rr_type in {2, 5, 12, 39}:
+        name, consumed = _dns_read_name(payload, start, index)
+        if consumed > end:
+            raise EmulatorInputError(f"wire packet {index} has a DNS RDATA name outside its record")
+        return name
+    if rr_type == 15 and len(data) >= 3:
+        name, consumed = _dns_read_name(payload, start + 2, index)
+        if consumed > end:
+            raise EmulatorInputError(f"wire packet {index} has an invalid MX record")
+        return f"{int.from_bytes(data[:2], 'big')} {name}"
+    if rr_type == 33 and len(data) >= 7:
+        name, consumed = _dns_read_name(payload, start + 6, index)
+        if consumed > end:
+            raise EmulatorInputError(f"wire packet {index} has an invalid SRV record")
+        return "{} {} {} {}".format(
+            int.from_bytes(data[:2], "big"),
+            int.from_bytes(data[2:4], "big"),
+            int.from_bytes(data[4:6], "big"),
+            name,
+        )
+    if rr_type == 16:
+        parts: list[str] = []
+        cursor = 0
+        while cursor < len(data):
+            length = data[cursor]
+            cursor += 1
+            if cursor + length > len(data):
+                raise EmulatorInputError(f"wire packet {index} has an invalid TXT record")
+            parts.append(_decode_wire_text(data[cursor : cursor + length]))
+            cursor += length
+        return " ".join(parts)
+    return _decode_wire_text(data)
+
+
+def _dns_parse_rr(payload: bytes, offset: int, index: int) -> tuple[dict[str, Any], int]:
+    name, cursor = _dns_read_name(payload, offset, index)
+    if cursor + 10 > len(payload):
+        raise EmulatorInputError(f"wire packet {index} has an incomplete DNS resource record")
+    rr_type = int.from_bytes(payload[cursor : cursor + 2], "big")
+    rr_class = int.from_bytes(payload[cursor + 2 : cursor + 4], "big")
+    ttl = int.from_bytes(payload[cursor + 4 : cursor + 8], "big")
+    rdlength = int.from_bytes(payload[cursor + 8 : cursor + 10], "big")
+    data_start = cursor + 10
+    data_end = data_start + rdlength
+    if data_end > len(payload):
+        raise EmulatorInputError(f"wire packet {index} has an incomplete DNS resource record payload")
+    record = {
+        "name": name,
+        "type": DNS_RR_TYPES.get(rr_type, str(rr_type)),
+        "class": DNS_RR_CLASSES.get(rr_class, str(rr_class)),
+        "ttl": ttl,
+        "rdata": _dns_rdata_text(payload, data_start, data_end, rr_type, index),
+    }
+    return record, data_end
+
+
+def _dns_packet_type(qr: bool, rcode: int, answers: list[dict[str, Any]], authority: list[dict[str, Any]]) -> str:
+    if not qr:
+        return "QUESTION"
+    if rcode == 3:
+        return "NXDOMAIN"
+    if answers:
+        return "ANSWER"
+    if authority:
+        return "REFERRAL"
+    return "NODATA"
+
+
+def _dns_wire_name(name: str, field: str) -> bytes:
+    name = name.rstrip(".")
+    if not name:
+        return b"\x00"
+    labels = name.split(".")
+    encoded = bytearray()
+    for label in labels:
+        raw = label.encode("utf-8")
+        if not raw or len(raw) > 63:
+            raise EmulatorInputError(f"DNS {field} contains an invalid label")
+        encoded.append(len(raw))
+        encoded.extend(raw)
+    encoded.append(0)
+    if len(encoded) > 255:
+        raise EmulatorInputError(f"DNS {field} exceeds the 255-byte wire name limit")
+    return bytes(encoded)
+
+
+def _dns_wire_code(value: Any, field: str, names: dict[int, str], maximum: int) -> int:
+    if isinstance(value, str):
+        upper = value.upper()
+        for code, name in names.items():
+            if name == upper:
+                return code
+    return _dns_uint(value, field, maximum)
+
+
+def _dns_rdata_wire(record: dict[str, Any], index: int) -> bytes:
+    rr_type = str(record["type"]).upper()
+    rdata = str(record["rdata"])
+    if rr_type == "A":
+        try:
+            value = ipaddress.ip_address(rdata)
+        except ValueError as exc:
+            raise EmulatorInputError(f"DNS record {index} has invalid A RDATA") from exc
+        if value.version != 4:
+            raise EmulatorInputError(f"DNS record {index} A RDATA must be IPv4")
+        return value.packed
+    if rr_type == "AAAA":
+        try:
+            value = ipaddress.ip_address(rdata)
+        except ValueError as exc:
+            raise EmulatorInputError(f"DNS record {index} has invalid AAAA RDATA") from exc
+        if value.version != 6:
+            raise EmulatorInputError(f"DNS record {index} AAAA RDATA must be IPv6")
+        return value.packed
+    if rr_type in {"CNAME", "DNAME", "NS", "PTR"}:
+        return _dns_wire_name(rdata, f"record {index} RDATA")
+    parts = rdata.split()
+    if rr_type == "MX" and len(parts) == 2:
+        return _dns_uint(parts[0], f"DNS record {index} MX preference", 65535).to_bytes(2, "big") + _dns_wire_name(parts[1], f"record {index} MX target")
+    if rr_type == "SRV" and len(parts) == 4:
+        return b"".join(
+            _dns_uint(parts[offset], f"DNS record {index} SRV field", 65535).to_bytes(2, "big")
+            for offset in range(3)
+        ) + _dns_wire_name(parts[3], f"record {index} SRV target")
+    if rr_type == "TXT":
+        chunks = rdata.split(" ") if rdata else [""]
+        encoded = bytearray()
+        for chunk in chunks:
+            raw = chunk.encode("utf-8")
+            if len(raw) > 255:
+                raise EmulatorInputError(f"DNS record {index} TXT chunk exceeds 255 bytes")
+            encoded.append(len(raw))
+            encoded.extend(raw)
+        return bytes(encoded)
+    return rdata.encode("utf-8")
+
+
+def _dns_records_from_tcl(value: Any, field: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for index, raw_record in enumerate(_split_tcl_list(value)):
+        parts = _split_tcl_list(raw_record)
+        if len(parts) != 5:
+            raise EmulatorInputError(f"DNS {field} snapshot record {index} is malformed")
+        records.append(
+            _dns_normalise_record(
+                {
+                    "name": parts[0],
+                    "type": parts[1],
+                    "class": parts[2],
+                    "ttl": parts[3],
+                    "rdata": parts[4],
+                },
+                field,
+                index,
+            )
+        )
+    return records
+
+
+def _dns_encode_message(state: dict[str, Any]) -> bytes:
+    answers = _dns_records_from_tcl(state.get("answers", ""), "answers")
+    authority = _dns_records_from_tcl(state.get("authority", ""), "authority")
+    additional = _dns_records_from_tcl(state.get("additional", ""), "additional")
+    qname = _dns_wire_name(str(state.get("qname", "")), "question name")
+    qtype = _dns_wire_code(state.get("qtype", "A"), "question type", DNS_RR_TYPES, 65535)
+    qclass = _dns_wire_code(state.get("qclass", "IN"), "question class", DNS_RR_CLASSES, 65535)
+    def flag(name: str) -> int:
+        return 1 if str(state.get(name, "0")).lower() in {"1", "true"} else 0
+    rcode = _dns_wire_code(state.get("rcode", "0"), "rcode", DNS_RCODE_NAMES, 15)
+    opcode = _dns_wire_code(state.get("opcode", "0"), "opcode", DNS_OPCODE_NAMES, 15)
+    flags = (
+        (flag("qr") << 15)
+        | (opcode << 11)
+        | (flag("aa") << 10)
+        | (flag("tc") << 9)
+        | (flag("rd") << 8)
+        | (flag("ra") << 7)
+        | (flag("ad") << 5)
+        | (flag("cd") << 4)
+        | rcode
+    )
+    question_count = _dns_uint(state.get("qdcount", "1"), "qdcount", 65535)
+    message = bytearray(struct.pack(
+        "!HHHHHH",
+        _dns_uint(state.get("id", "0"), "id", 65535),
+        flags,
+        question_count,
+        len(answers),
+        len(authority),
+        len(additional),
+    ))
+    for _ in range(question_count):
+        message.extend(qname)
+        message.extend(struct.pack("!HH", qtype, qclass))
+    for record in answers + authority + additional:
+        name = _dns_wire_name(record["name"], "record name")
+        rr_type = _dns_wire_code(record["type"], "record type", DNS_RR_TYPES, 65535)
+        rr_class = _dns_wire_code(record["class"], "record class", DNS_RR_CLASSES, 65535)
+        rdata = _dns_rdata_wire(record, len(message))
+        if len(rdata) > 65535:
+            raise EmulatorInputError("DNS RDATA exceeds the 65535-byte wire limit")
+        message.extend(name)
+        message.extend(struct.pack("!HHIH", rr_type, rr_class, record["ttl"], len(rdata)))
+        message.extend(rdata)
+    if len(message) > 65535:
+        raise EmulatorInputError("DNS message exceeds the 65535-byte wire limit")
+    return bytes(message)
+
+
 def _decode_dns_payload(payload: bytes, direction: str, index: int) -> dict[str, Any] | None:
     if len(payload) < 12:
         return None
     flags = int.from_bytes(payload[2:4], "big")
     qdcount = int.from_bytes(payload[4:6], "big")
+    ancount = int.from_bytes(payload[6:8], "big")
+    nscount = int.from_bytes(payload[8:10], "big")
+    arcount = int.from_bytes(payload[10:12], "big")
     if qdcount < 1:
         return None
     cursor = 12
-    labels: list[str] = []
-    while cursor < len(payload):
-        length = payload[cursor]
-        cursor += 1
-        if length == 0:
-            break
-        if length & 0xC0 or cursor + length > len(payload):
-            raise EmulatorInputError(f"wire packet {index} has an invalid DNS name")
-        labels.append(_decode_wire_text(payload[cursor : cursor + length]))
-        cursor += length
+    qname, cursor = _dns_read_name(payload, cursor, index)
     if cursor + 4 > len(payload):
         raise EmulatorInputError(f"wire packet {index} has an incomplete DNS question")
     qtype = int.from_bytes(payload[cursor : cursor + 2], "big")
     qclass = int.from_bytes(payload[cursor + 2 : cursor + 4], "big")
+    cursor += 4
+    for _ in range(qdcount - 1):
+        _, cursor = _dns_read_name(payload, cursor, index)
+        if cursor + 4 > len(payload):
+            raise EmulatorInputError(f"wire packet {index} has an incomplete DNS question")
+        cursor += 4
+    sections: dict[str, list[dict[str, Any]]] = {}
+    for section, count in (("answers", ancount), ("authority", nscount), ("additional", arcount)):
+        records: list[dict[str, Any]] = []
+        for _ in range(count):
+            record, cursor = _dns_parse_rr(payload, cursor, index)
+            records.append(record)
+        sections[section] = records
+    qr = bool(flags & 0x8000)
+    rcode = flags & 0x000F
     result: dict[str, Any] = {
         "protocol": "dns",
-        "direction": "server_to_client" if flags & 0x8000 else direction,
-        "qname": ".".join(labels),
-        "qtype": {1: "A", 28: "AAAA", 5: "CNAME", 15: "MX"}.get(qtype, str(qtype)),
-        "qclass": {1: "IN"}.get(qclass, str(qclass)),
+        "direction": "server_to_client" if qr else direction,
+        "qname": qname,
+        "qtype": DNS_RR_TYPES.get(qtype, str(qtype)),
+        "qclass": DNS_RR_CLASSES.get(qclass, str(qclass)),
+        "qr": qr,
         "id": int.from_bytes(payload[0:2], "big"),
-        "rcode": flags & 0x000F,
+        "rcode": rcode,
         "opcode": (flags >> 11) & 0x000F,
         "aa": bool(flags & 0x0400),
         "tc": bool(flags & 0x0200),
@@ -1993,7 +2469,14 @@ def _decode_dns_payload(payload: bytes, direction: str, index: int) -> dict[str,
         "ra": bool(flags & 0x0080),
         "cd": bool(flags & 0x0010),
         "ad": bool(flags & 0x0020),
+        "qdcount": qdcount,
+        "ancount": ancount,
+        "nscount": nscount,
+        "arcount": arcount,
+        "ptype": _dns_packet_type(qr, rcode, sections["answers"], sections["authority"]),
+        "message_length": len(payload),
     }
+    result.update(sections)
     return result
 
 
@@ -4281,6 +4764,71 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     normalised["fin"] = "1"
                 if "masked" not in normalised:
                     normalised["masked"] = "1" if direction == "client_to_server" else "0"
+        if protocol == "dns":
+            for section in ("answers", "authority", "additional"):
+                normalised[section] = _dns_normalise_records(
+                    packet.get(section, []), f"packet {index} {section}"
+                )
+            normalised["qname"] = _require_string(
+                packet.get("qname", ""), f"packet {index} qname"
+            )
+            normalised["qtype"] = _require_string(
+                packet.get("qtype", "A"), f"packet {index} qtype"
+            ).upper()
+            normalised["qclass"] = _require_string(
+                packet.get("qclass", "IN"), f"packet {index} qclass"
+            ).upper()
+            normalised.setdefault("qr", direction == "server_to_client")
+            normalised.setdefault("rcode", 0)
+            normalised.setdefault("opcode", 0)
+            normalised.setdefault("id", 0)
+            for flag in ("aa", "tc", "rd", "ra", "cd", "ad"):
+                normalised.setdefault(flag, 1 if flag == "rd" else 0)
+            normalised["rcode"] = _dns_uint(normalised["rcode"], f"packet {index} rcode", 15)
+            normalised["opcode"] = _dns_uint(normalised["opcode"], f"packet {index} opcode", 15)
+            normalised["id"] = _dns_uint(normalised["id"], f"packet {index} id", 65535)
+            normalised["qr"] = _packet_bool(normalised["qr"], f"packet {index} qr")
+            for flag in ("aa", "tc", "rd", "ra", "cd", "ad"):
+                normalised[flag] = _packet_bool(normalised[flag], f"packet {index} {flag}")
+            normalised.setdefault("qdcount", 1)
+            normalised.setdefault("ancount", len(normalised["answers"]))
+            normalised.setdefault("nscount", len(normalised["authority"]))
+            normalised.setdefault("arcount", len(normalised["additional"]))
+            for field in ("qdcount", "ancount", "nscount", "arcount"):
+                normalised[field] = _dns_uint(normalised[field], f"packet {index} {field}", 65535)
+            normalised.setdefault(
+                "ptype",
+                _dns_packet_type(
+                    normalised["qr"] == "1",
+                    normalised["rcode"],
+                    normalised["answers"],
+                    normalised["authority"],
+                ),
+            )
+            normalised["ptype"] = _require_string(
+                normalised["ptype"], f"packet {index} ptype"
+            ).upper()
+            normalised.setdefault("message_length", 0)
+            normalised["message_length"] = _dns_uint(
+                normalised["message_length"], f"packet {index} message_length", 0xFFFF
+            )
+            for field in ("disabled", "dropped", "response_sent"):
+                normalised.setdefault(field, "0")
+                normalised[field] = _packet_bool(normalised[field], f"packet {index} {field}")
+            normalised.setdefault("last_act", "")
+            normalised["edns0"] = _dns_normalise_edns0(
+                packet.get("edns0"), f"packet {index} edns0"
+            )
+            normalised["rpz_policy"] = _require_string(
+                packet.get("rpz_policy", ""), f"packet {index} rpz_policy"
+            )
+            raw_wideips = packet.get("wideips", [])
+            if not isinstance(raw_wideips, list):
+                raise EmulatorInputError(f"packet {index} wideips must be an array")
+            normalised["wideips"] = [
+                _require_string(value, f"packet {index} wideips entry")
+                for value in raw_wideips
+            ]
         if protocol == "mqtt":
             packet_type = normalised.get("type")
             if packet_type is None:
@@ -4943,6 +5491,8 @@ class EmulatorSession:
                     )
                 else:
                     session.eval_tcl(f"set {namespace}::{field} {_tcl_quote(value)}")
+        if "dns" in state:
+            session.eval_tcl("::itest::semantic::dns_prepare_message")
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
         event_result = session.fire_event(event_name)
         if "sip" in state:
@@ -4954,18 +5504,33 @@ class EmulatorSession:
         if "gtp" in state:
             session.eval_tcl("::itest::semantic::gtp_rebuild_message")
         fired_events = _split_tcl_list(session.eval_tcl("::itest::get_fired_events"))
+        state_snapshot: dict[str, dict[str, Any]] = {}
+        for layer in state:
+            state_snapshot[layer] = {}
+            for field in EVENT_STATE_FIELDS[layer]:
+                if layer == "dns" and field in {"answers", "authority", "additional"}:
+                    state_snapshot[layer][field] = session.eval_tcl(
+                        f"::itest::semantic::dns_snapshot_section {field}"
+                    )
+                else:
+                    state_snapshot[layer][field] = session.eval_tcl(
+                        f"set {EVENT_STATE_NAMESPACES[layer]}::{field}"
+                    )
+        if "dns" in state:
+            try:
+                dns_wire = _dns_encode_message(state_snapshot["dns"])
+            except EmulatorInputError as exc:
+                state_snapshot["dns"]["message_hex"] = ""
+                state_snapshot["dns"]["message_encoding_error"] = str(exc)
+            else:
+                state_snapshot["dns"]["message_hex"] = dns_wire.hex()
+                state_snapshot["dns"]["message_length"] = str(len(dns_wire))
         result = {
             "event": event_name,
             "fired": bool(event_result.fired),
             "reason": event_result.reason,
             "events_fired": fired_events[fired_before:],
-            "state": {
-                layer: {
-                    field: session.eval_tcl(f"set {EVENT_STATE_NAMESPACES[layer]}::{field}")
-                    for field in EVENT_STATE_FIELDS[layer]
-                }
-                for layer in state
-            },
+            "state": state_snapshot,
             "decisions": [
                 entry if not isinstance(entry, tuple) else list(entry)
                 for entry in session.get_decisions()
@@ -5063,7 +5628,14 @@ class EmulatorSession:
             dns_state: dict[str, str] = {}
             for field in EVENT_STATE_FIELDS["dns"]:
                 if field in packet:
-                    dns_state[field] = _packet_scalar(packet[field], field)
+                    if field in {"answers", "authority", "additional"}:
+                        dns_state[field] = _dns_records_tcl(packet[field])
+                    elif field == "wideips":
+                        dns_state[field] = _tcl_list(packet[field])
+                    elif field == "edns0":
+                        dns_state[field] = _dns_edns0_tcl(packet[field])
+                    else:
+                        dns_state[field] = _packet_scalar(packet[field], field)
             if dns_state:
                 state["dns"] = dns_state
         elif protocol == "websocket":
@@ -6613,9 +7185,41 @@ class EmulatorSession:
                     self._server_connection_open = True
             elif protocol == "dns":
                 event_name = "DNS_REQUEST" if direction == "client_to_server" else "DNS_RESPONSE"
-                entry["events"].append(
-                    self._fire_event_on_worker(session, event_name, self._packet_event_state(packet))
+                event_result = self._fire_event_on_worker(
+                    session, event_name, self._packet_event_state(packet)
                 )
+                entry["events"].append(event_result)
+                dns_state = event_result.get("state", {}).get("dns", {})
+                dropped = dns_state.get("dropped") in {"1", "true"}
+                if dropped:
+                    entry["dropped"] = True
+                    entry["drop_reason"] = "dns"
+                if dns_state.get("disabled") in {"1", "true"}:
+                    entry["disabled"] = True
+                if dns_state.get("response_sent") in {"1", "true"}:
+                    entry["responded"] = True
+                if event_name == "DNS_REQUEST" and not dropped and dns_state.get(
+                    "response_sent"
+                ) in {"1", "true"}:
+                    response_state = {
+                        layer: dict(values)
+                        for layer, values in event_result.get("state", {}).items()
+                    }
+                    response_dns = response_state.setdefault("dns", {})
+                    response_dns["qr"] = "1"
+                    response_dns["response_sent"] = "0"
+                    response_event = self._fire_event_on_worker(
+                        session, "DNS_RESPONSE", response_state
+                    )
+                    entry["events"].append(response_event)
+                    response_dns = response_event.get("state", {}).get("dns", {})
+                    if response_dns.get("dropped") in {"1", "true"}:
+                        entry["dropped"] = True
+                        entry["drop_reason"] = "dns"
+                    if response_dns.get("disabled") in {"1", "true"}:
+                        entry["disabled"] = True
+                    if response_dns.get("response_sent") in {"1", "true"}:
+                        entry["responded"] = True
                 continue
             else:  # Generic UDP has no single catalogued iRule data event.
                 entry["ignored"] = "generic UDP packet has no protocol-specific event adapter"

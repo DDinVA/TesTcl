@@ -3391,6 +3391,170 @@ when DNS_REQUEST {
             },
         )
 
+    def test_dns_rr_objects_can_be_created_inserted_and_inspected(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP", "DNS"],
+                "irule": """
+when DNS_REQUEST {
+    set rr [DNS::rr "[DNS::question name]. 30 IN A 192.0.2.10"]
+    DNS::answer clear
+    DNS::answer insert $rr
+    DNS::header aa 1
+    log local0. "[DNS::name $rr] [DNS::type $rr] [DNS::class $rr] [DNS::ttl $rr] [DNS::rdata $rr] [DNS::header aa]"
+    DNS::return
+}
+when DNS_RESPONSE { DNS::drop }
+""",
+                "packets": [
+                    {
+                        "protocol": "dns",
+                        "direction": "client_to_server",
+                        "qname": "example.com",
+                        "qtype": "A",
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = result["trace"][0]["events"][0]
+        self.assertTrue(event["fired"])
+        self.assertTrue(event["state"]["dns"]["response_sent"] in {"1", "true"})
+        self.assertTrue(result["trace"][0]["dropped"])
+        self.assertEqual(event["state"]["dns"]["ancount"], "1")
+        self.assertIn("example.com. A IN 30 192.0.2.10", event["state"]["dns"]["answers"])
+        self.assertIn("example.com. A IN 30 192.0.2.10 1", event["logs"][0])
+        self.assertTrue(event["state"]["dns"]["message_hex"])
+        self.assertEqual(result["trace"][0]["events"][1]["event"], "DNS_RESPONSE")
+
+    def test_raw_dns_response_decodes_compressed_answer_records(self) -> None:
+        qname = b"\x07example\x03com\x00"
+        dns_payload = (
+            struct.pack("!HHHHHH", 0x1234, 0x8180, 1, 1, 0, 0)
+            + qname
+            + struct.pack("!HH", 1, 1)
+            + b"\xc0\x0c"
+            + struct.pack("!HHIH4s", 1, 1, 60, 4, b"\xc0\x00\x02\x0a")
+        )
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP", "DNS"],
+                "irule": "when DNS_RESPONSE { set rr [lindex [DNS::answer] 0]; log local0. \"[DNS::name $rr] [DNS::type $rr] [DNS::rdata $rr] [DNS::ttl $rr] [DNS::header ancount]\" }",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_udp_hex(
+                            "192.0.2.53", "10.0.0.5", 53, 53000, dns_payload
+                        ),
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = result["trace"][0]["events"][0]
+        self.assertEqual(event["event"], "DNS_RESPONSE")
+        self.assertTrue(event["fired"])
+        self.assertEqual(event["state"]["dns"]["ancount"], "1")
+        self.assertIn("example.com A 192.0.2.10 60 1", event["logs"][0])
+        self.assertEqual(
+            int(event["state"]["dns"]["message_length"]),
+            len(bytes.fromhex(event["state"]["dns"]["message_hex"])),
+        )
+
+    def test_dns_response_rr_mutation_scrape_and_drop_are_stateful(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP", "DNS"],
+                "irule": """
+when DNS_RESPONSE {
+    set rr [lindex [DNS::answer] 0]
+    DNS::ttl $rr 10
+    DNS::answer insert [DNS::rr "alias.example.com. 20 IN CNAME example.com."]
+    log local0. "[DNS::scrape ALL type ttl qnamelen rdatalen]"
+    DNS::answer remove $rr
+    DNS::drop
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "dns",
+                        "direction": "server_to_client",
+                        "qname": "example.com",
+                        "qtype": "A",
+                        "answers": [
+                            {
+                                "name": "example.com.",
+                                "type": "A",
+                                "class": "IN",
+                                "ttl": 60,
+                                "rdata": "192.0.2.10",
+                            }
+                        ],
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        packet = result["trace"][0]
+        event = packet["events"][0]
+        self.assertTrue(event["fired"])
+        self.assertTrue(packet["dropped"])
+        self.assertEqual(event["state"]["dns"]["ancount"], "1")
+        self.assertIn("alias.example.com. CNAME IN 20 example.com.", event["state"]["dns"]["answers"])
+        self.assertIn("A 10 12 10", event["logs"][0])
+        self.assertIn("CNAME 20 18 12", event["logs"][0])
+
+    def test_dns_structured_input_supports_edns0_and_wideip_membership(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP", "DNS"],
+                "irule": """
+when DNS_REQUEST {
+    log local0. "[DNS::edns0 exists] [DNS::edns0 do] [DNS::edns0 sz] [DNS::edns0 subnet address] [DNS::is_wideip [DNS::question name]]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "dns",
+                        "qname": "www.example.com.",
+                        "edns0": {
+                            "exists": True,
+                            "do": True,
+                            "sz": 1232,
+                            "subnet_address": "192.0.2.0",
+                            "subnet_source": 24,
+                            "subnet_scope": 0,
+                        },
+                        "wideips": ["www.example.com"],
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = result["trace"][0]["events"][0]
+        self.assertIn("1 1 1232 192.0.2.0 0", event["logs"][0])
+
+    def test_dns_input_rejects_invalid_resource_record_ttl(self) -> None:
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "ttl"):
+            self.adapter._normalise_packets(
+                [
+                    {
+                        "protocol": "dns",
+                        "qname": "example.com",
+                        "answers": [
+                            {
+                                "name": "example.com.",
+                                "type": "A",
+                                "class": "IN",
+                                "ttl": -1,
+                                "rdata": "192.0.2.10",
+                            }
+                        ],
+                    }
+                ]
+            )
+
     def test_sequence_aware_reassembly_handles_out_of_order_and_retransmission(self) -> None:
         request_payload = b"GET /ordered HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
         first = request_payload[:20]

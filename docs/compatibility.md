@@ -46,6 +46,13 @@ egress events, bounded payload collection, route state, retries, and the
 `MESSAGE::`, `GENERICMESSAGE::`, and core `MR::` command families. Peer
 connections, production route selection, and timer-driven retries remain
 outside this deterministic model.
+DNS packet state includes the question, header flags/codes, and bounded answer,
+authority, and additional RR sections. The DNS semantic layer supports opaque
+RR objects, section insert/remove/clear operations, RR field mutation,
+`DNS::header`, `DNS::scrape`, EDNS0 controls, `DNS::return`, and packet drop or
+disable actions. Structured records are deterministic test data; the emulator
+does not run DNS-Express, recursive resolution, DNSSEC signing, or a live
+nameserver.
 GTP packets expose bounded GTPv1 and GTPv2 header/IE state, G-PDU payloads,
 GTP signaling/G-PDU/Prime ingress and egress events, and the catalogued
 `GTP::` command family. GTP-C and GTP-U use UDP ports 2123 and 2152; GTP-Prime

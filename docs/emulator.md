@@ -399,6 +399,42 @@ See the F5 [`GTP::header`](https://clouddocs.f5.com/api/irules/GTP__header.html)
 [`GTP::ie`](https://clouddocs.f5.com/api/irules/GTP__ie.html), and
 [`GTP::tunnel`](https://clouddocs.f5.com/api/irules/GTP__tunnel.html)
 references for the production command/event contract.
+
+DNS traces expose the question, header fields, and answer, authority, and
+additional resource-record sections. Structured records may be supplied as
+objects with `name`, `type`, `class`, `ttl`, and `rdata`, or as standard DNS
+text such as `example.com. 60 IN A 192.0.2.10`. Within `DNS_REQUEST` and
+`DNS_RESPONSE`, the emulator supports RR-object iteration and mutation with
+`DNS::answer`, `DNS::authority`, `DNS::additional`, `DNS::rr`, `DNS::name`,
+`DNS::type`, `DNS::class`, `DNS::ttl`, and `DNS::rdata`; header inspection and
+mutation with `DNS::header`; bounded `DNS::scrape`; EDNS0 controls; and
+`DNS::drop`, `DNS::disable`, `DNS::enable`, `DNS::last_act`, `DNS::return`,
+`DNS::ptype`, and `DNS::len`. `DNS::return` from a request produces a bounded
+follow-up `DNS_RESPONSE` event carrying the mutated message state. `DNS::query`
+filters the supplied deterministic RR sections as a DNS-Express-shaped test
+fixture, while recursive resolution, DNSSEC, TSIG, compression-preserving
+re-encoding, and live nameserver behavior remain outside the boundary.
+
+```json
+{
+  "profiles": ["UDP", "DNS"],
+  "irule": "when DNS_REQUEST { set rr [DNS::rr \"[DNS::question name]. 30 IN A 192.0.2.10\"]; DNS::answer clear; DNS::answer insert $rr; DNS::header aa 1; DNS::return }",
+  "packets": [{
+    "protocol": "dns",
+    "qname": "example.com",
+    "qtype": "A"
+  }]
+}
+```
+
+For raw IPv4/UDP DNS, the decoder handles compressed names and common A,
+AAAA, CNAME, NS, PTR, MX, SRV, and TXT resource records. See the F5
+[`DNS::answer`](https://clouddocs.f5.com/api/irules/DNS__answer.html),
+[`DNS::rr`](https://clouddocs.f5.com/api/irules/DNS__rr.html),
+[`DNS::header`](https://clouddocs.f5.com/api/irules/DNS__header.html), and
+[`DNS::scrape`](https://clouddocs.f5.com/api/irules/DNS__scrape.html)
+references for the production command contract.
+
 For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
 packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
 performs bounded sequence-aware TCP application reassembly across records and

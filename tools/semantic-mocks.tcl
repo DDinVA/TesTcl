@@ -42,6 +42,9 @@ namespace eval ::itest::semantic {
     variable mqtt_dropped 0
     variable mqtt_disconnect_requested 0
 
+    variable dns_rr_counter 0
+    variable dns_rr_objects [dict create]
+
     variable sip_discarded 0
     variable sip_response_requested 0
     variable sip_response_code ""
@@ -4850,12 +4853,470 @@ namespace eval ::itest::semantic {
         return [_uri_encode_value [lindex $args 0] 0]
     }
 
+    # ── DNS message and resource-record semantics ────────────────────
+    #
+    # The upstream harness recognizes the DNS namespace, but its older
+    # answer/header mocks use ad-hoc lists and cannot model RR objects.  Keep
+    # opaque RR handles in this overlay so the common F5 pattern
+    #   foreach rr [DNS::answer] { DNS::ttl $rr 30 }
+    # behaves like a real rule while the event snapshot remains readable.
+
+    proc _dns_rr_create {name type rr_class ttl rdata} {
+        variable dns_rr_counter
+        variable dns_rr_objects
+        if {$name eq "" || $type eq "" || $rr_class eq ""} {
+            error "DNS::rr requires name, type, and class"
+        }
+        if {![string is integer -strict $ttl] || $ttl < 0 || $ttl > 0xffffffff} {
+            error "DNS::rr ttl must be between 0 and 4294967295"
+        }
+        incr dns_rr_counter
+        set handle "rr$dns_rr_counter"
+        dict set dns_rr_objects $handle [dict create \
+            name $name type [string toupper $type] class [string toupper $rr_class] \
+            ttl $ttl rdata $rdata]
+        return $handle
+    }
+
+    proc _dns_rr_object {value} {
+        variable dns_rr_objects
+        if {[dict exists $dns_rr_objects $value]} {
+            return $value
+        }
+        set parts $value
+        if {[llength $parts] < 5} {
+            error "invalid DNS resource record object"
+        }
+        set name [lindex $parts 0]
+        if {[string is integer -strict [lindex $parts 1]]} {
+            set ttl [lindex $parts 1]
+            set rr_class [lindex $parts 2]
+            set type [lindex $parts 3]
+        } else {
+            set type [lindex $parts 1]
+            set rr_class [lindex $parts 2]
+            set ttl [lindex $parts 3]
+        }
+        return [_dns_rr_create $name $type $rr_class $ttl [join [lrange $parts 4 end] " "]]
+    }
+
+    proc _dns_rr_get {rr field} {
+        variable dns_rr_objects
+        set handle [_dns_rr_object $rr]
+        return [dict get $dns_rr_objects $handle $field]
+    }
+
+    proc _dns_rr_set {rr field value} {
+        variable dns_rr_objects
+        set handle [_dns_rr_object $rr]
+        if {$field eq "ttl" && (![string is integer -strict $value] ||
+            $value < 0 || $value > 0xffffffff)} {
+            error "DNS::ttl value must be between 0 and 4294967295"
+        }
+        if {$field in {name type class} && $value eq ""} {
+            error "DNS resource record $field cannot be empty"
+        }
+        if {$field in {type class}} { set value [string toupper $value] }
+        dict set dns_rr_objects $handle $field $value
+        return $value
+    }
+
+    proc _dns_rr_snapshot {rr} {
+        return [list \
+            [_dns_rr_get $rr name] \
+            [_dns_rr_get $rr type] \
+            [_dns_rr_get $rr class] \
+            [_dns_rr_get $rr ttl] \
+            [_dns_rr_get $rr rdata]]
+    }
+
+    proc _dns_refresh_state {{recalculate_length 0}} {
+        foreach section {answers authority additional} {
+            set count [llength [set ::state::dns::$section]]
+            set field [expr {$section eq "answers" ? "ancount" : \
+                ($section eq "authority" ? "nscount" : "arcount")}]
+            set ::state::dns::$field $count
+        }
+        if {![info exists ::state::dns::qdcount]} { set ::state::dns::qdcount 1 }
+        if {![info exists ::state::dns::qr]} { set ::state::dns::qr 0 }
+        if {![info exists ::state::dns::rcode]} { set ::state::dns::rcode 0 }
+        set qr [expr {$::state::dns::qr in {1 true TRUE}}]
+        if {$::state::dns::rcode eq "NXDOMAIN"} { set rcode 3 } else { set rcode $::state::dns::rcode }
+        if {![string is integer -strict $rcode]} { set rcode 0 }
+        if {!$qr} {
+            set ::state::dns::ptype QUESTION
+        } elseif {$rcode == 3} {
+            set ::state::dns::ptype NXDOMAIN
+        } elseif {$::state::dns::ancount > 0} {
+            set ::state::dns::ptype ANSWER
+        } elseif {$::state::dns::nscount > 0} {
+            set ::state::dns::ptype REFERRAL
+        } else {
+            set ::state::dns::ptype NODATA
+        }
+        if {$recalculate_length || ![info exists ::state::dns::message_length] ||
+            $::state::dns::message_length eq "" || $::state::dns::message_length == 0} {
+            set length [expr {12 + [string length $::state::dns::qname] + 6}]
+            foreach section {answers authority additional} {
+                foreach rr [set ::state::dns::$section] {
+                    incr length [expr {10 + [string length [_dns_rr_get $rr name]] + \
+                        [string length [_dns_rr_get $rr rdata]]}]
+                }
+            }
+            set ::state::dns::message_length $length
+        }
+    }
+
+    proc dns_prepare_message {} {
+        variable dns_rr_objects
+        if {![info exists ::state::dns::qname]} { set ::state::dns::qname "" }
+        if {![info exists ::state::dns::qtype]} { set ::state::dns::qtype A }
+        if {![info exists ::state::dns::qclass]} { set ::state::dns::qclass IN }
+        foreach {field default} {
+            qr 0 rcode 0 opcode 0 id 0 aa 0 tc 0 rd 1 ra 0 cd 0 ad 0
+            qdcount 1 ancount 0 nscount 0 arcount 0 ptype QUESTION
+            message_length 0 message_hex "" disabled 0 dropped 0 last_act "" edns0 ""
+            rpz_policy "" wideips {} response_sent 0
+        } {
+            if {![info exists ::state::dns::$field]} {
+                set ::state::dns::$field $default
+            }
+        }
+        if {![info exists ::state::dns::answers]} { set ::state::dns::answers {} }
+        if {![info exists ::state::dns::authority]} { set ::state::dns::authority {} }
+        if {![info exists ::state::dns::additional]} { set ::state::dns::additional {} }
+        foreach section {answers authority additional} {
+            set objects {}
+            foreach record [set ::state::dns::$section] {
+                if {$record eq ""} { continue }
+                lappend objects [_dns_rr_object $record]
+            }
+            set ::state::dns::$section $objects
+        }
+        _dns_refresh_state
+    }
+
+    proc dns_snapshot_section {section} {
+        if {$section ni {answers authority additional}} {
+            error "invalid DNS section $section"
+        }
+        set result {}
+        foreach rr [set ::state::dns::$section] {
+            lappend result [_dns_rr_snapshot $rr]
+        }
+        return $result
+    }
+
+    proc dns_section_command {section args} {
+        _dns_refresh_state
+        set current [set ::state::dns::$section]
+        if {[llength $args] == 0} {
+            return $current
+        }
+        set operation [string tolower [lindex $args 0]]
+        switch -exact -- $operation {
+            clear {
+                if {[llength $args] != 1} { error "DNS::$section clear takes no arguments" }
+                set ::state::dns::$section {}
+                _dns_refresh_state 1
+                ::itest::log_decision dns ${section}_clear
+                return ""
+            }
+            count {
+                if {[llength $args] != 1} { error "DNS::$section count takes no arguments" }
+                return [llength $current]
+            }
+            insert - remove {
+                if {[llength $args] != 2} { error "DNS::$section $operation requires an RR object" }
+                set handle [_dns_rr_object [lindex $args 1]]
+                set index [lsearch -exact $current $handle]
+                if {$operation eq "insert"} {
+                    if {$index < 0} { lappend current $handle }
+                } elseif {$index >= 0} {
+                    set current [lreplace $current $index $index]
+                }
+                set ::state::dns::$section $current
+                _dns_refresh_state 1
+                ::itest::log_decision dns ${section}_$operation $handle
+                return ""
+            }
+            default {
+                if {[llength $args] == 1 && [string is integer -strict $operation] &&
+                    $operation >= 0 && $operation < [llength $current]} {
+                    return [lindex $current $operation]
+                }
+                error "unsupported DNS::$section operation $operation"
+            }
+        }
+    }
+
+    proc dns_answer_command {args} { return [dns_section_command answers {*}$args] }
+    proc dns_authority_command {args} { return [dns_section_command authority {*}$args] }
+    proc dns_additional_command {args} { return [dns_section_command additional {*}$args] }
+    proc dns_name_command {args} { return [dns_rr_field_command name {*}$args] }
+    proc dns_class_command {args} { return [dns_rr_field_command class {*}$args] }
+    proc dns_rdata_command {args} { return [dns_rr_field_command rdata {*}$args] }
+    proc dns_ttl_command {args} { return [dns_rr_field_command ttl {*}$args] }
+    proc dns_type_command {args} { return [dns_rr_field_command type {*}$args] }
+
+    proc dns_rr_command {args} {
+        if {[llength $args] == 1} {
+            return [_dns_rr_object [lindex $args 0]]
+        }
+        if {[llength $args] < 5} {
+            error "DNS::rr requires name, type, class, ttl, and rdata"
+        }
+        return [_dns_rr_create [lindex $args 0] [lindex $args 1] [lindex $args 2] \
+            [lindex $args 3] [join [lrange $args 4 end] " "]]
+    }
+
+    proc dns_rr_field_command {field args} {
+        if {[llength $args] < 1 || [llength $args] > 2} {
+            error "DNS::$field requires an RR object and optional value"
+        }
+        set rr [lindex $args 0]
+        if {[llength $args] == 1} {
+            return [_dns_rr_get $rr $field]
+        }
+        return [_dns_rr_set $rr $field [lindex $args 1]]
+    }
+
+    proc dns_header_command {args} {
+        if {[llength $args] < 1 || [llength $args] > 2} {
+            error "DNS::header requires a field and optional value"
+        }
+        _dns_refresh_state
+        set field [string tolower [lindex $args 0]]
+        set fields {id qr opcode aa tc rd ra ad cd rcode qdcount ancount nscount arcount}
+        if {$field ni $fields} { error "unsupported DNS header field $field" }
+        if {[llength $args] == 2} {
+            set value [lindex $args 1]
+            if {$field in {qr aa tc rd ra ad cd}} {
+                if {$value ni {0 1 true false TRUE FALSE}} {
+                    error "DNS::header $field must be boolean"
+                }
+                set value [expr {$value in {1 true TRUE} ? 1 : 0}]
+            } elseif {$field eq "rcode"} {
+                set names [dict create NOERROR 0 FORMERR 1 SERVFAIL 2 NXDOMAIN 3 \
+                    NOTIMP 4 REFUSED 5 YXDOMAIN 6 YXRRSET 7 NXRRSET 8 NOTAUTH 9 NOTZONE 10]
+                set key [string toupper $value]
+                if {[dict exists $names $key]} { set value [dict get $names $key] }
+                if {![string is integer -strict $value] || $value < 0 || $value > 15} {
+                    error "DNS::header rcode must be a valid DNS response code"
+                }
+            } elseif {$field eq "opcode"} {
+                set names [dict create QUERY 0 IQUERY 1 STATUS 2 NOTIFY 4 UPDATE 5]
+                set key [string toupper $value]
+                if {[dict exists $names $key]} { set value [dict get $names $key] }
+                if {![string is integer -strict $value] || $value < 0 || $value > 15} {
+                    error "DNS::header opcode must be a valid DNS operation code"
+                }
+            } else {
+                if {![string is integer -strict $value] || $value < 0 || $value > 65535} {
+                    error "DNS::header $field must be an unsigned 16-bit integer"
+                }
+            }
+            set ::state::dns::$field $value
+            _dns_refresh_state 1
+            ::itest::log_decision dns header_set [list $field $value]
+        }
+        set value [set ::state::dns::$field]
+        if {$field eq "rcode"} {
+            set names [dict create 0 NOERROR 1 FORMERR 2 SERVFAIL 3 NXDOMAIN 4 NOTIMP \
+                5 REFUSED 6 YXDOMAIN 7 YXRRSET 8 NXRRSET 9 NOTAUTH 10 NOTZONE]
+            if {[dict exists $names $value]} { return [dict get $names $value] }
+        } elseif {$field eq "opcode"} {
+            set names [dict create 0 QUERY 1 IQUERY 2 STATUS 4 NOTIFY 5 UPDATE]
+            if {[dict exists $names $value]} { return [dict get $names $value] }
+        }
+        return $value
+    }
+
+    proc dns_len_command {args} {
+        if {[llength $args] != 0} { error "DNS::len takes no arguments" }
+        _dns_refresh_state
+        return $::state::dns::message_length
+    }
+
+    proc dns_ptype_command {args} {
+        if {[llength $args] != 0} { error "DNS::ptype takes no arguments" }
+        _dns_refresh_state
+        return $::state::dns::ptype
+    }
+
+    proc dns_drop_command {args} {
+        if {[llength $args] != 0} { error "DNS::drop takes no arguments" }
+        set ::state::dns::dropped 1
+        ::itest::log_decision dns drop
+        return ""
+    }
+
+    proc dns_disable_command {args} {
+        if {[llength $args] != 0} { error "DNS::disable takes no arguments" }
+        set ::state::dns::disabled 1
+        ::itest::log_decision dns disable
+        return ""
+    }
+
+    proc dns_enable_command {args} {
+        if {[llength $args] != 0} { error "DNS::enable takes no arguments" }
+        set ::state::dns::disabled 0
+        ::itest::log_decision dns enable
+        return ""
+    }
+
+    proc dns_return_command {args} {
+        if {[llength $args] != 0} { error "DNS::return takes no arguments" }
+        set ::state::dns::response_sent 1
+        ::itest::log_decision dns return
+        return ""
+    }
+
+    proc dns_last_act_command {args} {
+        if {[llength $args] == 0} {
+            if {![info exists ::state::dns::last_act]} { return "" }
+            return $::state::dns::last_act
+        }
+        if {[llength $args] != 1 || [lindex $args 0] ni {allow drop reject hint noerror}} {
+            error "DNS::last_act requires allow, drop, reject, hint, or noerror"
+        }
+        set ::state::dns::last_act [lindex $args 0]
+        ::itest::log_decision dns last_act [lindex $args 0]
+        return $::state::dns::last_act
+    }
+
+    proc dns_rpz_policy_command {args} {
+        if {[llength $args] != 0} { error "DNS::rpz_policy takes no arguments" }
+        if {![info exists ::state::dns::rpz_policy]} { return "" }
+        return $::state::dns::rpz_policy
+    }
+
+    proc dns_is_wideip_command {args} {
+        if {[llength $args] != 1} { error "DNS::is_wideip requires a hostname" }
+        if {![info exists ::state::dns::wideips]} { return 0 }
+        set wanted [string tolower [string trimright [lindex $args 0] .]]
+        foreach candidate $::state::dns::wideips {
+            if {[string tolower [string trimright $candidate .]] eq $wanted} { return 1 }
+        }
+        return 0
+    }
+
+    proc dns_log_command {args} {
+        ::itest::log_decision dns log $args
+        return ""
+    }
+
+    proc _dns_edns_state {} {
+        if {![info exists ::state::dns::edns0] ||
+            [catch {dict size $::state::dns::edns0}]} {
+            set ::state::dns::edns0 [dict create exists 0 do 0 sz 512 nsid "" \
+                subnet_address "" subnet_source 0 subnet_scope 0]
+        }
+        foreach {key default} {exists 0 do 0 sz 512 nsid "" subnet_address "" subnet_source 0 subnet_scope 0} {
+            if {![dict exists $::state::dns::edns0 $key]} {
+                dict set ::state::dns::edns0 $key $default
+            }
+        }
+        return $::state::dns::edns0
+    }
+
+    proc dns_edns0_command {args} {
+        if {[llength $args] < 1 || [llength $args] > 3} {
+            error "DNS::edns0 requires a field and optional value"
+        }
+        set state [_dns_edns_state]
+        set field [string tolower [lindex $args 0]]
+        if {$field eq "exists"} {
+            if {[llength $args] == 2 && [lindex $args 1] eq "nsid"} {
+                return [expr {[dict get $state exists] && [dict get $state nsid] ne ""}]
+            }
+            if {[llength $args] != 1} { error "DNS::edns0 exists accepts only nsid" }
+            return [dict get $state exists]
+        }
+        if {$field eq "subnet"} {
+            if {[llength $args] < 2 || [llength $args] > 3} {
+                error "DNS::edns0 subnet requires address, source, or scope"
+            }
+            set subfield [string tolower [lindex $args 1]]
+            set key [dict create address subnet_address source subnet_source scope subnet_scope]
+            if {![dict exists $key $subfield]} { error "unsupported DNS::edns0 subnet field $subfield" }
+            set state_key [dict get $key $subfield]
+            if {[llength $args] == 3} { dict set state $state_key [lindex $args 2]; dict set state exists 1 }
+            set ::state::dns::edns0 $state
+            return [dict get $state $state_key]
+        }
+        if {$field ni {do sz nsid}} { error "unsupported DNS::edns0 field $field" }
+        if {[llength $args] == 2} {
+            dict set state $field [lindex $args 1]
+            dict set state exists 1
+            set ::state::dns::edns0 $state
+        } elseif {[llength $args] != 1} {
+            error "DNS::edns0 $field accepts one optional value"
+        }
+        return [dict get $state $field]
+    }
+
+    proc dns_query_command {args} {
+        if {[llength $args] < 3 || [llength $args] > 4} {
+            error "DNS::query requires dnsx, name, type, and optional dnssec"
+        }
+        if {[string tolower [lindex $args 0]] ne "dnsx"} {
+            error "DNS::query supports only the dnsx target in this emulator"
+        }
+        set wanted_name [string tolower [string trimright [lindex $args 1] .]]
+        set wanted_type [string toupper [lindex $args 2]]
+        set result {}
+        foreach section {answers authority additional} {
+            set section_result {}
+            foreach rr [set ::state::dns::$section] {
+                if {[string tolower [string trimright [_dns_rr_get $rr name] .]] eq $wanted_name &&
+                    ([string toupper [_dns_rr_get $rr type]] eq $wanted_type || $wanted_type eq "ANY")} {
+                    lappend section_result $rr
+                }
+            }
+            lappend result $section_result
+        }
+        ::itest::log_decision dns query [list [lindex $args 1] $wanted_type]
+        return $result
+    }
+
+    proc dns_scrape_command {args} {
+        if {[llength $args] < 2} { error "DNS::scrape requires a section and field" }
+        set section [string tolower [lindex $args 0]]
+        set section_map [dict create answer answers authority authority additional additional all {answers authority additional}]
+        if {![dict exists $section_map $section]} { error "unsupported DNS::scrape section $section" }
+        set fields [lrange $args 1 end]
+        set valid {type ttl qname qnamelen rdata rdatalen class}
+        foreach field $fields { if {$field ni $valid} { error "unsupported DNS::scrape field $field" } }
+        set sections [dict get $section_map $section]
+        set records {}
+        foreach current_section $sections {
+            foreach rr [set ::state::dns::$current_section] { lappend records $rr }
+        }
+        set result {}
+        foreach rr $records {
+            set values {}
+            foreach field $fields {
+                switch -exact -- $field {
+                    type - ttl - class { lappend values [_dns_rr_get $rr $field] }
+                    qname { lappend values [_dns_rr_get $rr name] }
+                    qnamelen { lappend values [string bytelength [_dns_rr_get $rr name]] }
+                    rdata { lappend values [_dns_rr_get $rr rdata] }
+                    rdatalen { lappend values [string bytelength [_dns_rr_get $rr rdata]] }
+                }
+            }
+            if {[llength $fields] == 1} { lappend result [lindex $values 0] } else { lappend result $values }
+        }
+        return $result
+    }
+
     proc dns_question {args} {
         if {[llength $args] == 1} {
             switch -exact -- [string tolower [lindex $args 0]] {
                 name { return $::state::dns::qname }
                 type { return $::state::dns::qtype }
-                default { error "DNS::question supports name and type" }
+                class { return $::state::dns::qclass }
+                default { error "DNS::question supports name, type, and class" }
             }
         }
         if {[llength $args] == 2} {
@@ -4863,7 +5324,8 @@ namespace eval ::itest::semantic {
             switch -exact -- $field {
                 name { set ::state::dns::qname [lindex $args 1] }
                 type { set ::state::dns::qtype [lindex $args 1] }
-                default { error "DNS::question supports name and type" }
+                class { set ::state::dns::qclass [lindex $args 1] }
+                default { error "DNS::question supports name, type, and class" }
             }
             return [lindex $args 1]
         }
@@ -5809,6 +6271,29 @@ foreach {name proc_name} {
     URI::compare ::itest::semantic::uri_compare
     DNS::origin ::itest::semantic::dns_origin
     DNS::question ::itest::semantic::dns_question
+    DNS::additional ::itest::semantic::dns_additional_command
+    DNS::answer ::itest::semantic::dns_answer_command
+    DNS::authority ::itest::semantic::dns_authority_command
+    DNS::class ::itest::semantic::dns_class_command
+    DNS::disable ::itest::semantic::dns_disable_command
+    DNS::drop ::itest::semantic::dns_drop_command
+    DNS::edns0 ::itest::semantic::dns_edns0_command
+    DNS::enable ::itest::semantic::dns_enable_command
+    DNS::header ::itest::semantic::dns_header_command
+    DNS::is_wideip ::itest::semantic::dns_is_wideip_command
+    DNS::last_act ::itest::semantic::dns_last_act_command
+    DNS::len ::itest::semantic::dns_len_command
+    DNS::log ::itest::semantic::dns_log_command
+    DNS::name ::itest::semantic::dns_name_command
+    DNS::ptype ::itest::semantic::dns_ptype_command
+    DNS::query ::itest::semantic::dns_query_command
+    DNS::rdata ::itest::semantic::dns_rdata_command
+    DNS::return ::itest::semantic::dns_return_command
+    DNS::rpz_policy ::itest::semantic::dns_rpz_policy_command
+    DNS::rr ::itest::semantic::dns_rr_command
+    DNS::scrape ::itest::semantic::dns_scrape_command
+    DNS::ttl ::itest::semantic::dns_ttl_command
+    DNS::type ::itest::semantic::dns_type_command
     class ::itest::cmd::cmd_class
     MQTT::clean_session ::itest::cmd::mqtt_clean_session
     MQTT::client_id ::itest::cmd::mqtt_client_id
