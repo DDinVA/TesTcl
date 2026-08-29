@@ -198,6 +198,14 @@ live-device ciphertext compatibility remains a validation item. Generated
 keys are random per emulator session and are never included in semantic
 snapshots.
 
+The TMOS 17.5 IPFIX surface is modeled as deterministic object state for
+`IPFIX::template`, `IPFIX::msg`, and `IPFIX::destination`. Templates and
+destinations persist for the emulator session; messages are connection-scoped
+and may be filled across multiple events. Repeated template elements honor the
+documented zero-based `-pos` occurrence index, and destination sends are
+captured in a bounded semantic history. The adapter does not connect to a
+configured log publisher, serialize IPFIX datagrams, or transmit telemetry.
+
 The complete TMOS 17.5 `BWC::` family is represented by deterministic
 connection-scoped flow state. Policy attachment, category assignment, rate and
 PPS overrides, TOS/QoS marks, priority weights, debug state, and measurement

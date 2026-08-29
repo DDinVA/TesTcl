@@ -271,6 +271,15 @@ ciphertext vector, use formatted keys when interoperability with a live
 BIG-IP matters; live-device golden-vector validation remains separate from
 the deterministic in-process round-trip test.
 
+The IPFIX layer models `IPFIX::template create|delete`,
+`IPFIX::msg create|set|delete`, and `IPFIX::destination open|close|send` as
+deterministic objects. Templates and destinations persist for the emulator
+session, while messages can be populated across multiple events on one
+connection; repeated template elements use the documented zero-based
+`-pos` occurrence index. Sent records are retained in a bounded
+`semantic.ipfix.sends` history for inspection. The adapter does not open a
+real log publisher, encode IPFIX wire records, or transmit UDP traffic.
+
 The ADAPT layer models the 17.5 request/response static and dynamic context
 surface. `ADAPT::context_create` returns deterministic opaque handles whose
 attributes inherit from the static context; the remaining ADAPT commands can

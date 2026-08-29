@@ -1852,7 +1852,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
         self.assertNotIn(("BWC", "generated-stub"), queue_buckets)
         self.assertNotIn(("AES", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 128)
+        self.assertNotIn(("IPFIX", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 125)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -4382,6 +4383,135 @@ when HTTP_REQUEST {
             ("when HTTP_REQUEST { AES::key 64 }", "AES::key size must be 128, 192, or 256"),
             ("when HTTP_REQUEST { AES::encrypt {AES 128 deadbeef} data }", "exactly 32 hexadecimal characters"),
             ("when HTTP_REQUEST { AES::decrypt passphrase short }", "ciphertext length must be a positive multiple of 16"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, message
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "request": {"uri": "/"},
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+
+    def test_ipfix_templates_messages_persist_and_send_across_events(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when RULE_INIT {
+    set static::ipfix_destination ""
+    set static::ipfix_template ""
+}
+when CLIENT_ACCEPTED {
+    if {$static::ipfix_destination eq ""} {
+        set static::ipfix_destination [IPFIX::destination open -publisher /Common/ipfix_publisher]
+    }
+    if {$static::ipfix_template eq ""} {
+        set static::ipfix_template [IPFIX::template create {sourceIPv4Address action action}]
+    }
+}
+when HTTP_REQUEST {
+    set static::ipfix_message [IPFIX::msg create $static::ipfix_template]
+    IPFIX::msg set $static::ipfix_message sourceIPv4Address client
+    IPFIX::msg set $static::ipfix_message action -pos 0 Request
+}
+when HTTP_RESPONSE_RELEASE {
+    IPFIX::msg set $static::ipfix_message action -pos 1 Response
+    IPFIX::destination send $static::ipfix_destination $static::ipfix_message
+}
+""",
+                "requests": [
+                    {"uri": "/first", "close_after": True},
+                    {"uri": "/second", "close_after": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(len(result["results"]), 2)
+        first_ipfix = result["results"][0]["semantic"]["ipfix"]
+        second_ipfix = result["results"][1]["semantic"]["ipfix"]
+        expected_template = {
+            "handle": "template-1",
+            "fields": ["sourceIPv4Address", "action", "action"],
+        }
+        expected_destination = {
+            "handle": "destination-1",
+            "publisher": "/Common/ipfix_publisher",
+            "closed": False,
+        }
+        expected_fields = [
+            {"name": "sourceIPv4Address", "position": 0, "field_position": 0, "set": True, "value": "client"},
+            {"name": "action", "position": 1, "field_position": 0, "set": True, "value": "Request"},
+            {"name": "action", "position": 2, "field_position": 1, "set": True, "value": "Response"},
+        ]
+        self.assertEqual(first_ipfix["templates"], [expected_template])
+        self.assertEqual(first_ipfix["destinations"], [expected_destination])
+        self.assertEqual(first_ipfix["messages"], [
+            {"handle": "message-1", "template": "template-1", "fields": expected_fields}
+        ])
+        self.assertEqual(first_ipfix["sends"], [
+            {
+                "destination": "destination-1",
+                "message": "message-1",
+                "template": "template-1",
+                "fields": expected_fields,
+            }
+        ])
+        self.assertEqual(second_ipfix["templates"], [expected_template])
+        self.assertEqual(second_ipfix["destinations"], [expected_destination])
+        self.assertEqual(
+            second_ipfix["messages"][0]["handle"], "message-2"
+        )
+        self.assertEqual(len(second_ipfix["sends"]), 2)
+        self.assertEqual(second_ipfix["sends"][1]["message"], "message-2")
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in ("IPFIX::destination", "IPFIX::msg", "IPFIX::template"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+    def test_ipfix_validation_delete_and_closed_destination(self) -> None:
+        delete_result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    set destination [IPFIX::destination open -publisher /Common/publisher]
+    set template [IPFIX::template create {action}]
+    set message [IPFIX::msg create $template]
+    IPFIX::template delete $template
+    IPFIX::msg set $message action retained
+    IPFIX::destination send $destination $message
+}
+""",
+                "request": {"uri": "/"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        ipfix = delete_result["results"][0]["semantic"]["ipfix"]
+        self.assertEqual(ipfix["templates"], [])
+        self.assertEqual(ipfix["messages"][0]["fields"][0]["value"], "retained")
+        self.assertEqual(len(ipfix["sends"]), 1)
+
+        for irule, message in (
+            (
+                "when HTTP_REQUEST { set t [IPFIX::template create {action action}]; "
+                "set m [IPFIX::msg create $t]; IPFIX::msg set $m action value }",
+                "requires -pos for a repeated field",
+            ),
+            (
+                "when HTTP_REQUEST { set t [IPFIX::template create {sourceIPv4Address action}]; "
+                "set m [IPFIX::msg create $t]; IPFIX::msg set $m action -pos 1 value }",
+                "position must identify the requested field",
+            ),
+            (
+                "when HTTP_REQUEST { set d [IPFIX::destination open -publisher /Common/publisher]; "
+                "set t [IPFIX::template create {action}]; set m [IPFIX::msg create $t]; "
+                "IPFIX::destination close $d; IPFIX::destination send $d $m }",
+                "received a closed destination object",
+            ),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(
                 self.adapter.EmulatorInputError, message

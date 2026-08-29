@@ -1175,6 +1175,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "AES::decrypt",
     "AES::encrypt",
     "AES::key",
+    "IPFIX::destination",
+    "IPFIX::msg",
+    "IPFIX::template",
     "DATAGRAM::dns",
     "DATAGRAM::ip",
     "DATAGRAM::ip6",
@@ -2922,6 +2925,133 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         },
         "debug": bwc_values["debug_enabled"] == "1",
     }
+    ipfix_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::ipfix_snapshot")
+    )
+    if len(ipfix_parts) % 2:
+        raise EmulatorInputError("invalid IPFIX state")
+    ipfix_keys = ipfix_parts[::2]
+    if len(set(ipfix_keys)) != len(ipfix_keys):
+        raise EmulatorInputError("duplicate IPFIX state field")
+    ipfix_values = dict(zip(ipfix_parts[::2], ipfix_parts[1::2]))
+    if set(ipfix_values) != {"templates", "destinations", "messages", "sends"}:
+        raise EmulatorInputError("invalid IPFIX state fields")
+
+    ipfix_templates: list[dict[str, Any]] = []
+    seen_ipfix_templates: set[str] = set()
+    for raw_template in _split_tcl_list(ipfix_values["templates"]):
+        template_parts = _split_tcl_list(raw_template)
+        if (
+            len(template_parts) != 2
+            or not template_parts[0]
+            or template_parts[0] in seen_ipfix_templates
+        ):
+            raise EmulatorInputError("invalid IPFIX template state")
+        handle, raw_fields = template_parts
+        fields = _split_tcl_list(raw_fields)
+        if not fields or any(not field for field in fields):
+            raise EmulatorInputError("invalid IPFIX template fields")
+        seen_ipfix_templates.add(handle)
+        ipfix_templates.append({"handle": handle, "fields": fields})
+
+    ipfix_destinations: list[dict[str, Any]] = []
+    seen_ipfix_destinations: set[str] = set()
+    for raw_destination in _split_tcl_list(ipfix_values["destinations"]):
+        destination_parts = _split_tcl_list(raw_destination)
+        if (
+            len(destination_parts) != 3
+            or not destination_parts[0]
+            or destination_parts[0] in seen_ipfix_destinations
+            or destination_parts[2] not in {"0", "1"}
+        ):
+            raise EmulatorInputError("invalid IPFIX destination state")
+        handle, publisher, closed = destination_parts
+        if not publisher:
+            raise EmulatorInputError("invalid IPFIX destination publisher")
+        seen_ipfix_destinations.add(handle)
+        ipfix_destinations.append(
+            {"handle": handle, "publisher": publisher, "closed": closed == "1"}
+        )
+
+    def parse_ipfix_message_fields(
+        raw_fields: str, raw_values: str, field_error: str
+    ) -> list[dict[str, Any]]:
+        fields = _split_tcl_list(raw_fields)
+        if not fields or any(not field for field in fields):
+            raise EmulatorInputError(f"invalid IPFIX {field_error} fields")
+        value_parts = _split_tcl_list(raw_values)
+        if len(value_parts) % 2:
+            raise EmulatorInputError(f"invalid IPFIX {field_error} values")
+        values: dict[int, str] = {}
+        for raw_position, value in zip(value_parts[::2], value_parts[1::2]):
+            try:
+                position = int(raw_position)
+            except (TypeError, ValueError):
+                raise EmulatorInputError(f"invalid IPFIX {field_error} position") from None
+            if not 0 <= position < len(fields) or position in values:
+                raise EmulatorInputError(f"invalid IPFIX {field_error} position")
+            values[position] = value
+        occurrence_positions: dict[str, int] = {}
+        result: list[dict[str, Any]] = []
+        for position, name in enumerate(fields):
+            field_position = occurrence_positions.get(name, 0)
+            occurrence_positions[name] = field_position + 1
+            result.append(
+                {
+                    "name": name,
+                    "position": position,
+                    "field_position": field_position,
+                    "set": position in values,
+                    "value": values.get(position, ""),
+                }
+            )
+        return result
+
+    ipfix_messages: list[dict[str, Any]] = []
+    seen_ipfix_messages: set[str] = set()
+    for raw_message in _split_tcl_list(ipfix_values["messages"]):
+        message_parts = _split_tcl_list(raw_message)
+        if (
+            len(message_parts) != 4
+            or not message_parts[0]
+            or message_parts[0] in seen_ipfix_messages
+        ):
+            raise EmulatorInputError("invalid IPFIX message state")
+        handle, template, raw_fields, raw_values = message_parts
+        seen_ipfix_messages.add(handle)
+        ipfix_messages.append(
+            {
+                "handle": handle,
+                "template": template,
+                "fields": parse_ipfix_message_fields(raw_fields, raw_values, "message"),
+            }
+        )
+
+    ipfix_sends: list[dict[str, Any]] = []
+    for raw_send in _split_tcl_list(ipfix_values["sends"]):
+        send_parts = _split_tcl_list(raw_send)
+        if len(send_parts) != 5:
+            raise EmulatorInputError("invalid IPFIX send state")
+        destination, message, template, raw_fields, raw_values = send_parts
+        # Send history survives connection cleanup, while message objects do
+        # not. A historical message handle therefore need not be present in
+        # the current connection's live-message table.
+        if destination not in seen_ipfix_destinations or not message:
+            raise EmulatorInputError("invalid IPFIX send object reference")
+        ipfix_sends.append(
+            {
+                "destination": destination,
+                "message": message,
+                "template": template,
+                "fields": parse_ipfix_message_fields(raw_fields, raw_values, "send"),
+            }
+        )
+    ipfix = {
+        "templates": ipfix_templates,
+        "destinations": ipfix_destinations,
+        "messages": ipfix_messages,
+        "sends": ipfix_sends,
+    }
     adapt_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::adapt_snapshot")
     )
@@ -3748,6 +3878,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         },
         "oneconnect": oneconnect,
         "bwc": bwc,
+        "ipfix": ipfix,
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "lb": lb_control,
@@ -11068,6 +11199,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
                 session.eval_tcl("::itest::semantic::crypto_reset_connection")
                 session.eval_tcl("::itest::semantic::bwc_reset_connection")
+                session.eval_tcl("::itest::semantic::ipfix_reset_connection")
                 session.eval_tcl("::itest::semantic::adapt_reset_connection")
                 session.eval_tcl("::itest::semantic::datagram_reset_connection")
                 session.eval_tcl("::itest::semantic::sctp_reset_connection")
@@ -11130,6 +11262,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
                 session.eval_tcl("::itest::semantic::crypto_reset_connection")
                 session.eval_tcl("::itest::semantic::bwc_reset_connection")
+                session.eval_tcl("::itest::semantic::ipfix_reset_connection")
                 session.eval_tcl("::itest::semantic::adapt_reset_connection")
                 session.eval_tcl("::itest::semantic::datagram_reset_connection")
                 session.eval_tcl("::itest::semantic::sctp_reset_connection")
@@ -11446,6 +11579,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::crypto_reset_connection")
             session.eval_tcl("::itest::semantic::bwc_reset_connection")
+            session.eval_tcl("::itest::semantic::ipfix_reset_connection")
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
             session.eval_tcl("::itest::semantic::datagram_reset_connection")
             session.eval_tcl("::itest::semantic::sctp_reset_connection")
@@ -11479,6 +11613,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::crypto_reset_connection")
             session.eval_tcl("::itest::semantic::bwc_reset_connection")
+            session.eval_tcl("::itest::semantic::ipfix_reset_connection")
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
             session.eval_tcl("::itest::semantic::datagram_reset_connection")
             session.eval_tcl("::itest::semantic::sctp_reset_connection")
@@ -11765,6 +11900,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::l7check_reset_connection")
                 session.eval_tcl("::itest::semantic::link_reset_connection")
                 session.eval_tcl("::itest::semantic::bwc_reset_connection")
+                session.eval_tcl("::itest::semantic::ipfix_reset_connection")
                 session.eval_tcl("::itest::semantic::eca_reset_connection")
                 session.eval_tcl("::itest::semantic::avr_reset_connection")
             return self._fire_event_on_worker(session, event_name, normalised_state)
@@ -12864,6 +13000,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
         session.eval_tcl("::itest::semantic::crypto_reset_connection")
         session.eval_tcl("::itest::semantic::bwc_reset_connection")
+        session.eval_tcl("::itest::semantic::ipfix_reset_connection")
         session.eval_tcl("::itest::semantic::adapt_reset_connection")
         session.eval_tcl("::itest::semantic::datagram_reset_connection")
         session.eval_tcl("::itest::semantic::sctp_reset_connection")

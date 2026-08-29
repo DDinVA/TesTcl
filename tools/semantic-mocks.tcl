@@ -24,6 +24,17 @@ namespace eval ::itest::semantic {
     array set hsl_handles {}
     variable hsl_messages {}
     variable next_hsl_handle 0
+    # IPFIX templates and destinations are session-scoped, like the static
+    # objects an iRule normally keeps in static variables. Messages are
+    # connection-scoped and are cleared by ipfix_reset_connection.
+    variable ipfix_templates [dict create]
+    variable ipfix_destinations [dict create]
+    variable ipfix_messages [dict create]
+    variable ipfix_sends {}
+    variable ipfix_template_counter 0
+    variable ipfix_destination_counter 0
+    variable ipfix_message_counter 0
+    variable ipfix_max_sends 1024
     variable requested_lb_failure ""
     variable lb_failure_pending 0
     variable lb_failure_cause ""
@@ -20370,6 +20381,261 @@ namespace eval ::itest::semantic {
     }
 }
 
+# IPFIX objects are modeled as deterministic Tcl data rather than a live
+# logging publisher. Templates and destinations persist for the lifetime of
+# the emulator session; messages persist for one connection so a rule can
+# fill them from multiple events before sending them.
+namespace eval ::itest::semantic {
+    proc _ipfix_text {value field_name} {
+        if {[string first "\x00" $value] >= 0} {
+            error "$field_name must not contain NUL bytes"
+        }
+        if {[string bytelength $value] > 1048576} {
+            error "$field_name exceeds the 1048576-byte limit"
+        }
+        return $value
+    }
+
+    proc ipfix_reset_connection {} {
+        set ::itest::semantic::ipfix_messages [dict create]
+    }
+
+    proc ipfix_template_command {args} {
+        if {[llength $args] == 0} {
+            error "IPFIX::template requires create or delete"
+        }
+        set operation [string tolower [lindex $args 0]]
+        switch -exact -- $operation {
+            create {
+                if {[llength $args] != 2} {
+                    error "IPFIX::template create requires a template string"
+                }
+                set template_string [_ipfix_text [lindex $args 1] "IPFIX template"]
+                set fields [regexp -all -inline {\S+} $template_string]
+                if {[llength $fields] == 0} {
+                    error "IPFIX::template create requires at least one element"
+                }
+                if {[llength $fields] > 256} {
+                    error "IPFIX template cannot contain more than 256 elements"
+                }
+                foreach field $fields {
+                    _ipfix_text $field "IPFIX template element"
+                }
+                incr ::itest::semantic::ipfix_template_counter
+                set handle "template-$::itest::semantic::ipfix_template_counter"
+                dict set ::itest::semantic::ipfix_templates $handle [list fields $fields]
+                ::itest::log_decision ipfix template_create [list $handle $fields]
+                return $handle
+            }
+            delete {
+                if {[llength $args] != 2} {
+                    error "IPFIX::template delete requires a template object"
+                }
+                set handle [lindex $args 1]
+                if {![dict exists $::itest::semantic::ipfix_templates $handle]} {
+                    error "IPFIX::template delete received an unknown template object"
+                }
+                dict unset ::itest::semantic::ipfix_templates $handle
+                ::itest::log_decision ipfix template_delete $handle
+                return ""
+            }
+            default {
+                error "unsupported IPFIX::template operation $operation"
+            }
+        }
+    }
+
+    proc ipfix_message_entry {message command_name} {
+        if {![dict exists $::itest::semantic::ipfix_messages $message]} {
+            error "$command_name received an unknown IPFIX message object"
+        }
+        return [dict get $::itest::semantic::ipfix_messages $message]
+    }
+
+    proc ipfix_message_command {args} {
+        if {[llength $args] == 0} {
+            error "IPFIX::msg requires create, set, or delete"
+        }
+        set operation [string tolower [lindex $args 0]]
+        switch -exact -- $operation {
+            create {
+                if {[llength $args] != 2} {
+                    error "IPFIX::msg create requires a template object"
+                }
+                set template [lindex $args 1]
+                if {![dict exists $::itest::semantic::ipfix_templates $template]} {
+                    error "IPFIX::msg create received an unknown template object"
+                }
+                set fields [dict get [dict get $::itest::semantic::ipfix_templates $template] fields]
+                incr ::itest::semantic::ipfix_message_counter
+                set handle "message-$::itest::semantic::ipfix_message_counter"
+                dict set ::itest::semantic::ipfix_messages $handle [list \
+                    template $template fields $fields values [dict create]]
+                ::itest::log_decision ipfix message_create [list $handle $template]
+                return $handle
+            }
+            delete {
+                if {[llength $args] != 2} {
+                    error "IPFIX::msg delete requires a message object"
+                }
+                set message [lindex $args 1]
+                ipfix_message_entry $message IPFIX::msg\ delete
+                dict unset ::itest::semantic::ipfix_messages $message
+                ::itest::log_decision ipfix message_delete $message
+                return ""
+            }
+            set {
+                if {[llength $args] ni {4 6}} {
+                    error "IPFIX::msg set requires a message, field, and value"
+                }
+                set message [lindex $args 1]
+                set entry [ipfix_message_entry $message IPFIX::msg\ set]
+                set field [_ipfix_text [lindex $args 2] "IPFIX field type"]
+                set fields [dict get $entry fields]
+                set positions {}
+                for {set index 0} {$index < [llength $fields]} {incr index} {
+                    if {[lindex $fields $index] eq $field} {
+                        lappend positions $index
+                    }
+                }
+                if {[llength $positions] == 0} {
+                    error "IPFIX::msg set field $field is not present in the template"
+                }
+
+                if {[llength $args] == 4} {
+                    if {[llength $positions] != 1} {
+                        error "IPFIX::msg set requires -pos for a repeated field"
+                    }
+                    set position [lindex $positions 0]
+                    set field_position 0
+                    set value [lindex $args 3]
+                } else {
+                    if {[lindex $args 3] ne "-pos"} {
+                        error "IPFIX::msg set expects -pos before the field position"
+                    }
+                    set field_position [lindex $args 4]
+                    if {![string is integer -strict $field_position] || $field_position < 0 ||
+                        $field_position >= [llength $positions]} {
+                        error "IPFIX::msg set position must identify the requested field"
+                    }
+                    # F5 defines -pos as the zero-based occurrence of the
+                    # requested element, rather than the absolute template
+                    # slot. Keep the internal value keyed by that slot so
+                    # duplicate elements remain independently addressable.
+                    set position [lindex $positions $field_position]
+                    set value [lindex $args 5]
+                }
+                set value [_ipfix_text $value "IPFIX field value"]
+                set values [dict get $entry values]
+                dict set values $position $value
+                dict set entry values $values
+                dict set ::itest::semantic::ipfix_messages $message $entry
+                ::itest::log_decision ipfix message_set [list $message $field $field_position]
+                return ""
+            }
+            default {
+                error "unsupported IPFIX::msg operation $operation"
+            }
+        }
+    }
+
+    proc ipfix_destination_command {args} {
+        if {[llength $args] == 0} {
+            error "IPFIX::destination requires open, close, or send"
+        }
+        set operation [string tolower [lindex $args 0]]
+        switch -exact -- $operation {
+            open {
+                if {[llength $args] != 3 || [lindex $args 1] ne "-publisher"} {
+                    error "IPFIX::destination open requires -publisher and a log publisher"
+                }
+                set publisher [_ipfix_text [lindex $args 2] "IPFIX log publisher"]
+                if {$publisher eq ""} {
+                    error "IPFIX log publisher must not be empty"
+                }
+                incr ::itest::semantic::ipfix_destination_counter
+                set handle "destination-$::itest::semantic::ipfix_destination_counter"
+                dict set ::itest::semantic::ipfix_destinations $handle [list \
+                    publisher $publisher closed 0]
+                ::itest::log_decision ipfix destination_open [list $handle $publisher]
+                return $handle
+            }
+            close {
+                if {[llength $args] != 2} {
+                    error "IPFIX::destination close requires a destination object"
+                }
+                set destination [lindex $args 1]
+                if {![dict exists $::itest::semantic::ipfix_destinations $destination]} {
+                    error "IPFIX::destination close received an unknown destination object"
+                }
+                set entry [dict get $::itest::semantic::ipfix_destinations $destination]
+                if {[dict get $entry closed]} {
+                    error "IPFIX::destination close received a closed destination object"
+                }
+                dict set entry closed 1
+                dict set ::itest::semantic::ipfix_destinations $destination $entry
+                ::itest::log_decision ipfix destination_close $destination
+                return ""
+            }
+            send {
+                if {[llength $args] != 3} {
+                    error "IPFIX::destination send requires a destination and message object"
+                }
+                set destination [lindex $args 1]
+                if {![dict exists $::itest::semantic::ipfix_destinations $destination]} {
+                    error "IPFIX::destination send received an unknown destination object"
+                }
+                set destination_entry [dict get $::itest::semantic::ipfix_destinations $destination]
+                if {[dict get $destination_entry closed]} {
+                    error "IPFIX::destination send received a closed destination object"
+                }
+                set message [lindex $args 2]
+                set message_entry [ipfix_message_entry $message IPFIX::destination\ send]
+                set record [list $destination $message \
+                    [dict get $message_entry template] \
+                    [dict get $message_entry fields] \
+                    [dict get $message_entry values]]
+                lappend ::itest::semantic::ipfix_sends $record
+                if {[llength $::itest::semantic::ipfix_sends] > $::itest::semantic::ipfix_max_sends} {
+                    set first [expr {[llength $::itest::semantic::ipfix_sends] - $::itest::semantic::ipfix_max_sends}]
+                    set ::itest::semantic::ipfix_sends [lrange $::itest::semantic::ipfix_sends $first end]
+                }
+                ::itest::log_decision ipfix destination_send [list $destination $message]
+                return ""
+            }
+            default {
+                error "unsupported IPFIX::destination operation $operation"
+            }
+        }
+    }
+
+    proc ipfix_snapshot {} {
+        set templates {}
+        foreach handle [lsort -ascii [dict keys $::itest::semantic::ipfix_templates]] {
+            set entry [dict get $::itest::semantic::ipfix_templates $handle]
+            lappend templates [list $handle [dict get $entry fields]]
+        }
+        set destinations {}
+        foreach handle [lsort -ascii [dict keys $::itest::semantic::ipfix_destinations]] {
+            set entry [dict get $::itest::semantic::ipfix_destinations $handle]
+            lappend destinations [list $handle [dict get $entry publisher] [dict get $entry closed]]
+        }
+        set messages {}
+        foreach handle [lsort -ascii [dict keys $::itest::semantic::ipfix_messages]] {
+            set entry [dict get $::itest::semantic::ipfix_messages $handle]
+            set values {}
+            set value_dict [dict get $entry values]
+            foreach position [lsort -integer [dict keys $value_dict]] {
+                lappend values $position [dict get $value_dict $position]
+            }
+            lappend messages [list $handle [dict get $entry template] \
+                [dict get $entry fields] $values]
+        }
+        return [list templates $templates destinations $destinations \
+            messages $messages sends $::itest::semantic::ipfix_sends]
+    }
+}
+
 # Preserve the upstream pool behavior and replace only its member choice.
 if {[::tmm::_orig_info commands ::itest::cmd::cmd_pool] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::cmd_pool ::itest::cmd::_testcl_pool_orig
@@ -21298,6 +21564,9 @@ foreach {name proc_name} {
     AES::decrypt ::itest::semantic::aes_decrypt_command
     AES::encrypt ::itest::semantic::aes_encrypt_command
     AES::key ::itest::semantic::aes_key_command
+    IPFIX::destination ::itest::semantic::ipfix_destination_command
+    IPFIX::msg ::itest::semantic::ipfix_message_command
+    IPFIX::template ::itest::semantic::ipfix_template_command
     ISTATS::get ::itest::semantic::istats_get
     ISTATS::incr ::itest::semantic::istats_incr
     ISTATS::remove ::itest::semantic::istats_remove
