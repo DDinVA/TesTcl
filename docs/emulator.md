@@ -157,6 +157,16 @@ intentionally an observable emulator output: it does not
 create a BIG-IP request-logging profile, send syslog, or contact an external
 logging service.
 
+The ISTATS layer provides `ISTATS::get`, `ISTATS::incr`, `ISTATS::remove`, and
+`ISTATS::set` over arbitrary string keys. Values persist for the lifetime of
+the emulator session, across connections and keep-alive requests, and are
+returned under `semantic.istats.values` with a `count`. Missing keys read as
+`0`; increments require an integer, permit negative values for gauge keys, and
+only operate on numeric values. Missing string keys read as an empty value;
+other missing keys read as `0`. This models the rule-visible state and
+deterministic aggregate view, but not multi-TMM aggregation, tmsh
+synchronization, or a live BIG-IP iStats database.
+
 ```json
 {
   "route": {

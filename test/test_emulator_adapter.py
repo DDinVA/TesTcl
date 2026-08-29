@@ -479,7 +479,7 @@ when HTTP_REQUEST {
         }
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
-        self.assertGreaterEqual(queue["command_count"], 347)
+        self.assertGreaterEqual(queue["command_count"], 343)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1404,6 +1404,70 @@ when HTTP_REQUEST {
                 "IP::addr": "semantic-mock",
             },
         )
+
+    def test_istats_persist_across_requests_and_support_remove(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    set count_key {app counter requests}
+    set status_key {app string status}
+    set gauge_key {app /service gauge active}
+    set missing_string_key {app string missing}
+    set missing_counter_key {app counter missing}
+    if {[HTTP::path] eq "/remove"} {
+        ISTATS::remove $count_key
+    } else {
+        ISTATS::incr $count_key 1
+        ISTATS::set $status_key ready
+        ISTATS::set $gauge_key 3
+        ISTATS::incr $gauge_key -1
+    }
+    log local0. "count=[ISTATS::get $count_key] status=[ISTATS::get $status_key] gauge=[ISTATS::get $gauge_key] missing=[ISTATS::get $missing_string_key] zero=[ISTATS::get $missing_counter_key]"
+}
+""",
+                "requests": [
+                    {"uri": "/one"},
+                    {"uri": "/two"},
+                    {"uri": "/remove"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        first, second, removed = result["results"]
+        self.assertEqual(first["semantic"]["istats"], {
+            "count": 3,
+            "values": {
+                "app counter requests": "1",
+                "app string status": "ready",
+                "app /service gauge active": "2",
+            },
+        })
+        self.assertEqual(second["semantic"]["istats"]["values"]["app counter requests"], "2")
+        self.assertEqual(removed["semantic"]["istats"], {
+            "count": 2,
+            "values": {
+                "app string status": "ready",
+                "app /service gauge active": "2",
+            },
+        })
+        self.assertTrue(any("missing= zero=0" in entry for entry in first["logs"]))
+        self.assertTrue(any("count=0 status=ready gauge=2" in entry for entry in removed["logs"]))
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in ("ISTATS::get", "ISTATS::incr", "ISTATS::remove", "ISTATS::set"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "counter value must be non-negative"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": 'when HTTP_REQUEST { ISTATS::incr "app counter bad" -1 }',
+                    "request": {"uri": "/"},
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_ip_semantics_record_packet_state_and_seeded_lookups(self) -> None:
         result = self.adapter.run_scenario(

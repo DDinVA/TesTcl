@@ -105,6 +105,13 @@ structured request and response records containing phase, method, URI, host,
 status, byte length, and headers; records are reset between transactions while
 the toggle persists across keep-alive requests. The adapter does not connect to
 a BIG-IP request-logging profile, syslog destination, or external logging sink.
+The TMOS 17.5 `ISTATS::get`, `ISTATS::incr`, `ISTATS::remove`, and `ISTATS::set`
+commands use a session-global key/value store, allowing counters, gauges, and
+strings to persist across connections and requests. `ISTATS::incr` requires an
+integer, permits negative values for gauge keys, and rejects non-numeric or
+string values. Missing string keys read as an empty value and other missing
+keys read as zero. The adapter does not aggregate values across emulator
+processes or expose a live control-plane iStats database.
 The IP semantic layer models the seven TMOS 17.5 commands `IP::hops`,
 `IP::idle_timeout`, `IP::ingress_drop_rate`, `IP::ingress_rate_limit`,
 `IP::intelligence`, `IP::reputation`, and `IP::stats`. Path hops, directional

@@ -8,6 +8,8 @@
 namespace eval ::itest::semantic {
     variable stats
     array set stats {}
+    variable istats
+    array set istats {}
     variable hsl_handles
     array set hsl_handles {}
     variable hsl_messages {}
@@ -788,6 +790,11 @@ namespace eval ::itest::semantic {
     proc stats_snapshot {} {
         variable stats
         return [array get stats]
+    }
+
+    proc istats_snapshot {} {
+        variable istats
+        return [array get istats]
     }
 
     proc hsl_snapshot {} {
@@ -8479,6 +8486,97 @@ namespace eval ::itest::semantic {
         return $current
     }
 
+    proc _istats_key {key command_name} {
+        if {$key eq ""} {
+            error "$command_name requires a non-empty key"
+        }
+        return $key
+    }
+
+    proc _istats_measure_type {key} {
+        set tokens [regexp -all -inline {\S+} $key]
+        foreach index {2 1} {
+            if {$index >= [llength $tokens]} {
+                continue
+            }
+            set token [lindex $tokens $index]
+            switch -nocase -- $token {
+                counter - c - r { return counter }
+                gauge - g { return gauge }
+                string - text - s { return string }
+            }
+        }
+        return ""
+    }
+
+    proc istats_get {args} {
+        if {[llength $args] != 1} {
+            error "ISTATS::get requires exactly one key"
+        }
+        variable istats
+        set key [_istats_key [lindex $args 0] ISTATS::get]
+        if {[info exists istats($key)]} {
+            return $istats($key)
+        }
+        if {[_istats_measure_type $key] eq "string"} {
+            return ""
+        }
+        return 0
+    }
+
+    proc istats_set {args} {
+        if {[llength $args] != 2} {
+            error "ISTATS::set requires key and value"
+        }
+        variable istats
+        set key [_istats_key [lindex $args 0] ISTATS::set]
+        set istats($key) [lindex $args 1]
+        ::itest::log_decision istats set [list $key $istats($key)]
+        return ""
+    }
+
+    proc istats_incr {args} {
+        if {[llength $args] != 2} {
+            error "ISTATS::incr requires key and value"
+        }
+        variable istats
+        set key [_istats_key [lindex $args 0] ISTATS::incr]
+        set amount [lindex $args 1]
+        if {![string is integer -strict $amount]} {
+            error "ISTATS::incr value must be an integer"
+        }
+        set measure_type [_istats_measure_type $key]
+        if {$measure_type eq "string"} {
+            error "ISTATS::incr cannot increment a string value"
+        }
+        if {$amount < 0 && $measure_type ne "gauge"} {
+            error "ISTATS::incr counter value must be non-negative"
+        }
+        if {[info exists istats($key)]} {
+            set current $istats($key)
+            if {![string is integer -strict $current]} {
+                error "ISTATS::incr cannot increment a non-numeric value"
+            }
+        } else {
+            set current 0
+        }
+        set value [expr {$current + $amount}]
+        set istats($key) $value
+        ::itest::log_decision istats incr [list $key $amount $value]
+        return $value
+    }
+
+    proc istats_remove {args} {
+        if {[llength $args] != 1} {
+            error "ISTATS::remove requires exactly one key"
+        }
+        variable istats
+        set key [_istats_key [lindex $args 0] ISTATS::remove]
+        unset -nocomplain istats($key)
+        ::itest::log_decision istats remove $key
+        return ""
+    }
+
     proc hsl_open {args} {
         variable hsl_handles
         variable next_hsl_handle
@@ -14798,6 +14896,10 @@ foreach {name proc_name} {
     STATS::set ::itest::semantic::stats_set
     STATS::setmax ::itest::semantic::stats_setmax
     STATS::setmin ::itest::semantic::stats_setmin
+    ISTATS::get ::itest::semantic::istats_get
+    ISTATS::incr ::itest::semantic::istats_incr
+    ISTATS::remove ::itest::semantic::istats_remove
+    ISTATS::set ::itest::semantic::istats_set
     LB::down ::itest::semantic::lb_down
     LB::persist ::itest::semantic::lb_persist
     LB::reselect ::itest::semantic::lb_reselect

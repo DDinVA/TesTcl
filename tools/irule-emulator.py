@@ -878,6 +878,10 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTML::tag",
     "HTTPLOG::disable",
     "HTTPLOG::enable",
+    "ISTATS::get",
+    "ISTATS::incr",
+    "ISTATS::remove",
+    "ISTATS::set",
     "COMPRESS::buffer_size",
     "COMPRESS::disable",
     "COMPRESS::enable",
@@ -2150,6 +2154,15 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         name: value
         for name, value in zip(stats_parts[::2], stats_parts[1::2])
     }
+    istats_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::istats_snapshot")
+    )
+    if len(istats_parts) % 2:
+        raise EmulatorInputError("invalid ISTATS state")
+    istats_keys = istats_parts[::2]
+    if len(set(istats_keys)) != len(istats_keys):
+        raise EmulatorInputError("duplicate ISTATS key")
+    istats = dict(zip(istats_keys, istats_parts[1::2]))
     hsl_messages: list[dict[str, str]] = []
     for raw_message in _split_tcl_list(session.eval_tcl("::itest::semantic::hsl_snapshot")):
         parts = _split_tcl_list(raw_message)
@@ -2917,6 +2930,10 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
     }
     return {
         "stats": stats,
+        "istats": {
+            "count": len(istats),
+            "values": istats,
+        },
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "lb": lb_control,
