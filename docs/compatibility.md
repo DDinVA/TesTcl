@@ -36,6 +36,16 @@ read connection metadata, while `htonl`/`ntohl` and `htons`/`ntohs` perform
 bounded unsigned byte-order conversion. These retain the old command surface
 without introducing a second source of HTTP/IP state.
 
+The top-level sideband commands `connect`, `send`, `recv`, and `close` are
+implemented as deterministic fixture-backed controls. A scenario may provide
+successful response bytes or an explicit connection failure such as
+`unreachable`, `refused`, or `timeout`; no external socket is opened. Handles
+are scoped to the emulated connection, and semantic output reports lifecycle
+state plus sent, received, and buffered byte counts. The model validates the
+documented options and status-variable forms, including `recv -peek` and
+`recv -eol`, but does not claim to reproduce DNS, TLS, socket scheduling,
+upstream protocol behavior, or real sideband timing.
+
 The optional TMOS 17.5 emulator exposes the pinned `tcl-lsp` registry in
 bounded chunks and reports static command-handler and packet-event coverage
 through its conformance endpoint. Structured packet traces currently cover

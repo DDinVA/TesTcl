@@ -1754,6 +1754,10 @@ SEMANTIC_MOCK_COMMANDS = {
     "uniq_sorted_ip_list",
     "vlan_id",
     "substr",
+    "close",
+    "connect",
+    "recv",
+    "send",
     "xff_list",
     "xff_uniq_ordered_ip_list",
     "xff_uniq_sorted_ip_list",
@@ -3131,6 +3135,18 @@ def _configure_flowtable(session: Any, flowtable_config: dict[str, Any]) -> None
     )
 
 
+def _configure_sideband(session: Any, sideband_config: dict[str, dict[str, str]]) -> None:
+    """Install bounded, deterministic sideband connection fixtures."""
+    flattened: list[str] = []
+    for destination, fixture in sideband_config.items():
+        flattened.extend(
+            (destination, fixture["connect_status"], fixture["response"])
+        )
+    session.eval_tcl(
+        "::itest::semantic::sideband_configure " + _tcl_list(flattened)
+    )
+
+
 def _split_tcl_list(value: Any) -> list[str]:
     """Parse a Tcl list returned by the bridge using a temporary interpreter."""
     try:
@@ -3190,6 +3206,79 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "reuse_enabled": oneconnect_parts[1] == "1",
         "select": oneconnect_parts[2],
         "label": oneconnect_parts[3],
+    }
+    sideband_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::sideband_snapshot")
+    )
+    if (
+        len(sideband_parts) != 4
+        or sideband_parts[0] != "next_id"
+        or sideband_parts[2] != "connections"
+    ):
+        raise EmulatorInputError("invalid sideband state")
+    try:
+        sideband_next_id = int(sideband_parts[1])
+    except (TypeError, ValueError):
+        raise EmulatorInputError("invalid sideband next-id state") from None
+    if sideband_next_id < 0:
+        raise EmulatorInputError("invalid sideband next-id state")
+    sideband_connections: list[dict[str, Any]] = []
+    sideband_handles: set[str] = set()
+    for raw_connection in _split_tcl_list(sideband_parts[3]):
+        connection_parts = _split_tcl_list(raw_connection)
+        if len(connection_parts) != 16 or connection_parts[::2] != [
+            "handle",
+            "destination",
+            "protocol",
+            "status",
+            "closed",
+            "sent_bytes",
+            "received_bytes",
+            "buffered_bytes",
+        ]:
+            raise EmulatorInputError("invalid sideband connection state")
+        connection = dict(
+            zip(connection_parts[::2], connection_parts[1::2])
+        )
+        handle = connection["handle"]
+        if not handle or handle in sideband_handles:
+            raise EmulatorInputError("invalid or duplicate sideband connection handle")
+        sideband_handles.add(handle)
+        if connection["status"] not in {
+            "connected", "closed", "error", "refused", "timeout", "unreachable"
+        }:
+            raise EmulatorInputError("invalid sideband connection status")
+        if connection["closed"] not in {"0", "1"}:
+            raise EmulatorInputError("invalid sideband closed state")
+        try:
+            protocol = int(connection["protocol"])
+            sent_bytes = int(connection["sent_bytes"])
+            received_bytes = int(connection["received_bytes"])
+            buffered_bytes = int(connection["buffered_bytes"])
+        except (KeyError, TypeError, ValueError):
+            raise EmulatorInputError("invalid sideband numeric state") from None
+        if (
+            not 0 <= protocol <= 255
+            or sent_bytes < 0
+            or received_bytes < 0
+            or buffered_bytes < 0
+        ):
+            raise EmulatorInputError("invalid sideband numeric state")
+        sideband_connections.append(
+            {
+                "handle": handle,
+                "destination": connection["destination"],
+                "protocol": protocol,
+                "status": connection["status"],
+                "closed": connection["closed"] == "1",
+                "sent_bytes": sent_bytes,
+                "received_bytes": received_bytes,
+                "buffered_bytes": buffered_bytes,
+            }
+        )
+    sideband = {
+        "next_id": sideband_next_id,
+        "connections": sideband_connections,
     }
     bwc_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::bwc_snapshot")
@@ -4718,6 +4807,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "values": istats,
         },
         "oneconnect": oneconnect,
+        "sideband": sideband,
         "bwc": bwc,
         "ipfix": ipfix,
         "ilx": ilx,
@@ -6638,6 +6728,76 @@ def _normalise_flowtable(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalise_sideband(raw: Any) -> dict[str, dict[str, str]]:
+    """Normalize deterministic sideband destinations and response fixtures."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("sideband must be an object mapping destinations to fixtures")
+    if len(raw) > 32:
+        raise EmulatorInputError("sideband cannot contain more than 32 destination fixtures")
+
+    result: dict[str, dict[str, str]] = {}
+    allowed = {"connect_status", "response"}
+    valid_statuses = {"connected", "error", "refused", "timeout", "unreachable"}
+    for destination, fixture in raw.items():
+        valid_destination_encoding = True
+        try:
+            destination_bytes = destination.encode("utf-8") if isinstance(destination, str) else b""
+        except UnicodeEncodeError:
+            valid_destination_encoding = False
+            destination_bytes = b""
+        if (
+            not isinstance(destination, str)
+            or not destination
+            or not valid_destination_encoding
+            or "\x00" in destination
+            or len(destination_bytes) > 4096
+        ):
+            raise EmulatorInputError(
+                "sideband destination keys must be non-empty strings of at most 4096 UTF-8 bytes without NUL"
+            )
+        if isinstance(fixture, str):
+            connect_status = "connected"
+            response = fixture
+        elif isinstance(fixture, dict):
+            unknown = sorted(set(fixture) - allowed)
+            if unknown:
+                raise EmulatorInputError(
+                    f"sideband.{destination} unsupported field(s): {', '.join(unknown)}"
+                )
+            connect_status = fixture.get("connect_status", "connected")
+            response = fixture.get("response", "")
+        else:
+            raise EmulatorInputError(
+                f"sideband.{destination} must be a response string or fixture object"
+            )
+        if not isinstance(connect_status, str) or connect_status not in valid_statuses:
+            raise EmulatorInputError(
+                f"sideband.{destination}.connect_status must be one of: "
+                + ", ".join(sorted(valid_statuses))
+            )
+        if not isinstance(response, str) or "\x00" in response:
+            raise EmulatorInputError(
+                f"sideband.{destination}.response must be a string without NUL"
+            )
+        valid_response_encoding = True
+        try:
+            response_bytes = response.encode("utf-8")
+        except UnicodeEncodeError:
+            valid_response_encoding = False
+            response_bytes = b""
+        if len(response_bytes) > 1024 * 1024 or not valid_response_encoding:
+            raise EmulatorInputError(
+                f"sideband.{destination}.response cannot exceed 1048576 UTF-8 bytes"
+            )
+        result[destination] = {
+            "connect_status": connect_status,
+            "response": response,
+        }
+    return result
+
+
 def _normalise_ip(raw: Any) -> dict[str, Any]:
     """Normalize deterministic inputs for the bounded IP command model."""
     if raw is None:
@@ -6972,6 +7132,7 @@ def _normalise_scenario_config(
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
+    dict[str, dict[str, str]],
 ]:
     if not isinstance(scenario, dict):
         raise EmulatorInputError("scenario must be a JSON object")
@@ -6996,6 +7157,7 @@ def _normalise_scenario_config(
         "route",
         "http_proxy",
         "flowtable",
+        "sideband",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -7048,6 +7210,7 @@ def _normalise_scenario_config(
         _normalise_route(scenario.get("route")),
         _normalise_http_proxy(scenario.get("http_proxy")),
         _normalise_flowtable(scenario.get("flowtable")),
+        _normalise_sideband(scenario.get("sideband")),
     )
 
 
@@ -12379,6 +12542,7 @@ class EmulatorSession:
             route_config,
             http_proxy_config,
             flowtable_config,
+            sideband_config,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -12406,6 +12570,7 @@ class EmulatorSession:
         self._route_visible = bool(route_config["metrics"]) or "ROUTE::" in source
         self._http_proxy_config = http_proxy_config
         self._flowtable_config = flowtable_config
+        self._sideband_config = sideband_config
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -12528,6 +12693,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::offbox_reset_connection")
                 session.eval_tcl("::itest::semantic::qoe_reset_connection")
                 session.eval_tcl("::itest::semantic::ike_reset_event")
+                session.eval_tcl("::itest::semantic::sideband_reset_connection")
                 session.eval_tcl("::itest::semantic::ftp_reset_connection")
                 session.eval_tcl("::itest::semantic::imap_reset_connection")
                 session.eval_tcl("::itest::semantic::pop3_reset_connection")
@@ -12574,6 +12740,7 @@ class EmulatorSession:
                 _configure_route(session, self._route_config)
                 _configure_http_proxy(session, self._http_proxy_config)
                 _configure_flowtable(session, self._flowtable_config)
+                _configure_sideband(session, self._sideband_config)
                 session.eval_tcl("::itest::semantic::rewrite_reset_connection")
                 session.eval_tcl("::itest::semantic::html_reset_connection")
                 session.eval_tcl("::itest::semantic::compression_reset_connection")
@@ -12693,6 +12860,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::aaa_reset_connection")
             session.eval_tcl("::itest::semantic::access_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
+            session.eval_tcl("::itest::semantic::sideband_reset_connection")
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::route_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
@@ -13201,6 +13369,7 @@ class EmulatorSession:
                 for entry in session.get_logs()
             ],
             "semantic": {
+                "sideband": semantic_snapshot["sideband"],
                 "adapt": semantic_snapshot["adapt"],
                 "psm": semantic_snapshot["psm"],
                 "ip": semantic_snapshot["ip"],

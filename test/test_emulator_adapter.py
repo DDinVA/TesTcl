@@ -1907,7 +1907,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 35)
+        self.assertEqual(queue["command_count"], 31)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -9548,6 +9548,137 @@ when HTTP_REQUEST {
                 session.fire_event("CLIENT_ACCEPTED")
         finally:
             session.close()
+
+    def test_sideband_connect_send_peek_recv_and_close_use_deterministic_fixtures(self) -> None:
+        response = "HTTP/1.0 200 OK\r\nX-Test: yes\r\n\r\n"
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "HTTP"],
+                "sideband": {"10.0.0.10:80": {"response": response}},
+                "irule": """
+when HTTP_REQUEST {
+    set conn [connect -protocol TCP -timeout 100 -idle 30 -status connect_status 10.0.0.10:80]
+    set sent [send -timeout 1000 -status send_status $conn "GET / HTTP/1.0\r\n\r\n"]
+    set peeked [recv -peek -status peek_status 5 $conn]
+    set line [recv -eol -status line_status $conn]
+    set remainder [recv -status recv_status $conn]
+    close $conn close_status
+    log local0. "statuses=$connect_status/$send_status/$peek_status/$line_status/$recv_status/$close_status sent=$sent peek=[string length $peeked] line=[string length $line] remainder=[string length $remainder]"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=True,
+            allow_packets=False,
+        )
+        try:
+            result = session.run_request({"uri": "/"})
+            self.assertTrue(
+                any(
+                    "statuses=connected/sent/received/received/received/closed" in entry
+                    and f"sent={len('GET / HTTP/1.0\r\n\r\n')}" in entry
+                    and "peek=5" in entry
+                    for entry in result["logs"]
+                )
+            )
+            sideband = result["semantic"]["sideband"]
+            self.assertEqual(sideband["next_id"], 1)
+            self.assertEqual(len(sideband["connections"]), 1)
+            connection = sideband["connections"][0]
+            self.assertEqual(connection["handle"], "sideband:1")
+            self.assertEqual(connection["destination"], "10.0.0.10:80")
+            self.assertEqual(connection["protocol"], 6)
+            self.assertTrue(connection["closed"])
+            self.assertEqual(connection["sent_bytes"], len("GET / HTTP/1.0\r\n\r\n"))
+            self.assertEqual(connection["received_bytes"], len(response))
+            self.assertEqual(connection["buffered_bytes"], 0)
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            for command_name in ("connect", "send", "recv", "close"):
+                self.assertEqual(usage[command_name]["runtime_status"], "semantic-mock")
+        finally:
+            session.close()
+
+    def test_sideband_connect_failure_and_lifecycle_validation_are_deterministic(self) -> None:
+        failed = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "sideband": {
+                    "unreachable.example:443": {"connect_status": "unreachable"}
+                },
+                "irule": """
+when HTTP_REQUEST {
+    set conn [connect -status status unreachable.example:443]
+    log local0. "conn=$conn status=$status"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = failed.fire_event("HTTP_REQUEST")
+            self.assertTrue(any("conn= status=unreachable" in entry for entry in result["logs"]))
+            self.assertEqual(result["semantic"]["sideband"]["connections"], [])
+        finally:
+            failed.close()
+
+        for irule, message in (
+            (
+                "when HTTP_REQUEST { send sideband:99 data }",
+                "send references an unknown sideband connection",
+            ),
+            (
+                "when HTTP_REQUEST { connect -unknown x }",
+                "unsupported connect option -unknown",
+            ),
+        ):
+            invalid = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {"profiles": ["HTTP"], "irule": irule},
+                allow_irule_file=True,
+                allow_requests=False,
+                allow_packets=False,
+            )
+            try:
+                with self.subTest(message=message), self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError, message
+                ):
+                    invalid.fire_event("HTTP_REQUEST")
+            finally:
+                    invalid.close()
+
+        output_session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "sideband": {"empty.example:80": ""},
+                "irule": """
+when HTTP_REQUEST {
+    set conn [connect empty.example:80]
+    set count [recv -timeout 25 $conn received]
+    set status [recv -timeout 25 -status receive_status $conn]
+    close $conn
+    log local0. "count=$count received=<$received> status=$receive_status result=<$status>"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = output_session.fire_event("HTTP_REQUEST")
+            self.assertTrue(
+                any(
+                    "count=0 received=<> status=timeout result=<>" in entry
+                    for entry in result["logs"]
+                )
+            )
+        finally:
+            output_session.close()
 
     def test_qoe_commands_model_video_metrics_and_connection_control(self) -> None:
         session = self.adapter.EmulatorSession(

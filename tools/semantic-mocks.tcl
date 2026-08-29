@@ -516,6 +516,12 @@ namespace eval ::itest::semantic {
         variable name ""
     }
 
+    namespace eval ::state::sideband {
+        variable next_id 0
+        variable connections {}
+        variable routes {}
+    }
+
     namespace eval ::state::socks {
         variable version "5"
         variable allowed 1
@@ -9261,6 +9267,335 @@ namespace eval ::itest::semantic {
         set result $::state::link::vlan_id
         ::itest::log_decision link vlan_id $result
         return $result
+    }
+
+    proc sideband_configure {values} {
+        if {[llength $values] % 3} {
+            error "sideband fixtures require destination, status, and response triples"
+        }
+        set ::state::sideband::routes [dict create]
+        foreach {destination status response} $values {
+            dict set ::state::sideband::routes $destination [dict create \
+                connect_status $status response $response]
+        }
+    }
+
+    proc sideband_reset_connection {} {
+        set ::state::sideband::next_id 0
+        set ::state::sideband::connections [dict create]
+    }
+
+    proc _sideband_validate_text {value label} {
+        if {$value eq "" || [string first "\x00" $value] >= 0} {
+            error "$label must be non-empty and free of NUL bytes"
+        }
+        if {[string bytelength $value] > 4096} {
+            error "$label exceeds the 4096-byte limit"
+        }
+        return $value
+    }
+
+    proc _sideband_validate_status_var {value label} {
+        if {$value eq "" || [string first "\x00" $value] >= 0} {
+            error "$label variable name must be non-empty and free of NUL bytes"
+        }
+        if {[string bytelength $value] > 4096} {
+            error "$label variable name exceeds the 4096-byte limit"
+        }
+        return $value
+    }
+
+    proc _sideband_set_status {variable_name value {level 4}} {
+        if {$variable_name eq ""} { return }
+        upvar $level $variable_name target
+        set target $value
+    }
+
+    proc _sideband_validate_integer {value label minimum maximum} {
+        if {![string is integer -strict $value] || $value < $minimum || $value > $maximum} {
+            error "$label must be an integer from $minimum to $maximum"
+        }
+        return $value
+    }
+
+    proc _sideband_validate_protocol {value} {
+        switch -exact -- [string toupper $value] {
+            TCP     { return 6 }
+            UDP     { return 17 }
+            SCTP    { return 132 }
+            ICMP    { return 1 }
+            ICMPV6  { return 58 }
+            IPV6-ICMP { return 58 }
+            default { return [_sideband_validate_integer $value "connect protocol" 0 255] }
+        }
+    }
+
+    proc sideband_connect_command {args} {
+        set protocol 6
+        set myaddr ""
+        set myport 0
+        set timeout 0
+        set idle 300
+        set tos 0
+        set status_variable ""
+        set index 0
+        set end_options 0
+        while {$index < [llength $args]} {
+            set token [lindex $args $index]
+            if {!$end_options && $token eq "--"} {
+                set end_options 1
+                incr index
+                continue
+            }
+            if {!$end_options && [string index $token 0] eq "-"} {
+                switch -exact -- $token {
+                    -protocol - -myaddr - -myport - -timeout - -idle - -tos - -status {
+                        if {$index + 1 >= [llength $args]} {
+                            error "connect $token requires a value"
+                        }
+                        set value [lindex $args [incr index]]
+                        switch -exact -- $token {
+                            -protocol { set protocol [_sideband_validate_protocol $value] }
+                            -myaddr { set myaddr [_sideband_validate_text $value "connect source address"] }
+                            -myport { set myport [_sideband_validate_integer $value "connect source port" 0 65535] }
+                            -timeout { set timeout [_sideband_validate_integer $value "connect timeout" 0 86400000] }
+                            -idle { set idle [_sideband_validate_integer $value "connect idle timeout" 0 86400] }
+                            -tos { set tos [_sideband_validate_integer $value "connect TOS" 0 255] }
+                            -status { set status_variable [_sideband_validate_status_var $value "connect status"] }
+                        }
+                        incr index
+                        continue
+                    }
+                    default { error "unsupported connect option $token" }
+                }
+            }
+            break
+        }
+        set remaining [lrange $args $index end]
+        if {[llength $remaining] != 1} {
+            error "connect requires one destination"
+        }
+        set destination [_sideband_validate_text [lindex $remaining 0] "connect destination"]
+        set connect_status connected
+        set response ""
+        if {[dict exists $::state::sideband::routes $destination]} {
+            set fixture [dict get $::state::sideband::routes $destination]
+            set connect_status [dict get $fixture connect_status]
+            set response [dict get $fixture response]
+        }
+        if {$connect_status ne "connected"} {
+            _sideband_set_status $status_variable $connect_status
+            ::itest::log_decision sideband connect [list $destination $connect_status]
+            return ""
+        }
+        incr ::state::sideband::next_id
+        set handle "sideband:$::state::sideband::next_id"
+        set record [dict create destination $destination protocol $protocol myaddr $myaddr \
+            myport $myport timeout $timeout idle $idle tos $tos status connected \
+            closed 0 sent_bytes 0 received_bytes 0 recv_buffer $response]
+        dict set ::state::sideband::connections $handle $record
+        _sideband_set_status $status_variable connected
+        ::itest::log_decision sideband connect [list $handle $destination $protocol]
+        return $handle
+    }
+
+    proc _sideband_connection {handle command} {
+        if {$handle eq "" || ![dict exists $::state::sideband::connections $handle]} {
+            error "$command references an unknown sideband connection"
+        }
+        set record [dict get $::state::sideband::connections $handle]
+        if {[dict get $record closed]} {
+            error "$command references a closed sideband connection"
+        }
+        return $record
+    }
+
+    proc _sideband_prefix_bytes {value count} {
+        if {$count <= 0} { return "" }
+        set encoded [binary encode hex $value]
+        set available [expr {[string length $encoded] / 2}]
+        set take [expr {min($count, $available)}]
+        if {$take == 0} { return "" }
+        return [binary decode hex [string range $encoded 0 [expr {$take * 2 - 1}]]]
+    }
+
+    proc _sideband_consume_bytes {value count} {
+        if {$count <= 0} { return $value }
+        set encoded [binary encode hex $value]
+        set offset [expr {$count * 2}]
+        set remaining [string range $encoded $offset end]
+        if {$remaining eq ""} { return "" }
+        return [binary decode hex $remaining]
+    }
+
+    proc sideband_send_command {args} {
+        set timeout 0
+        set status_variable ""
+        set index 0
+        set end_options 0
+        while {$index < [llength $args]} {
+            set token [lindex $args $index]
+            if {!$end_options && $token eq "--"} {
+                set end_options 1
+                incr index
+                continue
+            }
+            if {!$end_options && [string index $token 0] eq "-"} {
+                switch -exact -- $token {
+                    -timeout - -status {
+                        if {$index + 1 >= [llength $args]} { error "send $token requires a value" }
+                        set value [lindex $args [incr index]]
+                        if {$token eq "-timeout"} {
+                            set timeout [_sideband_validate_integer $value "send timeout" 0 86400000]
+                        } else {
+                            set status_variable [_sideband_validate_status_var $value "send status"]
+                        }
+                        incr index
+                        continue
+                    }
+                    default { error "unsupported send option $token" }
+                }
+            }
+            break
+        }
+        set remaining [lrange $args $index end]
+        if {[llength $remaining] != 2} { error "send requires a connection and data" }
+        set handle [lindex $remaining 0]
+        set data [lindex $remaining 1]
+        set record [_sideband_connection $handle send]
+        set count [string bytelength $data]
+        if {$count > 1048576} { error "send data cannot exceed 1048576 bytes" }
+        dict set record sent_bytes [expr {[dict get $record sent_bytes] + $count}]
+        dict set ::state::sideband::connections $handle $record
+        _sideband_set_status $status_variable sent
+        ::itest::log_decision sideband send [list $handle $count $timeout]
+        return $count
+    }
+
+    proc sideband_recv_command {args} {
+        set eol 0
+        set peek 0
+        set timeout 0
+        set status_variable ""
+        set index 0
+        set end_options 0
+        while {$index < [llength $args]} {
+            set token [lindex $args $index]
+            if {!$end_options && $token eq "--"} {
+                set end_options 1
+                incr index
+                continue
+            }
+            if {!$end_options && [string index $token 0] eq "-"} {
+                switch -exact -- $token {
+                    -eol { set eol 1 }
+                    -peek { set peek 1 }
+                    -timeout - -status {
+                        if {$index + 1 >= [llength $args]} { error "recv $token requires a value" }
+                        set value [lindex $args [incr index]]
+                        if {$token eq "-timeout"} {
+                            set timeout [_sideband_validate_integer $value "recv timeout" 0 86400000]
+                        } else {
+                            set status_variable [_sideband_validate_status_var $value "recv status"]
+                        }
+                    }
+                    default { error "unsupported recv option $token" }
+                }
+                incr index
+                continue
+            }
+            break
+        }
+        set remaining [lrange $args $index end]
+        if {[llength $remaining] < 1 || [llength $remaining] > 3} {
+            error "recv requires a connection, with optional byte count and variable"
+        }
+        set count -1
+        set handle ""
+        set variable_name ""
+        if {[llength $remaining] == 1} {
+            set handle [lindex $remaining 0]
+        } elseif {[llength $remaining] == 2 && [string is integer -strict [lindex $remaining 0]]} {
+            set count [lindex $remaining 0]
+            set handle [lindex $remaining 1]
+        } elseif {[llength $remaining] == 2} {
+            set handle [lindex $remaining 0]
+            set variable_name [lindex $remaining 1]
+        } else {
+            set count [lindex $remaining 0]
+            set handle [lindex $remaining 1]
+            set variable_name [lindex $remaining 2]
+        }
+        if {$count != -1} {
+            _sideband_validate_integer $count "recv byte count" 0 1048576
+        }
+        if {$variable_name ne ""} {
+            _sideband_validate_status_var $variable_name "recv output"
+        }
+        set record [_sideband_connection $handle recv]
+        set buffered [dict get $record recv_buffer]
+        if {$eol} {
+            set newline [string first "\n" $buffered]
+            if {$newline < 0} {
+                set selected ""
+            } else {
+                set selected [string range $buffered 0 $newline]
+            }
+        } else {
+            set selected $buffered
+        }
+        if {$count >= 0} {
+            set selected [_sideband_prefix_bytes $selected $count]
+        }
+        set received_count [string bytelength $selected]
+        if {!$peek && $received_count > 0} {
+            dict set record recv_buffer [_sideband_consume_bytes $buffered $received_count]
+            dict set record received_bytes [expr {[dict get $record received_bytes] + $received_count}]
+            dict set ::state::sideband::connections $handle $record
+        }
+        set status [expr {$received_count > 0 ? "received" : "timeout"}]
+        _sideband_set_status $status_variable $status
+        ::itest::log_decision sideband recv [list $handle $received_count $peek $eol $timeout]
+        if {$variable_name ne ""} {
+            upvar 3 $variable_name output
+            set output $selected
+            return $received_count
+        }
+        return $selected
+    }
+
+    proc sideband_close_command {args} {
+        if {[llength $args] < 1 || [llength $args] > 2} {
+            error "close requires a connection and optional status variable"
+        }
+        set handle [lindex $args 0]
+        set status_variable ""
+        if {[llength $args] == 2} {
+            set status_variable [_sideband_validate_status_var [lindex $args 1] "close status"]
+        }
+        set record [_sideband_connection $handle close]
+        dict set record closed 1
+        dict set record status closed
+        dict set ::state::sideband::connections $handle $record
+        _sideband_set_status $status_variable closed 3
+        ::itest::log_decision sideband close $handle
+        return ""
+    }
+
+    proc sideband_snapshot {} {
+        set rows {}
+        dict for {handle record} $::state::sideband::connections {
+            lappend rows [list \
+                handle $handle \
+                destination [dict get $record destination] \
+                protocol [dict get $record protocol] \
+                status [dict get $record status] \
+                closed [dict get $record closed] \
+                sent_bytes [dict get $record sent_bytes] \
+                received_bytes [dict get $record received_bytes] \
+                buffered_bytes [string bytelength [dict get $record recv_buffer]]]
+        }
+        return [list next_id $::state::sideband::next_id connections $rows]
     }
 
     proc socks_reset_connection {} {
@@ -22589,6 +22924,27 @@ foreach {original replacement} {
         } $replacement]
     }
 }
+
+# `close` is also a native Tcl command, so it never reaches the unknown
+# dispatcher that handles the other top-level iRule commands.  Keep the
+# native command available to framework namespaces while routing calls from
+# iRule handlers to the deterministic sideband model.
+if {[::tmm::_orig_info commands ::close] ne "" &&
+    [::tmm::_orig_info commands ::tmm::_orig_sideband_close] eq ""} {
+    ::tmm::_orig_rename ::close ::tmm::_orig_sideband_close
+    proc ::close {args} {
+        set caller_ns [uplevel 1 {namespace current}]
+        if {[string match "::tmm*" $caller_ns] ||
+            [string match "::itest*" $caller_ns] ||
+            [string match "::orch*" $caller_ns] ||
+            [string match "::state*" $caller_ns] ||
+            [string match "::proto*" $caller_ns] ||
+            [string match "::static*" $caller_ns]} {
+            return [uplevel 1 [linsert $args 0 ::tmm::_orig_sideband_close]]
+        }
+        return [eval [linsert $args 0 ::itest::semantic::sideband_close_command]]
+    }
+}
 foreach {original replacement} {
     htonl legacy_htonl
     htons legacy_htons
@@ -22843,8 +23199,10 @@ foreach {original replacement} {
     active_nodes active_nodes_command
     b64decode b64decode_command
     b64encode b64encode_command
+    close sideband_close_command
     client_addr client_addr_command
     client_port client_port_command
+    connect sideband_connect_command
     crc32 crc32_command
     decode_uri decode_uri_command
     domain domain_command
@@ -22865,6 +23223,8 @@ foreach {original replacement} {
     remote_addr remote_addr_command
     remote_port remote_port_command
     rmd160 rmd160_command
+    recv sideband_recv_command
+    send sideband_send_command
     serverside serverside_command
     server_addr server_addr_command
     server_port server_port_command

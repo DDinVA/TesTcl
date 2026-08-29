@@ -65,6 +65,35 @@ Connection endpoint getters (`client_addr`, `client_port`, `local_addr`,
 `local_port`, `remote_addr`, `remote_port`, `server_addr`, and `server_port`)
 read the configured connection endpoints; server getters switch to the
 selected pool member after `pool` or `LB::reselect` establishes one.
+The top-level sideband commands `connect`, `send`, `recv`, and `close` use
+deterministic, scenario-supplied fixtures rather than opening external
+sockets. Configure a destination with a response shorthand or an explicit
+connection result:
+
+```json
+{
+  "sideband": {
+    "10.0.0.10:80": {
+      "response": "HTTP/1.0 200 OK\r\nX-Test: yes\r\n\r\n"
+    },
+    "unreachable.example:443": {
+      "connect_status": "unreachable"
+    }
+  }
+}
+```
+
+`connect` returns a connection-scoped handle and supports the documented
+`-protocol`, `-myaddr`, `-myport`, `-timeout`, `-idle`, `-tos`, and `-status`
+options. `send` records byte counts and supports `-timeout` and `-status`.
+`recv` returns fixture bytes, or writes them to a variable, and supports
+bounded byte counts plus `-eol`, `-peek`, `-timeout`, and `-status`; `close`
+marks the handle closed. Connection status, sent/received byte counts, and
+remaining buffered bytes are returned in `result.semantic.sideband`. Fixtures
+are capped at 32 destinations and 1 MiB per response, and sideband operations
+are intentionally connection-scoped and repeatable. This models iRule
+control flow and failure handling, not DNS, TLS, upstream protocol parsing,
+socket timing, or real network I/O.
 Generic UDP packet traces fire `CLIENT_ACCEPTED`, `CLIENT_DATA`,
 `SERVER_CONNECTED`, and `SERVER_DATA` as applicable. `UDP::payload` is mutable
 by wire-byte offset, and the adapter records UDP drop, hold/release, respond,
