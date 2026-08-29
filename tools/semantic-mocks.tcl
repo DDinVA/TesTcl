@@ -44,6 +44,9 @@ namespace eval ::itest::semantic {
 
     variable dns_rr_counter 0
     variable dns_rr_objects [dict create]
+    variable dns_message_counter 0
+    variable dns_message_objects [dict create]
+    variable resolver_records [dict create]
 
     variable sip_discarded 0
     variable sip_response_requested 0
@@ -4930,6 +4933,130 @@ namespace eval ::itest::semantic {
             [_dns_rr_get $rr rdata]]
     }
 
+    # DNSMSG/RESOLVER use opaque dns_message and resource-record handles.
+    # The resolver data is deliberately supplied by the scenario so lookups
+    # stay deterministic and never reach the network.
+    proc resolver_clear {} {
+        variable resolver_records
+        variable dns_message_counter
+        variable dns_message_objects
+        set resolver_records [dict create]
+        set dns_message_counter 0
+        set dns_message_objects [dict create]
+    }
+
+    proc resolver_set {name records} {
+        variable resolver_records
+        if {$name eq ""} { error "resolver name cannot be empty" }
+        if {[catch {llength $records}]} {
+            error "resolver records must be a Tcl list"
+        }
+        dict set resolver_records $name $records
+    }
+
+    proc _dns_message_get {message} {
+        variable dns_message_objects
+        if {![dict exists $dns_message_objects $message]} {
+            error "invalid DNS message object"
+        }
+        return [dict get $dns_message_objects $message]
+    }
+
+    proc _dns_message_create {qname qtype rr_class records} {
+        variable dns_message_counter
+        variable dns_message_objects
+        set answer_objects {}
+        foreach record $records {
+            if {$record eq ""} { continue }
+            lappend answer_objects [_dns_rr_object $record]
+        }
+        set question [_dns_rr_create $qname $qtype $rr_class 0 ""]
+        incr dns_message_counter
+        set handle "dnsmsg$dns_message_counter"
+        dict set dns_message_objects $handle [dict create \
+            id 0 qr 1 opcode 0 aa 0 tc 0 rd 1 ra 1 ad 0 cd 0 \
+            rcode 0 question $question answer $answer_objects \
+            authority {} additional {}]
+        return $handle
+    }
+
+    proc dnsmsg_header_command {args} {
+        if {[llength $args] != 2} {
+            error "DNSMSG::header requires a DNS message and field"
+        }
+        set message [_dns_message_get [lindex $args 0]]
+        set field [string tolower [lindex $args 1]]
+        if {$field ni {rcode opcode id ra rd tc qr aa ad cd}} {
+            error "unsupported DNSMSG::header field $field"
+        }
+        return [dict get $message $field]
+    }
+
+    proc dnsmsg_section_command {args} {
+        if {[llength $args] != 2} {
+            error "DNSMSG::section requires a DNS message and section"
+        }
+        set message [_dns_message_get [lindex $args 0]]
+        set section [string tolower [lindex $args 1]]
+        if {$section ni {question answer authority additional}} {
+            error "unsupported DNSMSG::section section $section"
+        }
+        if {$section eq "question"} {
+            return [list [dict get $message question]]
+        }
+        return [dict get $message $section]
+    }
+
+    proc dnsmsg_record_command {args} {
+        if {[llength $args] != 2} {
+            error "DNSMSG::record requires a resource record and field"
+        }
+        set field [string tolower [lindex $args 1]]
+        if {$field eq "owner"} { set field name }
+        if {$field ni {name type ttl class rdata}} {
+            error "unsupported DNSMSG::record field $field"
+        }
+        return [_dns_rr_get [lindex $args 0] $field]
+    }
+
+    proc resolver_name_lookup {args} {
+        variable resolver_records
+        if {[llength $args] != 3} {
+            error "RESOLVER::name_lookup requires resolver, name, and type"
+        }
+        set resolver [lindex $args 0]
+        if {![dict exists $resolver_records $resolver]} {
+            error "unknown network resolver $resolver"
+        }
+        set wanted_name [string tolower [string trimright [lindex $args 1] .]]
+        set wanted_type [string toupper [lindex $args 2]]
+        set matched {}
+        foreach record [dict get $resolver_records $resolver] {
+            set rr [_dns_rr_object $record]
+            set rr_name [string tolower [string trimright [_dns_rr_get $rr name] .]]
+            set rr_type [string toupper [_dns_rr_get $rr type]]
+            if {$rr_name eq $wanted_name &&
+                ($rr_type eq $wanted_type || $wanted_type eq "ANY")} {
+                lappend matched [_dns_rr_snapshot $rr]
+            }
+        }
+        set message [_dns_message_create [lindex $args 1] $wanted_type IN $matched]
+        ::itest::log_decision dns resolver_lookup [list $resolver [lindex $args 1] $wanted_type]
+        return $message
+    }
+
+    proc resolver_summarize {args} {
+        if {[llength $args] != 1} {
+            error "RESOLVER::summarize requires a DNS message"
+        }
+        set message [_dns_message_get [lindex $args 0]]
+        set result [dict get $message answer]
+        foreach section {authority additional} {
+            set result [concat $result [dict get $message $section]]
+        }
+        return $result
+    }
+
     proc _dns_refresh_state {{recalculate_length 0}} {
         foreach section {answers authority additional} {
             set count [llength [set ::state::dns::$section]]
@@ -6294,6 +6421,11 @@ foreach {name proc_name} {
     DNS::scrape ::itest::semantic::dns_scrape_command
     DNS::ttl ::itest::semantic::dns_ttl_command
     DNS::type ::itest::semantic::dns_type_command
+    DNSMSG::header ::itest::semantic::dnsmsg_header_command
+    DNSMSG::record ::itest::semantic::dnsmsg_record_command
+    DNSMSG::section ::itest::semantic::dnsmsg_section_command
+    RESOLVER::name_lookup ::itest::semantic::resolver_name_lookup
+    RESOLVER::summarize ::itest::semantic::resolver_summarize
     class ::itest::cmd::cmd_class
     MQTT::clean_session ::itest::cmd::mqtt_clean_session
     MQTT::client_id ::itest::cmd::mqtt_client_id

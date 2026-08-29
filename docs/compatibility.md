@@ -52,7 +52,8 @@ RR objects, section insert/remove/clear operations, RR field mutation,
 `DNS::header`, `DNS::scrape`, EDNS0 controls, `DNS::return`, and packet drop or
 disable actions. Structured records are deterministic test data; the emulator
 does not run DNS-Express, recursive resolution, DNSSEC signing, or a live
-nameserver.
+nameserver. `RESOLVER::name_lookup` and the `DNSMSG::*` commands can consume
+scenario-supplied resolver records without making network requests.
 GTP packets expose bounded GTPv1 and GTPv2 header/IE state, G-PDU payloads,
 GTP signaling/G-PDU/Prime ingress and egress events, and the catalogued
 `GTP::` command family. GTP-C and GTP-U use UDP ports 2123 and 2152; GTP-Prime

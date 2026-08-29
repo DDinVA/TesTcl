@@ -415,6 +415,28 @@ filters the supplied deterministic RR sections as a DNS-Express-shaped test
 fixture, while recursive resolution, DNSSEC, TSIG, compression-preserving
 re-encoding, and live nameserver behavior remain outside the boundary.
 
+Resolver-backed rules can use the same deterministic records through
+`RESOLVER::name_lookup`, `DNSMSG::header`, `DNSMSG::section`,
+`DNSMSG::record`, and `RESOLVER::summarize`. Add a `resolvers` object to the
+scenario; each resolver name maps to an RR array. Lookups never access the
+network and return only records whose owner name and type match the query.
+
+```json
+{
+  "profiles": ["TCP"],
+  "resolvers": {
+    "/Common/r1": [{
+      "name": "www.example.com.",
+      "type": "A",
+      "class": "IN",
+      "ttl": 120,
+      "rdata": "192.0.2.20"
+    }]
+  },
+  "irule": "when CLIENT_ACCEPTED { set m [RESOLVER::name_lookup /Common/r1 www.example.com A]; set rr [lindex [DNSMSG::section $m answer] 0]; log local0. [DNSMSG::record $rr rdata] }"
+}
+```
+
 ```json
 {
   "profiles": ["UDP", "DNS"],

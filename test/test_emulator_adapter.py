@@ -3555,6 +3555,40 @@ when DNS_REQUEST {
                 ]
             )
 
+    def test_resolver_lookup_returns_dnsmsg_objects(self) -> None:
+        session = self.adapter.EmulatorSession(
+            Path(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    set message [RESOLVER::name_lookup /Common/r1 www.example.com A]
+    set rr [lindex [DNSMSG::section $message answer] 0]
+    log local0. "[DNSMSG::header $message qr] [DNSMSG::header $message rcode] [DNSMSG::record $rr owner] [DNSMSG::record $rr type] [DNSMSG::record $rr rdata] [llength [RESOLVER::summarize $message]]"
+}
+""",
+                "resolvers": {
+                    "/Common/r1": [
+                        {
+                            "name": "www.example.com.",
+                            "type": "A",
+                            "class": "IN",
+                            "ttl": 120,
+                            "rdata": "192.0.2.20",
+                        }
+                    ]
+                },
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event("CLIENT_ACCEPTED")
+        finally:
+            session.close()
+        self.assertTrue(result["fired"])
+        self.assertIn("1 0 www.example.com. A 192.0.2.20 1", result["logs"][0])
+
     def test_sequence_aware_reassembly_handles_out_of_order_and_retransmission(self) -> None:
         request_payload = b"GET /ordered HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
         first = request_payload[:20]

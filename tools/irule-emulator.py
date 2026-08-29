@@ -432,6 +432,11 @@ SEMANTIC_MOCK_COMMANDS = {
     "DNS::scrape",
     "DNS::ttl",
     "DNS::type",
+    "DNSMSG::header",
+    "DNSMSG::record",
+    "DNSMSG::section",
+    "RESOLVER::name_lookup",
+    "RESOLVER::summarize",
     "event",
     "HTTP::passthrough_reason",
     "HTTP::password",
@@ -1219,6 +1224,25 @@ def _normalise_pools(raw: Any) -> dict[str, list[str]]:
     return pools
 
 
+def _normalise_resolvers(raw: Any) -> dict[str, list[dict[str, Any]]]:
+    """Normalize deterministic DNS records used by RESOLVER::name_lookup."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError(
+            "resolvers must be an object mapping resolver names to record arrays"
+        )
+    resolvers: dict[str, list[dict[str, Any]]] = {}
+    for name, records in raw.items():
+        resolver_name = _require_string(name, "resolver name")
+        if not resolver_name or "\x00" in resolver_name:
+            raise EmulatorInputError("resolver name cannot be empty or contain NUL")
+        resolvers[resolver_name] = _dns_normalise_records(
+            records, f"resolver {resolver_name}"
+        )
+    return resolvers
+
+
 def _normalise_datagroups(raw: Any) -> list[tuple[str, dict[str, str], str]]:
     if raw is None:
         return []
@@ -1390,11 +1414,25 @@ def _normalise_scenario_config(
     allow_requests: bool,
     allow_packets: bool = False,
     require_http: bool,
-) -> tuple[str, list[str], dict[str, list[str]], list[tuple[str, dict[str, str], str]]]:
+) -> tuple[
+    str,
+    list[str],
+    dict[str, list[str]],
+    dict[str, list[dict[str, Any]]],
+    list[tuple[str, dict[str, str], str]],
+]:
     if not isinstance(scenario, dict):
         raise EmulatorInputError("scenario must be a JSON object")
 
-    allowed_fields = {"tmos_version", "irule", "irule_file", "profiles", "pools", "datagroups"}
+    allowed_fields = {
+        "tmos_version",
+        "irule",
+        "irule_file",
+        "profiles",
+        "pools",
+        "resolvers",
+        "datagroups",
+    }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
     if allow_packets:
@@ -1428,8 +1466,12 @@ def _normalise_scenario_config(
     if require_http and "HTTP" not in profiles:
         raise EmulatorInputError("the first emulator slice requires the HTTP profile")
 
-    return source, profiles, _normalise_pools(scenario.get("pools")), _normalise_datagroups(
-        scenario.get("datagroups")
+    return (
+        source,
+        profiles,
+        _normalise_pools(scenario.get("pools")),
+        _normalise_resolvers(scenario.get("resolvers")),
+        _normalise_datagroups(scenario.get("datagroups")),
     )
 
 
@@ -5212,7 +5254,7 @@ class EmulatorSession:
         allow_packets: bool = False,
         backend: str = "inprocess",
     ) -> None:
-        source, profiles, pools, datagroups = _normalise_scenario_config(
+        source, profiles, pools, resolvers, datagroups = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
             allow_requests=allow_requests,
@@ -5224,6 +5266,7 @@ class EmulatorSession:
         self._source = source
         self._profiles = profiles
         self._pools = pools
+        self._resolvers = resolvers
         self._datagroups = datagroups
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
@@ -5305,6 +5348,12 @@ class EmulatorSession:
                 self._registered_events = session.load_irule(self._source)
                 for name, members in self._pools.items():
                     session.add_pool(name, members)
+                session.eval_tcl("::itest::semantic::resolver_clear")
+                for name, records in self._resolvers.items():
+                    session.eval_tcl(
+                        "::itest::semantic::resolver_set "
+                        f"{_tcl_quote(name)} {_tcl_quote(_dns_records_tcl(records))}"
+                    )
                 for name, records, dg_type in self._datagroups:
                     session.add_datagroup(name, records, dg_type)
                 self._started.set()
