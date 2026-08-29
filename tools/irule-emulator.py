@@ -545,6 +545,17 @@ EVENT_STATE_FIELDS = {
         "l7_aborted",
         "applied_action",
     },
+    "lsn": {
+        "address",
+        "port",
+        "pool",
+        "disabled",
+        "inbound_disabled",
+        "persistence_mode",
+        "persistence_timeout",
+        "persistence_entries",
+        "inbound_entries",
+    },
     "diameter": {
         "type",
         "version",
@@ -914,6 +925,7 @@ EVENT_STATE_NAMESPACES = {
     "sip": "::state::sip",
     "sdp": "::state::sdp",
     "acl": "::state::acl",
+    "lsn": "::state::lsn",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
     "message": "::state::message",
@@ -1438,6 +1450,14 @@ SEMANTIC_MOCK_COMMANDS = {
     "SDP::session_id",
     "ACL::action",
     "ACL::eval",
+    "LSN::address",
+    "LSN::disable",
+    "LSN::inbound",
+    "LSN::inbound-entry",
+    "LSN::persistence",
+    "LSN::persistence-entry",
+    "LSN::pool",
+    "LSN::port",
     "DIAMETER::avp",
     "DIAMETER::command",
     "DIAMETER::disconnect",
@@ -10474,6 +10494,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::sctp_reset_connection")
                 session.eval_tcl("::itest::semantic::flow_reset_connection")
                 session.eval_tcl("::itest::semantic::acl_reset_connection")
+                session.eval_tcl("::itest::semantic::lsn_reset_connection")
                 if any(str(profile).upper() == "REWRITE" for profile in self._profiles):
                     session.eval_tcl("::itest::semantic::rewrite_install_flow_hooks")
                 if any(
@@ -10756,6 +10777,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
             session.eval_tcl("::itest::semantic::flow_reset_connection")
             session.eval_tcl("::itest::semantic::acl_reset_connection")
+            session.eval_tcl("::itest::semantic::lsn_reset_connection")
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::route_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
@@ -12127,6 +12149,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::access_reset_connection")
         session.eval_tcl("::itest::semantic::flow_reset_connection")
         session.eval_tcl("::itest::semantic::acl_reset_connection")
+        session.eval_tcl("::itest::semantic::lsn_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::stream_reset_connection")
         session.eval_tcl("::itest::semantic::route_reset_connection")
@@ -12194,6 +12217,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::access_reset_connection")
         session.eval_tcl("::itest::semantic::flow_reset_connection")
         session.eval_tcl("::itest::semantic::acl_reset_connection")
+        session.eval_tcl("::itest::semantic::lsn_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::datagram_reset_connection")

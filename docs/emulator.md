@@ -612,6 +612,33 @@ The resulting `acl` state exposes `evaluated`, `l7_aborted`, and
 decision model only; it does not evaluate configured ACL rules, enforce a
 drop/reset on a real connection, or reproduce AFM policy-chain behavior.
 
+### LSN translation state
+
+The emulator models the eight catalogued `LSN::*` controls as deterministic
+connection state. Address, port, pool, disable, inbound filtering, persistence
+mode, persistence mappings, and inbound mappings are available from the event
+API. For example:
+
+```tcl
+when CLIENT_ACCEPTED {
+    LSN::address 198.51.100.10
+    LSN::port 45000
+    LSN::pool /Common/lsn_pool
+    LSN::persistence address-port 60
+    LSN::persistence-entry create 10.0.0.1:50000 198.51.100.10:45000
+    LSN::inbound-entry create /Common/lsn_pool 120 \
+        10.0.0.1:50000 198.51.100.10:45000 tcp
+}
+```
+
+`LSN::persistence-entry get CLIENT[:PORT]` returns the mapped translation
+endpoint, while `delete` removes it. `LSN::inbound-entry get TRANSLATION
+PROTOCOL` returns a two-item `{client route-domain}` list; `create` and
+`delete` manage the corresponding mapping. IPv6 endpoints with ports use
+`[HOST]:PORT`. The state records are bounded and reset with the connection;
+they do not allocate from a live CGNAT pool, translate packets, replicate
+mappings, or enforce wall-clock expiry.
+
 ### FLOWTABLE query inputs
 
 The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,

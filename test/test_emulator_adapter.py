@@ -292,6 +292,95 @@ when FLOW_INIT {
         finally:
             invalid_session.close()
 
+    def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "irule": """
+when CLIENT_ACCEPTED {
+    LSN::address 198.51.100.10
+    LSN::port 45000
+    LSN::pool /Common/lsn_pool
+    LSN::persistence address-port 60
+    LSN::inbound disable
+    LSN::disable
+    set persistence_created [LSN::persistence-entry create 10.0.0.1:50000 198.51.100.10:45000]
+    set inbound_created [LSN::inbound-entry create /Common/lsn_pool 120 10.0.0.1:50000 198.51.100.10:45000 tcp]
+    set persistence_found [LSN::persistence-entry get 10.0.0.1:50000]
+    set inbound_found [LSN::inbound-entry get 198.51.100.10:45000 TCP]
+    log local0. "address=198.51.100.10 port=45000 pool=/Common/lsn_pool mode=address-port p=$persistence_created/$persistence_found i=$inbound_created/$inbound_found"
+    LSN::persistence-entry delete 10.0.0.1:50000
+    LSN::inbound-entry delete 198.51.100.10:45000 udp
+    set persistence_after [LSN::persistence-entry get 10.0.0.1:50000]
+    set inbound_after [LSN::inbound-entry get 198.51.100.10:45000 TCP]
+    LSN::inbound-entry delete 198.51.100.10:45000 tcp
+    set inbound_deleted [LSN::inbound-entry get 198.51.100.10:45000 TCP]
+    log local0. "after=$persistence_after/$inbound_after deleted=$inbound_deleted"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event("CLIENT_ACCEPTED", {"lsn": {}})
+            self.assertTrue(result["fired"])
+            self.assertEqual(result["state"]["lsn"]["address"], "198.51.100.10")
+            self.assertEqual(result["state"]["lsn"]["port"], "45000")
+            self.assertEqual(result["state"]["lsn"]["pool"], "/Common/lsn_pool")
+            self.assertEqual(result["state"]["lsn"]["disabled"], "1")
+            self.assertEqual(result["state"]["lsn"]["inbound_disabled"], "1")
+            self.assertEqual(result["state"]["lsn"]["persistence_mode"], "address-port")
+            self.assertEqual(result["state"]["lsn"]["persistence_timeout"], "60")
+            self.assertEqual(result["state"]["lsn"]["persistence_entries"], "")
+            self.assertEqual(result["state"]["lsn"]["inbound_entries"], "")
+            self.assertTrue(any(
+                "p=198.51.100.10:45000/198.51.100.10:45000" in entry
+                and "i=198.51.100.10:45000 0/10.0.0.1:50000 0" in entry
+                for entry in result["logs"]
+            ))
+            self.assertTrue(any(
+                "after=/10.0.0.1:50000 0 deleted=" in entry
+                for entry in result["logs"]
+            ))
+        finally:
+            session.close()
+
+        invalid = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {"profiles": ["FLOW"], "irule": "when FLOW_INIT { LSN::pool x }"},
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, "not valid in FLOW_INIT"
+            ):
+                invalid.fire_event("FLOW_INIT")
+        finally:
+            invalid.close()
+
+        invalid_endpoint = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "irule": (
+                    "when CLIENT_ACCEPTED { "
+                    "LSN::inbound-entry create pool 60 10.0.0.1:50000 "
+                    "2001:db8::1:45000 tcp }"
+                )
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                r"IPv6 endpoints with ports must use \[HOST\]:PORT",
+            ):
+                invalid_endpoint.fire_event("CLIENT_ACCEPTED")
+        finally:
+            invalid_endpoint.close()
+
     def test_http_data_events_require_collection_and_honor_length(self) -> None:
         no_collect = self.adapter.run_scenario(
             {
@@ -804,8 +893,9 @@ when HTTP_REQUEST {
         self.assertNotIn(("RESOLV", "generated-stub"), queue_buckets)
         self.assertNotIn(("SOCKS", "generated-stub"), queue_buckets)
         self.assertNotIn(("SDP", "generated-stub"), queue_buckets)
+        self.assertNotIn(("LSN", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 214)
+        self.assertEqual(queue["command_count"], 206)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)

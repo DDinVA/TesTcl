@@ -964,6 +964,18 @@ namespace eval ::itest::semantic {
         variable applied_action 0
     }
 
+    namespace eval ::state::lsn {
+        variable address ""
+        variable port 0
+        variable pool ""
+        variable disabled 0
+        variable inbound_disabled 0
+        variable persistence_mode none
+        variable persistence_timeout 0
+        variable persistence_entries {}
+        variable inbound_entries {}
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -3890,6 +3902,291 @@ namespace eval ::itest::semantic {
         set ::state::acl::applied_action [_acl_action_code $::state::acl::action]
         ::itest::log_decision acl eval $::state::acl::applied_action
         return 0
+    }
+
+    proc lsn_reset_connection {} {
+        set ::state::lsn::address ""
+        set ::state::lsn::port 0
+        set ::state::lsn::pool ""
+        set ::state::lsn::disabled 0
+        set ::state::lsn::inbound_disabled 0
+        set ::state::lsn::persistence_mode none
+        set ::state::lsn::persistence_timeout 0
+        set ::state::lsn::persistence_entries {}
+        set ::state::lsn::inbound_entries {}
+    }
+
+    proc _lsn_require_event {command_name allowed_events} {
+        if {$::itest::current_event ni $allowed_events} {
+            error "$command_name is not valid in $::itest::current_event"
+        }
+    }
+
+    proc _lsn_validate_text {value field_name} {
+        if {$value eq "" || [string first "\x00" $value] >= 0 ||
+            [string first "\r" $value] >= 0 || [string first "\n" $value] >= 0} {
+            error "$field_name must be non-empty and contain no NUL bytes or newlines"
+        }
+        return $value
+    }
+
+    proc _lsn_validate_port {value field_name} {
+        if {![string is integer -strict $value] || $value < 0 || $value > 65535} {
+            error "$field_name must be an integer from 0 to 65535"
+        }
+        return $value
+    }
+
+    proc _lsn_validate_timeout {value field_name} {
+        if {![string is integer -strict $value] || $value < 0} {
+            error "$field_name must be a non-negative integer"
+        }
+        return $value
+    }
+
+    proc _lsn_protocol {value} {
+        set value [string toupper [_lsn_validate_text $value "LSN protocol"]]
+        if {$value ni {TCP UDP}} {
+            error "LSN protocol must be TCP or UDP"
+        }
+        return $value
+    }
+
+    proc _lsn_endpoint {value field_name require_port} {
+        set value [_lsn_validate_text $value $field_name]
+        if {[regexp {^\[([^]]+)\]:([0-9]+)$} $value -> address port]} {
+            return [list [_lsn_validate_text $address "$field_name address"] [_lsn_validate_port $port "$field_name port"] 1]
+        }
+        set colon_count [regexp -all -- {:} $value]
+        if {$colon_count == 1 && [regexp {^(.+):([0-9]+)$} $value -> address port]} {
+            return [list [_lsn_validate_text $address "$field_name address"] [_lsn_validate_port $port "$field_name port"] 1]
+        }
+        if {$colon_count > 1} {
+            if {$require_port} {
+                error "$field_name IPv6 endpoints with ports must use \[HOST\]:PORT"
+            }
+            return [list $value "" 0]
+        }
+        if {$require_port} {
+            error "$field_name requires HOST:PORT"
+        }
+        return [list $value "" 0]
+    }
+
+    proc _lsn_format_endpoint {address port} {
+        if {$port eq ""} { return $address }
+        if {[string first : $address] >= 0} {
+            return [format {[%s]:%s} $address $port]
+        }
+        return [format {%s:%s} $address $port]
+    }
+
+    proc _lsn_find_persistence {client} {
+        foreach entry $::state::lsn::persistence_entries {
+            if {[catch {dict get $entry client} entry_client]} {
+                error "LSN persistence state must contain dictionaries"
+            }
+            if {$entry_client eq $client} { return $entry }
+        }
+        return {}
+    }
+
+    proc _lsn_find_inbound {translation protocol} {
+        foreach entry $::state::lsn::inbound_entries {
+            if {[catch {
+                set entry_translation [dict get $entry translation]
+                set entry_protocol [dict get $entry protocol]
+            }]} {
+                error "LSN inbound state must contain dictionaries"
+            }
+            if {$entry_translation eq $translation && $entry_protocol eq $protocol} {
+                return $entry
+            }
+        }
+        return {}
+    }
+
+    proc lsn_address_command {args} {
+        _lsn_require_event LSN::address {AUTH_RESULT AUTH_WANTCREDENTIAL CACHE_REQUEST CACHE_UPDATE CLIENT_ACCEPTED CLIENT_DATA CLIENTSSL_CLIENTCERT CLIENTSSL_HANDSHAKE HTTP_CLASS_FAILED HTTP_CLASS_SELECTED HTTP_REQUEST HTTP_REQUEST_DATA LB_SELECTED RTSP_REQUEST RTSP_REQUEST_DATA SIP_REQUEST STREAM_MATCHED}
+        if {[llength $args] != 1} { error "LSN::address requires a translation address" }
+        set ::state::lsn::address [_lsn_validate_text [lindex $args 0] "LSN::address"]
+        ::itest::log_decision lsn address $::state::lsn::address
+        return ""
+    }
+
+    proc lsn_disable_command {args} {
+        _lsn_require_event LSN::disable {AUTH_RESULT AUTH_WANTCREDENTIAL CACHE_REQUEST CACHE_UPDATE CLIENT_ACCEPTED CLIENT_DATA CLIENTSSL_CLIENTCERT CLIENTSSL_HANDSHAKE HTTP_CLASS_FAILED HTTP_CLASS_SELECTED HTTP_REQUEST HTTP_REQUEST_DATA LB_SELECTED RTSP_REQUEST RTSP_REQUEST_DATA SIP_REQUEST STREAM_MATCHED}
+        if {[llength $args] != 0} { error "LSN::disable takes no arguments" }
+        set ::state::lsn::disabled 1
+        ::itest::log_decision lsn disable
+        return ""
+    }
+
+    proc lsn_inbound_command {args} {
+        _lsn_require_event LSN::inbound {AUTH_RESULT AUTH_WANTCREDENTIAL CACHE_REQUEST CACHE_UPDATE CLIENT_ACCEPTED CLIENT_DATA CLIENTSSL_CLIENTCERT CLIENTSSL_HANDSHAKE HTTP_CLASS_FAILED HTTP_CLASS_SELECTED HTTP_REQUEST HTTP_REQUEST_DATA LB_SELECTED RTSP_REQUEST RTSP_REQUEST_DATA SIP_REQUEST STREAM_MATCHED}
+        if {[llength $args] != 1 || [lindex $args 0] ne "disable"} {
+            error "LSN::inbound requires disable"
+        }
+        set ::state::lsn::inbound_disabled 1
+        ::itest::log_decision lsn inbound_disable
+        return ""
+    }
+
+    proc lsn_pool_command {args} {
+        _lsn_require_event LSN::pool {CLIENT_ACCEPTED CLIENT_DATA HTTP_REQUEST LB_FAILED LB_SELECTED RTSP_REQUEST SIP_REQUEST}
+        if {[llength $args] != 1} { error "LSN::pool requires a pool name" }
+        set ::state::lsn::pool [_lsn_validate_text [lindex $args 0] "LSN::pool"]
+        ::itest::log_decision lsn pool $::state::lsn::pool
+        return ""
+    }
+
+    proc lsn_port_command {args} {
+        _lsn_require_event LSN::port {AUTH_RESULT AUTH_WANTCREDENTIAL CACHE_REQUEST CACHE_UPDATE CLIENT_ACCEPTED CLIENT_DATA CLIENTSSL_CLIENTCERT CLIENTSSL_HANDSHAKE HTTP_CLASS_FAILED HTTP_CLASS_SELECTED HTTP_REQUEST HTTP_REQUEST_DATA LB_SELECTED RTSP_REQUEST RTSP_REQUEST_DATA SIP_REQUEST STREAM_MATCHED}
+        if {[llength $args] != 1} { error "LSN::port requires a translation port" }
+        set ::state::lsn::port [_lsn_validate_port [lindex $args 0] "LSN::port"]
+        ::itest::log_decision lsn port $::state::lsn::port
+        return ""
+    }
+
+    proc lsn_persistence_command {args} {
+        _lsn_require_event LSN::persistence {AUTH_RESULT AUTH_WANTCREDENTIAL CACHE_REQUEST CACHE_UPDATE CLIENT_ACCEPTED CLIENT_DATA CLIENTSSL_CLIENTCERT CLIENTSSL_HANDSHAKE HTTP_CLASS_FAILED HTTP_CLASS_SELECTED HTTP_REQUEST HTTP_REQUEST_DATA LB_SELECTED MR_INGRESS RTSP_REQUEST RTSP_REQUEST_DATA SIP_REQUEST STREAM_MATCHED}
+        if {[llength $args] != 2} {
+            error "LSN::persistence requires a mode and timeout"
+        }
+        set mode [lindex $args 0]
+        if {$mode ni {none address address-port strict-address-port}} {
+            error "LSN::persistence mode must be none, address, address-port, or strict-address-port"
+        }
+        set timeout [_lsn_validate_timeout [lindex $args 1] "LSN::persistence timeout"]
+        set ::state::lsn::persistence_mode $mode
+        set ::state::lsn::persistence_timeout $timeout
+        ::itest::log_decision lsn persistence [list $mode $timeout]
+        return ""
+    }
+
+    proc lsn_persistence_entry_command {args} {
+        _lsn_require_event LSN::persistence-entry {AUTH_RESULT AUTH_WANTCREDENTIAL CACHE_REQUEST CACHE_UPDATE CLIENT_ACCEPTED CLIENT_DATA CLIENTSSL_CLIENTCERT CLIENTSSL_HANDSHAKE HTTP_CLASS_FAILED HTTP_CLASS_SELECTED HTTP_REQUEST HTTP_REQUEST_DATA LB_SELECTED RTSP_REQUEST RTSP_REQUEST_DATA SIP_REQUEST STREAM_MATCHED}
+        if {[llength $args] < 2} {
+            error "LSN::persistence-entry requires get, create, or delete"
+        }
+        set operation [lindex $args 0]
+        if {$operation eq "get" || $operation eq "delete"} {
+            if {[llength $args] != 2} { error "LSN::persistence-entry $operation requires a client endpoint" }
+            set client_parts [_lsn_endpoint [lindex $args 1] "LSN::persistence-entry client" 0]
+            set client [_lsn_format_endpoint [lindex $client_parts 0] [lindex $client_parts 1]]
+            set entries $::state::lsn::persistence_entries
+            if {$operation eq "get"} {
+                set entry [_lsn_find_persistence $client]
+                if {$entry eq ""} { return "" }
+                return [dict get $entry translation]
+            }
+            set remaining {}
+            foreach entry $entries {
+                if {[dict get $entry client] ne $client} { lappend remaining $entry }
+            }
+            set ::state::lsn::persistence_entries $remaining
+            ::itest::log_decision lsn persistence_delete $client
+            return ""
+        }
+        if {$operation ne "create"} {
+            error "LSN::persistence-entry requires get, create, or delete"
+        }
+        set create_args [lrange $args 1 end]
+        set override 0
+        if {[llength $create_args] > 0 && [lindex $create_args 0] eq "-override"} {
+            set override 1
+            set create_args [lrange $create_args 1 end]
+        }
+        if {[llength $create_args] < 1 || [llength $create_args] > 4} {
+            error "LSN::persistence-entry create accepts client, translation, pool, and optional timeout"
+        }
+        set pool ""
+        set timeout $::state::lsn::persistence_timeout
+        if {[llength $create_args] == 1} {
+            set client_value [lindex $create_args 0]
+            set translation_value ""
+        } elseif {[llength $create_args] == 2} {
+            set client_value [lindex $create_args 0]
+            set translation_value [lindex $create_args 1]
+        } else {
+            set pool [_lsn_validate_text [lindex $create_args 0] "LSN::persistence-entry pool"]
+            set client_value [lindex $create_args 1]
+            set translation_value [lindex $create_args 2]
+            if {[llength $create_args] == 4} {
+                set timeout [_lsn_validate_timeout [lindex $create_args 3] "LSN::persistence-entry timeout"]
+            }
+        }
+        set client_parts [_lsn_endpoint $client_value "LSN::persistence-entry client" 0]
+        set client [_lsn_format_endpoint [lindex $client_parts 0] [lindex $client_parts 1]]
+        set existing [_lsn_find_persistence $client]
+        if {$existing ne "" && !$override} { return [dict get $existing translation] }
+        if {$translation_value eq ""} {
+            set translation_address $::state::lsn::address
+            if {$translation_address eq ""} { set translation_address "198.51.100.1" }
+            set translation_port $::state::lsn::port
+            if {$translation_port == 0} { set translation_port 1024 }
+            set translation [_lsn_format_endpoint $translation_address $translation_port]
+        } else {
+            set translation_parts [_lsn_endpoint $translation_value "LSN::persistence-entry translation" 1]
+            set translation [_lsn_format_endpoint [lindex $translation_parts 0] [lindex $translation_parts 1]]
+        }
+        set entry [dict create client $client translation $translation pool $pool timeout $timeout]
+        set remaining {}
+        foreach item $::state::lsn::persistence_entries {
+            if {[dict get $item client] ne $client} { lappend remaining $item }
+        }
+        lappend remaining $entry
+        set ::state::lsn::persistence_entries $remaining
+        ::itest::log_decision lsn persistence_create $entry
+        return $translation
+    }
+
+    proc lsn_inbound_entry_command {args} {
+        _lsn_require_event LSN::inbound-entry {CLIENT_ACCEPTED CLIENT_DATA HTTP_REQUEST LB_SELECTED RTSP_REQUEST SIP_REQUEST}
+        if {[llength $args] < 1} { error "LSN::inbound-entry requires get, create, or delete" }
+        set operation [lindex $args 0]
+        if {$operation eq "get"} {
+            if {[llength $args] != 3} { error "LSN::inbound-entry get requires translation endpoint and protocol" }
+            set translation_parts [_lsn_endpoint [lindex $args 1] "LSN::inbound-entry translation" 1]
+            set translation [_lsn_format_endpoint [lindex $translation_parts 0] [lindex $translation_parts 1]]
+            set protocol [_lsn_protocol [lindex $args 2]]
+            set entry [_lsn_find_inbound $translation $protocol]
+            if {$entry eq ""} { return "" }
+            return [list [dict get $entry client] [dict get $entry route_domain]]
+        }
+        if {$operation eq "delete"} {
+            if {[llength $args] != 3} { error "LSN::inbound-entry delete requires translation endpoint and protocol" }
+            set translation_parts [_lsn_endpoint [lindex $args 1] "LSN::inbound-entry translation" 1]
+            set translation [_lsn_format_endpoint [lindex $translation_parts 0] [lindex $translation_parts 1]]
+            set protocol [_lsn_protocol [lindex $args 2]]
+            set remaining {}
+            foreach entry $::state::lsn::inbound_entries {
+                if {[dict get $entry translation] ne $translation || [dict get $entry protocol] ne $protocol} {
+                    lappend remaining $entry
+                }
+            }
+            set ::state::lsn::inbound_entries $remaining
+            ::itest::log_decision lsn inbound_delete [list $translation $protocol]
+            return ""
+        }
+        if {$operation ne "create"} { error "LSN::inbound-entry requires get, create, or delete" }
+        set create_args [lrange $args 1 end]
+        if {[llength $create_args] != 5} {
+            error "LSN::inbound-entry create requires pool, timeout, client, translation, and protocol"
+        }
+        set pool [_lsn_validate_text [lindex $create_args 0] "LSN::inbound-entry pool"]
+        set timeout [_lsn_validate_timeout [lindex $create_args 1] "LSN::inbound-entry timeout"]
+        set client_parts [_lsn_endpoint [lindex $create_args 2] "LSN::inbound-entry client" 1]
+        set client [_lsn_format_endpoint [lindex $client_parts 0] [lindex $client_parts 1]]
+        set translation_parts [_lsn_endpoint [lindex $create_args 3] "LSN::inbound-entry translation" 1]
+        set translation [_lsn_format_endpoint [lindex $translation_parts 0] [lindex $translation_parts 1]]
+        set protocol [_lsn_protocol [lindex $create_args 4]]
+        set existing [_lsn_find_inbound $translation $protocol]
+        if {$existing ne ""} { return [list $translation [dict get $existing route_domain]] }
+        set entry [dict create pool $pool timeout $timeout client $client translation $translation protocol $protocol route_domain 0]
+        lappend ::state::lsn::inbound_entries $entry
+        ::itest::log_decision lsn inbound_create $entry
+        return [list $translation 0]
     }
 
     proc diameter_reset_connection {} {
@@ -17956,6 +18253,14 @@ foreach {original replacement} {
     sdp_session_id sdp_session_id_command
     acl_action acl_action_command
     acl_eval acl_eval_command
+    lsn_address lsn_address_command
+    lsn_disable lsn_disable_command
+    lsn_inbound lsn_inbound_command
+    lsn_inbound_entry lsn_inbound_entry_command
+    lsn_persistence lsn_persistence_command
+    lsn_persistence_entry lsn_persistence_entry_command
+    lsn_pool lsn_pool_command
+    lsn_port lsn_port_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
         ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
@@ -18565,6 +18870,14 @@ foreach {name proc_name} {
     SDP::session_id ::itest::semantic::sdp_session_id_command
     ACL::action ::itest::semantic::acl_action_command
     ACL::eval ::itest::semantic::acl_eval_command
+    LSN::address ::itest::semantic::lsn_address_command
+    LSN::disable ::itest::semantic::lsn_disable_command
+    LSN::inbound ::itest::semantic::lsn_inbound_command
+    LSN::inbound-entry ::itest::semantic::lsn_inbound_entry_command
+    LSN::persistence ::itest::semantic::lsn_persistence_command
+    LSN::persistence-entry ::itest::semantic::lsn_persistence_entry_command
+    LSN::pool ::itest::semantic::lsn_pool_command
+    LSN::port ::itest::semantic::lsn_port_command
     DIAMETER::avp ::itest::semantic::diameter_avp_command
     DIAMETER::command ::itest::semantic::diameter_command_command
     DIAMETER::disconnect ::itest::semantic::diameter_disconnect_command

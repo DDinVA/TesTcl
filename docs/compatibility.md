@@ -309,6 +309,12 @@ deterministic ACL decision state. `ACL::action` supports the documented
 `ACL::eval` supports L4 evaluation and the `-l7` early-return behavior in
 `CLIENT_ACCEPTED`. The model records evaluation and applied-action state but
 does not enforce AFM policy, terminate sockets, or evaluate a live ACL chain.
+The eight catalogued TMOS 17.5 `LSN::*` commands are represented by a
+deterministic connection-scoped translation state. Address, port, pool,
+disable, inbound filtering, persistence mode, persistence entries, and
+inbound entries can be set, queried, and removed with bounded endpoint and
+timeout validation. The model does not allocate from a live CGNAT pool,
+translate packets, replicate mappings, or enforce idle expiry.
 The seven catalogued TMOS 17.5 `FLOW::*` commands are represented by paired
 synthetic client/server handles. `FLOW::this`, `FLOW::peer`, priority, idle
 timeout, idle duration, refresh, and validated related-flow creation update a
