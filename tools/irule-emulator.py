@@ -616,6 +616,15 @@ EVENT_STATE_FIELDS = {
         "action",
         "result",
     },
+    "connector": {
+        "enabled",
+        "profile",
+        "client_addr",
+        "client_port",
+        "server_addr",
+        "server_port",
+        "remaps",
+    },
     "diameter": {
         "type",
         "version",
@@ -990,6 +999,7 @@ EVENT_STATE_NAMESPACES = {
     "pcp": "::state::pcp",
     "psc": "::state::psc",
     "pem": "::state::pem",
+    "connector": "::state::connector",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
     "message": "::state::message",
@@ -1548,6 +1558,10 @@ SEMANTIC_MOCK_COMMANDS = {
     "PEM::flow",
     "PEM::session",
     "PEM::subscriber",
+    "CONNECTOR::disable",
+    "CONNECTOR::enable",
+    "CONNECTOR::profile",
+    "CONNECTOR::remap",
     "DIAMETER::avp",
     "DIAMETER::command",
     "DIAMETER::disconnect",
@@ -5822,6 +5836,7 @@ PACKET_EVENT_ADAPTERS = {
     "CLASSIFICATION_DETECTED": "supplied flow classification result",
     "DNS_REQUEST": "DNS request packet",
     "DNS_RESPONSE": "DNS response packet",
+    "CONNECTOR_OPEN": "structured connector event",
     "PEM_POLICY": "structured PEM policy event",
     "PEM_SUBS_SESS_CREATED": "structured PEM subscriber-session creation event",
     "PEM_SUBS_SESS_UPDATED": "structured PEM subscriber-session update event",
@@ -10600,6 +10615,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::pcp_reset_connection")
                 session.eval_tcl("::itest::semantic::psc_reset_connection")
                 session.eval_tcl("::itest::semantic::pem_reset_connection")
+                session.eval_tcl("::itest::semantic::connector_reset_connection")
                 if any(str(profile).upper() == "REWRITE" for profile in self._profiles):
                     session.eval_tcl("::itest::semantic::rewrite_install_flow_hooks")
                 if any(
@@ -10887,6 +10903,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::pcp_reset_connection")
             session.eval_tcl("::itest::semantic::psc_reset_connection")
             session.eval_tcl("::itest::semantic::pem_reset_connection")
+            session.eval_tcl("::itest::semantic::connector_reset_connection")
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::route_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
@@ -12263,6 +12280,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::pcp_reset_connection")
         session.eval_tcl("::itest::semantic::psc_reset_connection")
         session.eval_tcl("::itest::semantic::pem_reset_connection")
+        session.eval_tcl("::itest::semantic::connector_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::stream_reset_connection")
         session.eval_tcl("::itest::semantic::route_reset_connection")
@@ -12335,6 +12353,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::pcp_reset_connection")
         session.eval_tcl("::itest::semantic::psc_reset_connection")
         session.eval_tcl("::itest::semantic::pem_reset_connection")
+        session.eval_tcl("::itest::semantic::connector_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::datagram_reset_connection")

@@ -738,6 +738,25 @@ attributes, 256 policies, and 256 IP bindings per record. This is an emulator
 of rule-visible state and lifecycle signals; it does not run the PEM policy
 engine, Gx/AAA provisioning, or a live PEM Session DB.
 
+### CONNECTOR chain controls
+
+With the `CONNECTOR` profile attached, `CONNECTOR::disable` and
+`CONNECTOR::enable` toggle the deterministic connector-chain state, while
+`CONNECTOR::profile` returns the profile name supplied in the event state.
+`CONNECTOR::remap` accepts the documented `client_addr`, `client_port`,
+`server_addr`, and `server_port` targets, validates IP addresses and ports,
+and records up to 256 remaps for inspection. The command contracts follow
+the [CONNECTOR::disable](https://clouddocs.f5.com/api/irules/CONNECTOR__disable.html),
+[CONNECTOR::enable](https://clouddocs.f5.com/api/irules/CONNECTOR__enable.html),
+[CONNECTOR::profile](https://clouddocs.f5.com/api/irules/CONNECTOR__profile.html),
+and [CONNECTOR::remap](https://clouddocs.f5.com/api/irules/CONNECTOR__remap.html)
+references.
+
+The direct event API supports `CONNECTOR_OPEN` with caller-supplied connector
+fields. Connector state is reset at connection teardown. This models the
+rule-visible control and remap state; it does not create connector sockets,
+resolve DNS, establish an upstream chain, or perform live traffic remapping.
+
 ### FLOWTABLE query inputs
 
 The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,

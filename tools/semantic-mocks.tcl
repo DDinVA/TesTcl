@@ -1045,6 +1045,16 @@ namespace eval ::itest::semantic {
         variable subscribers {}
     }
 
+    namespace eval ::state::connector {
+        variable enabled 1
+        variable profile ""
+        variable client_addr ""
+        variable client_port 0
+        variable server_addr ""
+        variable server_port 0
+        variable remaps {}
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -5524,6 +5534,58 @@ namespace eval ::itest::semantic {
             ip { return [_pem_subscriber_ip {*}[lrange $args 1 end]] }
             default { error "PEM::subscriber supports create, delete, info, config, or ip" }
         }
+    }
+
+    proc connector_reset_connection {} {
+        foreach {name value} {
+            enabled 1
+            profile ""
+            client_addr ""
+            client_port 0
+            server_addr ""
+            server_port 0
+            remaps {}
+        } {
+            set ::state::connector::$name $value
+        }
+    }
+
+    proc connector_disable_command {args} {
+        if {[llength $args] != 0} { error "CONNECTOR::disable takes no arguments" }
+        set ::state::connector::enabled 0
+        ::itest::log_decision connector disable
+        return ""
+    }
+
+    proc connector_enable_command {args} {
+        if {[llength $args] != 0} { error "CONNECTOR::enable takes no arguments" }
+        set ::state::connector::enabled 1
+        ::itest::log_decision connector enable
+        return ""
+    }
+
+    proc connector_profile_command {args} {
+        if {[llength $args] != 0} { error "CONNECTOR::profile takes no arguments" }
+        return [_pem_text $::state::connector::profile "CONNECTOR profile"]
+    }
+
+    proc connector_remap_command {args} {
+        if {[llength $args] != 2} { error "CONNECTOR::remap requires a target and value" }
+        set target [lindex $args 0]
+        if {$target in {client_addr server_addr}} {
+            set value [_psc_ip_address [lindex $args 1]]
+        } elseif {$target in {client_port server_port}} {
+            set value [_psc_integer [lindex $args 1] "CONNECTOR port" 0 65535]
+        } else {
+            error "CONNECTOR::remap target must be client_addr, client_port, server_addr, or server_port"
+        }
+        set remaps $::state::connector::remaps
+        if {[llength $remaps] >= 256} { error "CONNECTOR remap history cannot contain more than 256 entries" }
+        set ::state::connector::$target $value
+        lappend remaps [list $target $value]
+        set ::state::connector::remaps $remaps
+        ::itest::log_decision connector remap [list $target $value]
+        return ""
     }
 
     proc diameter_reset_connection {} {
@@ -19613,6 +19675,10 @@ foreach {original replacement} {
     pem_flow pem_flow_command
     pem_session pem_session_command
     pem_subscriber pem_subscriber_command
+    connector_disable connector_disable_command
+    connector_enable connector_enable_command
+    connector_profile connector_profile_command
+    connector_remap connector_remap_command
     psc_aaa_reporting_interval psc_aaa_reporting_interval_command
     psc_attr psc_attr_command
     psc_calling_id psc_calling_id_command
@@ -20256,6 +20322,10 @@ foreach {name proc_name} {
     PEM::flow ::itest::semantic::pem_flow_command
     PEM::session ::itest::semantic::pem_session_command
     PEM::subscriber ::itest::semantic::pem_subscriber_command
+    CONNECTOR::disable ::itest::semantic::connector_disable_command
+    CONNECTOR::enable ::itest::semantic::connector_enable_command
+    CONNECTOR::profile ::itest::semantic::connector_profile_command
+    CONNECTOR::remap ::itest::semantic::connector_remap_command
     PSC::aaa_reporting_interval ::itest::semantic::psc_aaa_reporting_interval_command
     PSC::attr ::itest::semantic::psc_attr_command
     PSC::calling_id ::itest::semantic::psc_calling_id_command

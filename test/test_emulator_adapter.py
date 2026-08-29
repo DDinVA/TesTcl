@@ -569,6 +569,53 @@ when PEM_SUBS_SESS_CREATED { log local0. "pem-event=[set ::state::pem::action]" 
         finally:
             session.close()
 
+    def test_connector_controls_profile_and_remap_state(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["CONNECTOR"],
+                "irule": """
+when CONNECTOR_OPEN {
+    set profile [CONNECTOR::profile]
+    CONNECTOR::disable
+    CONNECTOR::remap client_addr 192.0.2.40
+    CONNECTOR::remap client_port 44000
+    CONNECTOR::remap server_addr 198.51.100.40
+    CONNECTOR::remap server_port 8443
+    CONNECTOR::enable
+    log local0. "profile=$profile enabled=[set ::state::connector::enabled] client=[set ::state::connector::client_addr]:[set ::state::connector::client_port] server=[set ::state::connector::server_addr]:[set ::state::connector::server_port]"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event(
+                "CONNECTOR_OPEN",
+                {"connector": {"profile": "/Common/connector_profile_1"}},
+            )
+            self.assertTrue(result["fired"])
+            connector_state = result["state"]["connector"]
+            self.assertEqual(connector_state["profile"], "/Common/connector_profile_1")
+            self.assertEqual(connector_state["enabled"], "1")
+            self.assertEqual(connector_state["client_addr"], "192.0.2.40")
+            self.assertEqual(connector_state["client_port"], "44000")
+            self.assertEqual(connector_state["server_addr"], "198.51.100.40")
+            self.assertEqual(connector_state["server_port"], "8443")
+            self.assertEqual(
+                connector_state["remaps"],
+                "{client_addr 192.0.2.40} {client_port 44000} "
+                "{server_addr 198.51.100.40} {server_port 8443}",
+            )
+            self.assertTrue(any(
+                "profile=/Common/connector_profile_1 enabled=1 client=192.0.2.40:44000"
+                " server=198.51.100.40:8443" in entry
+                for entry in result["logs"]
+            ))
+        finally:
+            session.close()
+
     def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1176,7 +1223,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
         self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 180)
+        self.assertEqual(queue["command_count"], 176)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
