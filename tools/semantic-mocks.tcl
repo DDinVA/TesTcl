@@ -608,6 +608,22 @@ namespace eval ::itest::semantic {
         variable requests {}
     }
 
+    namespace eval ::state::tds {
+        variable type 0
+        variable length 0
+        variable procid 0
+        variable procname ""
+        variable sqltext ""
+        variable xacttype 0
+        variable xactid 0
+        variable is_read 0
+        variable request_type read
+        variable username ""
+        variable dbname ""
+        variable loginoption ""
+        variable version ""
+    }
+
     namespace eval ::state::ftp {
         variable allow_active_mode disable
         variable command ""
@@ -3564,6 +3580,89 @@ namespace eval ::itest::semantic {
             last_uri $::state::rest::last_uri \
             last_body $::state::rest::last_body \
             requests $::state::rest::requests]
+    }
+
+    proc tds_reset_connection {} {
+        set ::state::tds::type 0
+        set ::state::tds::length 0
+        set ::state::tds::procid 0
+        set ::state::tds::procname ""
+        set ::state::tds::sqltext ""
+        set ::state::tds::xacttype 0
+        set ::state::tds::xactid 0
+        set ::state::tds::is_read 0
+        set ::state::tds::request_type read
+        set ::state::tds::username ""
+        set ::state::tds::dbname ""
+        set ::state::tds::loginoption ""
+        set ::state::tds::version ""
+    }
+
+    proc tds_prepare_event {} {
+        set ::state::tds::type 0
+        set ::state::tds::length 0
+        set ::state::tds::procid 0
+        set ::state::tds::procname ""
+        set ::state::tds::sqltext ""
+        set ::state::tds::xacttype 0
+        set ::state::tds::xactid 0
+        set ::state::tds::is_read 0
+        set ::state::tds::request_type read
+    }
+
+    proc _tds_require_event {command_name} {
+        if {$::itest::current_event ni {TDS_REQUEST TDS_RESPONSE}} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc tds_msg_command {args} {
+        _tds_require_event TDS::msg
+        if {[llength $args] < 1 || [llength $args] > 2} {
+            error "TDS::msg requires a field and optional request_type value"
+        }
+        set field [lindex $args 0]
+        if {$field ni {type length procid procname sqltext xacttype xactid is_read request_type}} {
+            error "TDS::msg field must be type, length, procid, procname, sqltext, xacttype, xactid, is_read, or request_type"
+        }
+        if {$field ne "request_type" && [llength $args] != 1} {
+            error "TDS::msg $field takes no value"
+        }
+        if {$field eq "request_type" && [llength $args] == 2} {
+            set value [string tolower [lindex $args 1]]
+            if {$value ni {read write}} {
+                error "TDS::msg request_type must be read or write"
+            }
+            set ::state::tds::request_type $value
+            ::itest::log_decision tds request_type $value
+            return ""
+        }
+        return [set ::state::tds::$field]
+    }
+
+    proc tds_session_command {args} {
+        _tds_require_event TDS::session
+        if {[llength $args] != 1 || [lindex $args 0] ni {username dbname loginoption version}} {
+            error "TDS::session requires username, dbname, loginoption, or version"
+        }
+        return [set ::state::tds::[lindex $args 0]]
+    }
+
+    proc tds_snapshot {} {
+        return [list \
+            type $::state::tds::type \
+            length $::state::tds::length \
+            procid $::state::tds::procid \
+            procname $::state::tds::procname \
+            sqltext $::state::tds::sqltext \
+            xacttype $::state::tds::xacttype \
+            xactid $::state::tds::xactid \
+            is_read $::state::tds::is_read \
+            request_type $::state::tds::request_type \
+            username $::state::tds::username \
+            dbname $::state::tds::dbname \
+            loginoption $::state::tds::loginoption \
+            version $::state::tds::version]
     }
 
     proc feature_controls_reset_connection {} {
@@ -22601,6 +22700,8 @@ foreach {name proc_name} {
     DHCPv6::reject ::itest::semantic::dhcpv6_reject_command
     DHCPv6::transaction_id ::itest::semantic::dhcpv6_transaction_id_command
     REST::send ::itest::semantic::rest_send_command
+    TDS::msg ::itest::semantic::tds_msg_command
+    TDS::session ::itest::semantic::tds_session_command
     FTP::allow_active_mode ::itest::semantic::ftp_allow_active_mode_command
     FTP::disable ::itest::semantic::ftp_disable_command
     FTP::enable ::itest::semantic::ftp_enable_command

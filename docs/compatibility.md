@@ -275,6 +275,13 @@ forms.
 `-method METHOD URI ?BODY?` form and records bounded local-request state under
 `semantic.rest`; it never performs outbound network I/O or exposes a response.
 
+The TDS command surface is modeled for direct `TDS_REQUEST` and
+`TDS_RESPONSE` events. `TDS::msg` provides the event message fields and the
+read/write `request_type` override; `TDS::session` provides connection-scoped
+username, database, login-option, and version metadata. Message state resets
+between TDS events while session metadata persists, and the result is exposed
+under `semantic.tds`. Packet-level TDS decoding is not implemented yet.
+
 The six catalogued TMOS 17.5 `NSH::*` commands are modeled as connection-
 scoped rule state. `NSH::chain` records a direction-specific chain name;
 `NSH::context`, `NSH::path_id`, and `NSH::service_index` validate and retain

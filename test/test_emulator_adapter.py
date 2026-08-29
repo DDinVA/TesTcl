@@ -1859,7 +1859,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("NSH", "generated-stub"), queue_buckets)
         self.assertNotIn(("SIPALG", "generated-stub"), queue_buckets)
         self.assertNotIn(("REST", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 84)
+        self.assertNotIn(("TDS", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 82)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -8650,6 +8651,98 @@ when HTTP_REQUEST {
                     },
                     tcl_lsp_root=self.tcl_lsp_root,
                 )
+
+    def test_tds_message_and_session_commands_model_direct_events(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TDS"],
+                "irule": """
+when TDS_REQUEST {
+    log local0. "msg=[TDS::msg type]/[TDS::msg length]/[TDS::msg procid]/[TDS::msg procname]/[TDS::msg sqltext]/[TDS::msg xacttype]/[TDS::msg xactid]/[TDS::msg is_read] session=[TDS::session username]/[TDS::session dbname]/[TDS::session loginoption]/[TDS::session version]"
+    TDS::msg request_type write
+    log local0. "request_type=[TDS::msg request_type]"
+}
+when TDS_RESPONSE {
+    log local0. "response=[TDS::msg type] session=[TDS::session username] request_type=[TDS::msg request_type]"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            request = session.fire_event(
+                "TDS_REQUEST",
+                {
+                    "tds": {
+                        "type": 4,
+                        "length": 128,
+                        "procid": 7,
+                        "procname": "sp_executesql",
+                        "sqltext": "select 1",
+                        "xacttype": 2,
+                        "xactid": 9,
+                        "is_read": True,
+                        "request_type": "read",
+                        "username": "alice",
+                        "dbname": "app",
+                        "loginoption": "integrated",
+                        "version": "7.4",
+                    }
+                },
+            )
+            response = session.fire_event(
+                "TDS_RESPONSE",
+                {"tds": {"type": 5, "length": 32}},
+            )
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            self.assertEqual(usage["TDS::msg"]["runtime_status"], "semantic-mock")
+            self.assertEqual(usage["TDS::session"]["runtime_status"], "semantic-mock")
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, "invalid TDS type state"
+            ):
+                session.fire_event("TDS_REQUEST", {"tds": {"type": -1}})
+        finally:
+            session.close()
+
+        self.assertTrue(
+            any(
+                "msg=4/128/7/sp_executesql/select 1/2/9/1 session=alice/app/integrated/7.4"
+                in entry
+                for entry in request["logs"]
+            )
+        )
+        self.assertTrue(any("request_type=write" in entry for entry in request["logs"]))
+        self.assertTrue(
+            any("response=5 session=alice request_type=read" in entry for entry in response["logs"])
+        )
+        self.assertEqual(
+            request["semantic"]["tds"],
+            {
+                "message": {
+                    "type": 4,
+                    "length": 128,
+                    "procid": 7,
+                    "procname": "sp_executesql",
+                    "sqltext": "select 1",
+                    "xacttype": 2,
+                    "xactid": 9,
+                    "is_read": True,
+                    "request_type": "write",
+                },
+                "session": {
+                    "username": "alice",
+                    "dbname": "app",
+                    "loginoption": "integrated",
+                    "version": "7.4",
+                },
+            },
+        )
+        self.assertEqual(
+            response["semantic"]["tds"]["session"]["username"], "alice"
+        )
 
     def test_sdp_commands_model_fields_media_and_session_id(self) -> None:
         session = self.adapter.EmulatorSession(

@@ -1496,6 +1496,19 @@ history under `semantic.rest`; it does not contact a BIG-IP REST endpoint or
 make outbound network calls. This matches the iRule contract that the request
 is sent to the local REST framework and its response is not available to the
 rule. See the F5 [`REST::send` reference](https://clouddocs.f5.com/api/irules/REST__send.html).
+The TDS surface is available through the direct event API for
+`TDS_REQUEST` and `TDS_RESPONSE`. Supply a `tds` object containing the message
+fields (`type`, `length`, `procid`, `procname`, `sqltext`, `xacttype`, `xactid`,
+`is_read`, and `request_type`) and session fields (`username`, `dbname`,
+`loginoption`, and `version`). `TDS::msg` exposes the current event's message;
+its `request_type` setter records the rule's read/write override. `TDS::session`
+reads connection-scoped session metadata, which persists across the two event
+types, while message fields reset at each event boundary. The resulting state
+is returned under `semantic.tds`. This is intentionally a direct-event model:
+the emulator does not yet decode or synthesize TDS wire packets. See the F5
+[`TDS::msg`](https://clouddocs.f5.com/api/irules/TDS__msg.html) and
+[`TDS::session`](https://clouddocs.f5.com/api/irules/TDS__session.html)
+references for the production command contract.
 Diameter support is pinned to the 17.5 catalog. Structured
 `protocol: "diameter"` packets and raw Diameter-over-TCP packets drive
 `DIAMETER_INGRESS` or `DIAMETER_EGRESS`; a packet with the retransmit flag also

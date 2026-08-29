@@ -839,6 +839,21 @@ EVENT_STATE_FIELDS = {
         "payload",
         "payload_length",
     },
+    "tds": {
+        "type",
+        "length",
+        "procid",
+        "procname",
+        "sqltext",
+        "xacttype",
+        "xactid",
+        "is_read",
+        "request_type",
+        "username",
+        "dbname",
+        "loginoption",
+        "version",
+    },
     "ftp": {
         "allow_active_mode",
         "command",
@@ -1079,6 +1094,7 @@ EVENT_STATE_NAMESPACES = {
     "dhcp": "::state::dhcp",
     "dhcpv4": "::state::dhcpv4",
     "dhcpv6": "::state::dhcpv6",
+    "tds": "::state::tds",
     "ftp": "::state::ftp",
     "imap": "::state::imap",
     "pop3": "::state::pop3",
@@ -1236,6 +1252,8 @@ SEMANTIC_MOCK_COMMANDS = {
     "DHCPv6::reject",
     "DHCPv6::transaction_id",
     "REST::send",
+    "TDS::msg",
+    "TDS::session",
     "FTP::allow_active_mode",
     "FTP::disable",
     "FTP::enable",
@@ -3397,6 +3415,48 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         },
         "requests": rest_requests,
     }
+    tds_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::tds_snapshot"))
+    if len(tds_parts) % 2:
+        raise EmulatorInputError("invalid TDS state")
+    tds_keys = tds_parts[::2]
+    if len(set(tds_keys)) != len(tds_keys):
+        raise EmulatorInputError("duplicate TDS state field")
+    tds_values = dict(zip(tds_keys, tds_parts[1::2]))
+    expected_tds_fields = {
+        "type", "length", "procid", "procname", "sqltext", "xacttype",
+        "xactid", "is_read", "request_type", "username", "dbname",
+        "loginoption", "version",
+    }
+    if set(tds_values) != expected_tds_fields:
+        raise EmulatorInputError("invalid TDS state fields")
+    tds_numeric: dict[str, int] = {}
+    for name in ("type", "length", "procid", "xacttype", "xactid"):
+        try:
+            value = int(tds_values[name])
+        except (KeyError, TypeError, ValueError):
+            raise EmulatorInputError(f"invalid TDS {name} state") from None
+        if value < 0:
+            raise EmulatorInputError(f"invalid TDS {name} state")
+        tds_numeric[name] = value
+    if tds_values["is_read"] not in {"0", "1"}:
+        raise EmulatorInputError("invalid TDS is_read state")
+    if tds_values["request_type"] not in {"read", "write"}:
+        raise EmulatorInputError("invalid TDS request_type state")
+    tds = {
+        "message": {
+            **{name: tds_numeric[name] for name in ("type", "length", "procid", "xacttype", "xactid")},
+            "procname": tds_values["procname"],
+            "sqltext": tds_values["sqltext"],
+            "is_read": tds_values["is_read"] == "1",
+            "request_type": tds_values["request_type"],
+        },
+        "session": {
+            "username": tds_values["username"],
+            "dbname": tds_values["dbname"],
+            "loginoption": tds_values["loginoption"],
+            "version": tds_values["version"],
+        },
+    }
     adapt_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::adapt_snapshot")
     )
@@ -4229,6 +4289,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "sipalg": sipalg,
         "feature_controls": feature_controls,
         "rest": rest,
+        "tds": tds,
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "lb": lb_control,
@@ -11818,6 +11879,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::socks_reset_connection")
                 session.eval_tcl("::itest::semantic::sdp_reset_connection")
                 session.eval_tcl("::itest::semantic::dhcp_reset_connection")
+                session.eval_tcl("::itest::semantic::tds_reset_connection")
                 session.eval_tcl("::itest::semantic::ftp_reset_connection")
                 session.eval_tcl("::itest::semantic::imap_reset_connection")
                 session.eval_tcl("::itest::semantic::pop3_reset_connection")
@@ -12302,6 +12364,8 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::sctp_prepare_event")
         if "dhcpv4" in state or "dhcpv6" in state:
             session.eval_tcl("::itest::semantic::dhcp_prepare_event")
+        if event_name in {"TDS_REQUEST", "TDS_RESPONSE"}:
+            session.eval_tcl("::itest::semantic::tds_prepare_event")
         if "ftp" in state:
             session.eval_tcl("::itest::semantic::ftp_prepare_event")
         for protocol in STARTTLS_PROTOCOLS.intersection(state):
@@ -12495,6 +12559,7 @@ class EmulatorSession:
                 "sipalg": semantic_snapshot["sipalg"],
                 "feature_controls": semantic_snapshot["feature_controls"],
                 "rest": semantic_snapshot["rest"],
+                "tds": semantic_snapshot["tds"],
             },
         }
         if mqtt_forwarded is not None:
