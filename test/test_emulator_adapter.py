@@ -478,7 +478,7 @@ when HTTP_REQUEST {
         }
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
-        self.assertGreaterEqual(queue["command_count"], 376)
+        self.assertGreaterEqual(queue["command_count"], 367)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -5716,6 +5716,99 @@ when CLIENT_ACCEPTED {
             session.close()
         self.assertTrue(result["fired"])
         self.assertIn("1 0 www.example.com. A 192.0.2.20 1", result["logs"][0])
+
+    def test_route_metrics_lookup_domain_and_clear(self) -> None:
+        destination = "192.0.2.10"
+        gateway = "192.0.2.1"
+        session = self.adapter.EmulatorSession(
+            Path(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP"],
+                "route": {
+                    "domain": "7",
+                    "metrics": [
+                        {
+                            "destination": destination,
+                            "gateway": gateway,
+                            "age": 12,
+                            "expiration": 300,
+                            "mtu": 1500,
+                            "rtt": 3200,
+                            "rttvar": 400,
+                            "cwnd": 14600,
+                            "bandwidth": 3650,
+                        }
+                    ],
+                },
+                "irule": f"""
+when CLIENT_ACCEPTED {{
+    log local0. "before=[ROUTE::domain] [ROUTE::age {destination} {gateway}] [ROUTE::expiration {destination} {gateway}] [ROUTE::mtu {destination} {gateway}] [ROUTE::rtt {destination} {gateway}] [ROUTE::rttvar {destination} {gateway}] [ROUTE::cwnd {destination} {gateway}] [ROUTE::bandwidth {destination} {gateway}]"
+    ROUTE::clear {destination} {gateway}
+    log local0. "after=[ROUTE::rtt {destination} {gateway}] cleared=[set ::state::route::cleared]"
+}}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            first = session.fire_event("CLIENT_ACCEPTED")
+            second = session.fire_event("CLIENT_ACCEPTED")
+            fidelity = session.fidelity
+        finally:
+            session.close()
+
+        self.assertTrue(first["fired"])
+        self.assertTrue(any("before=7 12 300 1500 3200 400 14600 3650" in log for log in first["logs"]))
+        self.assertTrue(any("after=0 cleared=1" in log for log in first["logs"]))
+        self.assertTrue(any("before=7 0 0 0 0 0 0 0" in log for log in second["logs"]))
+        self.assertEqual(first["state"]["route"]["cleared"], "1")
+        self.assertEqual(first["state"]["route"]["rtt"], "0")
+        self.assertEqual(second["state"]["route"]["destination"], destination)
+        self.assertEqual(
+            {
+                entry["name"]: entry["runtime_status"]
+                for entry in fidelity["commands"]
+                if entry["name"].startswith("ROUTE::")
+            },
+            {
+                "ROUTE::age": "semantic-mock",
+                "ROUTE::bandwidth": "semantic-mock",
+                "ROUTE::clear": "semantic-mock",
+                "ROUTE::cwnd": "semantic-mock",
+                "ROUTE::domain": "semantic-mock",
+                "ROUTE::expiration": "semantic-mock",
+                "ROUTE::mtu": "semantic-mock",
+                "ROUTE::rtt": "semantic-mock",
+                "ROUTE::rttvar": "semantic-mock",
+            },
+        )
+
+    def test_route_metrics_reject_duplicate_entries_and_invalid_values(self) -> None:
+        base = {
+            "profiles": ["TCP"],
+            "irule": "when CLIENT_ACCEPTED { log local0. [ROUTE::domain] }",
+        }
+        invalid_routes = (
+            (
+                {"domain": "0", "metrics": [{"destination": "192.0.2.1"}, {"destination": "192.0.2.1"}]},
+                "duplicate destination/gateway",
+            ),
+            (
+                {"domain": "0", "metrics": [{"destination": "192.0.2.1", "rtt": -1}]},
+                "non-negative integer",
+            ),
+        )
+        for route, message in invalid_routes:
+            with self.subTest(route=route):
+                scenario = dict(base, route=route)
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.EmulatorSession(
+                        Path(self.tcl_lsp_root),
+                        scenario,
+                        allow_irule_file=False,
+                        allow_requests=False,
+                    )
 
     def test_tls_semantics_expose_sni_cipher_and_peer_certificate(self) -> None:
         result = self.adapter.run_scenario(

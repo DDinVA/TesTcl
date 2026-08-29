@@ -73,6 +73,32 @@ pacing, PUSH mode, congestion label, proxy-buffer thresholds, and a
 deterministic unused-port allocator; those values persist across packet
 events in the emulated connection. This is transport-control state, not a
 kernel TCP implementation or wire-level congestion/retransmission simulator.
+The ROUTE layer accepts scenario-seeded route-domain and congestion-metric
+entries. `ROUTE::age`, `ROUTE::bandwidth`, `ROUTE::cwnd`, `ROUTE::expiration`,
+`ROUTE::mtu`, `ROUTE::rtt`, and `ROUTE::rttvar` read deterministic entries, and
+`ROUTE::clear` removes a matching destination/gateway entry for the rest of
+the session. This models rule-visible cache decisions, not live route
+discovery, metric aging, or multi-TMM cache synchronization.
+
+```json
+{
+  "route": {
+    "domain": "7",
+    "metrics": [{
+      "destination": "192.0.2.10",
+      "gateway": "192.0.2.1",
+      "age": 12,
+      "expiration": 300,
+      "mtu": 1500,
+      "rtt": 3200,
+      "rttvar": 400,
+      "cwnd": 14600,
+      "bandwidth": 3650
+    }]
+  }
+}
+```
+
 The IP layer models the seven TMOS 17.5 commands `IP::hops`,
 `IP::idle_timeout`, `IP::ingress_drop_rate`, `IP::ingress_rate_limit`,
 `IP::intelligence`, `IP::reputation`, and `IP::stats`. `IP::hops` reads a

@@ -67,6 +67,11 @@ proxy-buffer thresholds. `TCP::unused_port` allocates deterministic ephemeral
 ports for a validated tuple. These are deterministic state and inspection
 values; the adapter does not implement a kernel TCP stack, congestion-control
 algorithm, retransmission timers, or wire-level pacing.
+The TMOS 17.5 `ROUTE::*` surface uses scenario-seeded route-domain and
+congestion-metric entries. Metric getters return deterministic values and
+`ROUTE::clear` removes a matching entry for the session; connection lifecycle
+state is reset independently. No live route discovery, metric aging, or
+multi-TMM cache synchronization is performed.
 The IP semantic layer models the seven TMOS 17.5 commands `IP::hops`,
 `IP::idle_timeout`, `IP::ingress_drop_rate`, `IP::ingress_rate_limit`,
 `IP::intelligence`, `IP::reputation`, and `IP::stats`. Path hops, directional

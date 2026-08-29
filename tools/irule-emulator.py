@@ -205,6 +205,19 @@ EVENT_STATE_FIELDS = {
         "server_payload",
         "state",
     },
+    "route": {
+        "domain",
+        "destination",
+        "gateway",
+        "age",
+        "expiration",
+        "mtu",
+        "rtt",
+        "rttvar",
+        "cwnd",
+        "bandwidth",
+        "cleared",
+    },
     "tls_client": {
         "sni",
         "sni_required",
@@ -653,6 +666,7 @@ EVENT_STATE_FIELDS = {
 }
 EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
+    "route": "::state::route",
     "tls_client": "::state::tls::client",
     "tls_server": "::state::tls::server",
     "http2": "::state::http2",
@@ -1317,6 +1331,15 @@ SEMANTIC_MOCK_COMMANDS = {
     "TCP::snd_scale",
     "TCP::snd_ssthresh",
     "TCP::unused_port",
+    "ROUTE::age",
+    "ROUTE::bandwidth",
+    "ROUTE::clear",
+    "ROUTE::cwnd",
+    "ROUTE::domain",
+    "ROUTE::expiration",
+    "ROUTE::mtu",
+    "ROUTE::rtt",
+    "ROUTE::rttvar",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 RUNTIME_STATUS_VALUES = frozenset(
@@ -2020,6 +2043,29 @@ def _configure_ip(session: Any, ip_config: dict[str, Any]) -> None:
             "::itest::semantic::ip_set_reputation "
             f"{_tcl_quote(address)} {category_list}"
         )
+
+
+def _configure_route(session: Any, route_config: dict[str, Any]) -> None:
+    """Install deterministic route-domain and congestion-metric inputs."""
+    flattened: list[str] = []
+    for metric in route_config["metrics"]:
+        flattened.extend(
+            [
+                metric["destination"],
+                metric["gateway"],
+                str(metric["age"]),
+                str(metric["expiration"]),
+                str(metric["mtu"]),
+                str(metric["rtt"]),
+                str(metric["rttvar"]),
+                str(metric["cwnd"]),
+                str(metric["bandwidth"]),
+            ]
+        )
+    session.eval_tcl(
+        "::itest::semantic::route_configure "
+        f"{_tcl_quote(route_config['domain'])} {_tcl_list(flattened)}"
+    )
 
 
 def _split_tcl_list(value: Any) -> list[str]:
@@ -3559,6 +3605,73 @@ def _normalise_access(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalise_route(raw: Any) -> dict[str, Any]:
+    """Normalize deterministic route/congestion-metric cache inputs."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("route must be an object")
+    allowed = {"domain", "metrics"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError("route unsupported field(s): " + ", ".join(unknown))
+
+    domain = raw.get("domain", "0")
+    if not isinstance(domain, str) or not domain or "\x00" in domain:
+        raise EmulatorInputError("route.domain must be a non-empty string without NUL")
+
+    metrics = raw.get("metrics", [])
+    if not isinstance(metrics, list):
+        raise EmulatorInputError("route.metrics must be an array of metric objects")
+    if len(metrics) > 1024:
+        raise EmulatorInputError("route.metrics cannot contain more than 1024 entries")
+
+    metric_fields = {
+        "destination", "gateway", "age", "expiration", "mtu", "rtt", "rttvar",
+        "cwnd", "bandwidth",
+    }
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, metric in enumerate(metrics):
+        if not isinstance(metric, dict):
+            raise EmulatorInputError(f"route.metrics[{index}] must be an object")
+        unknown_metric = sorted(set(metric) - metric_fields)
+        if unknown_metric:
+            raise EmulatorInputError(
+                f"route.metrics[{index}] unsupported field(s): {', '.join(unknown_metric)}"
+            )
+        destination = metric.get("destination")
+        gateway = metric.get("gateway", "")
+        for name, value in (("destination", destination), ("gateway", gateway)):
+            if not isinstance(value, str) or "\x00" in value:
+                raise EmulatorInputError(
+                    f"route.metrics[{index}].{name} must be a string without NUL"
+                )
+            if name == "destination" and not value:
+                raise EmulatorInputError(
+                    f"route.metrics[{index}].destination must not be empty"
+                )
+        key = (destination, gateway)
+        if key in seen:
+            raise EmulatorInputError(
+                f"route.metrics contains duplicate destination/gateway pair {key!r}"
+            )
+        seen.add(key)
+        normalised_metric: dict[str, Any] = {
+            "destination": destination,
+            "gateway": gateway,
+        }
+        for name in ("age", "expiration", "mtu", "rtt", "rttvar", "cwnd", "bandwidth"):
+            value = metric.get(name, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise EmulatorInputError(
+                    f"route.metrics[{index}].{name} must be a non-negative integer"
+                )
+            normalised_metric[name] = value
+        result.append(normalised_metric)
+    return {"domain": domain, "metrics": result}
+
+
 def _normalise_ip(raw: Any) -> dict[str, Any]:
     """Normalize deterministic inputs for the bounded IP command model."""
     if raw is None:
@@ -3889,6 +4002,7 @@ def _normalise_scenario_config(
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
+    dict[str, Any],
 ]:
     if not isinstance(scenario, dict):
         raise EmulatorInputError("scenario must be a JSON object")
@@ -3910,6 +4024,7 @@ def _normalise_scenario_config(
         "aaa",
         "access",
         "ip",
+        "route",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -3959,6 +4074,7 @@ def _normalise_scenario_config(
         _normalise_aaa(scenario.get("aaa")),
         _normalise_access(scenario.get("access")),
         _normalise_ip(scenario.get("ip")),
+        _normalise_route(scenario.get("route")),
     )
 
 
@@ -8408,6 +8524,7 @@ class EmulatorSession:
             aaa,
             access,
             ip_config,
+            route_config,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -8431,6 +8548,8 @@ class EmulatorSession:
         self._aaa = aaa
         self._access = access
         self._ip_config = ip_config
+        self._route_config = route_config
+        self._route_visible = bool(route_config["metrics"]) or "ROUTE::" in source
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -8549,6 +8668,7 @@ class EmulatorSession:
                 _configure_aaa(session, self._aaa)
                 _configure_access(session, self._access)
                 _configure_ip(session, self._ip_config)
+                _configure_route(session, self._route_config)
                 session.eval_tcl("::itest::semantic::flow_reset_connection")
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
@@ -8603,6 +8723,7 @@ class EmulatorSession:
             if self._connection_open:
                 session.close_connection()
                 session.eval_tcl("::itest::semantic::stream_reset_connection")
+                session.eval_tcl("::itest::semantic::route_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         if not self._connection_open:
@@ -8618,6 +8739,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::access_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
             session.eval_tcl("::itest::semantic::stream_reset_connection")
+            session.eval_tcl("::itest::semantic::route_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -8769,6 +8891,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
             session.eval_tcl("::itest::semantic::flow_reset_connection")
             session.eval_tcl("::itest::semantic::stream_reset_connection")
+            session.eval_tcl("::itest::semantic::route_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         result["decisions"] = decision_history
@@ -8906,7 +9029,10 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::gtp_rebuild_message")
         fired_events = _split_tcl_list(session.eval_tcl("::itest::get_fired_events"))
         state_snapshot: dict[str, dict[str, Any]] = {}
-        for layer in state:
+        snapshot_layers = list(state)
+        if self._route_visible and "route" not in state:
+            snapshot_layers.append("route")
+        for layer in snapshot_layers:
             state_snapshot[layer] = {}
             for field in EVENT_STATE_FIELDS[layer]:
                 if layer == "dns" and field in {"answers", "authority", "additional"}:
@@ -9771,6 +9897,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::flow_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::stream_reset_connection")
+        session.eval_tcl("::itest::semantic::route_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))

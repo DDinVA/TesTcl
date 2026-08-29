@@ -81,6 +81,7 @@ namespace eval ::itest::semantic {
     variable cache_update_tick -1
     variable cache_objects
     array set cache_objects {}
+    variable route_metrics [dict create]
 
     variable lb_bias 0
     variable lb_class ""
@@ -351,6 +352,20 @@ namespace eval ::itest::semantic {
         variable payload_length 0
         variable payload_ivs ""
         variable payload_processing enable
+    }
+
+    namespace eval ::state::route {
+        variable domain 0
+        variable destination ""
+        variable gateway ""
+        variable age 0
+        variable expiration 0
+        variable mtu 0
+        variable rtt 0
+        variable rttvar 0
+        variable cwnd 0
+        variable bandwidth 0
+        variable cleared 0
     }
 
     namespace eval ::state::udp {
@@ -10867,6 +10882,103 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc _route_zero_metrics {} {
+        foreach field {age expiration mtu rtt rttvar cwnd bandwidth} {
+            set ::state::route::$field 0
+        }
+    }
+
+    proc _route_prepare_lookup {} {
+        set ::state::route::destination ""
+        set ::state::route::gateway ""
+        _route_zero_metrics
+    }
+
+    proc route_reset_connection {} {
+        _route_prepare_lookup
+        set ::state::route::cleared 0
+    }
+
+    proc route_configure {args} {
+        variable route_metrics
+        if {[llength $args] != 2} {
+            error "route configuration requires a domain and metric list"
+        }
+        set domain [lindex $args 0]
+        set flattened [lindex $args 1]
+        if {[llength $flattened] % 9 != 0} {
+            error "route metric list must contain groups of nine values"
+        }
+        set route_metrics [dict create]
+        foreach {destination gateway age expiration mtu rtt rttvar cwnd bandwidth} $flattened {
+            dict set route_metrics $destination $gateway [dict create \
+                age $age expiration $expiration mtu $mtu rtt $rtt \
+                rttvar $rttvar cwnd $cwnd bandwidth $bandwidth]
+        }
+        set ::state::route::domain $domain
+        route_reset_connection
+    }
+
+    proc _route_lookup {args} {
+        variable route_metrics
+        if {[llength $args] < 1 || [llength $args] > 2} {
+            error "ROUTE command requires a destination and optional gateway"
+        }
+        set destination [lindex $args 0]
+        set gateway [expr {[llength $args] == 2 ? [lindex $args 1] : ""}]
+        if {$destination eq ""} {
+            error "ROUTE destination must not be empty"
+        }
+        _route_prepare_lookup
+        set ::state::route::destination $destination
+        set ::state::route::gateway $gateway
+        if {![dict exists $route_metrics $destination $gateway]} {
+            return {}
+        }
+        set record [dict get $route_metrics $destination $gateway]
+        foreach field {age expiration mtu rtt rttvar cwnd bandwidth} {
+            set ::state::route::$field [dict get $record $field]
+        }
+        return $record
+    }
+
+    proc _route_metric_command {field args} {
+        set record [_route_lookup {*}$args]
+        if {[dict size $record] == 0} {
+            return 0
+        }
+        return [dict get $record $field]
+    }
+
+    proc route_age_command {args} { return [_route_metric_command age {*}$args] }
+    proc route_bandwidth_command {args} { return [_route_metric_command bandwidth {*}$args] }
+    proc route_cwnd_command {args} { return [_route_metric_command cwnd {*}$args] }
+    proc route_expiration_command {args} { return [_route_metric_command expiration {*}$args] }
+    proc route_mtu_command {args} { return [_route_metric_command mtu {*}$args] }
+    proc route_rtt_command {args} { return [_route_metric_command rtt {*}$args] }
+    proc route_rttvar_command {args} { return [_route_metric_command rttvar {*}$args] }
+
+    proc route_domain_command {args} {
+        if {[llength $args] != 0} {
+            error "ROUTE::domain takes no arguments"
+        }
+        return $::state::route::domain
+    }
+
+    proc route_clear_command {args} {
+        variable route_metrics
+        _route_lookup {*}$args
+        set destination $::state::route::destination
+        set gateway $::state::route::gateway
+        if {[dict exists $route_metrics $destination $gateway]} {
+            dict unset route_metrics $destination $gateway
+        }
+        _route_zero_metrics
+        set ::state::route::cleared 1
+        ::itest::log_decision route clear [list destination $destination gateway $gateway]
+        return ""
+    }
+
     # ── TLS/SSL inspection and control semantics ─────────────────────
     proc _ssl_namespace {{side ""}} {
         if {$side eq "serverside" || [string match "SERVERSSL_*" $::itest::current_event] ||
@@ -13636,6 +13748,15 @@ foreach {name proc_name} {
     HTTP2::push ::itest::semantic::http2_push_command
     HTTP2::stream ::itest::semantic::http2_stream_command
     HTTP2::version ::itest::semantic::http2_version_command
+    ROUTE::age ::itest::semantic::route_age_command
+    ROUTE::bandwidth ::itest::semantic::route_bandwidth_command
+    ROUTE::clear ::itest::semantic::route_clear_command
+    ROUTE::cwnd ::itest::semantic::route_cwnd_command
+    ROUTE::domain ::itest::semantic::route_domain_command
+    ROUTE::expiration ::itest::semantic::route_expiration_command
+    ROUTE::mtu ::itest::semantic::route_mtu_command
+    ROUTE::rtt ::itest::semantic::route_rtt_command
+    ROUTE::rttvar ::itest::semantic::route_rttvar_command
     STREAM::disable ::itest::semantic::stream_disable_command
     STREAM::enable ::itest::semantic::stream_enable_command
     STREAM::encoding ::itest::semantic::stream_encoding_command
