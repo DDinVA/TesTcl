@@ -57,6 +57,11 @@ namespace eval ::itest::semantic {
     # Values live in the upstream connection-variable array so the normal
     # state-layer connection reset clears them with other unqualified vars.
     variable sharedvar_names {}
+    # Connection-scoped traffic intents. These describe clone/listener/related
+    # flows without opening sockets or pretending to run a second dataplane.
+    variable traffic_intents {}
+    variable traffic_intent_counter 0
+    variable traffic_intent_max 256
     # IPFIX templates and destinations are session-scoped, like the static
     # objects an iRule normally keeps in static variables. Messages are
     # connection-scoped and are cleared by ipfix_reset_connection.
@@ -1686,6 +1691,200 @@ namespace eval ::itest::semantic {
             lappend values [list name $name value $value]
         }
         return [list names $values]
+    }
+
+    proc traffic_intents_reset_connection {} {
+        variable traffic_intents
+        variable traffic_intent_counter
+        set traffic_intents {}
+        set traffic_intent_counter 0
+    }
+
+    proc _traffic_text {value label} {
+        if {$value eq "" || [string first "\x00" $value] >= 0 || [string bytelength $value] > 4096} {
+            error "$label must be non-empty and at most 4096 bytes"
+        }
+        return $value
+    }
+
+    proc _traffic_uint {value label maximum} {
+        if {![string is integer -strict $value] || $value < 0 || $value > $maximum} {
+            error "$label must be an integer from 0 through $maximum"
+        }
+        return $value
+    }
+
+    proc traffic_intent_record {kind data} {
+        variable traffic_intents
+        variable traffic_intent_counter
+        variable traffic_intent_max
+        if {$kind ni {clone listen relate_client relate_server use}} {
+            error "unsupported traffic intent kind $kind"
+        }
+        if {[string first "\x00" $data] >= 0 || [string bytelength $data] > 16384} {
+            error "traffic intent data must be at most 16384 bytes"
+        }
+        incr traffic_intent_counter
+        lappend traffic_intents [list ordinal $traffic_intent_counter kind $kind data $data]
+        if {[llength $traffic_intents] > $traffic_intent_max} {
+            set first [expr {[llength $traffic_intents] - $traffic_intent_max}]
+            set traffic_intents [lrange $traffic_intents $first end]
+        }
+        ::itest::log_decision traffic_intent $kind $data
+        return ""
+    }
+
+    proc clone_command {args} {
+        if {[llength $args] < 2} {
+            error "clone requires a target type and target name"
+        }
+        set target_type [lindex $args 0]
+        switch -exact -- $target_type {
+            pool {
+                if {[llength $args] ni {2 4 5}} {
+                    error "clone pool accepts a pool, optional member address, and optional port"
+                }
+                set target [_traffic_text [lindex $args 1] "clone pool"]
+                set data [list target_type pool target $target]
+                if {[llength $args] >= 4} {
+                    if {[lindex $args 2] ne "member"} {
+                        error "clone pool expects member before a member address"
+                    }
+                    lappend data member [_traffic_text [lindex $args 3] "clone member address"]
+                }
+                if {[llength $args] == 5} {
+                    lappend data port [_traffic_uint [lindex $args 4] "clone member port" 65535]
+                }
+                return [traffic_intent_record clone $data]
+            }
+            nexthop {
+                if {[llength $args] != 2} {
+                    error "clone nexthop requires a VLAN"
+                }
+                set target [_traffic_text [lindex $args 1] "clone nexthop VLAN"]
+                return [traffic_intent_record clone [list target_type nexthop target $target]]
+            }
+            default {
+                error "clone target must be pool or nexthop"
+            }
+        }
+    }
+
+    proc _traffic_config_words {args command_name} {
+        if {[llength $args] != 1} {
+            error "$command_name requires one braced configuration"
+        }
+        set config [lindex $args 0]
+        if {[catch {llength $config}]} {
+            error "$command_name configuration is not a valid Tcl list"
+        }
+        return $config
+    }
+
+    proc listen_command {args} {
+        set words [_traffic_config_words $args listen]
+        set config [dict create]
+        set index 0
+        set keys {proto timeout bind server allow}
+        while {$index < [llength $words]} {
+            set key [lindex $words $index]
+            incr index
+            if {$key ni $keys || [dict exists $config $key]} {
+                error "listen has an unknown or duplicate field $key"
+            }
+            switch -exact -- $key {
+                proto {
+                    if {$index >= [llength $words]} { error "listen proto requires a value" }
+                    dict set config proto [_traffic_uint [lindex $words $index] "listen proto" 255]
+                    incr index
+                }
+                timeout {
+                    if {$index >= [llength $words]} { error "listen timeout requires a value" }
+                    dict set config timeout [_traffic_uint [lindex $words $index] "listen timeout" 2147483647]
+                    incr index
+                }
+                bind {
+                    if {$index + 2 >= [llength $words]} { error "listen bind requires VLAN, address, and port" }
+                    set vlan [_traffic_text [lindex $words $index] "listen bind VLAN"]
+                    set address [_traffic_text [lindex $words [expr {$index + 1}]] "listen bind address"]
+                    set port [_traffic_uint [lindex $words [expr {$index + 2}]] "listen bind port" 65535]
+                    dict set config bind [list $vlan $address $port]
+                    incr index 3
+                }
+                server {
+                    if {$index + 1 >= [llength $words]} { error "listen server requires address and port" }
+                    set address [_traffic_text [lindex $words $index] "listen server address"]
+                    set port [_traffic_uint [lindex $words [expr {$index + 1}]] "listen server port" 65535]
+                    dict set config server [list $address $port]
+                    incr index 2
+                }
+                allow {
+                    if {$index >= [llength $words]} { error "listen allow requires an address" }
+                    set address [_traffic_text [lindex $words $index] "listen allow address"]
+                    incr index
+                    set allowed [list $address]
+                    if {$index < [llength $words] && [lindex $words $index] ni $keys} {
+                        lappend allowed [_traffic_uint [lindex $words $index] "listen allow port" 65535]
+                        incr index
+                    }
+                    dict set config allow $allowed
+                }
+            }
+        }
+        return [traffic_intent_record listen $config]
+    }
+
+    proc _related_flow {words index command_name field} {
+        if {$index + 5 > [llength $words]} {
+            error "$command_name $field requires five values"
+        }
+        set values {}
+        for {set offset 0} {$offset < 5} {incr offset} {
+            lappend values [_traffic_text [lindex $words [expr {$index + $offset}]] "$command_name $field value"]
+        }
+        return $values
+    }
+
+    proc related_command {kind args} {
+        set words [_traffic_config_words $args $kind]
+        set config [dict create]
+        set index 0
+        while {$index < [llength $words]} {
+            set key [lindex $words $index]
+            incr index
+            if {$key ni {proto clientflow serverflow} || [dict exists $config $key]} {
+                error "$kind has an unknown or duplicate field $key"
+            }
+            switch -exact -- $key {
+                proto {
+                    if {$index >= [llength $words]} { error "$kind proto requires a value" }
+                    dict set config proto [_traffic_uint [lindex $words $index] "$kind proto" 255]
+                    incr index
+                }
+                clientflow - serverflow {
+                    set values [_related_flow $words $index $kind $key]
+                    dict set config $key $values
+                    incr index 5
+                }
+            }
+        }
+        return [traffic_intent_record $kind $config]
+    }
+
+    proc use_command {args} {
+        if {[llength $args] < 2} {
+            error "use requires an object type and object name"
+        }
+        set values {}
+        foreach value $args {
+            lappend values [_traffic_text $value "use argument"]
+        }
+        return [traffic_intent_record use $values]
+    }
+
+    proc traffic_intents_snapshot {} {
+        variable traffic_intents
+        return [list intents $traffic_intents]
     }
 
     proc prepare_lb_failure {cause} {
@@ -23506,6 +23705,36 @@ if {[::tmm::_orig_info commands ::itest::cmd::cmd_sharedvar] ne ""} {
         # unknown -> handler).  Execute upvar in that handler frame so the
         # alias remains active for the rest of the handler body.
         return [uplevel 2 [list upvar #0 ::state::vars::connection_vars($name) $name]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_clone] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_clone ::itest::cmd::_testcl_clone_orig
+    proc ::itest::cmd::cmd_clone {args} {
+        return [eval [linsert $args 0 ::itest::semantic::clone_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_listen] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_listen ::itest::cmd::_testcl_listen_orig
+    proc ::itest::cmd::cmd_listen {args} {
+        return [eval [linsert $args 0 ::itest::semantic::listen_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_relate_client] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_relate_client ::itest::cmd::_testcl_relate_client_orig
+    proc ::itest::cmd::cmd_relate_client {args} {
+        return [eval [linsert $args 0 ::itest::semantic::related_command relate_client]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_relate_server] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_relate_server ::itest::cmd::_testcl_relate_server_orig
+    proc ::itest::cmd::cmd_relate_server {args} {
+        return [eval [linsert $args 0 ::itest::semantic::related_command relate_server]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_use] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_use ::itest::cmd::_testcl_use_orig
+    proc ::itest::cmd::cmd_use {args} {
+        return [eval [linsert $args 0 ::itest::semantic::use_command]]
     }
 }
 if {[::tmm::_orig_info commands ::itest::cmd::cmd_table] ne ""} {

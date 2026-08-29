@@ -1961,7 +1961,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 16)
+        self.assertEqual(queue["command_count"], 11)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -6504,6 +6504,131 @@ when HTTP_REQUEST {
                     },
                     tcl_lsp_root=self.tcl_lsp_root,
                 )
+
+    def test_traffic_intents_are_recorded_and_reset_with_connection(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/seed"} {
+        clone pool tap_pool member 192.0.2.50 8443
+        listen { proto 17 timeout 30 bind tap_vlan 192.0.2.10 4000 server 192.0.2.20 7 allow 10.0.0.1 55000 }
+        relate_client { proto 17 clientflow client_vlan 192.0.2.10 4000 10.0.0.1 55000 serverflow server_vlan 192.0.2.20 7 10.0.0.1 55000 }
+        relate_server { proto 17 clientflow client_vlan 192.0.2.10 4000 10.0.0.1 55000 serverflow server_vlan 192.0.2.20 7 10.0.0.1 55000 }
+        use pool legacy_pool
+    }
+}
+""",
+                "requests": [
+                    {"uri": "/seed"},
+                    {"uri": "/read", "new_connection": True},
+                    {"uri": "/seed"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        seeded, new_connection, fresh_connection = result["results"]
+        intents = seeded["semantic"]["traffic"]["intents"]
+        self.assertEqual(
+            [intent["kind"] for intent in intents],
+            ["clone", "listen", "relate_client", "relate_server", "use"],
+        )
+        self.assertEqual(
+            intents[0]["data"],
+            [
+                "target_type", "pool", "target", "tap_pool",
+                "member", "192.0.2.50", "port", "8443",
+            ],
+        )
+        self.assertEqual(
+            intents[1]["data"],
+            [
+                "proto", "17", "timeout", "30",
+                "bind", "tap_vlan 192.0.2.10 4000",
+                "server", "192.0.2.20 7",
+                "allow", "10.0.0.1 55000",
+            ],
+        )
+        self.assertEqual(
+            intents[2]["data"],
+            [
+                "proto", "17",
+                "clientflow", "client_vlan 192.0.2.10 4000 10.0.0.1 55000",
+                "serverflow", "server_vlan 192.0.2.20 7 10.0.0.1 55000",
+            ],
+        )
+        self.assertEqual(
+            new_connection["semantic"]["traffic"]["intents"],
+            [],
+        )
+        self.assertEqual(
+            [intent["ordinal"] for intent in fresh_connection["semantic"]["traffic"]["intents"]],
+            [1, 2, 3, 4, 5],
+        )
+        self.assertEqual(
+            {
+                entry["name"]: entry["runtime_status"]
+                for entry in result["fidelity"]["commands"]
+                if entry["name"] in {
+                    "clone", "listen", "relate_client", "relate_server", "use"
+                }
+            },
+            {
+                "clone": "semantic-mock",
+                "listen": "semantic-mock",
+                "relate_client": "semantic-mock",
+                "relate_server": "semantic-mock",
+                "use": "semantic-mock",
+            },
+        )
+
+    def test_traffic_intents_reject_malformed_configurations(self) -> None:
+        for irule in (
+            "when HTTP_REQUEST { clone pool }",
+            "when HTTP_REQUEST { clone pool tap_pool member 192.0.2.1 65536 }",
+            "when HTTP_REQUEST { listen { proto 6 bind vlan 192.0.2.1 } }",
+            "when HTTP_REQUEST { listen { proto 6 proto 17 } }",
+            "when HTTP_REQUEST { relate_client { proto 6 clientflow a b c } }",
+            "when HTTP_REQUEST { use pool }",
+            "when HTTP_REQUEST { use " + " ".join(["x" * 4096] * 5) + " }",
+        ):
+            with self.subTest(irule=irule), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "clone|listen|relate_client|use|traffic intent",
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "requests": [{"uri": "/"}],
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+
+    def test_traffic_intents_reset_after_explicit_close(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { use pool tap_pool }",
+                "requests": [
+                    {"uri": "/", "close_after": True},
+                    {"uri": "/"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        closed, after_close = result["results"]
+        self.assertEqual(
+            [intent["ordinal"] for intent in closed["semantic"]["traffic"]["intents"]],
+            [1],
+        )
+        self.assertEqual(
+            [intent["ordinal"] for intent in after_close["semantic"]["traffic"]["intents"]],
+            [1],
+        )
 
     def test_outer_priority_orders_handlers_and_exposes_timing_metadata(self) -> None:
         result = self.adapter.run_scenario(

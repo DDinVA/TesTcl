@@ -72,6 +72,16 @@ handlers can exchange values across events and connection sides represented
 by the emulator. The binding resets with the emulated client connection; the
 adapter does not instantiate a second VIP, cross-TMM shared memory, or live
 virtual-to-virtual forwarding path.
+The traffic-intent controls [`clone`](https://clouddocs.f5.com/api/irules/clone.html),
+[`listen`](https://clouddocs.f5.com/api/irules/listen.html),
+[`relate_client`](https://clouddocs.f5.com/api/irules/relate_client.html),
+[`relate_server`](https://clouddocs.f5.com/api/irules/relate_server.html), and
+[`use`](https://clouddocs.f5.com/api/irules/use.html) validate their documented
+argument shapes and emit deterministic connection-scoped intent records in
+`semantic.traffic.intents`. The records preserve source order, are bounded to
+256 per connection, and are cleared at connection reset. This is an explicit
+control-flow and observability model: no listener, clone socket, related flow,
+second virtual server, or live forwarding path is created.
 The related legacy connection controls are deterministic as well: `forward`
 records strict-forwarding intent, `translate` tracks address/port/service
 translation toggles, `rateclass` records the selected rate class, and

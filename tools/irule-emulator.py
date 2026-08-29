@@ -1343,6 +1343,11 @@ SEMANTIC_MOCK_COMMANDS = {
     "sharedvar",
     "priority",
     "timing",
+    "clone",
+    "listen",
+    "relate_client",
+    "relate_server",
+    "use",
     "urlcatblindquery",
     "urlcatquery",
     "IPFIX::destination",
@@ -3734,6 +3739,44 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         sharedvar_names.add(name)
         sharedvar_values.append({"name": name, "value": value})
     sharedvar_state = {"names": sharedvar_values}
+    traffic_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::traffic_intents_snapshot")
+    )
+    if len(traffic_parts) != 2 or traffic_parts[0] != "intents":
+        raise EmulatorInputError("invalid traffic intent state")
+    traffic_intents: list[dict[str, Any]] = []
+    previous_ordinal = 0
+    seen_ordinals: set[int] = set()
+    for raw_intent in _split_tcl_list(traffic_parts[1]):
+        intent_parts = _split_tcl_list(raw_intent)
+        if len(intent_parts) != 6 or intent_parts[::2] != [
+            "ordinal", "kind", "data"
+        ]:
+            raise EmulatorInputError("invalid traffic intent record")
+        try:
+            ordinal = int(intent_parts[1])
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid traffic intent ordinal") from None
+        if ordinal <= previous_ordinal or ordinal in seen_ordinals:
+            raise EmulatorInputError("invalid traffic intent ordinal")
+        kind = intent_parts[3]
+        if kind not in {"clone", "listen", "relate_client", "relate_server", "use"}:
+            raise EmulatorInputError("invalid traffic intent kind")
+        data = _split_tcl_list(intent_parts[5])
+        if any("\x00" in value for value in data) or sum(
+            len(value.encode("utf-8")) for value in data
+        ) > 16384:
+            raise EmulatorInputError("invalid traffic intent data")
+        previous_ordinal = ordinal
+        seen_ordinals.add(ordinal)
+        traffic_intents.append({
+            "ordinal": ordinal,
+            "kind": kind,
+            "data": data,
+        })
+    if len(traffic_intents) > 256:
+        raise EmulatorInputError("too many traffic intent records")
+    traffic_state = {"intents": traffic_intents}
     bwc_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::bwc_snapshot")
     )
@@ -5268,6 +5311,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "urlcat": urlcat,
         "session": session_state,
         "sharedvar": sharedvar_state,
+        "traffic": traffic_state,
         "bwc": bwc,
         "ipfix": ipfix,
         "ilx": ilx,
@@ -13334,6 +13378,7 @@ class EmulatorSession:
                 _install_runtime_shims(session)
                 session.eval_tcl("::itest::semantic::session_reset")
                 session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
+                session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
                 for procedure, arguments, body in _extract_irule_procedures(
                     self._root, self._prepared_source
                 ):
@@ -13510,6 +13555,7 @@ class EmulatorSession:
             if self._connection_open:
                 session.close_connection()
                 session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
+                session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
                 session.eval_tcl("::itest::semantic::stream_reset_connection")
                 session.eval_tcl("::itest::semantic::route_reset_connection")
                 session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
@@ -13528,6 +13574,7 @@ class EmulatorSession:
             self._server_connection_detached = False
             session.eval_tcl("::state::reset_connection_state")
             session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
+            session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
             session.eval_tcl("::itest::semantic::lb_reset_connection")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::psm_reset_connection")
@@ -13728,6 +13775,7 @@ class EmulatorSession:
             session.eval_tcl("set ::orch::_connection_active 0")
             session.eval_tcl("::state::reset_connection_state")
             session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
+            session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
             session.eval_tcl("::itest::semantic::psm_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
             session.eval_tcl("::itest::semantic::flow_reset_connection")
@@ -13778,6 +13826,7 @@ class EmulatorSession:
         if request.get("close_after"):
             session.close_connection()
             session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
+            session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
             session.eval_tcl("::itest::semantic::rewrite_reset_connection")
@@ -14058,6 +14107,7 @@ class EmulatorSession:
                 "urlcat": semantic_snapshot["urlcat"],
                 "session": semantic_snapshot["session"],
                 "sharedvar": semantic_snapshot["sharedvar"],
+                "traffic": semantic_snapshot["traffic"],
                 "adapt": semantic_snapshot["adapt"],
                 "psm": semantic_snapshot["psm"],
                 "ip": semantic_snapshot["ip"],
@@ -15166,6 +15216,7 @@ class EmulatorSession:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
+        session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
         session.eval_tcl("::itest::semantic::mqtt_reset_connection")
         session.eval_tcl("::itest::semantic::sip_reset_connection")
         session.eval_tcl("::itest::semantic::feature_controls_reset_connection")
@@ -15261,6 +15312,7 @@ class EmulatorSession:
         session.eval_tcl("set ::orch::_connection_active 0")
         session.eval_tcl("::state::reset_connection_state")
         session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
+        session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
         session.eval_tcl("::itest::semantic::bigtcp_prepare_connection")
         session.eval_tcl("::itest::semantic::psm_reset_connection")
         session.eval_tcl("::itest::semantic::dosl7_reset_connection")

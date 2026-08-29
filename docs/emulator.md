@@ -79,6 +79,18 @@ updates made by an earlier handler or event; the binding is cleared when the
 emulated client connection is reset. This supports VIP-to-VIP-style rule
 logic within one interpreter, but does not create a second virtual server or
 claim to emulate cross-TMM/shared-memory scheduling.
+The traffic-intent controls [`clone`](https://clouddocs.f5.com/api/irules/clone.html),
+[`listen`](https://clouddocs.f5.com/api/irules/listen.html),
+[`relate_client`](https://clouddocs.f5.com/api/irules/relate_client.html),
+[`relate_server`](https://clouddocs.f5.com/api/irules/relate_server.html), and
+[`use`](https://clouddocs.f5.com/api/irules/use.html) are modeled as validated,
+connection-scoped intent records. Each event result exposes them under
+`result.semantic.traffic.intents` with a monotonically increasing ordinal,
+command kind, and normalized argument data. Records are bounded to 256 per
+connection and reset on connection rollover or close. They describe the
+iRule-visible request to clone, listen, relate, or select a resource; the
+emulator does not open sockets, create a second virtual server, or forward
+live traffic as a consequence.
 The legacy global helpers `http_client_ip`, `http_content_len_max`,
 `http_cookie`, `http_header`, `http_host`, `http_method`, `http_uri`,
 `http_version`, `ip_addr`, `ip_protocol`, `ip_tos`, `ip_ttl`, `htonl`, `htons`,
