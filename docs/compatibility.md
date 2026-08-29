@@ -52,6 +52,12 @@ buffers, MSS changes, pacing, PUSH mode, congestion label, and proxy-buffer
 thresholds. These are deterministic state and inspection values; the adapter
 does not implement a kernel TCP stack, congestion-control algorithm,
 retransmission timers, or wire-level pacing.
+RTSP packet traces expose the four RTSP request/response events and the
+catalogued `RTSP::` surface for structured header lookup/mutation, payload
+collection and replacement, release, metadata getters, and deterministic
+response emission. RTSP currently requires structured packets and the RTSP
+profile; it does not parse raw RTSP wire messages or implement media transport,
+session negotiation, or interleaved RTP.
 RADIUS packet handling validates standard and Vendor-Specific attributes and
 exposes the four TMOS 17.5 AAA request/response events. It intentionally does
 not implement shared-secret cryptography, password obfuscation, live AAA

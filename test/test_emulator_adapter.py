@@ -1703,6 +1703,111 @@ when WS_SERVER_FRAME_DONE { log local0. server-done }
         )
         self.assertEqual(result["trace"][2]["payload"], "Józ")
 
+    def test_packet_trace_drives_rtsp_events_headers_collection_and_response(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "RTSP"],
+                "irule": """
+when RTSP_REQUEST {
+    log local0. "request=[RTSP::method] [RTSP::uri] [RTSP::version] source=[RTSP::msg_source] cseq=[RTSP::header value CSeq]"
+    RTSP::header replace Transport RTP/AVP/TCP
+    RTSP::collect 4
+}
+when RTSP_REQUEST_DATA {
+    log local0. "request-data=[RTSP::payload] length=[RTSP::payload length]"
+    RTSP::payload replace 0 4 PONG
+    RTSP::release
+}
+when RTSP_RESPONSE {
+    log local0. "response=[RTSP::status] [RTSP::header value Content-Type]"
+    RTSP::header insert [list X-Test yes]
+    RTSP::collect
+}
+when RTSP_RESPONSE_DATA {
+    log local0. "response-data=[RTSP::payload]"
+    RTSP::release
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "rtsp",
+                        "type": "request",
+                        "direction": "client_to_server",
+                        "method": "DESCRIBE",
+                        "uri": "rtsp://media.example/live",
+                        "headers": {
+                            "CSeq": "1",
+                            "Transport": "RTP/AVP;unicast",
+                        },
+                        "payload": "ping",
+                    },
+                    {
+                        "protocol": "rtsp",
+                        "type": "response",
+                        "direction": "server_to_client",
+                        "status": 200,
+                        "phrase": "OK",
+                        "response_headers": {
+                            "CSeq": "1",
+                            "Content-Type": "application/sdp",
+                        },
+                        "payload": "sdp",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(
+            [event["event"] for packet in result["trace"] for event in packet["events"]],
+            [
+                "RULE_INIT",
+                "CLIENT_ACCEPTED",
+                "RTSP_REQUEST",
+                "RTSP_REQUEST_DATA",
+                "RTSP_RESPONSE",
+                "RTSP_RESPONSE_DATA",
+            ],
+        )
+        request_event = result["trace"][0]["events"][2]
+        request_data = result["trace"][0]["events"][3]
+        response_event = result["trace"][1]["events"][0]
+        self.assertTrue(any("DESCRIBE rtsp://media.example/live RTSP/1.0" in log for log in request_event["logs"]))
+        self.assertTrue(any("request-data=ping length=4" in log for log in request_data["logs"]))
+        self.assertEqual(result["trace"][0]["payload_after"], "PONG")
+        self.assertIn("Transport", request_event["state"]["rtsp"]["headers"])
+        self.assertTrue(any("response=200 application/sdp" in log for log in response_event["logs"]))
+        self.assertIn("X-Test", response_event["state"]["rtsp"]["headers"])
+        self.assertTrue(result["trace"][0]["released"])
+        self.assertTrue(result["trace"][1]["released"])
+
+        response = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "RTSP"],
+                "irule": 'when RTSP_REQUEST { RTSP::respond 401 Unauthorized "X-Reason: denied\\r\\n\\r\\nblocked" }',
+                "packets": [
+                    {
+                        "protocol": "rtsp",
+                        "type": "request",
+                        "direction": "client_to_server",
+                        "method": "OPTIONS",
+                        "uri": "*",
+                        "headers": {"CSeq": "8"},
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        response_entry = response["trace"][0]
+        self.assertEqual(response_entry["events"][-1]["event"], "RTSP_REQUEST")
+        self.assertEqual(response_entry["response"]["status"], 401)
+        self.assertEqual(
+            response_entry["response"]["headers"],
+            [["X-Reason", "denied"], ["CSeq", "8"]],
+        )
+        self.assertEqual(response_entry["response"]["body"], "blocked")
+        self.assertEqual(response["emitted"][0]["protocol"], "rtsp")
+
     def test_websocket_processing_honors_collection_thresholds_and_drops(self) -> None:
         threshold = self.adapter.run_scenario(
             {

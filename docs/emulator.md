@@ -68,6 +68,11 @@ TCP packet traces also expose a bounded transport-control state layer. Rules
 can inspect or set Nagle mode, keepalive, idle timeout, send/receive buffers,
 MSS, pacing, PUSH mode, congestion label, and proxy-buffer thresholds; those
 values persist across packet events in the emulated connection.
+RTSP packet traces use the RTSP profile and expose structured request/response
+events, case-insensitive header lookup and mutation, byte-oriented payload
+collection/replacement, release, metadata getters, and deterministic
+`RTSP::respond` emissions. The packet interface is structured rather than a
+full RTSP wire parser or media-session implementation.
 
 ## HTTP API
 

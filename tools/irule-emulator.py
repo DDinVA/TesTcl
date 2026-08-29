@@ -438,6 +438,24 @@ EVENT_STATE_FIELDS = {
         "push_flag",
         "congestion",
     },
+    "rtsp": {
+        "type",
+        "method",
+        "uri",
+        "version",
+        "status",
+        "phrase",
+        "msg_source",
+        "headers",
+        "payload",
+        "payload_length",
+        "dropped",
+        "responded",
+        "response_status",
+        "response_phrase",
+        "response_headers",
+        "response_body",
+    },
 }
 EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
@@ -455,6 +473,7 @@ EVENT_STATE_NAMESPACES = {
     "gtp": "::state::gtp",
     "udp": "::state::udp",
     "tcp": "::state::tcp",
+    "rtsp": "::state::rtsp",
 }
 
 
@@ -842,6 +861,16 @@ SEMANTIC_MOCK_COMMANDS = {
     "TCP::setmss",
     "TCP::snd_cwnd",
     "TCP::snd_wnd",
+    "RTSP::collect",
+    "RTSP::header",
+    "RTSP::method",
+    "RTSP::msg_source",
+    "RTSP::payload",
+    "RTSP::release",
+    "RTSP::respond",
+    "RTSP::status",
+    "RTSP::uri",
+    "RTSP::version",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1873,7 +1902,7 @@ TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "wire"}
+PACKET_PROTOCOLS = {"tcp", "udp", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -2039,6 +2068,17 @@ PACKET_PROTOCOL_FIELDS = {
         "route_status",
         "route",
     },
+    "rtsp": {
+        "type",
+        "method",
+        "uri",
+        "version",
+        "status",
+        "phrase",
+        "headers",
+        "response_headers",
+        "body",
+    },
     "gtp": {
         "version",
         "type",
@@ -2094,6 +2134,10 @@ PACKET_EVENT_ADAPTERS = {
     "SIP_RESPONSE": "SIP server response ingress",
     "SIP_RESPONSE_DONE": "SIP response routing completion",
     "SIP_RESPONSE_SEND": "SIP response client-side send",
+    "RTSP_REQUEST": "RTSP request ingress",
+    "RTSP_REQUEST_DATA": "collected RTSP request payload",
+    "RTSP_RESPONSE": "RTSP response ingress",
+    "RTSP_RESPONSE_DATA": "collected RTSP response payload",
     "DIAMETER_INGRESS": "Diameter client-side message ingress",
     "DIAMETER_EGRESS": "Diameter message egress",
     "DIAMETER_RETRANSMISSION": "Diameter request retransmission",
@@ -5260,6 +5304,11 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                         raise EmulatorInputError(
                             f"unsupported SIP packet type: {packet_type}"
                         )
+                elif protocol == "rtsp":
+                    if packet_type not in {"request", "response"}:
+                        raise EmulatorInputError(
+                            f"unsupported RTSP packet type: {packet_type}"
+                        )
                 elif protocol == "diameter":
                     if packet_type not in {"request", "response"}:
                         raise EmulatorInputError(
@@ -5541,6 +5590,56 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                         f"packet {index} SIP encoder produced an incomplete message"
                     )
                 normalised.update(parsed)
+        if protocol == "rtsp":
+            if "body" in packet and "payload" in packet:
+                raise EmulatorInputError(
+                    f"packet {index} RTSP packets must use body or payload, not both"
+                )
+            packet_type = normalised.get("type")
+            if packet_type is None:
+                raise EmulatorInputError(f"packet {index} RTSP packets require type")
+            if packet_type == "request":
+                if direction != "client_to_server":
+                    raise EmulatorInputError(
+                        f"packet {index} RTSP requests must be client_to_server"
+                    )
+                if "method" not in normalised or "uri" not in normalised:
+                    raise EmulatorInputError(
+                        f"packet {index} RTSP requests require method and uri"
+                    )
+            else:
+                if direction != "server_to_client":
+                    raise EmulatorInputError(
+                        f"packet {index} RTSP responses must be server_to_client"
+                    )
+                if "status" not in normalised:
+                    raise EmulatorInputError(
+                        f"packet {index} RTSP responses require status"
+                    )
+                try:
+                    status = int(normalised["status"])
+                except (TypeError, ValueError) as exc:
+                    raise EmulatorInputError(
+                        f"packet {index} RTSP status must be an integer"
+                    ) from exc
+                if not 100 <= status <= 999:
+                    raise EmulatorInputError(
+                        f"packet {index} RTSP status must be between 100 and 999"
+                    )
+                normalised["status"] = status
+            normalised.setdefault("version", "RTSP/1.0")
+            if packet_type == "response":
+                normalised.setdefault("phrase", "OK" if normalised["status"] == 200 else "")
+            normalised.setdefault("headers", normalised.get("response_headers", {}))
+            if packet_type == "response":
+                normalised.setdefault("response_headers", normalised["headers"])
+            normalised["payload"] = normalised.get("payload", normalised.get("body", ""))
+            try:
+                normalised["_rtsp_payload"] = normalised["payload"].encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise EmulatorInputError(
+                    f"packet {index} RTSP payload must be valid UTF-8"
+                ) from exc
         if protocol == "diameter":
             if "message_hex" in normalised and (
                 "avps" in normalised or "payload_hex" in normalised
@@ -6200,6 +6299,8 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::tcp_clear_event_state")
         if "udp" in state:
             session.eval_tcl("::itest::semantic::udp_prepare_event")
+        if "rtsp" in state:
+            session.eval_tcl("::itest::semantic::rtsp_prepare_event")
         required_profiles = self._event_profiles.get(event_name, set())
         attached_profiles = {profile.upper() for profile in self._profiles}
         if required_profiles and not required_profiles.intersection(attached_profiles):
@@ -6215,7 +6316,7 @@ class EmulatorSession:
         for layer, values in state.items():
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp"} and field in {"payload", "message", "authenticator"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "rtsp"} and field in {"payload", "message", "authenticator"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -6314,7 +6415,7 @@ class EmulatorSession:
         protocol = packet["protocol"]
         if protocol == "sip" and packet.get("transport", "tcp") == "udp":
             connection.update({"protocol": "17", "transport": "udp"})
-        elif protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr"}:
+        elif protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "rtsp"}:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol in {"udp", "dns", "radius"}:
             connection.update({"protocol": "17", "transport": "udp"})
@@ -6453,6 +6554,30 @@ class EmulatorSession:
             mqtt_state["message"] = bytes(message)
             mqtt_state["message_length"] = str(len(message))
             state["mqtt"] = mqtt_state
+        elif protocol == "rtsp":
+            rtsp_state: dict[str, str] = {}
+            for field in EVENT_STATE_FIELDS["rtsp"]:
+                if field in {"headers", "response_headers", "payload"}:
+                    continue
+                if field in packet:
+                    rtsp_state[field] = _packet_scalar(packet[field], field)
+            headers = packet.get("headers", packet.get("response_headers", {}))
+            rtsp_state["headers"] = " ".join(
+                _tcl_quote(item) for pair in headers.items() for item in pair
+            )
+            if packet.get("type") == "response":
+                response_headers = packet.get("response_headers", headers)
+                rtsp_state["response_headers"] = " ".join(
+                    _tcl_quote(item)
+                    for pair in response_headers.items()
+                    for item in pair
+                )
+            payload = packet.get("_rtsp_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                payload = str(packet.get("payload", "")).encode("utf-8")
+            rtsp_state["payload"] = bytes(payload)
+            rtsp_state["payload_length"] = str(len(payload))
+            state["rtsp"] = rtsp_state
         elif protocol == "sip":
             sip_state: dict[str, str] = {}
             # Raw SIP TCP messages are synthesized from a generic TCP packet,
@@ -6594,7 +6719,7 @@ class EmulatorSession:
             mr_state["payload_length"] = str(len(payload))
             state["mr"] = mr_state
         if (
-            protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr"}
+            protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp"}
             or (protocol == "sip" and packet.get("transport", "tcp") == "tcp")
         ):
             state["tcp"] = {}
@@ -6929,7 +7054,7 @@ class EmulatorSession:
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
-        if packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp"}:
+        if packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
             return
         source = packet["source"]
         destination = packet["destination"]
@@ -6949,7 +7074,7 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
@@ -6958,13 +7083,14 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::diameter_reset_connection")
         session.eval_tcl("::itest::semantic::mr_reset_connection")
         session.eval_tcl("::itest::semantic::gtp_reset_connection")
+        session.eval_tcl("::itest::semantic::rtsp_reset_connection")
         session.eval_tcl("::itest::semantic::psm_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
         packet_has_tcp_layer = (
-            packet["protocol"] in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr"}
+            packet["protocol"] in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp"}
             or (packet["protocol"] == "sip" and packet.get("transport", "tcp") == "tcp")
         )
         accepted_state = (
@@ -6989,6 +7115,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::psm_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
+        session.eval_tcl("::itest::semantic::rtsp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         self._packet_streams.clear()
         self._http2_decoder = None
@@ -7733,6 +7860,85 @@ class EmulatorSession:
                             },
                             index,
                         )
+                continue
+
+            if protocol == "rtsp":
+                self._activate_packet_connection(session, packet, entry["events"])
+                is_request = packet["type"] == "request"
+                ingress_event = "RTSP_REQUEST" if is_request else "RTSP_RESPONSE"
+                data_event = "RTSP_REQUEST_DATA" if is_request else "RTSP_RESPONSE_DATA"
+                ingress_result = self._fire_event_on_worker(
+                    session, ingress_event, self._packet_event_state(packet)
+                )
+                entry["events"].append(ingress_result)
+                rtsp_state = ingress_result.get("state", {}).get("rtsp", {})
+                if rtsp_state.get("dropped") in {"1", "true"}:
+                    entry["dropped"] = True
+                    entry["drop_reason"] = "rtsp"
+                if rtsp_state.get("responded") in {"1", "true"}:
+                    entry["responded"] = True
+                    raw_headers = _split_tcl_list(rtsp_state.get("response_headers", ""))
+                    if len(raw_headers) % 2:
+                        raise EmulatorInputError("invalid RTSP response headers")
+                    response = {
+                        "status": int(rtsp_state.get("response_status", "0")),
+                        "phrase": rtsp_state.get("response_phrase", ""),
+                        "headers": [
+                            [raw_headers[offset], raw_headers[offset + 1]]
+                            for offset in range(0, len(raw_headers), 2)
+                        ],
+                        "body": rtsp_state.get("response_body", ""),
+                    }
+                    entry["response"] = response
+                    ingress_result.setdefault("emissions", []).append(
+                        {
+                            "protocol": "rtsp",
+                            "direction": "server_to_client",
+                            "payload": response["body"],
+                            "byte_length": len(response["body"].encode("utf-8")),
+                            "status": response["status"],
+                            "phrase": response["phrase"],
+                            "headers": response["headers"],
+                        }
+                    )
+                else:
+                    try:
+                        requested_length = int(
+                            session.eval_tcl(
+                                "set ::itest::semantic::rtsp_collection_length"
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        raise EmulatorInputError("invalid RTSP collection length") from None
+                    requested = session.eval_tcl(
+                        "set ::itest::semantic::rtsp_collection_requested"
+                    ) == "1"
+                    payload = packet.get("_rtsp_payload", b"")
+                    if not isinstance(payload, (bytes, bytearray)):
+                        payload = packet.get("payload", "").encode("utf-8")
+                    payload = bytes(payload)
+                    if requested and (requested_length == 0 or len(payload) >= requested_length):
+                        collected = payload if requested_length == 0 else payload[:requested_length]
+                        data_state = {
+                            layer: dict(values)
+                            for layer, values in ingress_result.get("state", {}).items()
+                        }
+                        data_state.setdefault("rtsp", {})["payload"] = collected
+                        data_state["rtsp"]["payload_length"] = str(len(collected))
+                        session.eval_tcl("set ::itest::semantic::rtsp_collection_requested 0")
+                        data_result = self._fire_event_on_worker(
+                            session, data_event, data_state
+                        )
+                        entry["events"].append(data_result)
+                        data_rtsp = data_result.get("state", {}).get("rtsp", {})
+                        if data_rtsp.get("dropped") in {"1", "true"}:
+                            entry["dropped"] = True
+                            entry["drop_reason"] = "rtsp"
+                        if session.eval_tcl(
+                            "set ::itest::semantic::rtsp_release_requested"
+                        ) == "1":
+                            entry["released"] = True
+                        entry["payload_after"] = data_rtsp.get("payload", "")
                 continue
 
             if protocol == "mqtt":

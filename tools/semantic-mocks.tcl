@@ -53,6 +53,9 @@ namespace eval ::itest::semantic {
     variable ssl_cert_objects [dict create]
     variable http2_pending [dict create]
     variable udp_unused_port_next 40000
+    variable rtsp_collection_requested 0
+    variable rtsp_collection_length 0
+    variable rtsp_release_requested 0
 
     variable sip_discarded 0
     variable sip_response_requested 0
@@ -120,6 +123,25 @@ namespace eval ::itest::semantic {
         variable proxybuffer_low 0
         variable push_flag default
         variable congestion ""
+    }
+
+    namespace eval ::state::rtsp {
+        variable type request
+        variable method ""
+        variable uri ""
+        variable version "RTSP/1.0"
+        variable status 200
+        variable phrase "OK"
+        variable msg_source client
+        variable headers {}
+        variable payload ""
+        variable payload_length 0
+        variable dropped 0
+        variable responded 0
+        variable response_status 0
+        variable response_phrase ""
+        variable response_headers {}
+        variable response_body ""
     }
 
     foreach tls_side {client server} {
@@ -3944,6 +3966,331 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc rtsp_reset_connection {} {
+        variable rtsp_collection_requested
+        variable rtsp_collection_length
+        variable rtsp_release_requested
+        set rtsp_collection_requested 0
+        set rtsp_collection_length 0
+        set rtsp_release_requested 0
+        foreach {name value} {
+            type request
+            method ""
+            uri ""
+            version RTSP/1.0
+            status 200
+            phrase OK
+            msg_source client
+            headers {}
+            payload ""
+            payload_length 0
+            dropped 0
+            responded 0
+            response_status 0
+            response_phrase ""
+            response_headers {}
+            response_body ""
+        } {
+            set ::state::rtsp::$name $value
+        }
+    }
+
+    proc rtsp_prepare_event {} {
+        variable rtsp_release_requested
+        set rtsp_release_requested 0
+        foreach {name value} {
+            dropped 0
+            responded 0
+            response_status 0
+            response_phrase ""
+            response_headers {}
+            response_body ""
+        } {
+            set ::state::rtsp::$name $value
+        }
+    }
+
+    proc _rtsp_require_event {allowed command_name} {
+        if {$::itest::current_event ni $allowed} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc _rtsp_is_response_event {} {
+        return [expr {$::itest::current_event in {RTSP_RESPONSE RTSP_RESPONSE_DATA}}]
+    }
+
+    proc _rtsp_header_matches {actual wanted} {
+        return [string equal -nocase $actual $wanted]
+    }
+
+    proc _rtsp_set_headers {headers} {
+        set ::state::rtsp::headers $headers
+        if {[_rtsp_is_response_event]} {
+            set ::state::rtsp::response_headers $headers
+        }
+    }
+
+    proc _rtsp_header_indices {headers wanted} {
+        set indices {}
+        set index 0
+        foreach {name value} $headers {
+            if {[_rtsp_header_matches $name $wanted]} {
+                lappend indices $index
+            }
+            incr index 2
+        }
+        return $indices
+    }
+
+    proc rtsp_header_command {args} {
+        _rtsp_require_event {
+            RTSP_REQUEST RTSP_REQUEST_DATA RTSP_RESPONSE RTSP_RESPONSE_DATA
+        } RTSP::header
+        if {[llength $args] == 0} {
+            error "RTSP::header requires a subcommand"
+        }
+        set subcommand [string tolower [lindex $args 0]]
+        set headers $::state::rtsp::headers
+        switch -exact -- $subcommand {
+            value {
+                if {[llength $args] != 2} { error "RTSP::header value requires a name" }
+                foreach {name value} $headers {
+                    if {[_rtsp_header_matches $name [lindex $args 1]]} {
+                        return $value
+                    }
+                }
+                return ""
+            }
+            exists {
+                if {[llength $args] != 2} { error "RTSP::header exists requires a name" }
+                return [expr {[llength [_rtsp_header_indices $headers [lindex $args 1]]] > 0}]
+            }
+            insert {
+                if {[llength $args] == 2} {
+                    set additions [lindex $args 1]
+                } elseif {[llength $args] >= 3 && ([llength $args] - 1) % 2 == 0} {
+                    set additions [lrange $args 1 end]
+                } else {
+                    error "RTSP::header insert requires name/value pairs"
+                }
+                if {[llength $additions] % 2} {
+                    error "RTSP::header insert requires name/value pairs"
+                }
+                foreach {name value} $additions {
+                    if {$name eq ""} { error "RTSP header name cannot be empty" }
+                    lappend headers $name $value
+                }
+                _rtsp_set_headers $headers
+            }
+            remove {
+                if {[llength $args] != 2} { error "RTSP::header remove requires a name" }
+                set wanted [lindex $args 1]
+                set updated {}
+                foreach {name value} $headers {
+                    if {![_rtsp_header_matches $name $wanted]} {
+                        lappend updated $name $value
+                    }
+                }
+                _rtsp_set_headers $updated
+            }
+            replace {
+                if {[llength $args] == 3} {
+                    set old_name [lindex $args 1]
+                    set new_name $old_name
+                    set new_value [lindex $args 2]
+                } elseif {[llength $args] == 5} {
+                    set old_name [lindex $args 1]
+                    set new_name [lindex $args 3]
+                    set new_value [lindex $args 4]
+                } else {
+                    error "RTSP::header replace requires name/value or old-name/value/new-name/value"
+                }
+                set updated {}
+                set replaced 0
+                foreach {name value} $headers {
+                    if {[_rtsp_header_matches $name $old_name]} {
+                        if {!$replaced} {
+                            lappend updated $new_name $new_value
+                            set replaced 1
+                        }
+                    } else {
+                        lappend updated $name $value
+                    }
+                }
+                if {!$replaced} { lappend updated $new_name $new_value }
+                _rtsp_set_headers $updated
+            }
+            default { error "unsupported RTSP::header subcommand $subcommand" }
+        }
+        return ""
+    }
+
+    proc rtsp_payload_command {args} {
+        _rtsp_require_event {RTSP_REQUEST_DATA RTSP_RESPONSE_DATA} RTSP::payload
+        if {[llength $args] == 0} { return $::state::rtsp::payload }
+        set subcommand [lindex $args 0]
+        switch -exact -- $subcommand {
+            length {
+                if {[llength $args] != 1} { error "RTSP::payload length takes no arguments" }
+                return [::itest::cmd::_payload_bytelength $::state::rtsp::payload]
+            }
+            replace {
+                if {[llength $args] != 4} {
+                    error "RTSP::payload replace requires offset, length, and data"
+                }
+                set offset [lindex $args 1]
+                set length [lindex $args 2]
+                if {![string is integer -strict $offset] || $offset < 0 ||
+                    ![string is integer -strict $length] || $length < 0} {
+                    error "RTSP::payload offsets must be non-negative integers"
+                }
+                set ::state::rtsp::payload [::itest::cmd::_payload_splice \
+                    $::state::rtsp::payload $offset $length [lindex $args 3]]
+                set ::state::rtsp::payload_length \
+                    [::itest::cmd::_payload_bytelength $::state::rtsp::payload]
+                ::itest::log_decision rtsp payload_replace [list $offset $length]
+                return ""
+            }
+            default {
+                if {![string is integer -strict $subcommand] || $subcommand < 0 ||
+                    [llength $args] != 1} {
+                    error "RTSP::payload accepts length, replace, or an optional non-negative size"
+                }
+                return [::itest::cmd::_payload_first $::state::rtsp::payload $subcommand]
+            }
+        }
+    }
+
+    proc rtsp_collect_command {args} {
+        _rtsp_require_event {RTSP_REQUEST RTSP_RESPONSE} RTSP::collect
+        variable rtsp_collection_requested
+        variable rtsp_collection_length
+        if {[llength $args] > 1} { error "RTSP::collect accepts an optional length" }
+        set length 0
+        if {[llength $args] == 1} {
+            set length [lindex $args 0]
+            if {![string is integer -strict $length] || $length <= 0} {
+                error "RTSP::collect length must be a positive integer"
+            }
+        }
+        set rtsp_collection_requested 1
+        set rtsp_collection_length $length
+        ::itest::log_decision rtsp collect $length
+        return ""
+    }
+
+    proc rtsp_release_command {args} {
+        _rtsp_require_event {RTSP_REQUEST_DATA RTSP_RESPONSE_DATA} RTSP::release
+        variable rtsp_release_requested
+        if {[llength $args] != 0} { error "RTSP::release takes no arguments" }
+        set rtsp_release_requested 1
+        variable rtsp_collection_requested
+        set rtsp_collection_requested 0
+        ::itest::log_decision rtsp release ""
+        return ""
+    }
+
+    proc _rtsp_getter {field command_name} {
+        _rtsp_require_event {
+            RTSP_REQUEST RTSP_REQUEST_DATA RTSP_RESPONSE RTSP_RESPONSE_DATA
+        } $command_name
+        return [set ::state::rtsp::$field]
+    }
+
+    proc rtsp_method_command {args} {
+        if {[llength $args] != 0} { error "RTSP::method takes no arguments" }
+        return [_rtsp_getter method RTSP::method]
+    }
+
+    proc rtsp_msg_source_command {args} {
+        if {[llength $args] != 0} { error "RTSP::msg_source takes no arguments" }
+        return [_rtsp_getter msg_source RTSP::msg_source]
+    }
+
+    proc rtsp_status_command {args} {
+        if {[llength $args] != 0} { error "RTSP::status takes no arguments" }
+        return [_rtsp_getter status RTSP::status]
+    }
+
+    proc rtsp_uri_command {args} {
+        if {[llength $args] != 0} { error "RTSP::uri takes no arguments" }
+        return [_rtsp_getter uri RTSP::uri]
+    }
+
+    proc rtsp_version_command {args} {
+        if {[llength $args] != 0} { error "RTSP::version takes no arguments" }
+        return [_rtsp_getter version RTSP::version]
+    }
+
+    proc rtsp_respond_command {args} {
+        _rtsp_require_event {RTSP_REQUEST} RTSP::respond
+        if {$::state::rtsp::responded} {
+            error "only one RTSP response is allowed per request"
+        }
+        if {[llength $args] < 2 || [llength $args] > 3} {
+            error "RTSP::respond requires status, phrase, and an optional response"
+        }
+        set status [lindex $args 0]
+        if {![string is integer -strict $status] || $status < 100 || $status > 999} {
+            error "RTSP response status must be between 100 and 999"
+        }
+        set phrase [lindex $args 1]
+        if {$phrase eq ""} { error "RTSP response phrase cannot be empty" }
+        set headers {}
+        set body ""
+        if {[llength $args] == 3} {
+            set response [lindex $args 2]
+            set separator [string first "\r\n\r\n" $response]
+            set separator_length 4
+            if {$separator < 0} {
+                set separator [string first "\n\n" $response]
+                set separator_length 2
+            }
+            if {$separator >= 0} {
+                set header_text [string range $response 0 [expr {$separator - 1}]]
+                set body [string range $response [expr {$separator + $separator_length}] end]
+            } else {
+                set header_text $response
+            }
+            set header_text [string map {\r\n \n \r \n} $header_text]
+            set non_header 0
+            foreach line [split $header_text \n] {
+                if {$line eq ""} { continue }
+                set colon [string first : $line]
+                if {$colon <= 0} {
+                    set non_header 1
+                    break
+                }
+                lappend headers [string trim [string range $line 0 [expr {$colon - 1}]]] \
+                    [string trim [string range $line [expr {$colon + 1}] end]]
+            }
+            if {$separator < 0 && $non_header} {
+                set headers {}
+                set body $response
+            }
+        }
+        set has_cseq 0
+        foreach {name value} $headers {
+            if {[_rtsp_header_matches $name CSeq]} { set has_cseq 1; break }
+        }
+        if {!$has_cseq} {
+            foreach {name value} $::state::rtsp::headers {
+                if {[_rtsp_header_matches $name CSeq]} {
+                    lappend headers CSeq $value
+                    break
+                }
+            }
+        }
+        set ::state::rtsp::responded 1
+        set ::state::rtsp::response_status $status
+        set ::state::rtsp::response_phrase $phrase
+        set ::state::rtsp::response_headers $headers
+        set ::state::rtsp::response_body $body
+        ::itest::log_decision rtsp respond [list $status $phrase]
+        return ""
+    }
+
     proc udp_reset_connection {} {
         namespace eval ::state::udp {
             variable payload ""
@@ -7374,6 +7721,16 @@ foreach {name proc_name} {
     TCP::setmss ::itest::semantic::tcp_setmss_command
     TCP::snd_cwnd ::itest::semantic::tcp_snd_cwnd_command
     TCP::snd_wnd ::itest::semantic::tcp_snd_wnd_command
+    RTSP::collect ::itest::semantic::rtsp_collect_command
+    RTSP::header ::itest::semantic::rtsp_header_command
+    RTSP::method ::itest::semantic::rtsp_method_command
+    RTSP::msg_source ::itest::semantic::rtsp_msg_source_command
+    RTSP::payload ::itest::semantic::rtsp_payload_command
+    RTSP::release ::itest::semantic::rtsp_release_command
+    RTSP::respond ::itest::semantic::rtsp_respond_command
+    RTSP::status ::itest::semantic::rtsp_status_command
+    RTSP::uri ::itest::semantic::rtsp_uri_command
+    RTSP::version ::itest::semantic::rtsp_version_command
     UDP::client_port ::itest::semantic::udp_client_port_command
     UDP::debug_queue ::itest::semantic::udp_debug_queue_command
     UDP::drop ::itest::semantic::udp_drop_command
