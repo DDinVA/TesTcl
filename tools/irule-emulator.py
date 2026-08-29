@@ -642,6 +642,14 @@ EVENT_STATE_FIELDS = {
     },
     "wam": {"enabled"},
     "vdi": {"enabled"},
+    "tap": {
+        "action",
+        "score",
+        "insight_requested",
+        "insight_token",
+        "config",
+        "insight",
+    },
     "diameter": {
         "type",
         "version",
@@ -1021,6 +1029,7 @@ EVENT_STATE_NAMESPACES = {
     "policy": "::state::policy",
     "wam": "::state::wam",
     "vdi": "::state::vdi",
+    "tap": "::state::tap",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
     "message": "::state::message",
@@ -1599,6 +1608,11 @@ SEMANTIC_MOCK_COMMANDS = {
     "WAM::enable",
     "VDI::disable",
     "VDI::enable",
+    "TAP::action",
+    "TAP::config",
+    "TAP::insight",
+    "TAP::insight_requested",
+    "TAP::score",
     "DIAMETER::avp",
     "DIAMETER::command",
     "DIAMETER::disconnect",
@@ -2400,6 +2414,12 @@ def _tcl_list(values: list[str]) -> str:
 def _tcl_list_value(values: list[str]) -> str:
     """Encode a Tcl list as a variable value rather than command syntax."""
     return " ".join(_tcl_quote(value) for value in values)
+
+
+def _tcl_dict_value(values: dict[str, str]) -> str:
+    """Encode a flat Tcl dictionary as a variable value."""
+    flattened = [item for key, value in values.items() for item in (key, value)]
+    return _tcl_list_value(flattened)
 
 
 def _configure_asm(session: Any, asm: dict[str, Any]) -> None:
@@ -5438,6 +5458,69 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
                         )
                     flattened.extend((policy_name, _tcl_list_value(rules)))
                 layer_values[field] = _tcl_list_value(flattened)
+            elif layer == "tap" and field == "config" and isinstance(value, dict):
+                if len(value) > 256:
+                    raise EmulatorInputError(
+                        "event state tap.config must contain at most 256 applications"
+                    )
+                encoded_config: dict[str, str] = {}
+                for application, entities in value.items():
+                    if (
+                        not isinstance(application, str)
+                        or not application
+                        or "\x00" in application
+                        or not isinstance(entities, dict)
+                        or len(entities) > 256
+                    ):
+                        raise EmulatorInputError(
+                            "event state tap.config must map application names to objects of at most 256 entities"
+                        )
+                    encoded_entities: dict[str, str] = {}
+                    for entity, item in entities.items():
+                        if not isinstance(entity, str) or not entity or "\x00" in entity:
+                            raise EmulatorInputError(
+                                "event state tap.config entity names must be non-empty strings without NUL"
+                            )
+                        if isinstance(item, bool):
+                            item_text = "1" if item else "0"
+                        elif isinstance(item, (str, int, float)):
+                            item_text = str(item)
+                        else:
+                            raise EmulatorInputError(
+                                "event state tap.config values must be strings or numbers"
+                            )
+                        if "\x00" in item_text:
+                            raise EmulatorInputError(
+                                "event state tap.config values must not contain NUL"
+                            )
+                        encoded_entities[entity] = item_text
+                    encoded_config[application] = _tcl_dict_value(encoded_entities)
+                layer_values[field] = _tcl_dict_value(encoded_config)
+            elif layer == "tap" and field == "insight" and isinstance(value, dict):
+                if len(value) > 256:
+                    raise EmulatorInputError(
+                        "event state tap.insight must contain at most 256 fields"
+                    )
+                encoded_insight: dict[str, str] = {}
+                for key, item in value.items():
+                    if not isinstance(key, str) or not key or "\x00" in key:
+                        raise EmulatorInputError(
+                            "event state tap.insight keys must be non-empty strings without NUL"
+                        )
+                    if isinstance(item, bool):
+                        item_text = "1" if item else "0"
+                    elif isinstance(item, (str, int, float)):
+                        item_text = str(item)
+                    else:
+                        raise EmulatorInputError(
+                            "event state tap.insight values must be strings or numbers"
+                        )
+                    if "\x00" in item_text:
+                        raise EmulatorInputError(
+                            "event state tap.insight values must not contain NUL"
+                        )
+                    encoded_insight[key] = item_text
+                layer_values[field] = _tcl_dict_value(encoded_insight)
             elif layer == "tmm" and field == "cmp_groups" and isinstance(value, list):
                 if not value or any(
                     isinstance(item, bool)
@@ -5922,6 +6005,7 @@ PACKET_EVENT_ADAPTERS = {
     "DNS_REQUEST": "DNS request packet",
     "DNS_RESPONSE": "DNS response packet",
     "CONNECTOR_OPEN": "structured connector event",
+    "TAP_REQUEST": "structured TAP security-token event",
     "PEM_POLICY": "structured PEM policy event",
     "PEM_SUBS_SESS_CREATED": "structured PEM subscriber-session creation event",
     "PEM_SUBS_SESS_UPDATED": "structured PEM subscriber-session update event",
@@ -10703,6 +10787,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::connector_reset_connection")
                 session.eval_tcl("::itest::semantic::wam_reset_connection")
                 session.eval_tcl("::itest::semantic::vdi_reset_connection")
+                session.eval_tcl("::itest::semantic::tap_reset_connection")
                 if any(str(profile).upper() == "REWRITE" for profile in self._profiles):
                     session.eval_tcl("::itest::semantic::rewrite_install_flow_hooks")
                 if any(
@@ -10993,6 +11078,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::connector_reset_connection")
             session.eval_tcl("::itest::semantic::wam_reset_connection")
             session.eval_tcl("::itest::semantic::vdi_reset_connection")
+            session.eval_tcl("::itest::semantic::tap_reset_connection")
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::route_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
@@ -12372,6 +12458,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::connector_reset_connection")
         session.eval_tcl("::itest::semantic::wam_reset_connection")
         session.eval_tcl("::itest::semantic::vdi_reset_connection")
+        session.eval_tcl("::itest::semantic::tap_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::stream_reset_connection")
         session.eval_tcl("::itest::semantic::route_reset_connection")
@@ -12447,6 +12534,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::connector_reset_connection")
         session.eval_tcl("::itest::semantic::wam_reset_connection")
         session.eval_tcl("::itest::semantic::vdi_reset_connection")
+        session.eval_tcl("::itest::semantic::tap_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::datagram_reset_connection")

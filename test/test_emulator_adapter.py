@@ -735,6 +735,56 @@ when HTTP_REQUEST {
         finally:
             session.close()
 
+    def test_tap_token_state_and_insight_submission(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TAP"],
+                "irule": """
+when TAP_REQUEST {
+    set old_action [TAP::action]
+    set old_score [TAP::score]
+    set config [TAP::config fraud mode]
+    set requested [TAP::insight_requested]
+    set action_result [TAP::action block]
+    set score_result [TAP::score 85]
+    TAP::insight set device mobile signal suspicious
+    set token [TAP::insight send login suspicious]
+    log local0. "old=$old_action/$old_score config=$config requested=$requested updates=$action_result/$score_result token=$token"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event(
+                "TAP_REQUEST",
+                {
+                    "tap": {
+                        "action": "allow",
+                        "score": 10,
+                        "insight_requested": True,
+                        "insight_token": "block",
+                        "config": {"fraud": {"mode": "strict"}},
+                        "insight": {"precondition": "present"},
+                    }
+                },
+            )
+            self.assertTrue(result["fired"])
+            tap_state = result["state"]["tap"]
+            self.assertEqual(tap_state["action"], "block")
+            self.assertEqual(tap_state["score"], "85")
+            self.assertEqual(tap_state["insight_requested"], "1")
+            self.assertEqual(tap_state["insight_token"], "block")
+            self.assertEqual(tap_state["insight"], "")
+            self.assertTrue(any(
+                "old=allow/10 config=strict requested=1 updates=allow/10 token=block" in entry
+                for entry in result["logs"]
+            ))
+        finally:
+            session.close()
+
     def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1342,7 +1392,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
         self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 163)
+        self.assertEqual(queue["command_count"], 158)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1362,6 +1412,10 @@ when HTTP_REQUEST {
         self.assertIn("PEM_SUBS_SESS_CREATED", packet_adapters)
         self.assertIn("PEM_SUBS_SESS_UPDATED", packet_adapters)
         self.assertIn("PEM_SUBS_SESS_DELETED", packet_adapters)
+        self.assertEqual(
+            packet_adapters["TAP_REQUEST"],
+            "structured TAP security-token event",
+        )
         self.assertEqual(
             packet_adapters["HTTP_REQUEST_RELEASE"],
             "HTTP request transaction release phase",

@@ -795,6 +795,19 @@ engines. See the F5 [WAM::disable](https://clouddocs.f5.com/api/irules/WAM__disa
 [VDI::disable](https://clouddocs.f5.com/api/irules/VDI__disable.html), and
 [VDI::enable](https://clouddocs.f5.com/api/irules/VDI__enable.html) references.
 
+### TAP security-token state
+
+The direct event API supports `TAP_REQUEST` with deterministic TAP state. The
+emulator models `TAP::action` and `TAP::score` get/set behavior,
+`TAP::insight_requested`, application/entity lookup through `TAP::config`, and
+`TAP::insight` set/send accumulation. Configure `tap.config` as an object of
+application objects and `tap.insight` as a key/value object; values are bounded
+to 256 entries. An insight send returns the configured deterministic token and
+clears the accumulated insight. This models rule-visible token decisions and
+submission state; it does not contact or reproduce the external TAP service.
+See the F5 [TAP namespace](https://clouddocs.f5.com/api/irules/TAP.html)
+reference.
+
 ### FLOWTABLE query inputs
 
 The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,

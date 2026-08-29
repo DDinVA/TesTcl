@@ -1080,6 +1080,15 @@ namespace eval ::itest::semantic {
         variable enabled 1
     }
 
+    namespace eval ::state::tap {
+        variable action allow
+        variable score 0
+        variable insight_requested 0
+        variable insight_token allow
+        variable config {}
+        variable insight {}
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -5805,6 +5814,131 @@ namespace eval ::itest::semantic {
         set ::state::vdi::enabled 1
         ::itest::log_decision vdi enable
         return ""
+    }
+
+    proc tap_reset_connection {} {
+        foreach {name value} {
+            action allow
+            score 0
+            insight_requested 0
+            insight_token allow
+            config {}
+            insight {}
+        } {
+            set ::state::tap::$name $value
+        }
+    }
+
+    proc _tap_text {value field_name} {
+        if {[string first "\x00" $value] >= 0 ||
+            [string first "\r" $value] >= 0 || [string first "\n" $value] >= 0} {
+            error "$field_name must not contain NUL bytes or newlines"
+        }
+        return $value
+    }
+
+    proc _tap_insight_token {} {
+        set token [_tap_text $::state::tap::insight_token "TAP insight token"]
+        if {$token ni {allow block captcha conviction deception timeout}} {
+            error "TAP insight token must be allow, block, captcha, conviction, deception, or timeout"
+        }
+        return $token
+    }
+
+    proc tap_action_command {args} {
+        if {$::itest::current_event ne "TAP_REQUEST"} {
+            error "TAP::action is only valid in TAP_REQUEST"
+        }
+        if {[llength $args] > 1} { error "TAP::action accepts an optional action" }
+        set allowed {allow alarm basicPolicy strictPolicy jsInjection captcha block tcpReset deception conviction}
+        set previous [_tap_text $::state::tap::action "TAP action"]
+        if {$previous ni $allowed} { error "TAP action state contains an unsupported action" }
+        if {[llength $args] == 0} { return $previous }
+        set next [_tap_text [lindex $args 0] "TAP action"]
+        if {$next ni $allowed} { error "TAP::action received an unsupported action" }
+        set ::state::tap::action $next
+        ::itest::log_decision tap action [list $previous $next]
+        return $previous
+    }
+
+    proc tap_score_command {args} {
+        if {$::itest::current_event ne "TAP_REQUEST"} {
+            error "TAP::score is only valid in TAP_REQUEST"
+        }
+        if {[llength $args] > 1} { error "TAP::score accepts an optional score" }
+        set previous [_tmm_nonnegative_integer $::state::tap::score "TAP score"]
+        if {$previous > 100} { error "TAP score must be an integer from 0 to 100" }
+        if {[llength $args] == 0} { return $previous }
+        set next [_tmm_nonnegative_integer [lindex $args 0] "TAP score"]
+        if {$next > 100} { error "TAP score must be an integer from 0 to 100" }
+        set ::state::tap::score $next
+        ::itest::log_decision tap score [list $previous $next]
+        return $previous
+    }
+
+    proc tap_config_command {args} {
+        if {[llength $args] != 2} { error "TAP::config requires APPLICATION and ENTITY" }
+        set application [_tap_text [lindex $args 0] "TAP application"]
+        set entity [_tap_text [lindex $args 1] "TAP entity"]
+        if {$application eq "" || $entity eq ""} { error "TAP::config requires non-empty names" }
+        if {[catch {dict exists $::state::tap::config $application $entity} exists]} {
+            error "TAP::config state must be an application-to-entity Tcl dictionary"
+        }
+        if {!$exists} { return "" }
+        return [_tap_text [dict get $::state::tap::config $application $entity] "TAP config value"]
+    }
+
+    proc tap_insight_command {args} {
+        if {[llength $args] == 0} {
+            return [_tap_insight_token]
+        }
+        set operation [lindex $args 0]
+        switch -exact -- $operation {
+            set {
+                if {[llength $args] < 3 || ([llength $args] - 1) % 2 != 0} {
+                    error "TAP::insight set requires key/value pairs"
+                }
+                set insight $::state::tap::insight
+                set index 1
+                while {$index < [llength $args]} {
+                    set key [_tap_text [lindex $args $index] "TAP insight key"]
+                    set value [_tap_text [lindex $args [incr index]] "TAP insight value"]
+                    if {$key eq ""} { error "TAP insight keys must be non-empty" }
+                    if {![dict exists $insight $key] && [dict size $insight] >= 256} {
+                        error "TAP insight cannot contain more than 256 fields"
+                    }
+                    dict set insight $key $value
+                    incr index
+                }
+                set ::state::tap::insight $insight
+                ::itest::log_decision tap insight_set $insight
+                return ""
+            }
+            send {
+                if {[llength $args] != 3} {
+                    error "TAP::insight send requires event type and reason"
+                }
+                set event_type [_tap_text [lindex $args 1] "TAP insight event type"]
+                set reason [_tap_text [lindex $args 2] "TAP insight reason"]
+                if {$event_type eq "" || $reason eq ""} {
+                    error "TAP::insight send requires non-empty event type and reason"
+                }
+                ::itest::log_decision tap insight_send [list $event_type $reason $::state::tap::insight]
+                set ::state::tap::insight {}
+                return [_tap_insight_token]
+            }
+            default {
+                error "TAP::insight supports no arguments, set, or send"
+            }
+        }
+    }
+
+    proc tap_insight_requested_command {args} {
+        if {[llength $args] != 0} { error "TAP::insight_requested takes no arguments" }
+        if {$::state::tap::insight_requested ni {0 1}} {
+            error "TAP insight_requested state must be boolean"
+        }
+        return $::state::tap::insight_requested
     }
 
     proc diameter_reset_connection {} {
@@ -19911,6 +20045,11 @@ foreach {original replacement} {
     wam_enable wam_enable_command
     vdi_disable vdi_disable_command
     vdi_enable vdi_enable_command
+    tap_action tap_action_command
+    tap_config tap_config_command
+    tap_insight tap_insight_command
+    tap_insight_requested tap_insight_requested_command
+    tap_score tap_score_command
     psc_aaa_reporting_interval psc_aaa_reporting_interval_command
     psc_attr psc_attr_command
     psc_calling_id psc_calling_id_command
@@ -20571,6 +20710,11 @@ foreach {name proc_name} {
     WAM::enable ::itest::semantic::wam_enable_command
     VDI::disable ::itest::semantic::vdi_disable_command
     VDI::enable ::itest::semantic::vdi_enable_command
+    TAP::action ::itest::semantic::tap_action_command
+    TAP::config ::itest::semantic::tap_config_command
+    TAP::insight ::itest::semantic::tap_insight_command
+    TAP::insight_requested ::itest::semantic::tap_insight_requested_command
+    TAP::score ::itest::semantic::tap_score_command
     PSC::aaa_reporting_interval ::itest::semantic::psc_aaa_reporting_interval_command
     PSC::attr ::itest::semantic::psc_attr_command
     PSC::calling_id ::itest::semantic::psc_calling_id_command
