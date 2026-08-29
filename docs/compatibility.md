@@ -316,6 +316,10 @@ with `global`, `virtual`, and `route_domain` maps, plus `flowtable.limit` with
 name is omitted, the deterministic lookup key is `default`. This models the
 query and validation surface, not live flow creation, multi-TMM replication,
 aging, or enforcement of a configured limit.
+`VALIDATE::protocol` performs bounded, deterministic payload signature checks
+for common HTTP, TLS, SSH, FTP, and SMTP forms and returns a boolean result;
+unknown application classifiers return false. It does not perform licensed
+APM/AFM/PEM classification, deep packet inspection, or external lookups.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

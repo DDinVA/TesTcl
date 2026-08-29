@@ -428,6 +428,43 @@ when HTTP_REQUEST {
         self.assertTrue(any("binary-md5=9fd6d2a57559960e059c385892142915" in entry for entry in logs))
         self.assertTrue(any("b64=hello" in entry for entry in logs))
 
+    def test_validate_protocol_matches_bounded_common_signatures(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    set http [VALIDATE::protocol http {GET /health HTTP/1.1\r\nHost: example.test\r\n}]
+    set response [VALIDATE::protocol http {HTTP/1.1 200 OK\r\n}]
+    set tls [VALIDATE::protocol tls [binary format H* 1603010000]]
+    set tls_app [VALIDATE::protocol tls [binary format H* 1703030000]]
+    set ssh [VALIDATE::protocol ssh {SSH-2.0-OpenSSH_9.0\r\n}]
+    set smtp [VALIDATE::protocol smtp {220 mail.example.test ESMTP\r\n}]
+    set unknown [VALIDATE::protocol mysql {not mysql}]
+    log local0. "http=$http response=$response tls=$tls tls_app=$tls_app ssh=$ssh smtp=$smtp unknown=$unknown"
+}
+""",
+                "request": {"uri": "/"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any(
+            "http=1 response=1 tls=1 tls_app=1 ssh=1 smtp=1 unknown=0" in entry
+            for entry in result["results"][0]["logs"]
+        ))
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        self.assertEqual(usage["VALIDATE::protocol"]["runtime_status"], "semantic-mock")
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "requires an application and payload"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when CLIENT_ACCEPTED { VALIDATE::protocol http }",
+                    "request": {"uri": "/"},
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_server_endpoint_aliases_clear_stale_member_after_pool_failure(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -497,7 +534,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("CATEGORY", "generated-stub"), queue_buckets)
         self.assertNotIn(("CLASSIFY", "generated-stub"), queue_buckets)
         self.assertNotIn(("FLOWTABLE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 231)
+        self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 230)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)

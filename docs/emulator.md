@@ -613,6 +613,15 @@ TMM. For example:
 model: it does not create or age flows, replicate state between TMMs, or
 enforce limits against traffic.
 
+### Payload protocol validation
+
+`VALIDATE::protocol APPLICATION PAYLOAD` returns `1` for a bounded signature
+match and `0` for a non-match. The current deterministic model recognizes
+common HTTP/1.x and HTTP/2 prefaces, TLS records, SSH banners, FTP greetings
+or commands, and SMTP greetings or commands. Other classifier names are
+conservative non-matches; no external inspection or licensed APM/AFM/PEM
+classification is performed.
+
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose

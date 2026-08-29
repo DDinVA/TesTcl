@@ -16327,6 +16327,54 @@ namespace eval ::itest::semantic {
         return $values
     }
 
+    proc validate_protocol_command {args} {
+        if {[llength $args] != 2} {
+            error "VALIDATE::protocol requires an application and payload"
+        }
+        set application [string tolower [lindex $args 0]]
+        if {$application eq "" || [string first "\x00" $application] >= 0} {
+            error "VALIDATE::protocol application must be non-empty and must not contain NUL"
+        }
+        set payload [lindex $args 1]
+        # Protocol validation is deliberately bounded: signatures only need
+        # the beginning of a payload, and an unknown classifier is a non-match
+        # rather than a reason to perform external inspection.
+        set sample [string range $payload 0 4095]
+        set matched 0
+        switch -exact -- $application {
+            http {
+                set matched [regexp -nocase {^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH|CONNECT|TRACE)\s+[^\r\n]+\s+HTTP/1\.[01](\r?\n|$)} $sample]
+                if {!$matched} {
+                    set matched [regexp -nocase {^HTTP/1\.[01]\s+[0-9]{3}(\s|$)} $sample]
+                }
+                if {!$matched} {
+                    set matched [expr {[string range $sample 0 23] eq "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"}]
+                }
+            }
+            ssl - tls - https {
+                if {[string bytelength $sample] >= 5} {
+                    set record [binary encode hex [string range $sample 0 4]]
+                    set matched [regexp {^(14|15|16|17)030[0-3]} $record]
+                }
+            }
+            ssh {
+                set matched [regexp {^SSH-[0-9]+\.[0-9]+-[^\r\n]+(\r?\n|$)} $sample]
+            }
+            ftp {
+                set matched [regexp -nocase {^(220(?:-|\s)|421(?:-|\s)|USER\s|PASS\s|SYST(?:\r?\n|$)|FEAT(?:\r?\n|$))} $sample]
+            }
+            smtp {
+                set matched [regexp -nocase {^(220(?:-|\s)|250(?:-|\s)|HELO\s|EHLO\s|MAIL\s+FROM:|RCPT\s+TO:)} $sample]
+            }
+            default {
+                set matched 0
+            }
+        }
+        set result [expr {$matched ? 1 : 0}]
+        ::itest::log_decision validate protocol [list $application $result [string bytelength $payload]]
+        return $result
+    }
+
     proc _connection_value {field args} {
         if {[llength $args] != 0} { error "$field takes no arguments" }
         if {$field in {server_addr server_port} &&
@@ -17560,6 +17608,7 @@ foreach {name proc_name} {
     FLOW::this ::itest::semantic::flow_this
     FLOWTABLE::count ::itest::semantic::flowtable_count_command
     FLOWTABLE::limit ::itest::semantic::flowtable_limit_command
+    VALIDATE::protocol ::itest::semantic::validate_protocol_command
     STATS::get ::itest::semantic::stats_get
     STATS::incr ::itest::semantic::stats_incr
     STATS::set ::itest::semantic::stats_set

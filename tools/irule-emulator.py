@@ -1338,6 +1338,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "URI::port",
     "URI::protocol",
     "URI::query",
+    "VALIDATE::protocol",
     "MQTT::clean_session",
     "MQTT::client_id",
     "MQTT::insert",
