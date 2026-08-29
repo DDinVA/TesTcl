@@ -96,6 +96,32 @@ TMOS_17_5_EVENT_OVERRIDES = {
         "common": False,
     }
 }
+TMOS_17_5_UNAVAILABLE_COMMANDS = frozenset(
+    {
+        "XML::address",
+        "XML::collect",
+        "XML::disable",
+        "XML::element",
+        "XML::enable",
+        "XML::event",
+        "XML::eventid",
+        "XML::parse",
+        "XML::payload",
+        "XML::release",
+        "XML::soap",
+        "XML::subscribe",
+    }
+)
+TMOS_17_5_UNAVAILABLE_EVENTS = frozenset(
+    {
+        "XML_BEGIN_DOCUMENT",
+        "XML_BEGIN_ELEMENT",
+        "XML_CDATA",
+        "XML_END_DOCUMENT",
+        "XML_END_ELEMENT",
+        "XML_EVENT",
+    }
+)
 ASM_LOGIN_STATUSES = frozenset({"not_logged_in", "logging_in", "logged_in", "failed"})
 ASM_CAPTCHA_STATUSES = frozenset({"not_received", "correct", "incorrect", "empty"})
 ASM_STATUSES = frozenset({"Alarm", "Blocked", "Clear"})
@@ -1201,7 +1227,13 @@ def _mock_proc_name(command: str) -> str:
     return "cmd_{}".format(command.replace("-", "_").replace(".", "_"))
 
 
-def _target_status(name: str, post_target_names: frozenset[str]) -> str:
+def _target_status(
+    name: str,
+    post_target_names: frozenset[str],
+    unavailable_names: frozenset[str],
+) -> str:
+    if name in unavailable_names:
+        return "unavailable-in-tmos-17.5"
     if name in post_target_names:
         return "introduced-after-tmos-17.5"
     return "available-in-tmos-17.5"
@@ -2101,7 +2133,11 @@ RUNTIME_STATUS_VALUES = frozenset(
     {"handwritten-mock", "semantic-mock", "generated-stub", "no-runtime-handler"}
 )
 TARGET_STATUS_VALUES = frozenset(
-    {"available-in-tmos-17.5", "introduced-after-tmos-17.5"}
+    {
+        "available-in-tmos-17.5",
+        "introduced-after-tmos-17.5",
+        "unavailable-in-tmos-17.5",
+    }
 )
 
 
@@ -2170,6 +2206,7 @@ def _build_capabilities(
     target_status_counts = {
         "available-in-tmos-17.5": 0,
         "introduced-after-tmos-17.5": 0,
+        "unavailable-in-tmos-17.5": 0,
     }
     for name in command_names:
         spec = REGISTRY.get_any(name)
@@ -2178,7 +2215,11 @@ def _build_capabilities(
         proc_name = _mock_proc_name(name)
         command_runtime_status = _capability_status(proc_name, handwritten, generated)
         status_counts[command_runtime_status] += 1
-        command_target_status = _target_status(name, TMOS_17_5_POST_TARGET_COMMANDS)
+        command_target_status = _target_status(
+            name,
+            TMOS_17_5_POST_TARGET_COMMANDS,
+            TMOS_17_5_UNAVAILABLE_COMMANDS,
+        )
         target_status_counts[command_target_status] += 1
         requirement = spec.event_requires
         hover = getattr(spec, "hover", None)
@@ -2230,7 +2271,11 @@ def _build_capabilities(
         events.append(
             {
                 "name": name,
-                "target_status": _target_status(name, TMOS_17_5_POST_TARGET_EVENTS),
+                "target_status": _target_status(
+                    name,
+                    TMOS_17_5_POST_TARGET_EVENTS,
+                    TMOS_17_5_UNAVAILABLE_EVENTS,
+                ),
                 "multiplicity": event_data["multiplicity"],
                 "client_side": event_data["client_side"],
                 "server_side": event_data["server_side"],
@@ -2322,18 +2367,32 @@ def _build_conformance(root: Path) -> dict[str, Any]:
     post_target_commands = sorted(
         name for name in status_map if name in TMOS_17_5_POST_TARGET_COMMANDS
     )
+    unavailable_commands = sorted(
+        name for name in status_map if name in TMOS_17_5_UNAVAILABLE_COMMANDS
+    )
     post_target_events = sorted(
         name for name in event_names if name in TMOS_17_5_POST_TARGET_EVENTS
+    )
+    unavailable_events = sorted(
+        name for name in event_names if name in TMOS_17_5_UNAVAILABLE_EVENTS
     )
     supported_events = [
         name
         for name in event_names
-        if name in PACKET_EVENT_ADAPTERS and name not in TMOS_17_5_POST_TARGET_EVENTS
+        if (
+            name in PACKET_EVENT_ADAPTERS
+            and name not in TMOS_17_5_POST_TARGET_EVENTS
+            and name not in TMOS_17_5_UNAVAILABLE_EVENTS
+        )
     ]
     implementation_buckets: dict[tuple[str, str], list[str]] = {}
     implementation_statuses = {"generated-stub", "no-runtime-handler"}
     for name, status in status_map.items():
-        if name in TMOS_17_5_POST_TARGET_COMMANDS or status not in implementation_statuses:
+        if (
+            name in TMOS_17_5_POST_TARGET_COMMANDS
+            or name in TMOS_17_5_UNAVAILABLE_COMMANDS
+            or status not in implementation_statuses
+        ):
             continue
         spec = registry.get_any(name)
         namespace = name.split("::", 1)[0] if "::" in name else ""
@@ -2360,12 +2419,18 @@ def _build_conformance(root: Path) -> dict[str, Any]:
             "name": "tcl-lsp f5-irules registry",
             "commit": os.environ.get("TCL_LSP_COMMIT", "unknown"),
             "event_overrides": sorted(TMOS_17_5_EVENT_OVERRIDES),
+            "unavailable_commands": sorted(TMOS_17_5_UNAVAILABLE_COMMANDS),
+            "unavailable_events": sorted(TMOS_17_5_UNAVAILABLE_EVENTS),
         },
         "commands": {
             "catalog_count": len(status_map),
-            "target_catalog_count": len(status_map) - len(post_target_commands),
+            "target_catalog_count": (
+                len(status_map) - len(post_target_commands) - len(unavailable_commands)
+            ),
             "post_target_count": len(post_target_commands),
             "post_target_commands": post_target_commands,
+            "unavailable_count": len(unavailable_commands),
+            "unavailable_commands": unavailable_commands,
             "runtime_status_counts": command_counts,
             "implementation_queue": {
                 "candidate_statuses": sorted(implementation_statuses),
@@ -2381,9 +2446,11 @@ def _build_conformance(root: Path) -> dict[str, Any]:
         },
         "events": {
             "catalog_count": len(event_names),
-            "target_catalog_count": len(event_names) - len(post_target_events),
+            "target_catalog_count": len(event_names) - len(post_target_events) - len(unavailable_events),
             "post_target_count": len(post_target_events),
             "post_target_events": post_target_events,
+            "unavailable_count": len(unavailable_events),
+            "unavailable_events": unavailable_events,
             "packet_adapter_count": len(supported_events),
             "packet_adapter_events": [
                 {"name": name, "adapter": PACKET_EVENT_ADAPTERS[name]}
@@ -2485,7 +2552,11 @@ def _analyze_rule_capabilities(
             status = status_map.get(name)
             if status is None:
                 status = "unknown-command" if spec is None else "no-runtime-handler"
-            target_status = _target_status(name, TMOS_17_5_POST_TARGET_COMMANDS)
+            target_status = _target_status(
+                name,
+                TMOS_17_5_POST_TARGET_COMMANDS,
+                TMOS_17_5_UNAVAILABLE_COMMANDS,
+            )
             row = {
                 "name": name,
                 "occurrences": usage[name]["occurrences"],
@@ -2494,14 +2565,18 @@ def _analyze_rule_capabilities(
                 "target_status": target_status,
             }
             command_rows.append(row)
-            if target_status == "introduced-after-tmos-17.5":
+            if target_status != "available-in-tmos-17.5":
+                if target_status == "introduced-after-tmos-17.5":
+                    message = f"{name} was introduced after TMOS 17.5"
+                else:
+                    message = f"{name} is unavailable in TMOS 17.5"
                 warnings.append(
                     {
                         "code": "version-incompatible",
                         "severity": "error",
                         "command": name,
                         "target_status": target_status,
-                        "message": f"{name} was introduced after TMOS 17.5",
+                        "message": message,
                     }
                 )
             elif status in {"generated-stub", "no-runtime-handler"} and spec is not None:
@@ -2531,14 +2606,23 @@ def _analyze_rule_capabilities(
         attached_profiles = {profile.upper() for profile in profiles}
         for event_name in sorted(event_names):
             props = NAMESPACE_REGISTRY.get_props(event_name)
-            if event_name in TMOS_17_5_POST_TARGET_EVENTS:
+            event_target_status = _target_status(
+                event_name,
+                TMOS_17_5_POST_TARGET_EVENTS,
+                TMOS_17_5_UNAVAILABLE_EVENTS,
+            )
+            if event_target_status != "available-in-tmos-17.5":
+                if event_target_status == "introduced-after-tmos-17.5":
+                    message = f"{event_name} was introduced after TMOS 17.5"
+                else:
+                    message = f"{event_name} is unavailable in TMOS 17.5"
                 warnings.append(
                     {
                         "code": "version-incompatible",
                         "severity": "error",
                         "event": event_name,
-                        "target_status": "introduced-after-tmos-17.5",
-                        "message": f"{event_name} was introduced after TMOS 17.5",
+                        "target_status": event_target_status,
+                        "message": message,
                     }
                 )
             required = set(props.implied_profiles) if props is not None else set()
@@ -6514,7 +6598,7 @@ def _load_event_profiles(root: Path) -> dict[str, set[str]]:
         raise EmulatorInputError(f"could not load tcl-lsp event registry: {exc}") from exc
     event_profiles: dict[str, set[str]] = {}
     for name in _catalog_event_names(NAMESPACE_REGISTRY):
-        if name in TMOS_17_5_POST_TARGET_EVENTS:
+        if name in TMOS_17_5_POST_TARGET_EVENTS or name in TMOS_17_5_UNAVAILABLE_EVENTS:
             continue
         props = NAMESPACE_REGISTRY.get_props(name)
         if props is not None:

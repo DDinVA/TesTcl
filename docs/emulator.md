@@ -1318,6 +1318,9 @@ lifecycle metadata and profile metadata. Each command and event also has a
 `target_status`; the pinned upstream registry is intentionally broader than
 17.5, so entries introduced after TMOS 17.5 remain visible for catalog
 completeness but are marked `introduced-after-tmos-17.5`.
+Entries that F5 documents as unavailable in this release are marked
+`unavailable-in-tmos-17.5`; both non-available statuses are rejected during
+scenario validation.
 
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
@@ -1348,6 +1351,12 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --capabilities --target-status introduced-after-tmos-17.5 \
   --offset 0 --limit 100
 ```
+
+Use `--target-status unavailable-in-tmos-17.5` to inspect catalog entries
+retained for reference but not runnable against the target profile. For TMOS
+17.5 this includes the legacy XML command family; F5 documents those XML
+commands and events as unavailable beginning in v10, except for
+`XML_CONTENT_BASED_ROUTING`.
 
 The same filters are available through `GET /v1/capabilities` and the
 `irule_capabilities` MCP tool as `namespace`, `runtime_status`, and

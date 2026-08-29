@@ -1426,9 +1426,15 @@ when HTTP_RESPONSE_RELEASE {
         )["commands"]
         json_entry = next(entry for entry in catalog if entry["name"] == "JSON::parse")
         self.assertEqual(json_entry["target_status"], "introduced-after-tmos-17.5")
+        xml_entry = next(entry for entry in catalog if entry["name"] == "XML::payload")
+        self.assertEqual(xml_entry["target_status"], "unavailable-in-tmos-17.5")
         self.assertEqual(
             result["summary"]["target_status_counts"]["introduced-after-tmos-17.5"],
             10,
+        )
+        self.assertEqual(
+            result["summary"]["target_status_counts"]["unavailable-in-tmos-17.5"],
+            12,
         )
 
         final = self.adapter._build_capabilities(
@@ -1809,8 +1815,10 @@ when HTTP_REQUEST {
         self.assertEqual(report["commands"]["post_target_count"], 10)
         self.assertEqual(
             report["commands"]["target_catalog_count"],
-            report["commands"]["catalog_count"] - 10,
+            report["commands"]["catalog_count"] - 10 - 12,
         )
+        self.assertEqual(report["commands"]["unavailable_count"], 12)
+        self.assertIn("XML::payload", report["commands"]["unavailable_commands"])
         self.assertIn("JSON::parse", report["commands"]["post_target_commands"])
         self.assertIn("IKE_AUTH", report["events"]["unmapped_events"])
         self.assertIn("IKE_AUTH", report["source"]["event_overrides"])
@@ -1863,14 +1871,17 @@ when HTTP_REQUEST {
         self.assertNotIn(("REST", "generated-stub"), queue_buckets)
         self.assertNotIn(("TDS", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 70)
+        self.assertNotIn(("XML", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 58)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
         self.assertEqual(
             report["events"]["target_catalog_count"],
-            report["events"]["catalog_count"] - 7,
+            report["events"]["catalog_count"] - 7 - 6,
         )
+        self.assertEqual(report["events"]["unavailable_count"], 6)
+        self.assertIn("XML_BEGIN_DOCUMENT", report["events"]["unavailable_events"])
         self.assertIn("JSON_REQUEST", report["events"]["post_target_events"])
         self.assertIn("HTTP_REQUEST", {
             entry["name"] for entry in report["events"]["packet_adapter_events"]
