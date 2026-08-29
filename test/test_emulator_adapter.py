@@ -633,6 +633,130 @@ when HTTP_REQUEST {
                 with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
                     self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
 
+    def test_botdefense_policy_state_getters_and_overrides(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "BOTDEFENSE"],
+                "botdefense": {
+                    "action": "allow",
+                    "bot_anomalies": ["OAT", "automation"],
+                    "bot_categories": ["scraping"],
+                    "bot_name": "curl",
+                    "bot_signature": "Headless Browser",
+                    "bot_signature_category": "Automation",
+                    "captcha_age": 42,
+                    "captcha_status": "correct",
+                    "client_class": "malicious_bot",
+                    "client_type": "bot",
+                    "cookie_age": 12,
+                    "cookie_status": "valid",
+                    "cs_allowed": True,
+                    "cs_attribute_device_id": True,
+                    "cs_possible": True,
+                    "device_id": 123,
+                    "intent": "credential_stuffing",
+                    "micro_service": {"name": "login", "type": "authentication"},
+                    "previous_action": "browser_challenge",
+                    "previous_request_age": 7,
+                    "previous_support_id": "prev-1",
+                    "reason": "anomaly",
+                    "support_id": "cur-1",
+                },
+                "irule": (
+                    "when HTTP_REQUEST {\n"
+                    "  log local0. \"action=[BOTDEFENSE::action] anomalies=[BOTDEFENSE::bot_anomalies] categories=[BOTDEFENSE::bot_categories]\"\n"
+                    "  log local0. \"bot=[BOTDEFENSE::bot_name] sig=[BOTDEFENSE::bot_signature] sigcat=[BOTDEFENSE::bot_signature_category]\"\n"
+                    "  log local0. \"captcha=[BOTDEFENSE::captcha_status] age=[BOTDEFENSE::captcha_age] cookie=[BOTDEFENSE::cookie_status] cage=[BOTDEFENSE::cookie_age]\"\n"
+                    "  log local0. \"class=[BOTDEFENSE::client_class] type=[BOTDEFENSE::client_type] device=[BOTDEFENSE::device_id] intent=[BOTDEFENSE::intent]\"\n"
+                    "  log local0. \"micro=[BOTDEFENSE::micro_service name]/[BOTDEFENSE::micro_service type] previous=[BOTDEFENSE::previous_action]/[BOTDEFENSE::previous_request_age]/[BOTDEFENSE::previous_support_id]\"\n"
+                    "  log local0. \"reason=[BOTDEFENSE::reason] support=[BOTDEFENSE::support_id] possible=[BOTDEFENSE::cs_possible] allowed=[BOTDEFENSE::cs_allowed] attr=[BOTDEFENSE::cs_attribute device_id]\"\n"
+                    "  set override [BOTDEFENSE::action block]\n"
+                    "  BOTDEFENSE::cs_allowed false\n"
+                    "  BOTDEFENSE::cs_attribute device_id false\n"
+                    "  BOTDEFENSE::disable\n"
+                    "  BOTDEFENSE::enable\n"
+                    "  log local0. \"override=$override action=[BOTDEFENSE::action] allowed=[BOTDEFENSE::cs_allowed] attr=[BOTDEFENSE::cs_attribute device_id]\"\n"
+                    "}\n"
+                    "when BOTDEFENSE_REQUEST { log local0. botdefense-request }\n"
+                    "when BOTDEFENSE_ACTION { log local0. botdefense-action }"
+                ),
+                "request": {"uri": "/"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        logs = result["results"][0]["logs"]
+        self.assertIn("BOTDEFENSE_REQUEST", result["results"][0]["events_fired"])
+        self.assertIn("BOTDEFENSE_ACTION", result["results"][0]["events_fired"])
+        self.assertLess(
+            result["results"][0]["events_fired"].index("BOTDEFENSE_REQUEST"),
+            result["results"][0]["events_fired"].index("BOTDEFENSE_ACTION"),
+        )
+        self.assertTrue(any("action=allow" in log for log in logs))
+        self.assertTrue(any("bot=curl sig=Headless Browser sigcat=Automation" in log for log in logs))
+        self.assertTrue(any("captcha=correct age=42 cookie=valid cage=12" in log for log in logs))
+        self.assertTrue(any("class=malicious_bot type=bot device=123 intent=credential_stuffing" in log for log in logs))
+        self.assertTrue(any("micro=login/authentication previous=browser_challenge/7/prev-1" in log for log in logs))
+        self.assertTrue(any("reason=anomaly support=cur-1 possible=1 allowed=1 attr=1" in log for log in logs))
+        self.assertTrue(any("override=ok action=block allowed=0 attr=0" in log for log in logs))
+        botdefense = result["results"][0]["semantic"]["botdefense"]
+        self.assertTrue(botdefense["enabled"])
+        self.assertEqual(botdefense["action"], "block")
+        self.assertTrue(botdefense["action_overridden"])
+        self.assertFalse(botdefense["cs_allowed"])
+        self.assertFalse(botdefense["cs_attribute_device_id"])
+        self.assertEqual(botdefense["bot_anomalies"], ["OAT", "automation"])
+        self.assertEqual(botdefense["bot_categories"], ["scraping"])
+        self.assertEqual(botdefense["micro_service"], {"name": "login", "type": "authentication"})
+
+    def test_botdefense_connection_state_and_input_validation(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "BOTDEFENSE"],
+                "botdefense": {"action": "allow"},
+                "irule": (
+                    "when HTTP_REQUEST {\n"
+                    "  if {[HTTP::uri] eq \"/disable\"} { BOTDEFENSE::disable }\n"
+                    "  if {[HTTP::uri] eq \"/enable\"} { BOTDEFENSE::enable }\n"
+                    "  if {[HTTP::uri] eq \"/override\"} { BOTDEFENSE::action block }\n"
+                    "  log local0. \"uri=[HTTP::uri] enabled=[BOTDEFENSE::action] overridden=[BOTDEFENSE::action]\"\n"
+                    "}"
+                ),
+                "requests": [
+                    {"uri": "/disable"},
+                    {"uri": "/enable"},
+                    {"uri": "/override"},
+                    {"uri": "/fresh", "new_connection": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        snapshots = [item["semantic"]["botdefense"] for item in result["results"]]
+        self.assertFalse(snapshots[0]["enabled"])
+        self.assertTrue(snapshots[1]["enabled"])
+        self.assertEqual(snapshots[2]["action"], "block")
+        self.assertTrue(snapshots[2]["action_overridden"])
+        self.assertEqual(snapshots[3]["action"], "allow")
+        self.assertTrue(snapshots[3]["enabled"])
+
+        base = {
+            "profiles": ["TCP", "HTTP", "BOTDEFENSE"],
+            "irule": "when HTTP_REQUEST { BOTDEFENSE::action }",
+            "request": {"uri": "/"},
+        }
+        invalid_cases = (
+            ({"enabled": "yes"}, "botdefense.enabled must be a boolean"),
+            ({"captcha_status": "unknown"}, "botdefense.captcha_status must be one of"),
+            ({"client_type": []}, "botdefense.client_type must be a string without NUL"),
+            ({"device_id": -1}, "botdefense.device_id must be an integer"),
+            ({"micro_service": {"bad": "field"}}, "unsupported field"),
+        )
+        for botdefense, message in invalid_cases:
+            scenario = dict(base)
+            scenario["botdefense"] = botdefense
+            with self.subTest(botdefense=botdefense):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
     def test_semantic_overlay_implements_profiles_auth_uri_stats_and_hsl(self) -> None:
         result = self.adapter.run_scenario(
             {

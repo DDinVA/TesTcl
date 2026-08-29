@@ -131,6 +131,56 @@ namespace eval ::itest::semantic {
     variable asm_conviction 0
     variable asm_deception 0
 
+    variable botdefense_default_enabled 1
+    variable botdefense_enabled 1
+    variable botdefense_default_action allow
+    variable botdefense_action allow
+    variable botdefense_action_overridden 0
+    variable botdefense_default_bot_anomalies {}
+    variable botdefense_bot_anomalies {}
+    variable botdefense_default_bot_categories {}
+    variable botdefense_bot_categories {}
+    variable botdefense_default_bot_name ""
+    variable botdefense_bot_name ""
+    variable botdefense_default_bot_signature ""
+    variable botdefense_bot_signature ""
+    variable botdefense_default_bot_signature_category ""
+    variable botdefense_bot_signature_category ""
+    variable botdefense_default_captcha_age -1
+    variable botdefense_captcha_age -1
+    variable botdefense_default_captcha_status not_received
+    variable botdefense_captcha_status not_received
+    variable botdefense_default_client_class unknown
+    variable botdefense_client_class unknown
+    variable botdefense_default_client_type uncategorized
+    variable botdefense_client_type uncategorized
+    variable botdefense_default_cookie_age -1
+    variable botdefense_cookie_age -1
+    variable botdefense_default_cookie_status ""
+    variable botdefense_cookie_status ""
+    variable botdefense_default_cs_allowed 1
+    variable botdefense_cs_allowed 1
+    variable botdefense_default_cs_attribute_device_id 1
+    variable botdefense_cs_attribute_device_id 1
+    variable botdefense_default_cs_possible 1
+    variable botdefense_cs_possible 1
+    variable botdefense_default_device_id 0
+    variable botdefense_device_id 0
+    variable botdefense_default_intent ""
+    variable botdefense_intent ""
+    variable botdefense_default_micro_service [list "" ""]
+    variable botdefense_micro_service [list "" ""]
+    variable botdefense_default_previous_action undetermined
+    variable botdefense_previous_action undetermined
+    variable botdefense_default_previous_request_age 0
+    variable botdefense_previous_request_age 0
+    variable botdefense_default_previous_support_id 0
+    variable botdefense_previous_support_id 0
+    variable botdefense_default_reason ""
+    variable botdefense_reason ""
+    variable botdefense_default_support_id ""
+    variable botdefense_support_id ""
+
     variable sip_discarded 0
     variable sip_response_requested 0
     variable sip_response_code ""
@@ -4374,6 +4424,459 @@ namespace eval ::itest::semantic {
             uncaptcha $asm_uncaptcha unblocked $asm_unblocked \
             conviction $asm_conviction deception $asm_deception \
             violations $violations signatures $signatures threat_campaigns $campaigns]
+    }
+
+    proc botdefense_configure {raw} {
+        variable botdefense_default_enabled
+        variable botdefense_enabled
+        variable botdefense_default_action
+        variable botdefense_action
+        variable botdefense_default_bot_name
+        variable botdefense_bot_name
+        variable botdefense_default_bot_signature
+        variable botdefense_bot_signature
+        variable botdefense_default_bot_signature_category
+        variable botdefense_bot_signature_category
+        variable botdefense_default_captcha_age
+        variable botdefense_captcha_age
+        variable botdefense_default_captcha_status
+        variable botdefense_captcha_status
+        variable botdefense_default_client_class
+        variable botdefense_client_class
+        variable botdefense_default_client_type
+        variable botdefense_client_type
+        variable botdefense_default_cookie_age
+        variable botdefense_cookie_age
+        variable botdefense_default_cookie_status
+        variable botdefense_cookie_status
+        variable botdefense_default_cs_allowed
+        variable botdefense_cs_allowed
+        variable botdefense_default_cs_possible
+        variable botdefense_cs_possible
+        variable botdefense_default_cs_attribute_device_id
+        variable botdefense_cs_attribute_device_id
+        variable botdefense_default_device_id
+        variable botdefense_device_id
+        variable botdefense_default_intent
+        variable botdefense_intent
+        variable botdefense_default_previous_action
+        variable botdefense_previous_action
+        variable botdefense_default_previous_request_age
+        variable botdefense_previous_request_age
+        variable botdefense_default_previous_support_id
+        variable botdefense_previous_support_id
+        variable botdefense_default_reason
+        variable botdefense_reason
+        variable botdefense_default_support_id
+        variable botdefense_support_id
+        variable botdefense_action_overridden
+        if {[llength $raw] != 21} { error "invalid Bot Defense configuration" }
+        lassign $raw enabled action bot_name bot_signature bot_signature_category \
+            captcha_age captcha_status client_class client_type cookie_age cookie_status \
+            cs_allowed cs_possible cs_attribute_device_id device_id intent \
+            previous_action previous_request_age previous_support_id reason support_id
+        foreach {name value} [list \
+            enabled $enabled cs_allowed $cs_allowed cs_possible $cs_possible \
+            cs_attribute_device_id $cs_attribute_device_id] {
+            if {$value ni {0 1}} { error "Bot Defense $name state must be boolean" }
+        }
+        if {![string is integer -strict $captcha_age] || $captcha_age < -1} {
+            error "Bot Defense CAPTCHA age must be a non-negative integer or -1"
+        }
+        if {![string is integer -strict $cookie_age] || $cookie_age < -1} {
+            error "Bot Defense cookie age must be a non-negative integer or -1"
+        }
+        if {![string is integer -strict $device_id] || $device_id < 0} {
+            error "Bot Defense device ID must be a non-negative integer"
+        }
+        if {![string is integer -strict $previous_request_age] || $previous_request_age < 0} {
+            error "Bot Defense previous request age must be a non-negative integer"
+        }
+        if {$action eq ""} { error "Bot Defense action cannot be empty" }
+        if {$captcha_status ni {not_received correct incorrect empty expired}} {
+            error "invalid Bot Defense CAPTCHA status"
+        }
+        if {$client_type ni {bot mobile_app browser uncategorized}} {
+            error "invalid Bot Defense client type"
+        }
+        if {$client_class ni {unknown browser mobile_application trusted_bot untrusted_bot malicious_bot suspicious_browser}} {
+            error "invalid Bot Defense client class"
+        }
+        if {$cookie_status ni {{} valid invalid expired valid_redirect_challenge renewal}} {
+            error "invalid Bot Defense cookie status"
+        }
+        set botdefense_default_enabled $enabled
+        set botdefense_enabled $enabled
+        set botdefense_default_action $action
+        set botdefense_action $action
+        set botdefense_default_bot_name $bot_name
+        set botdefense_bot_name $bot_name
+        set botdefense_default_bot_signature $bot_signature
+        set botdefense_bot_signature $bot_signature
+        set botdefense_default_bot_signature_category $bot_signature_category
+        set botdefense_bot_signature_category $bot_signature_category
+        set botdefense_default_captcha_age $captcha_age
+        set botdefense_captcha_age $captcha_age
+        set botdefense_default_captcha_status $captcha_status
+        set botdefense_captcha_status $captcha_status
+        set botdefense_default_client_class $client_class
+        set botdefense_client_class $client_class
+        set botdefense_default_client_type $client_type
+        set botdefense_client_type $client_type
+        set botdefense_default_cookie_age $cookie_age
+        set botdefense_cookie_age $cookie_age
+        set botdefense_default_cookie_status $cookie_status
+        set botdefense_cookie_status $cookie_status
+        set botdefense_default_cs_allowed $cs_allowed
+        set botdefense_cs_allowed $cs_allowed
+        set botdefense_default_cs_possible $cs_possible
+        set botdefense_cs_possible $cs_possible
+        set botdefense_default_cs_attribute_device_id $cs_attribute_device_id
+        set botdefense_cs_attribute_device_id $cs_attribute_device_id
+        set botdefense_default_device_id $device_id
+        set botdefense_device_id $device_id
+        set botdefense_default_intent $intent
+        set botdefense_intent $intent
+        set botdefense_default_previous_action $previous_action
+        set botdefense_previous_action $previous_action
+        set botdefense_default_previous_request_age $previous_request_age
+        set botdefense_previous_request_age $previous_request_age
+        set botdefense_default_previous_support_id $previous_support_id
+        set botdefense_previous_support_id $previous_support_id
+        set botdefense_default_reason $reason
+        set botdefense_reason $reason
+        set botdefense_default_support_id $support_id
+        set botdefense_support_id $support_id
+        set botdefense_action_overridden 0
+    }
+
+    proc botdefense_set_lists {anomalies categories} {
+        variable botdefense_default_bot_anomalies
+        variable botdefense_bot_anomalies
+        variable botdefense_default_bot_categories
+        variable botdefense_bot_categories
+        set botdefense_default_bot_anomalies $anomalies
+        set botdefense_bot_anomalies $anomalies
+        set botdefense_default_bot_categories $categories
+        set botdefense_bot_categories $categories
+    }
+
+    proc botdefense_set_micro_service {raw} {
+        variable botdefense_default_micro_service
+        variable botdefense_micro_service
+        if {[llength $raw] != 2} { error "Bot Defense micro-service requires name and type" }
+        set botdefense_default_micro_service $raw
+        set botdefense_micro_service $raw
+    }
+
+    proc botdefense_prepare_request {} {
+        variable botdefense_default_action
+        variable botdefense_action
+        variable botdefense_default_bot_anomalies
+        variable botdefense_bot_anomalies
+        variable botdefense_default_bot_categories
+        variable botdefense_bot_categories
+        variable botdefense_default_bot_name
+        variable botdefense_bot_name
+        variable botdefense_default_bot_signature
+        variable botdefense_bot_signature
+        variable botdefense_default_bot_signature_category
+        variable botdefense_bot_signature_category
+        variable botdefense_default_captcha_age
+        variable botdefense_captcha_age
+        variable botdefense_default_captcha_status
+        variable botdefense_captcha_status
+        variable botdefense_default_client_class
+        variable botdefense_client_class
+        variable botdefense_default_client_type
+        variable botdefense_client_type
+        variable botdefense_default_cookie_age
+        variable botdefense_cookie_age
+        variable botdefense_default_cookie_status
+        variable botdefense_cookie_status
+        variable botdefense_default_cs_allowed
+        variable botdefense_cs_allowed
+        variable botdefense_default_cs_possible
+        variable botdefense_cs_possible
+        variable botdefense_default_cs_attribute_device_id
+        variable botdefense_cs_attribute_device_id
+        variable botdefense_default_device_id
+        variable botdefense_device_id
+        variable botdefense_default_intent
+        variable botdefense_intent
+        variable botdefense_default_micro_service
+        variable botdefense_micro_service
+        variable botdefense_default_previous_action
+        variable botdefense_previous_action
+        variable botdefense_default_previous_request_age
+        variable botdefense_previous_request_age
+        variable botdefense_default_previous_support_id
+        variable botdefense_previous_support_id
+        variable botdefense_default_reason
+        variable botdefense_reason
+        variable botdefense_default_support_id
+        variable botdefense_support_id
+        variable botdefense_action_overridden
+        set botdefense_action $botdefense_default_action
+        set botdefense_bot_anomalies $botdefense_default_bot_anomalies
+        set botdefense_bot_categories $botdefense_default_bot_categories
+        set botdefense_bot_name $botdefense_default_bot_name
+        set botdefense_bot_signature $botdefense_default_bot_signature
+        set botdefense_bot_signature_category $botdefense_default_bot_signature_category
+        set botdefense_captcha_age $botdefense_default_captcha_age
+        set botdefense_captcha_status $botdefense_default_captcha_status
+        set botdefense_client_class $botdefense_default_client_class
+        set botdefense_client_type $botdefense_default_client_type
+        set botdefense_cookie_age $botdefense_default_cookie_age
+        set botdefense_cookie_status $botdefense_default_cookie_status
+        set botdefense_cs_allowed $botdefense_default_cs_allowed
+        set botdefense_cs_possible $botdefense_default_cs_possible
+        set botdefense_cs_attribute_device_id $botdefense_default_cs_attribute_device_id
+        set botdefense_device_id $botdefense_default_device_id
+        set botdefense_intent $botdefense_default_intent
+        set botdefense_micro_service $botdefense_default_micro_service
+        set botdefense_previous_action $botdefense_default_previous_action
+        set botdefense_previous_request_age $botdefense_default_previous_request_age
+        set botdefense_previous_support_id $botdefense_default_previous_support_id
+        set botdefense_reason $botdefense_default_reason
+        set botdefense_support_id $botdefense_default_support_id
+        set botdefense_action_overridden 0
+    }
+
+    proc botdefense_reset_connection {} {
+        variable botdefense_default_enabled
+        variable botdefense_enabled
+        set botdefense_enabled $botdefense_default_enabled
+    }
+
+    proc botdefense_action {args} {
+        variable botdefense_enabled
+        variable botdefense_action
+        variable botdefense_action_overridden
+        variable botdefense_cs_allowed
+        variable botdefense_cs_possible
+        if {[llength $args] == 0} { return $botdefense_action }
+        if {[llength $args] != 1} { error "BOTDEFENSE::action accepts an optional action" }
+        set requested [lindex $args 0]
+        if {$requested eq ""} { error "BOTDEFENSE::action cannot set an empty action" }
+        if {!$botdefense_enabled} { return "bot defense is disabled" }
+        if {$botdefense_action_overridden} { return "action already overridden" }
+        if {[string match *challenge* $requested] && (!$botdefense_cs_possible || !$botdefense_cs_allowed)} {
+            return "client-side action is not possible"
+        }
+        set botdefense_action $requested
+        set botdefense_action_overridden 1
+        ::itest::log_decision botdefense action $requested
+        return ok
+    }
+
+    proc botdefense_bot_anomalies {args} {
+        variable botdefense_bot_anomalies
+        if {[llength $args] != 0} { error "BOTDEFENSE::bot_anomalies takes no arguments" }
+        return $botdefense_bot_anomalies
+    }
+
+    proc botdefense_bot_categories {args} {
+        variable botdefense_bot_categories
+        if {[llength $args] != 0} { error "BOTDEFENSE::bot_categories takes no arguments" }
+        return $botdefense_bot_categories
+    }
+
+    proc botdefense_bot_name {args} {
+        variable botdefense_bot_name
+        if {[llength $args] != 0} { error "BOTDEFENSE::bot_name takes no arguments" }
+        return $botdefense_bot_name
+    }
+
+    proc botdefense_bot_signature {args} {
+        variable botdefense_bot_signature
+        if {[llength $args] != 0} { error "BOTDEFENSE::bot_signature takes no arguments" }
+        return $botdefense_bot_signature
+    }
+
+    proc botdefense_bot_signature_category {args} {
+        variable botdefense_bot_signature_category
+        if {[llength $args] != 0} { error "BOTDEFENSE::bot_signature_category takes no arguments" }
+        return $botdefense_bot_signature_category
+    }
+
+    proc botdefense_captcha_age {args} {
+        variable botdefense_captcha_age
+        variable botdefense_captcha_status
+        if {[llength $args] != 0} { error "BOTDEFENSE::captcha_age takes no arguments" }
+        if {$botdefense_captcha_status ni {correct renewal expired}} { return -1 }
+        return $botdefense_captcha_age
+    }
+
+    proc botdefense_captcha_status {args} {
+        variable botdefense_captcha_status
+        if {[llength $args] != 0} { error "BOTDEFENSE::captcha_status takes no arguments" }
+        return $botdefense_captcha_status
+    }
+
+    proc botdefense_client_class {args} {
+        variable botdefense_client_class
+        if {[llength $args] != 0} { error "BOTDEFENSE::client_class takes no arguments" }
+        return $botdefense_client_class
+    }
+
+    proc botdefense_client_type {args} {
+        variable botdefense_client_type
+        if {[llength $args] != 0} { error "BOTDEFENSE::client_type takes no arguments" }
+        return $botdefense_client_type
+    }
+
+    proc botdefense_cookie_age {args} {
+        variable botdefense_cookie_age
+        variable botdefense_cookie_status
+        if {[llength $args] != 0} { error "BOTDEFENSE::cookie_age takes no arguments" }
+        if {$botdefense_cookie_status ni {valid expired valid_redirect_challenge renewal}} { return -1 }
+        return $botdefense_cookie_age
+    }
+
+    proc botdefense_cookie_status {args} {
+        variable botdefense_cookie_status
+        if {[llength $args] != 0} { error "BOTDEFENSE::cookie_status takes no arguments" }
+        return $botdefense_cookie_status
+    }
+
+    proc botdefense_cs_allowed {args} {
+        variable botdefense_cs_allowed
+        if {[llength $args] > 1} { error "BOTDEFENSE::cs_allowed accepts an optional boolean" }
+        if {[llength $args] == 0} { return $botdefense_cs_allowed }
+        set value [lindex $args 0]
+        if {![string is boolean -strict $value]} { error "BOTDEFENSE::cs_allowed requires a boolean" }
+        set botdefense_cs_allowed [expr {$value ? 1 : 0}]
+        ::itest::log_decision botdefense cs_allowed $botdefense_cs_allowed
+        return ""
+    }
+
+    proc botdefense_cs_attribute {args} {
+        variable botdefense_cs_attribute_device_id
+        if {[llength $args] < 1 || [llength $args] > 2 || [lindex $args 0] ne "device_id"} {
+            error "BOTDEFENSE::cs_attribute syntax is device_id with optional boolean"
+        }
+        if {[llength $args] == 1} { return $botdefense_cs_attribute_device_id }
+        set value [lindex $args 1]
+        if {![string is boolean -strict $value]} { error "BOTDEFENSE::cs_attribute requires a boolean" }
+        set botdefense_cs_attribute_device_id [expr {$value ? 1 : 0}]
+        ::itest::log_decision botdefense cs_attribute $botdefense_cs_attribute_device_id
+        return ""
+    }
+
+    proc botdefense_cs_possible {args} {
+        variable botdefense_cs_possible
+        if {[llength $args] != 0} { error "BOTDEFENSE::cs_possible takes no arguments" }
+        return $botdefense_cs_possible
+    }
+
+    proc botdefense_device_id {args} {
+        variable botdefense_device_id
+        if {[llength $args] != 0} { error "BOTDEFENSE::device_id takes no arguments" }
+        return $botdefense_device_id
+    }
+
+    proc botdefense_disable {args} {
+        variable botdefense_enabled
+        if {[llength $args] != 0} { error "BOTDEFENSE::disable takes no arguments" }
+        set botdefense_enabled 0
+        ::itest::log_decision botdefense disable
+        return ""
+    }
+
+    proc botdefense_enable {args} {
+        variable botdefense_enabled
+        if {[llength $args] != 0} { error "BOTDEFENSE::enable takes no arguments" }
+        set botdefense_enabled 1
+        ::itest::log_decision botdefense enable
+        return ""
+    }
+
+    proc botdefense_intent {args} {
+        variable botdefense_intent
+        if {[llength $args] != 0} { error "BOTDEFENSE::intent takes no arguments" }
+        return $botdefense_intent
+    }
+
+    proc botdefense_micro_service {args} {
+        variable botdefense_micro_service
+        if {[llength $args] != 1 || [lindex $args 0] ni {name type}} {
+            error "BOTDEFENSE::micro_service requires name or type"
+        }
+        return [lindex $botdefense_micro_service [expr {[lindex $args 0] eq "name" ? 0 : 1}]]
+    }
+
+    proc botdefense_previous_action {args} {
+        variable botdefense_previous_action
+        if {[llength $args] != 0} { error "BOTDEFENSE::previous_action takes no arguments" }
+        return $botdefense_previous_action
+    }
+
+    proc botdefense_previous_request_age {args} {
+        variable botdefense_previous_request_age
+        if {[llength $args] != 0} { error "BOTDEFENSE::previous_request_age takes no arguments" }
+        return $botdefense_previous_request_age
+    }
+
+    proc botdefense_previous_support_id {args} {
+        variable botdefense_previous_support_id
+        if {[llength $args] != 0} { error "BOTDEFENSE::previous_support_id takes no arguments" }
+        return $botdefense_previous_support_id
+    }
+
+    proc botdefense_reason {args} {
+        variable botdefense_reason
+        if {[llength $args] != 0} { error "BOTDEFENSE::reason takes no arguments" }
+        return $botdefense_reason
+    }
+
+    proc botdefense_support_id {args} {
+        variable botdefense_support_id
+        if {[llength $args] != 0} { error "BOTDEFENSE::support_id takes no arguments" }
+        return $botdefense_support_id
+    }
+
+    proc botdefense_snapshot {} {
+        variable botdefense_enabled
+        variable botdefense_action
+        variable botdefense_action_overridden
+        variable botdefense_bot_anomalies
+        variable botdefense_bot_categories
+        variable botdefense_bot_name
+        variable botdefense_bot_signature
+        variable botdefense_bot_signature_category
+        variable botdefense_captcha_status
+        variable botdefense_client_class
+        variable botdefense_client_type
+        variable botdefense_cookie_status
+        variable botdefense_cs_allowed
+        variable botdefense_cs_attribute_device_id
+        variable botdefense_cs_possible
+        variable botdefense_device_id
+        variable botdefense_intent
+        variable botdefense_micro_service
+        variable botdefense_previous_action
+        variable botdefense_previous_request_age
+        variable botdefense_previous_support_id
+        variable botdefense_reason
+        variable botdefense_support_id
+        return [list \
+            enabled $botdefense_enabled action $botdefense_action \
+            action_overridden $botdefense_action_overridden \
+            bot_anomalies $botdefense_bot_anomalies bot_categories $botdefense_bot_categories \
+            bot_name $botdefense_bot_name bot_signature $botdefense_bot_signature \
+            bot_signature_category $botdefense_bot_signature_category \
+            captcha_age [botdefense_captcha_age] captcha_status $botdefense_captcha_status \
+            client_class $botdefense_client_class client_type $botdefense_client_type \
+            cookie_age [botdefense_cookie_age] cookie_status $botdefense_cookie_status \
+            cs_allowed $botdefense_cs_allowed \
+            cs_attribute_device_id $botdefense_cs_attribute_device_id \
+            cs_possible $botdefense_cs_possible device_id $botdefense_device_id \
+            intent $botdefense_intent micro_service $botdefense_micro_service \
+            previous_action $botdefense_previous_action \
+            previous_request_age $botdefense_previous_request_age \
+            previous_support_id $botdefense_previous_support_id reason $botdefense_reason \
+            support_id $botdefense_support_id]
     }
 
     proc profile_clientssl {args} { return [_profile_enabled CLIENTSSL] }
@@ -8992,12 +9495,17 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::lb_reset_connection
             ::itest::semantic::dosl7_reset_connection
             ::itest::semantic::asm_reset_connection
+            ::itest::semantic::botdefense_reset_connection
         }
         if {$gated && $event_name eq "HTTP_REQUEST" && [::itest::semantic::_cache_profile_enabled]} {
             ::itest::semantic::cache_prepare_request
         }
         set result [uplevel 1 [list ::itest::_testcl_fire_event_orig $event_name]]
         if {$gated && $event_name eq "HTTP_REQUEST"} {
+            if {[::itest::semantic::_profile_enabled BOTDEFENSE]} {
+                uplevel 1 [list ::itest::_testcl_fire_event_orig BOTDEFENSE_REQUEST]
+                uplevel 1 [list ::itest::_testcl_fire_event_orig BOTDEFENSE_ACTION]
+            }
             ::itest::semantic::_maybe_fire_lb_failed
             ::itest::semantic::cache_request_event
         } elseif {$gated && $event_name eq "HTTP_RESPONSE"} {
@@ -9322,6 +9830,31 @@ foreach {name proc_name} {
     ASM::username ::itest::semantic::asm_username
     ASM::violation ::itest::semantic::asm_violation
     ASM::violation_data ::itest::semantic::asm_violation_data
+    BOTDEFENSE::action ::itest::semantic::botdefense_action
+    BOTDEFENSE::bot_anomalies ::itest::semantic::botdefense_bot_anomalies
+    BOTDEFENSE::bot_categories ::itest::semantic::botdefense_bot_categories
+    BOTDEFENSE::bot_name ::itest::semantic::botdefense_bot_name
+    BOTDEFENSE::bot_signature ::itest::semantic::botdefense_bot_signature
+    BOTDEFENSE::bot_signature_category ::itest::semantic::botdefense_bot_signature_category
+    BOTDEFENSE::captcha_age ::itest::semantic::botdefense_captcha_age
+    BOTDEFENSE::captcha_status ::itest::semantic::botdefense_captcha_status
+    BOTDEFENSE::client_class ::itest::semantic::botdefense_client_class
+    BOTDEFENSE::client_type ::itest::semantic::botdefense_client_type
+    BOTDEFENSE::cookie_age ::itest::semantic::botdefense_cookie_age
+    BOTDEFENSE::cookie_status ::itest::semantic::botdefense_cookie_status
+    BOTDEFENSE::cs_allowed ::itest::semantic::botdefense_cs_allowed
+    BOTDEFENSE::cs_attribute ::itest::semantic::botdefense_cs_attribute
+    BOTDEFENSE::cs_possible ::itest::semantic::botdefense_cs_possible
+    BOTDEFENSE::device_id ::itest::semantic::botdefense_device_id
+    BOTDEFENSE::disable ::itest::semantic::botdefense_disable
+    BOTDEFENSE::enable ::itest::semantic::botdefense_enable
+    BOTDEFENSE::intent ::itest::semantic::botdefense_intent
+    BOTDEFENSE::micro_service ::itest::semantic::botdefense_micro_service
+    BOTDEFENSE::previous_action ::itest::semantic::botdefense_previous_action
+    BOTDEFENSE::previous_request_age ::itest::semantic::botdefense_previous_request_age
+    BOTDEFENSE::previous_support_id ::itest::semantic::botdefense_previous_support_id
+    BOTDEFENSE::reason ::itest::semantic::botdefense_reason
+    BOTDEFENSE::support_id ::itest::semantic::botdefense_support_id
     STATS::get ::itest::semantic::stats_get
     STATS::incr ::itest::semantic::stats_incr
     STATS::set ::itest::semantic::stats_set

@@ -91,6 +91,16 @@ recorded in request semantic state. Request inputs reset between transactions,
 while connection overrides reset when a new connection begins. The model does
 not perform WAF signature matching, request inspection, CAPTCHA validation,
 threat-campaign detection, or production ASM enforcement.
+The TMOS 17.5 `BOTDEFENSE::` surface is represented by a deterministic policy
+model covering all 25 catalogued commands. Scenario inputs can seed action,
+client and bot classification, anomalies/categories, CAPTCHA/cookie state,
+device and micro-service metadata, previous-request fields, and support or
+reason values. Action and client-side challenge overrides are recorded in
+semantic state, while enable/disable is connection-scoped. The model does not
+perform Bot Defense detection, browser challenges, CAPTCHA validation, cookie
+cryptography, or ML classification; `BOTDEFENSE_REQUEST` and
+`BOTDEFENSE_ACTION` remain explicit profile-gated events rather than claims of
+a production Bot Defense pipeline.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

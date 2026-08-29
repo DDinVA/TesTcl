@@ -150,6 +150,34 @@ inputs reset between requests; connection-scoped enable/disable and policy
 overrides reset at a new connection. This is a deterministic policy model,
 not a WAF inspection, signature-matching, CAPTCHA service, or attack-detection
 engine.
+The `BOTDEFENSE` policy surface can be seeded with deterministic client and
+decision results:
+
+```json
+{
+  "profiles": ["TCP", "HTTP", "BOTDEFENSE"],
+  "botdefense": {
+    "action": "block",
+    "client_type": "bot",
+    "client_class": "malicious_bot",
+    "bot_name": "example-bot",
+    "bot_anomalies": ["automation"],
+    "bot_categories": ["scraping"],
+    "support_id": "BD-42"
+  },
+  "irule": "when HTTP_REQUEST { log local0. \"[BOTDEFENSE::action] [BOTDEFENSE::client_type]\" }"
+}
+```
+
+This models all 25 catalogued TMOS 17.5 `BOTDEFENSE::` commands. It exposes
+client classification, bot metadata, CAPTCHA and cookie state, device ID,
+micro-service and previous-request fields, support/reason values, and
+client-side challenge controls. `BOTDEFENSE::action` supports deterministic
+per-request overrides; `BOTDEFENSE::enable` and `BOTDEFENSE::disable` are
+connection-scoped. The model does not run Bot Defense detection, browser
+challenges, CAPTCHA verification, cookie cryptography, or machine-learning
+classification. The two Bot Defense events are available through the existing
+event/session interface when the `BOTDEFENSE` profile is attached.
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose

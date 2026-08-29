@@ -94,6 +94,26 @@ ASM_SIGNATURE_FIELDS = (
     "staged_set_names",
 )
 ASM_CAMPAIGN_FIELDS = ("names", "staged_names")
+BOTDEFENSE_CAPTCHA_STATUSES = frozenset(
+    {"not_received", "correct", "incorrect", "empty", "expired"}
+)
+BOTDEFENSE_COOKIE_STATUSES = frozenset(
+    {"", "valid", "invalid", "expired", "valid_redirect_challenge", "renewal"}
+)
+BOTDEFENSE_CLIENT_TYPES = frozenset(
+    {"bot", "mobile_app", "browser", "uncategorized"}
+)
+BOTDEFENSE_CLIENT_CLASSES = frozenset(
+    {
+        "unknown",
+        "browser",
+        "mobile_application",
+        "trusted_bot",
+        "untrusted_bot",
+        "malicious_bot",
+        "suspicious_browser",
+    }
+)
 DEFAULT_PROFILES = ["TCP", "HTTP"]
 LB_FAILURE_CAUSES = frozenset(
     {"no_member", "unreachable", "queue_limit", "connection_timeout"}
@@ -984,6 +1004,31 @@ SEMANTIC_MOCK_COMMANDS = {
     "ASM::username",
     "ASM::violation",
     "ASM::violation_data",
+    "BOTDEFENSE::action",
+    "BOTDEFENSE::bot_anomalies",
+    "BOTDEFENSE::bot_categories",
+    "BOTDEFENSE::bot_name",
+    "BOTDEFENSE::bot_signature",
+    "BOTDEFENSE::bot_signature_category",
+    "BOTDEFENSE::captcha_age",
+    "BOTDEFENSE::captcha_status",
+    "BOTDEFENSE::client_class",
+    "BOTDEFENSE::client_type",
+    "BOTDEFENSE::cookie_age",
+    "BOTDEFENSE::cookie_status",
+    "BOTDEFENSE::cs_allowed",
+    "BOTDEFENSE::cs_attribute",
+    "BOTDEFENSE::cs_possible",
+    "BOTDEFENSE::device_id",
+    "BOTDEFENSE::disable",
+    "BOTDEFENSE::enable",
+    "BOTDEFENSE::intent",
+    "BOTDEFENSE::micro_service",
+    "BOTDEFENSE::previous_action",
+    "BOTDEFENSE::previous_request_age",
+    "BOTDEFENSE::previous_support_id",
+    "BOTDEFENSE::reason",
+    "BOTDEFENSE::support_id",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1458,6 +1503,46 @@ def _configure_asm(session: Any, asm: dict[str, Any]) -> None:
     session.eval_tcl("::itest::semantic::asm_prepare_request 0 \"\"")
 
 
+def _configure_botdefense(session: Any, botdefense: dict[str, Any]) -> None:
+    """Install deterministic Bot Defense policy results in the Tcl session."""
+    scalar_values = (
+        "1" if botdefense["enabled"] else "0",
+        botdefense["action"],
+        botdefense["bot_name"],
+        botdefense["bot_signature"],
+        botdefense["bot_signature_category"],
+        str(botdefense["captcha_age"]),
+        botdefense["captcha_status"],
+        botdefense["client_class"],
+        botdefense["client_type"],
+        str(botdefense["cookie_age"]),
+        botdefense["cookie_status"],
+        "1" if botdefense["cs_allowed"] else "0",
+        "1" if botdefense["cs_possible"] else "0",
+        "1" if botdefense["cs_attribute_device_id"] else "0",
+        str(botdefense["device_id"]),
+        botdefense["intent"],
+        botdefense["previous_action"],
+        str(botdefense["previous_request_age"]),
+        botdefense["previous_support_id"],
+        botdefense["reason"],
+        botdefense["support_id"],
+    )
+    session.eval_tcl(
+        "::itest::semantic::botdefense_configure " + _tcl_list(list(scalar_values))
+    )
+    session.eval_tcl(
+        "::itest::semantic::botdefense_set_lists "
+        f"{_tcl_list(botdefense['bot_anomalies'])} "
+        f"{_tcl_list(botdefense['bot_categories'])}"
+    )
+    session.eval_tcl(
+        "::itest::semantic::botdefense_set_micro_service "
+        f"{_tcl_list([botdefense['micro_service']['name'], botdefense['micro_service']['type']])}"
+    )
+    session.eval_tcl("::itest::semantic::botdefense_prepare_request")
+
+
 def _split_tcl_list(value: Any) -> list[str]:
     """Parse a Tcl list returned by the bridge using a temporary interpreter."""
     try:
@@ -1603,6 +1688,53 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         asm_campaigns[record[0]] = _split_tcl_list(record[1])
     if set(asm_campaigns) != set(ASM_CAMPAIGN_FIELDS):
         raise EmulatorInputError("incomplete ASM threat campaign state")
+    botdefense_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::botdefense_snapshot")
+    )
+    if len(botdefense_parts) % 2:
+        raise EmulatorInputError("invalid Bot Defense state")
+    botdefense_keys = botdefense_parts[::2]
+    if len(set(botdefense_keys)) != len(botdefense_keys):
+        raise EmulatorInputError("duplicate Bot Defense state field")
+    botdefense_values = dict(
+        zip(botdefense_parts[::2], botdefense_parts[1::2])
+    )
+    expected_botdefense_fields = {
+        "enabled", "action", "action_overridden", "bot_anomalies", "bot_categories",
+        "bot_name", "bot_signature", "bot_signature_category", "captcha_age",
+        "captcha_status", "client_class", "client_type", "cookie_age",
+        "cookie_status", "cs_allowed", "cs_attribute_device_id", "cs_possible",
+        "device_id", "intent", "micro_service", "previous_action",
+        "previous_request_age", "previous_support_id", "reason", "support_id",
+    }
+    if set(botdefense_values) != expected_botdefense_fields:
+        raise EmulatorInputError("invalid Bot Defense state fields")
+    botdefense_bool_fields = {
+        "enabled", "action_overridden", "cs_allowed",
+        "cs_attribute_device_id", "cs_possible",
+    }
+    if any(
+        botdefense_values[name] not in {"0", "1"}
+        for name in botdefense_bool_fields
+    ):
+        raise EmulatorInputError("invalid Bot Defense boolean state")
+    botdefense_int_fields = (
+        "captcha_age", "cookie_age", "device_id", "previous_request_age"
+    )
+    botdefense_ints: dict[str, int] = {}
+    for name in botdefense_int_fields:
+        try:
+            value = int(botdefense_values[name])
+        except (KeyError, TypeError, ValueError):
+            raise EmulatorInputError("invalid Bot Defense numeric state") from None
+        if name in {"captcha_age", "cookie_age"} and value < -1:
+            raise EmulatorInputError("invalid Bot Defense age state")
+        if name in {"device_id", "previous_request_age"} and value < 0:
+            raise EmulatorInputError("invalid Bot Defense numeric state")
+        botdefense_ints[name] = value
+    botdefense_micro_service = _split_tcl_list(botdefense_values["micro_service"])
+    if len(botdefense_micro_service) != 2:
+        raise EmulatorInputError("invalid Bot Defense micro-service state")
     dosl7_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::dosl7_snapshot"))
     if len(dosl7_parts) % 2:
         raise EmulatorInputError("invalid DOSL7 state")
@@ -1663,6 +1795,36 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "violations": asm_violations,
             "signatures": asm_signatures,
             "threat_campaigns": asm_campaigns,
+        },
+        "botdefense": {
+            "enabled": botdefense_values["enabled"] == "1",
+            "action": botdefense_values["action"],
+            "action_overridden": botdefense_values["action_overridden"] == "1",
+            "bot_anomalies": _split_tcl_list(botdefense_values["bot_anomalies"]),
+            "bot_categories": _split_tcl_list(botdefense_values["bot_categories"]),
+            "bot_name": botdefense_values["bot_name"],
+            "bot_signature": botdefense_values["bot_signature"],
+            "bot_signature_category": botdefense_values["bot_signature_category"],
+            "captcha_age": botdefense_ints["captcha_age"],
+            "captcha_status": botdefense_values["captcha_status"],
+            "client_class": botdefense_values["client_class"],
+            "client_type": botdefense_values["client_type"],
+            "cookie_age": botdefense_ints["cookie_age"],
+            "cookie_status": botdefense_values["cookie_status"],
+            "cs_allowed": botdefense_values["cs_allowed"] == "1",
+            "cs_attribute_device_id": botdefense_values["cs_attribute_device_id"] == "1",
+            "cs_possible": botdefense_values["cs_possible"] == "1",
+            "device_id": botdefense_ints["device_id"],
+            "intent": botdefense_values["intent"],
+            "micro_service": {
+                "name": botdefense_micro_service[0],
+                "type": botdefense_micro_service[1],
+            },
+            "previous_action": botdefense_values["previous_action"],
+            "previous_request_age": botdefense_ints["previous_request_age"],
+            "previous_support_id": botdefense_values["previous_support_id"],
+            "reason": botdefense_values["reason"],
+            "support_id": botdefense_values["support_id"],
         },
         "dosl7": {
             "enabled": dosl7_values["enabled"] == "1",
@@ -2096,6 +2258,146 @@ def _normalise_asm(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalise_botdefense(raw: Any) -> dict[str, Any]:
+    """Normalize deterministic inputs for the bounded Bot Defense model."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("botdefense must be an object")
+    allowed = {
+        "enabled",
+        "action",
+        "bot_anomalies",
+        "bot_categories",
+        "bot_name",
+        "bot_signature",
+        "bot_signature_category",
+        "captcha_age",
+        "captcha_status",
+        "client_class",
+        "client_type",
+        "cookie_age",
+        "cookie_status",
+        "cs_allowed",
+        "cs_attribute_device_id",
+        "cs_possible",
+        "device_id",
+        "intent",
+        "micro_service",
+        "previous_action",
+        "previous_request_age",
+        "previous_support_id",
+        "reason",
+        "support_id",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            "botdefense unsupported field(s): " + ", ".join(unknown)
+        )
+
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise EmulatorInputError("botdefense.enabled must be a boolean")
+
+    def string_field(name: str, default: str = "") -> str:
+        return _normalise_asm_string(raw.get(name, default), f"botdefense.{name}")
+
+    def string_list_field(name: str) -> list[str]:
+        return _normalise_asm_string_list(
+            raw.get(name, []), f"botdefense.{name}"
+        )
+
+    def boolean_field(name: str, default: bool) -> bool:
+        value = raw.get(name, default)
+        if not isinstance(value, bool):
+            raise EmulatorInputError(f"botdefense.{name} must be a boolean")
+        return value
+
+    def integer_field(name: str, default: int, minimum: int = -1) -> int:
+        value = raw.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise EmulatorInputError(
+                f"botdefense.{name} must be an integer from {minimum}"
+            )
+        if value > 2**31 - 1:
+            raise EmulatorInputError(
+                f"botdefense.{name} must be at most 2147483647"
+            )
+        return value
+
+    action = string_field("action", "allow")
+    if not action:
+        raise EmulatorInputError("botdefense.action cannot be empty")
+    captcha_status = string_field("captcha_status", "not_received")
+    if captcha_status not in BOTDEFENSE_CAPTCHA_STATUSES:
+        raise EmulatorInputError(
+            "botdefense.captcha_status must be one of: "
+            + ", ".join(sorted(BOTDEFENSE_CAPTCHA_STATUSES))
+        )
+    client_type = string_field("client_type", "uncategorized")
+    if client_type not in BOTDEFENSE_CLIENT_TYPES:
+        raise EmulatorInputError(
+            "botdefense.client_type must be one of: "
+            + ", ".join(sorted(BOTDEFENSE_CLIENT_TYPES))
+        )
+    client_class = string_field("client_class", "unknown")
+    if client_class not in BOTDEFENSE_CLIENT_CLASSES:
+        raise EmulatorInputError(
+            "botdefense.client_class must be one of: "
+            + ", ".join(sorted(BOTDEFENSE_CLIENT_CLASSES))
+        )
+    cookie_status = string_field("cookie_status", "")
+    if cookie_status not in BOTDEFENSE_COOKIE_STATUSES:
+        raise EmulatorInputError(
+            "botdefense.cookie_status must be one of: "
+            + ", ".join(sorted(BOTDEFENSE_COOKIE_STATUSES))
+        )
+    micro_service = raw.get("micro_service", {})
+    if not isinstance(micro_service, dict):
+        raise EmulatorInputError("botdefense.micro_service must be an object")
+    unknown_micro_service = sorted(set(micro_service) - {"name", "type"})
+    if unknown_micro_service:
+        raise EmulatorInputError(
+            "botdefense.micro_service unsupported field(s): "
+            + ", ".join(unknown_micro_service)
+        )
+    micro_service_result = {
+        "name": _normalise_asm_string(
+            micro_service.get("name", ""), "botdefense.micro_service.name"
+        ),
+        "type": _normalise_asm_string(
+            micro_service.get("type", ""), "botdefense.micro_service.type"
+        ),
+    }
+    return {
+        "enabled": enabled,
+        "action": action,
+        "bot_anomalies": string_list_field("bot_anomalies"),
+        "bot_categories": string_list_field("bot_categories"),
+        "bot_name": string_field("bot_name"),
+        "bot_signature": string_field("bot_signature"),
+        "bot_signature_category": string_field("bot_signature_category"),
+        "captcha_age": integer_field("captcha_age", -1),
+        "captcha_status": captcha_status,
+        "client_class": client_class,
+        "client_type": client_type,
+        "cookie_age": integer_field("cookie_age", -1),
+        "cookie_status": cookie_status,
+        "cs_allowed": boolean_field("cs_allowed", True),
+        "cs_attribute_device_id": boolean_field("cs_attribute_device_id", True),
+        "cs_possible": boolean_field("cs_possible", True),
+        "device_id": integer_field("device_id", 0, 0),
+        "intent": string_field("intent"),
+        "micro_service": micro_service_result,
+        "previous_action": string_field("previous_action", "undetermined"),
+        "previous_request_age": integer_field("previous_request_age", 0, 0),
+        "previous_support_id": string_field("previous_support_id", "0"),
+        "reason": string_field("reason"),
+        "support_id": string_field("support_id"),
+    }
+
+
 def _normalise_resolvers(raw: Any) -> dict[str, list[dict[str, Any]]]:
     """Normalize deterministic DNS records used by RESOLVER::name_lookup."""
     if raw is None:
@@ -2361,6 +2663,7 @@ def _normalise_scenario_config(
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
+    dict[str, Any],
 ]:
     if not isinstance(scenario, dict):
         raise EmulatorInputError("scenario must be a JSON object")
@@ -2376,6 +2679,7 @@ def _normalise_scenario_config(
         "profile_settings",
         "dosl7",
         "asm",
+        "botdefense",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -2419,6 +2723,7 @@ def _normalise_scenario_config(
         _normalise_profile_settings(scenario.get("profile_settings")),
         _normalise_dosl7(scenario.get("dosl7")),
         _normalise_asm(scenario.get("asm")),
+        _normalise_botdefense(scenario.get("botdefense")),
     )
 
 
@@ -6692,6 +6997,7 @@ class EmulatorSession:
             profile_settings,
             dosl7,
             asm,
+            botdefense,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -6709,6 +7015,7 @@ class EmulatorSession:
         self._profile_settings = profile_settings
         self._dosl7 = dosl7
         self._asm = asm
+        self._botdefense = botdefense
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -6816,6 +7123,7 @@ class EmulatorSession:
                     f"{_tcl_list(dosl7_flattened)}"
                 )
                 _configure_asm(session, self._asm)
+                _configure_botdefense(session, self._botdefense)
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
                     for profile in self._profiles
@@ -6875,6 +7183,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::psm_reset_connection")
             session.eval_tcl("::itest::semantic::dosl7_reset_connection")
             session.eval_tcl("::itest::semantic::asm_reset_connection")
+            session.eval_tcl("::itest::semantic::botdefense_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
@@ -6907,6 +7216,7 @@ class EmulatorSession:
                     f"{_tcl_quote('1' if 'body' in kwargs else '0')} "
                     f"{_tcl_quote(kwargs.get('body', ''))}"
                 )
+                session.eval_tcl("::itest::semantic::botdefense_prepare_request")
                 session.eval_tcl(
                     f"::itest::semantic::prepare_lb_failure {_tcl_quote(attempt_failure)}"
                 )
@@ -7806,6 +8116,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::psm_reset_connection")
         session.eval_tcl("::itest::semantic::dosl7_reset_connection")
         session.eval_tcl("::itest::semantic::asm_reset_connection")
+        session.eval_tcl("::itest::semantic::botdefense_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
@@ -7836,6 +8147,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::psm_reset_connection")
         session.eval_tcl("::itest::semantic::dosl7_reset_connection")
         session.eval_tcl("::itest::semantic::asm_reset_connection")
+        session.eval_tcl("::itest::semantic::botdefense_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
