@@ -83,6 +83,15 @@ namespace eval ::itest::semantic {
     set lb_connlimits [dict create]
     variable profile_settings
     set profile_settings [dict create]
+    variable dosl7_default_enabled 1
+    variable dosl7_enabled 1
+    variable dosl7_health 0
+    variable dosl7_profile ""
+    variable dosl7_default_mitigated 0
+    variable dosl7_mitigated 0
+    variable dosl7_profile_object ""
+    variable dosl7_greylist
+    set dosl7_greylist [dict create]
 
     variable sip_discarded 0
     variable sip_response_requested 0
@@ -3669,6 +3678,174 @@ namespace eval ::itest::semantic {
             }
         }
         return $result
+    }
+
+    proc dosl7_configure {enabled health profile mitigated raw_greylist} {
+        variable dosl7_default_enabled
+        variable dosl7_enabled
+        variable dosl7_health
+        variable dosl7_profile
+        variable dosl7_default_mitigated
+        variable dosl7_mitigated
+        variable dosl7_profile_object
+        variable dosl7_greylist
+        if {$enabled ni {0 1} || $mitigated ni {0 1}} {
+            error "DOSL7 enabled and mitigated state must be boolean"
+        }
+        if {![string is integer -strict $health] || $health < 0} {
+            error "DOSL7 health must be a non-negative integer"
+        }
+        if {[llength $raw_greylist] % 3} {
+            error "DOSL7 greylist requires address, rate, and timeout triples"
+        }
+        set greylist [dict create]
+        foreach {address rate timeout} $raw_greylist {
+            if {$address eq ""} {
+                error "DOSL7 greylist address cannot be empty"
+            }
+            if {![string is integer -strict $rate] || $rate < 0 || $rate > 100} {
+                error "DOSL7 slowdown rate must be an integer from 0 to 100"
+            }
+            if {![string is integer -strict $timeout] || $timeout < 0} {
+                error "DOSL7 slowdown timeout must be a non-negative integer"
+            }
+            dict set greylist $address [list $rate $timeout]
+        }
+        set dosl7_default_enabled $enabled
+        set dosl7_enabled $enabled
+        set dosl7_health $health
+        set dosl7_profile $profile
+        set dosl7_default_mitigated $mitigated
+        set dosl7_mitigated $mitigated
+        set dosl7_profile_object ""
+        set dosl7_greylist $greylist
+    }
+
+    proc dosl7_reset_connection {} {
+        variable dosl7_default_enabled
+        variable dosl7_enabled
+        variable dosl7_default_mitigated
+        variable dosl7_mitigated
+        variable dosl7_profile_object
+        set dosl7_enabled $dosl7_default_enabled
+        set dosl7_profile_object ""
+        set dosl7_mitigated $dosl7_default_mitigated
+    }
+
+    proc dosl7_prepare_request {has_override mitigated} {
+        variable dosl7_default_mitigated
+        variable dosl7_mitigated
+        if {$has_override ni {0 1} || $mitigated ni {0 1}} {
+            error "DOSL7 request mitigation state must be boolean"
+        }
+        if {$has_override} {
+            set dosl7_mitigated $mitigated
+        } else {
+            set dosl7_mitigated $dosl7_default_mitigated
+        }
+    }
+
+    proc dosl7_enable {args} {
+        variable dosl7_enabled
+        variable dosl7_profile_object
+        if {[llength $args] > 1} {
+            error "DOSL7::enable accepts an optional profile object"
+        }
+        set dosl7_enabled 1
+        set dosl7_profile_object ""
+        if {[llength $args] == 1} {
+            set dosl7_profile_object [lindex $args 0]
+        }
+        ::itest::log_decision dosl7 enable $dosl7_profile_object
+        return ""
+    }
+
+    proc dosl7_disable {args} {
+        variable dosl7_enabled
+        variable dosl7_profile_object
+        if {[llength $args] != 0} {
+            error "DOSL7::disable takes no arguments"
+        }
+        set dosl7_enabled 0
+        set dosl7_profile_object ""
+        ::itest::log_decision dosl7 disable
+        return ""
+    }
+
+    proc dosl7_health {args} {
+        variable dosl7_health
+        if {[llength $args] != 0} {
+            error "DOSL7::health takes no arguments"
+        }
+        return $dosl7_health
+    }
+
+    proc dosl7_profile {args} {
+        variable dosl7_enabled
+        variable dosl7_profile
+        if {[llength $args] != 0} {
+            error "DOSL7::profile takes no arguments"
+        }
+        if {!$dosl7_enabled || ![_profile_enabled FASTHTTP]} {
+            return ""
+        }
+        return $dosl7_profile
+    }
+
+    proc dosl7_is_ip_slowdown {args} {
+        variable dosl7_greylist
+        if {[llength $args] != 0} {
+            error "DOSL7::is_ip_slowdown takes no arguments"
+        }
+        return [dict exists $dosl7_greylist $::state::connection::client_addr]
+    }
+
+    proc dosl7_is_mitigated {args} {
+        variable dosl7_mitigated
+        if {[llength $args] != 0} {
+            error "DOSL7::is_mitigated takes no arguments"
+        }
+        return $dosl7_mitigated
+    }
+
+    proc dosl7_slowdown {args} {
+        variable dosl7_greylist
+        if {[llength $args] != 2} {
+            error "DOSL7::slowdown requires rate and timeout"
+        }
+        set rate [lindex $args 0]
+        set timeout [lindex $args 1]
+        if {![string is integer -strict $rate] || $rate < 0 || $rate > 100} {
+            error "DOSL7::slowdown rate must be an integer from 0 to 100"
+        }
+        if {![string is integer -strict $timeout] || $timeout < 0} {
+            error "DOSL7::slowdown timeout must be a non-negative integer"
+        }
+        set address $::state::connection::client_addr
+        dict set dosl7_greylist $address [list $rate $timeout]
+        ::itest::log_decision dosl7 slowdown [list $address $rate $timeout]
+        return ""
+    }
+
+    proc dosl7_snapshot {} {
+        variable dosl7_enabled
+        variable dosl7_health
+        variable dosl7_profile
+        variable dosl7_mitigated
+        variable dosl7_profile_object
+        variable dosl7_greylist
+        set greylist [list]
+        foreach address [lsort -dictionary [dict keys $dosl7_greylist]] {
+            set values [dict get $dosl7_greylist $address]
+            lappend greylist [list $address [lindex $values 0] [lindex $values 1]]
+        }
+        return [list \
+            enabled $dosl7_enabled \
+            health $dosl7_health \
+            profile $dosl7_profile \
+            mitigated $dosl7_mitigated \
+            profile_object $dosl7_profile_object \
+            greylist $greylist]
     }
 
     proc profile_clientssl {args} { return [_profile_enabled CLIENTSSL] }
@@ -8285,6 +8462,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
         }
         if {$event_name eq "CLIENT_ACCEPTED"} {
             ::itest::semantic::lb_reset_connection
+            ::itest::semantic::dosl7_reset_connection
         }
         if {$gated && $event_name eq "HTTP_REQUEST" && [::itest::semantic::_cache_profile_enabled]} {
             ::itest::semantic::cache_prepare_request
@@ -8583,6 +8761,13 @@ foreach {name proc_name} {
     PROFILE::vdi ::itest::semantic::profile_vdi_command
     PROFILE::webacceleration ::itest::semantic::profile_webacceleration_command
     PROFILE::xml ::itest::semantic::profile_xml_command
+    DOSL7::disable ::itest::semantic::dosl7_disable
+    DOSL7::enable ::itest::semantic::dosl7_enable
+    DOSL7::health ::itest::semantic::dosl7_health
+    DOSL7::is_ip_slowdown ::itest::semantic::dosl7_is_ip_slowdown
+    DOSL7::is_mitigated ::itest::semantic::dosl7_is_mitigated
+    DOSL7::profile ::itest::semantic::dosl7_profile
+    DOSL7::slowdown ::itest::semantic::dosl7_slowdown
     STATS::get ::itest::semantic::stats_get
     STATS::incr ::itest::semantic::stats_incr
     STATS::set ::itest::semantic::stats_set

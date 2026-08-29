@@ -86,6 +86,34 @@ or `HTTPCOMPRESSION`, and values are attribute/value maps; attributes are
 returned only when the corresponding profile is attached. This provides a
 deterministic way to exercise profile-aware rules without requiring a BIG-IP
 configuration export.
+The `DOSL7` policy surface can be seeded with a scenario-level `dosl7` object:
+
+```json
+{
+  "profiles": ["TCP", "HTTP", "FASTHTTP"],
+  "dosl7": {
+    "enabled": true,
+    "health": 7,
+    "profile": "/Common/dos-profile",
+    "mitigated": false,
+    "greylist": {
+      "10.0.0.1": {"rate": 30, "timeout": 60}
+    }
+  },
+  "irule": "when HTTP_REQUEST { if {[DOSL7::is_ip_slowdown]} { log local0. slowed } }"
+}
+```
+
+This models all seven TMOS 17.5 `DOSL7::` commands. `DOSL7::enable` and
+`DOSL7::disable` change the current connection's enforcement state;
+`DOSL7::health`, `DOSL7::profile`, and `DOSL7::is_mitigated` read the seeded
+policy inputs; and `DOSL7::slowdown RATE TIMEOUT` adds the current client IP to
+the session greylist. The configured greylist survives a new connection while
+the enable/disable override does not. The model records timeout values but does
+not advance a wall clock or run a real L7 DoS detection/mitigation engine. An
+HTTP request may include `"dosl7": {"mitigated": true}` or `false` to override
+the seeded mitigation result for that transaction; the override is reused for
+an internal `HTTP::retry` and the next request returns to the scenario default.
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose
@@ -737,7 +765,9 @@ selected HSL, HTTP, IP, LB, PROFILE, STATS, URI, persistence, table, TCP, and
 HTTP cookie commands, PSM FTP/HTTP/SMTP protocol controls, SSL inspection and
 control state, plus SIP request/response message adaptation and common global string, base64, data-group, and pool
 health and pool inventory functions, URI decoding, dotted-domain extraction, CRC32,
-and binary-compatible MD5/SHA1/SHA256/SHA384/SHA512 digests.
+and binary-compatible MD5/SHA1/SHA256/SHA384/SHA512 digests. The DOSL7 policy
+surface is modeled through deterministic scenario inputs, connection controls,
+health/profile queries, mitigation flags, and source-IP greylist state.
 It also models multimap lookup through `llookup`. The semantic overlay also models data-group `class`
 matching, lookup, enumeration, connection-scoped search iterators, and
 request/response cookie mutations. TCP payload access is directional for

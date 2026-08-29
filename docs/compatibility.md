@@ -73,6 +73,15 @@ The profile-attribute commands `PROFILE::access`, `PROFILE::antifraud`,
 values supplied by the scenario's `profile_settings` object. They return an
 empty value for unattached or unspecified profiles; they do not load live
 BIG-IP profile objects or infer undocumented defaults.
+The TMOS 17.5 `DOSL7::disable`, `DOSL7::enable`, `DOSL7::health`,
+`DOSL7::is_ip_slowdown`, `DOSL7::is_mitigated`, `DOSL7::profile`, and
+`DOSL7::slowdown` commands use the scenario's deterministic `dosl7` policy
+inputs. Enable/disable is connection-scoped, while seeded and rule-created
+greylist entries remain available to later connections in the same session.
+An HTTP request can override the seeded `is_mitigated` result for one
+transaction, including across an internal `HTTP::retry`. The adapter records
+rate and timeout values but does not implement wall-clock expiry, traffic-rate
+measurement, or the ASM/DOS inspection and mitigation engines.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

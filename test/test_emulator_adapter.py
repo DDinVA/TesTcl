@@ -714,6 +714,127 @@ when HTTP_REQUEST {
             },
         )
 
+    def test_semantic_overlay_models_dosl7_policy_state(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "FASTHTTP"],
+                "dosl7": {
+                    "enabled": True,
+                    "health": 7,
+                    "profile": "/Common/dos-profile",
+                    "mitigated": True,
+                    "greylist": {
+                        "10.0.0.1": {"rate": 10, "timeout": 60},
+                    },
+                },
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/disable"} {
+        DOSL7::disable
+    } elseif {[HTTP::uri] eq "/enable"} {
+        DOSL7::enable /Common/override
+    } elseif {[HTTP::uri] eq "/slow"} {
+        DOSL7::slowdown 30 120
+    }
+    log local0. "profile=[DOSL7::profile] health=[DOSL7::health] slowed=[DOSL7::is_ip_slowdown] mitigated=[DOSL7::is_mitigated]"
+}
+""",
+                "requests": [
+                    {"uri": "/inspect"},
+                    {"uri": "/disable"},
+                    {"uri": "/enable"},
+                    {"uri": "/slow"},
+                    {"uri": "/inspect", "new_connection": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        inspect, disabled, enabled, slowed, fresh = result["results"]
+        self.assertTrue(any("profile=/Common/dos-profile health=7 slowed=1 mitigated=1" in log for log in inspect["logs"]))
+        self.assertTrue(any("profile= health=7 slowed=1 mitigated=1" in log for log in disabled["logs"]))
+        self.assertTrue(any("profile=/Common/dos-profile health=7 slowed=1 mitigated=1" in log for log in enabled["logs"]))
+        self.assertIn("dosl7 slowdown {{10.0.0.1 30 120}}", slowed["decisions"])
+        self.assertTrue(any("profile=/Common/dos-profile health=7 slowed=1 mitigated=1" in log for log in fresh["logs"]))
+        self.assertEqual(
+            slowed["semantic"]["dosl7"]["greylist"]["10.0.0.1"],
+            {"rate": 30, "timeout": 120},
+        )
+        self.assertFalse(disabled["semantic"]["dosl7"]["enabled"])
+        self.assertTrue(enabled["semantic"]["dosl7"]["enabled"])
+        self.assertEqual(enabled["semantic"]["dosl7"]["profile_object"], "/Common/override")
+        self.assertEqual(fresh["semantic"]["dosl7"]["profile_object"], "")
+        self.assertEqual(
+            {
+                command["name"]: command["runtime_status"]
+                for command in result["fidelity"]["commands"]
+                if command["name"].startswith("DOSL7::")
+            },
+            {
+                "DOSL7::disable": "semantic-mock",
+                "DOSL7::enable": "semantic-mock",
+                "DOSL7::health": "semantic-mock",
+                "DOSL7::is_ip_slowdown": "semantic-mock",
+                "DOSL7::is_mitigated": "semantic-mock",
+                "DOSL7::profile": "semantic-mock",
+                "DOSL7::slowdown": "semantic-mock",
+            },
+        )
+
+    def test_dosl7_scenario_validation_rejects_invalid_policy_inputs(self) -> None:
+        base = {
+            "profiles": ["TCP", "HTTP", "FASTHTTP"],
+            "irule": "when HTTP_REQUEST { log local0. ok }",
+            "request": {"uri": "/"},
+        }
+        invalid_cases = (
+            ({"enabled": "yes"}, "dosl7.enabled must be a boolean"),
+            ({"health": -1}, "dosl7.health must be an integer"),
+            ({"greylist": {"10.0.0.1": {"rate": 101, "timeout": 60}}}, "rate must be an integer"),
+            ({"greylist": {"10.0.0.1": {"rate": 10, "timeout": -1}}}, "timeout must be an integer"),
+            ({"greylist": {"not-an-ip": {"rate": 10, "timeout": 60}}}, "not a valid IPv4 or IPv6 address"),
+            ({"unknown": True}, "dosl7 unsupported field"),
+        )
+        for dosl7, message in invalid_cases:
+            scenario = dict(base)
+            scenario["dosl7"] = dosl7
+            with self.subTest(dosl7=dosl7):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+    def test_dosl7_request_mitigation_override_resets_to_policy_default(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "FASTHTTP"],
+                "dosl7": {"mitigated": True},
+                "irule": "when HTTP_REQUEST { log local0. \"mitigated=[DOSL7::is_mitigated]\" }",
+                "requests": [
+                    {"uri": "/default"},
+                    {"uri": "/override", "dosl7": {"mitigated": False}},
+                    {"uri": "/default-again"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any("mitigated=1" in log for log in result["results"][0]["logs"]))
+        self.assertTrue(any("mitigated=0" in log for log in result["results"][1]["logs"]))
+        self.assertTrue(any("mitigated=1" in log for log in result["results"][2]["logs"]))
+        self.assertTrue(result["results"][0]["semantic"]["dosl7"]["mitigated"])
+        self.assertFalse(result["results"][1]["semantic"]["dosl7"]["mitigated"])
+        self.assertTrue(result["results"][2]["semantic"]["dosl7"]["mitigated"])
+
+    def test_dosl7_profile_is_gated_without_fasthttp(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "dosl7": {"profile": "/Common/dos-profile"},
+                "irule": "when HTTP_REQUEST { log local0. \"profile=[DOSL7::profile]\" }",
+                "request": {"uri": "/"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any("profile=" in log and "/Common/dos-profile" not in log for log in result["results"][0]["logs"]))
+
     def test_semantic_overlay_models_lb_connection_controls(self) -> None:
         result = self.adapter.run_scenario(
             {

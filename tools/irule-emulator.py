@@ -937,6 +937,13 @@ SEMANTIC_MOCK_COMMANDS = {
     "CACHE::uri",
     "CACHE::useragent",
     "CACHE::userkey",
+    "DOSL7::disable",
+    "DOSL7::enable",
+    "DOSL7::health",
+    "DOSL7::is_ip_slowdown",
+    "DOSL7::is_mitigated",
+    "DOSL7::profile",
+    "DOSL7::slowdown",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1436,6 +1443,35 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             raise EmulatorInputError("invalid profile settings state")
         profile_name, attribute, value = setting_parts
         profile_settings.setdefault(profile_name, {})[attribute] = value
+    dosl7_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::dosl7_snapshot"))
+    if len(dosl7_parts) % 2:
+        raise EmulatorInputError("invalid DOSL7 state")
+    dosl7_values = dict(zip(dosl7_parts[::2], dosl7_parts[1::2]))
+    if set(dosl7_values) != {
+        "enabled", "health", "profile", "mitigated", "profile_object", "greylist"
+    }:
+        raise EmulatorInputError("invalid DOSL7 state fields")
+    if any(dosl7_values[name] not in {"0", "1"} for name in ("enabled", "mitigated")):
+        raise EmulatorInputError("invalid DOSL7 boolean state")
+    try:
+        dosl7_health = int(dosl7_values["health"])
+    except (KeyError, TypeError, ValueError):
+        raise EmulatorInputError("invalid DOSL7 health state") from None
+    if dosl7_health < 0:
+        raise EmulatorInputError("invalid DOSL7 health state")
+    dosl7_greylist: dict[str, dict[str, int]] = {}
+    for raw_record in _split_tcl_list(dosl7_values["greylist"]):
+        record = _split_tcl_list(raw_record)
+        if len(record) != 3 or record[0] in dosl7_greylist:
+            raise EmulatorInputError("invalid DOSL7 greylist state")
+        try:
+            rate = int(record[1])
+            timeout = int(record[2])
+        except (IndexError, TypeError, ValueError):
+            raise EmulatorInputError("invalid DOSL7 greylist state") from None
+        if not 0 <= rate <= 100 or timeout < 0:
+            raise EmulatorInputError("invalid DOSL7 greylist state")
+        dosl7_greylist[record[0]] = {"rate": rate, "timeout": timeout}
     return {
         "stats": stats,
         "hsl_messages": hsl_messages,
@@ -1445,6 +1481,14 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "psm": psm,
         "cache": cache,
         "profile_settings": profile_settings,
+        "dosl7": {
+            "enabled": dosl7_values["enabled"] == "1",
+            "health": dosl7_health,
+            "profile": dosl7_values["profile"],
+            "mitigated": dosl7_values["mitigated"] == "1",
+            "profile_object": dosl7_values["profile_object"],
+            "greylist": dosl7_greylist,
+        },
     }
 
 
@@ -1591,6 +1635,100 @@ def _normalise_profile_settings(raw: Any) -> dict[str, dict[str, str]]:
     return settings
 
 
+def _normalise_dosl7(raw: Any) -> dict[str, Any]:
+    """Normalize deterministic inputs for the bounded DOSL7 policy model."""
+    if raw is None:
+        return {
+            "enabled": True,
+            "health": 0,
+            "profile": "",
+            "mitigated": False,
+            "greylist": [],
+        }
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("dosl7 must be an object")
+    allowed = {"enabled", "health", "profile", "mitigated", "greylist"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError(f"dosl7 unsupported field(s): {', '.join(unknown)}")
+
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise EmulatorInputError("dosl7.enabled must be a boolean")
+    mitigated = raw.get("mitigated", False)
+    if not isinstance(mitigated, bool):
+        raise EmulatorInputError("dosl7.mitigated must be a boolean")
+
+    health = raw.get("health", 0)
+    if isinstance(health, bool) or not isinstance(health, int) or not 0 <= health <= 2**31 - 1:
+        raise EmulatorInputError("dosl7.health must be an integer from 0 to 2147483647")
+
+    profile = raw.get("profile", "")
+    if not isinstance(profile, str) or "\x00" in profile:
+        raise EmulatorInputError("dosl7.profile must be a string without NUL")
+
+    greylist = raw.get("greylist", {})
+    if not isinstance(greylist, dict):
+        raise EmulatorInputError("dosl7.greylist must map source IPs to rate/timeout objects")
+    records: list[tuple[str, int, int]] = []
+    for address, record in greylist.items():
+        if not isinstance(address, str) or not address or "\x00" in address:
+            raise EmulatorInputError(
+                "dosl7.greylist source IPs must be non-empty strings without NUL"
+            )
+        try:
+            ipaddress.ip_address(address)
+        except ValueError:
+            raise EmulatorInputError(
+                f"dosl7.greylist source IP {address!r} is not a valid IPv4 or IPv6 address"
+            ) from None
+        if not isinstance(record, dict):
+            raise EmulatorInputError(f"dosl7.greylist entry {address!r} must be an object")
+        unsupported = sorted(set(record) - {"rate", "timeout"})
+        if unsupported:
+            raise EmulatorInputError(
+                f"dosl7.greylist entry {address!r} has unsupported field(s): "
+                f"{', '.join(unsupported)}"
+            )
+        rate = record.get("rate")
+        timeout = record.get("timeout")
+        if isinstance(rate, bool) or not isinstance(rate, int) or not 0 <= rate <= 100:
+            raise EmulatorInputError(
+                f"dosl7.greylist entry {address!r}.rate must be an integer from 0 to 100"
+            )
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, int)
+            or not 0 <= timeout <= 2**31 - 1
+        ):
+            raise EmulatorInputError(
+                f"dosl7.greylist entry {address!r}.timeout must be an integer from 0 to 2147483647"
+            )
+        records.append((address, rate, timeout))
+    return {
+        "enabled": enabled,
+        "health": health,
+        "profile": profile,
+        "mitigated": mitigated,
+        "greylist": records,
+    }
+
+
+def _normalise_dosl7_request(raw: Any) -> dict[str, bool]:
+    """Normalize per-transaction DOSL7 decision inputs."""
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("request.dosl7 must be an object")
+    unknown = sorted(set(raw) - {"mitigated"})
+    if unknown:
+        raise EmulatorInputError(
+            f"request.dosl7 unsupported field(s): {', '.join(unknown)}"
+        )
+    mitigated = raw.get("mitigated", False)
+    if not isinstance(mitigated, bool):
+        raise EmulatorInputError("request.dosl7.mitigated must be a boolean")
+    return {"mitigated": mitigated}
+
+
 def _normalise_resolvers(raw: Any) -> dict[str, list[dict[str, Any]]]:
     """Normalize deterministic DNS records used by RESOLVER::name_lookup."""
     if raw is None:
@@ -1657,6 +1795,7 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
         "response_body",
         "http2",
         "lb_failure",
+        "dosl7",
     }
     unknown = sorted(set(request) - allowed - {"close_before", "close_after", "new_connection"})
     if unknown:
@@ -1698,6 +1837,8 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
             causes = ", ".join(sorted(LB_FAILURE_CAUSES))
             raise EmulatorInputError(f"lb_failure must be one of: {causes}")
         kwargs["lb_failure"] = failure
+    if "dosl7" in request:
+        kwargs["dosl7"] = _normalise_dosl7_request(request["dosl7"])
     return kwargs
 
 
@@ -1850,6 +1991,7 @@ def _normalise_scenario_config(
     dict[str, list[str]],
     dict[str, list[dict[str, Any]]],
     list[tuple[str, dict[str, str], str]],
+    dict[str, Any],
 ]:
     if not isinstance(scenario, dict):
         raise EmulatorInputError("scenario must be a JSON object")
@@ -1863,6 +2005,7 @@ def _normalise_scenario_config(
         "resolvers",
         "datagroups",
         "profile_settings",
+        "dosl7",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -1904,6 +2047,7 @@ def _normalise_scenario_config(
         _normalise_resolvers(scenario.get("resolvers")),
         _normalise_datagroups(scenario.get("datagroups")),
         _normalise_profile_settings(scenario.get("profile_settings")),
+        _normalise_dosl7(scenario.get("dosl7")),
     )
 
 
@@ -6175,6 +6319,7 @@ class EmulatorSession:
             resolvers,
             datagroups,
             profile_settings,
+            dosl7,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -6190,6 +6335,7 @@ class EmulatorSession:
         self._resolvers = resolvers
         self._datagroups = datagroups
         self._profile_settings = profile_settings
+        self._dosl7 = dosl7
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -6283,6 +6429,19 @@ class EmulatorSession:
                         "::itest::semantic::profile_settings_set "
                         f"{_tcl_quote(profile_name)} {_tcl_list(flattened)}"
                     )
+                dosl7_flattened = [
+                    item
+                    for address, rate, timeout in self._dosl7["greylist"]
+                    for item in (address, str(rate), str(timeout))
+                ]
+                session.eval_tcl(
+                    "::itest::semantic::dosl7_configure "
+                    f"{_tcl_quote('1' if self._dosl7['enabled'] else '0')} "
+                    f"{_tcl_quote(str(self._dosl7['health']))} "
+                    f"{_tcl_quote(self._dosl7['profile'])} "
+                    f"{_tcl_quote('1' if self._dosl7['mitigated'] else '0')} "
+                    f"{_tcl_list(dosl7_flattened)}"
+                )
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
                     for profile in self._profiles
@@ -6340,6 +6499,7 @@ class EmulatorSession:
             self._connection_request_number = 0
             session.eval_tcl("::itest::semantic::lb_reset_connection")
             session.eval_tcl("::itest::semantic::psm_reset_connection")
+            session.eval_tcl("::itest::semantic::dosl7_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
@@ -6347,6 +6507,7 @@ class EmulatorSession:
         )
         kwargs = _request_kwargs(request)
         lb_failure = kwargs.pop("lb_failure", "")
+        dosl7_request = kwargs.pop("dosl7", None)
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
         original_kwargs = dict(kwargs)
         retry_count = 0
@@ -6358,6 +6519,14 @@ class EmulatorSession:
         try:
             while True:
                 attempt_failure = lb_failure if retry_count == 0 else ""
+                dosl7_mitigated = "0"
+                if dosl7_request is not None and dosl7_request["mitigated"]:
+                    dosl7_mitigated = "1"
+                session.eval_tcl(
+                    "::itest::semantic::dosl7_prepare_request "
+                    f"{_tcl_quote('1' if dosl7_request is not None else '0')} "
+                    f"{_tcl_quote(dosl7_mitigated)}"
+                )
                 session.eval_tcl(
                     f"::itest::semantic::prepare_lb_failure {_tcl_quote(attempt_failure)}"
                 )
@@ -6407,6 +6576,8 @@ class EmulatorSession:
                 ):
                     if field in original_kwargs:
                         retry_kwargs.setdefault(field, original_kwargs[field])
+                if dosl7_request is not None:
+                    retry_kwargs["dosl7"] = dosl7_request
                 if "http2" in original_kwargs:
                     retry_kwargs.setdefault("http2", original_kwargs["http2"])
                 kwargs = retry_kwargs
@@ -7253,6 +7424,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::gtp_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
         session.eval_tcl("::itest::semantic::psm_reset_connection")
+        session.eval_tcl("::itest::semantic::dosl7_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
@@ -7281,6 +7453,7 @@ class EmulatorSession:
         session.eval_tcl("set ::orch::_connection_active 0")
         session.eval_tcl("::state::reset_connection_state")
         session.eval_tcl("::itest::semantic::psm_reset_connection")
+        session.eval_tcl("::itest::semantic::dosl7_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
