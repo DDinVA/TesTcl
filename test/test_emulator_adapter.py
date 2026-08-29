@@ -1906,7 +1906,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 46)
+        self.assertEqual(queue["command_count"], 45)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -9121,6 +9121,77 @@ when HTTP_REQUEST {
                 invalid.fire_event("HTTP_REQUEST")
         finally:
             invalid.close()
+
+    def test_call_dispatches_defined_tcl_procedures_and_preserves_errors(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "irule": """
+proc join_words {left right} { return "$left:$right" }
+when HTTP_REQUEST {
+    set result [call -debug join_words left right]
+    log local0. "result=$result"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = session.fire_event("HTTP_REQUEST")
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            self.assertEqual(usage["call"]["runtime_status"], "semantic-mock")
+            self.assertTrue(any("result=left:right" in entry for entry in result["logs"]))
+            self.assertIn("call debug {::join_words {left right}}", result["decisions"])
+            self.assertIn("call invoke {::join_words 2}", result["decisions"])
+        finally:
+            session.close()
+
+        error_session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "irule": """
+proc fail_proc {} { error "boom" }
+when HTTP_REQUEST { call fail_proc }
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            with self.assertRaisesRegex(self.adapter.EmulatorInputError, "boom"):
+                error_session.fire_event("HTTP_REQUEST")
+        finally:
+            error_session.close()
+
+        for irule, message in (
+            (
+                "when HTTP_REQUEST { call missing_proc }",
+                "call procedure missing_proc is not defined",
+            ),
+            (
+                "when HTTP_REQUEST { call }",
+                "call requires a procedure name",
+            ),
+        ):
+            invalid = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {"profiles": ["HTTP"], "irule": irule},
+                allow_irule_file=True,
+                allow_requests=False,
+                allow_packets=False,
+            )
+            try:
+                with self.subTest(message=message), self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError, message
+                ):
+                    invalid.fire_event("HTTP_REQUEST")
+            finally:
+                invalid.close()
 
     def test_qoe_commands_model_video_metrics_and_connection_control(self) -> None:
         session = self.adapter.EmulatorSession(

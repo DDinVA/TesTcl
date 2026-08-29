@@ -655,6 +655,18 @@ expressions or reproduce the policy engine:
 }
 ```
 
+### `call` procedure dispatch
+
+The global `call ?-debug? proc_name ?arg ...?` command invokes a procedure
+declared at the top level of the iRule. The emulator resolves the procedure
+through Tcl's command namespace, invokes it with list-safe argument handling,
+and preserves Tcl return/error codes. `-debug` records the resolved procedure
+and argument list in the decision trace. Undefined procedures, an omitted
+procedure name, NUL-containing names, and names longer than 4096 characters
+are rejected. This models procedure dispatch; it does not execute arbitrary
+top-level Tcl beyond installing `proc` declarations. See the F5 [`call` command
+reference](https://clouddocs.f5.com/api/irules/call.html).
+
 ### AM acceleration metadata
 
 The seven catalogued `AM::*` commands are available with deterministic

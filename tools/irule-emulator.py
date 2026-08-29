@@ -1232,6 +1232,36 @@ def _load_session_class(root: Path) -> Any:
     return IruleTestSessionSync
 
 
+def _extract_irule_procedures(root: Path, source: str) -> list[tuple[str, str, str]]:
+    """Extract top-level proc declarations without executing other Tcl.
+
+    The pinned tcl-lsp iRule loader intentionally consumes ``when`` blocks,
+    while real iRules commonly declare reusable procedures at top level. Use
+    its command segmenter to identify only top-level ``proc`` commands; the
+    caller installs those declarations as individually quoted Tcl words.
+    """
+    _load_session_class(root)
+    try:
+        from compiler.parsing.command_segmenter import segment_commands
+
+        commands = segment_commands(source, recovery=False)
+    except Exception:
+        # Procedure support is additive. If a source cannot be segmented,
+        # leave event loading and its existing diagnostics to tcl-lsp.
+        return []
+
+    procedures: list[tuple[str, str, str]] = []
+    for command in commands:
+        texts = command.texts
+        if len(texts) != 4 or texts[0] != "proc":
+            continue
+        name, arguments, body = texts[1:]
+        if not name:
+            continue
+        procedures.append((name, arguments, body))
+    return procedures
+
+
 def _proc_names(path: Path) -> set[str]:
     """Read Tcl proc names without executing upstream source code."""
     try:
@@ -1279,6 +1309,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "AES::decrypt",
     "AES::encrypt",
     "AES::key",
+    "call",
     "htonl",
     "htons",
     "http_client_ip",
@@ -12284,6 +12315,19 @@ class EmulatorSession:
             )
             with backend_session as session:
                 _install_runtime_shims(session)
+                for procedure, arguments, body in _extract_irule_procedures(
+                    self._root, self._source
+                ):
+                    procedure_name = (
+                        procedure if procedure.startswith("::") else "::" + procedure
+                    )
+                    session.eval_tcl(
+                        "proc {} {} {}".format(
+                            _tcl_quote(procedure_name),
+                            _tcl_quote(arguments),
+                            _tcl_quote(body),
+                        )
+                    )
                 self._registered_events = session.load_irule(self._source)
                 session.eval_tcl("::itest::semantic::lb_reset_connection")
                 session.eval_tcl("::itest::semantic::oneconnect_reset_connection")

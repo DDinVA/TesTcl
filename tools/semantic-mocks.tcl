@@ -12178,6 +12178,47 @@ namespace eval ::itest::semantic {
         return [list proc $::state::access2::proc]
     }
 
+    proc call_command {args} {
+        set debug 0
+        if {[llength $args] > 0 && [lindex $args 0] eq "-debug"} {
+            set debug 1
+            set args [lrange $args 1 end]
+        }
+        if {[llength $args] < 1} {
+            error "call requires a procedure name"
+        }
+        set procedure [lindex $args 0]
+        if {$procedure eq "" || [string first "\x00" $procedure] >= 0} {
+            error "call procedure name must be non-empty and free of NUL bytes"
+        }
+        if {[string length $procedure] > 4096} {
+            error "call procedure name exceeds 4096 characters"
+        }
+        if {[string match "::*" $procedure]} {
+            set resolved [namespace which -command $procedure]
+        } else {
+            set resolved [namespace which -command ::$procedure]
+            if {$resolved eq ""} {
+                set resolved [namespace which -command $procedure]
+            }
+        }
+        if {$resolved eq "" || [catch {info args $resolved}]} {
+            error "call procedure $procedure is not defined"
+        }
+        set procedure_args [lrange $args 1 end]
+        if {$debug} {
+            ::itest::log_decision call debug $resolved $procedure_args
+        }
+        set code [catch {
+            uplevel #0 [list $resolved {*}$procedure_args]
+        } result options]
+        if {$code != 0} {
+            return -options $options $result
+        }
+        ::itest::log_decision call invoke $resolved [llength $procedure_args]
+        return $result
+    }
+
     proc am_reset_connection {} {
         set ::state::am::age 0
         set ::state::am::application ""
@@ -23258,6 +23299,7 @@ foreach {name proc_name} {
     AAA::auth_send ::itest::semantic::aaa_auth_send
     ACCESS::acl ::itest::semantic::access_acl
     ACCESS2::access2_proc ::itest::semantic::access2_proc_command
+    call ::itest::semantic::call_command
     AM::age ::itest::semantic::am_age_command
     AM::application ::itest::semantic::am_application_command
     AM::cache ::itest::semantic::am_cache_command
