@@ -658,6 +658,31 @@ QoS and VLAN return `0`, last-hop fields are empty, and next-hop MAC returns
 `ff:ff:ff:ff:ff:ff`, matching the documented pre-server-connection behavior.
 This is structured metadata, not a live NIC, ARP, VLAN, routing, or QoS model.
 
+### SOCKS request state
+
+`SOCKS::version`, `SOCKS::allowed`, and `SOCKS::destination` are available in
+`SOCKS_REQUEST` with the `SOCKS` profile. Supply the request state through the
+event API:
+
+```json
+{
+  "event": "SOCKS_REQUEST",
+  "state": {
+    "socks": {
+      "version": "5",
+      "allowed": 1,
+      "destination_host": "proxy.example",
+      "destination_port": 1080
+    }
+  }
+}
+```
+
+`SOCKS::allowed` reads or sets `0`/`1`. `SOCKS::destination` reads or updates
+the combined `HOST:PORT`, or reads/updates `host` and `port` independently;
+IPv6 hosts use `[HOST]:PORT`. The model records the decision and destination
+but does not implement a SOCKS handshake, proxy socket, or live connection.
+
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose

@@ -586,6 +586,84 @@ when CLIENT_ACCEPTED {
         finally:
             invalid.close()
 
+    def test_socks_commands_model_request_decision_and_destination(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "SOCKS"],
+                "irule": """
+when SOCKS_REQUEST {
+    set before [SOCKS::destination]
+    set before_host [SOCKS::destination host]
+    set before_port [SOCKS::destination port]
+    SOCKS::destination host internal.example
+    SOCKS::destination port 8443
+    SOCKS::allowed 0
+    log local0. "version=[SOCKS::version] before=$before/$before_host/$before_port after=[SOCKS::destination] allowed=[SOCKS::allowed]"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event(
+                "SOCKS_REQUEST",
+                {
+                    "socks": {
+                        "version": "5",
+                        "allowed": 1,
+                        "destination_host": "proxy.example",
+                        "destination_port": 1080,
+                    }
+                },
+            )
+            self.assertTrue(result["fired"])
+            self.assertEqual(result["state"]["socks"]["allowed"], "0")
+            self.assertEqual(result["state"]["socks"]["destination_host"], "internal.example")
+            self.assertEqual(result["state"]["socks"]["destination_port"], "8443")
+            self.assertTrue(any(
+                "version=5 before=proxy.example:1080/proxy.example/1080 after=internal.example:8443 allowed=0" in entry
+                for entry in result["logs"]
+            ))
+        finally:
+            session.close()
+
+        invalid = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "SOCKS"],
+                "irule": "when CLIENT_ACCEPTED { SOCKS::version }",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, "not valid in CLIENT_ACCEPTED"
+            ):
+                invalid.fire_event("CLIENT_ACCEPTED")
+        finally:
+            invalid.close()
+
+        malformed = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "SOCKS"],
+                "irule": "when SOCKS_REQUEST { SOCKS::destination malformed }",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                r"requires HOST:PORT or \[HOST\]:PORT",
+            ):
+                malformed.fire_event("SOCKS_REQUEST")
+        finally:
+            malformed.close()
+
     def test_server_endpoint_aliases_clear_stale_member_after_pool_failure(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -659,8 +737,9 @@ when HTTP_REQUEST {
         self.assertNotIn(("LINK", "generated-stub"), queue_buckets)
         self.assertNotIn(("NAME", "generated-stub"), queue_buckets)
         self.assertNotIn(("RESOLV", "generated-stub"), queue_buckets)
+        self.assertNotIn(("SOCKS", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 222)
+        self.assertEqual(queue["command_count"], 219)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)

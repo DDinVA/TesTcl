@@ -471,6 +471,13 @@ namespace eval ::itest::semantic {
         variable nexthop_name ""
     }
 
+    namespace eval ::state::socks {
+        variable version "5"
+        variable allowed 1
+        variable destination_host ""
+        variable destination_port 0
+    }
+
     namespace eval ::state::udp {
         variable payload ""
         variable payload_length 0
@@ -5513,6 +5520,119 @@ namespace eval ::itest::semantic {
         set result $::state::link::vlan_id
         ::itest::log_decision link vlan_id $result
         return $result
+    }
+
+    proc socks_reset_connection {} {
+        set ::state::socks::version "5"
+        set ::state::socks::allowed 1
+        set ::state::socks::destination_host ""
+        set ::state::socks::destination_port 0
+    }
+
+    proc _socks_require_event {command} {
+        if {$::itest::current_event ne "SOCKS_REQUEST"} {
+            error "$command is not valid in $::itest::current_event"
+        }
+        if {![_profile_enabled SOCKS]} {
+            error "$command requires the SOCKS profile"
+        }
+    }
+
+    proc socks_version_command {args} {
+        _socks_require_event SOCKS::version
+        if {[llength $args] != 0} {
+            error "SOCKS::version takes no arguments"
+        }
+        return $::state::socks::version
+    }
+
+    proc socks_allowed_command {args} {
+        _socks_require_event SOCKS::allowed
+        if {[llength $args] == 0} {
+            return $::state::socks::allowed
+        }
+        if {[llength $args] != 1 || [lindex $args 0] ni {0 1}} {
+            error "SOCKS::allowed requires 0 or 1"
+        }
+        set ::state::socks::allowed [lindex $args 0]
+        ::itest::log_decision socks allowed $::state::socks::allowed
+        return $::state::socks::allowed
+    }
+
+    proc _socks_validate_port {port} {
+        if {![string is integer -strict $port] || $port < 0 || $port > 65535} {
+            error "SOCKS::destination port must be an integer from 0 to 65535"
+        }
+        return $port
+    }
+
+    proc _socks_validate_host {host} {
+        if {$host eq "" || [string first "\x00" $host] >= 0} {
+            error "SOCKS::destination host must be non-empty and must not contain NUL"
+        }
+        return $host
+    }
+
+    proc _socks_destination_format {} {
+        set host $::state::socks::destination_host
+        set port $::state::socks::destination_port
+        if {[string first : $host] >= 0} {
+            return [format {[%s]:%s} $host $port]
+        }
+        return [format {%s:%s} $host $port]
+    }
+
+    proc _socks_destination_tuple {value} {
+        if {[regexp {^\[([^]]+)\]:([0-9]+)$} $value -> host port]} {
+            return [list [_socks_validate_host $host] [_socks_validate_port $port]]
+        }
+        if {[regexp {^(.+):([0-9]+)$} $value -> host port]} {
+            return [list [_socks_validate_host $host] [_socks_validate_port $port]]
+        }
+        error {SOCKS::destination requires HOST:PORT or [HOST]:PORT}
+    }
+
+    proc socks_destination_command {args} {
+        _socks_require_event SOCKS::destination
+        if {[llength $args] == 0} {
+            return [_socks_destination_format]
+        }
+        if {[llength $args] == 1} {
+            set selector [lindex $args 0]
+            if {$selector eq "host"} {
+                return $::state::socks::destination_host
+            }
+            if {$selector eq "port"} {
+                return $::state::socks::destination_port
+            }
+            lassign [_socks_destination_tuple $selector] host port
+            set ::state::socks::destination_host $host
+            set ::state::socks::destination_port $port
+            ::itest::log_decision socks destination [list $host $port]
+            return [_socks_destination_format]
+        }
+        if {[llength $args] != 2} {
+            error "SOCKS::destination accepts at most two arguments"
+        }
+        set selector [lindex $args 0]
+        set value [lindex $args 1]
+        switch -exact -- $selector {
+            host {
+                set ::state::socks::destination_host [_socks_validate_host $value]
+            }
+            port {
+                set ::state::socks::destination_port [_socks_validate_port $value]
+            }
+            default {
+                error "SOCKS::destination selector must be host or port"
+            }
+        }
+        ::itest::log_decision socks destination \
+            [list $::state::socks::destination_host $::state::socks::destination_port]
+        if {$selector eq "host"} {
+            return $::state::socks::destination_host
+        }
+        return $::state::socks::destination_port
     }
 
     proc _flow_require_profile {command} {
@@ -18031,6 +18151,9 @@ foreach {name proc_name} {
     RESOLV::lookup ::itest::semantic::resolv_lookup_command
     RESOLVER::name_lookup ::itest::semantic::resolver_name_lookup
     RESOLVER::summarize ::itest::semantic::resolver_summarize
+    SOCKS::allowed ::itest::semantic::socks_allowed_command
+    SOCKS::destination ::itest::semantic::socks_destination_command
+    SOCKS::version ::itest::semantic::socks_version_command
     SSL::cert ::itest::semantic::ssl_cert_command
     SSL::c3d ::itest::semantic::ssl_c3d_command
     SSL::cert_constraint ::itest::semantic::ssl_cert_constraint_command

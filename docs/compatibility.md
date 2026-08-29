@@ -328,6 +328,11 @@ event-state API. The four `LINK::*` commands (`lasthop`, `nexthop`, `qos`, and
 defaults to the documented broadcast value until the caller supplies one.
 This models iRule-visible state and command validation, not live Ethernet,
 ARP, VLAN, route, QoS, or TMM forwarding behavior.
+The TMOS 17.5 `SOCKS::allowed`, `SOCKS::destination`, and `SOCKS::version`
+commands are modeled on a structured `SOCKS_REQUEST` state. They support
+version inspection, allow/reject decisions, host and port getters/setters,
+and bounded `HOST:PORT` parsing; they do not implement a SOCKS handshake,
+proxy socket, or live destination connection.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

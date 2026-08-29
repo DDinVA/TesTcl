@@ -257,6 +257,12 @@ EVENT_STATE_FIELDS = {
         "nexthop_type",
         "nexthop_name",
     },
+    "socks": {
+        "version",
+        "allowed",
+        "destination_host",
+        "destination_port",
+    },
     "tls_client": {
         "sni",
         "sni_required",
@@ -885,6 +891,7 @@ EVENT_STATE_NAMESPACES = {
     "route": "::state::route",
     "l7check": "::state::l7check",
     "link": "::state::link",
+    "socks": "::state::socks",
     "tls_client": "::state::tls::client",
     "tls_server": "::state::tls::server",
     "http2": "::state::http2",
@@ -1091,6 +1098,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "NAME::lookup",
     "NAME::response",
     "RESOLV::lookup",
+    "SOCKS::allowed",
+    "SOCKS::destination",
+    "SOCKS::version",
     "ICAP::header",
     "ICAP::method",
     "ICAP::status",
@@ -10380,6 +10390,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::l7check_reset_connection")
                 session.eval_tcl("::itest::semantic::link_reset_connection")
                 session.eval_tcl("::itest::semantic::name_reset_connection")
+                session.eval_tcl("::itest::semantic::socks_reset_connection")
                 session.eval_tcl("::itest::semantic::dhcp_reset_connection")
                 session.eval_tcl("::itest::semantic::ftp_reset_connection")
                 session.eval_tcl("::itest::semantic::imap_reset_connection")
@@ -10731,6 +10742,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::l7check_reset_connection")
             session.eval_tcl("::itest::semantic::link_reset_connection")
             session.eval_tcl("::itest::semantic::name_reset_connection")
+            session.eval_tcl("::itest::semantic::socks_reset_connection")
             self._connection_open = False
             self._server_connection_open = False
             self._server_connection_detached = False
@@ -12100,6 +12112,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::l7check_reset_connection")
         session.eval_tcl("::itest::semantic::link_reset_connection")
         session.eval_tcl("::itest::semantic::name_reset_connection")
+        session.eval_tcl("::itest::semantic::socks_reset_connection")
         session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::ftp_reset_connection")
         session.eval_tcl("::itest::semantic::imap_reset_connection")
@@ -12155,6 +12168,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::l7check_reset_connection")
         session.eval_tcl("::itest::semantic::link_reset_connection")
         session.eval_tcl("::itest::semantic::name_reset_connection")
+        session.eval_tcl("::itest::semantic::socks_reset_connection")
         session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::ftp_reset_connection")
         session.eval_tcl("::itest::semantic::icap_reset_connection")
