@@ -1341,6 +1341,8 @@ SEMANTIC_MOCK_COMMANDS = {
     "translate",
     "session",
     "sharedvar",
+    "priority",
+    "timing",
     "urlcatblindquery",
     "urlcatquery",
     "IPFIX::destination",
@@ -2661,6 +2663,168 @@ def _runtime_status_map(root: Path) -> tuple[Any, dict[str, str]]:
 def _is_f5_runtime_command(name: str, spec: Any) -> bool:
     """Avoid warning on ordinary Tcl control commands in a rule."""
     return "::" in name or bool(getattr(spec, "event_requires", None))
+
+
+def _rule_priority(value: str, context: str) -> int:
+    """Validate one TMOS event priority declaration."""
+    try:
+        priority = int(value, 10)
+    except (TypeError, ValueError):
+        raise EmulatorInputError(f"{context} priority must be an integer from 0 through 1000") from None
+    if not 0 <= priority <= 1000:
+        raise EmulatorInputError(f"{context} priority must be an integer from 0 through 1000")
+    return priority
+
+
+def _rule_timing(value: str, context: str) -> str:
+    """Normalize the timing spelling accepted by the pinned Tcl loader."""
+    normalized = value.lower()
+    if normalized in {"on", "enable"}:
+        return "on"
+    if normalized in {"off", "disable"}:
+        return "off"
+    raise EmulatorInputError(f"{context} timing must be on or off")
+
+
+def _prepare_irule_source(
+    root: Path, source: str
+) -> tuple[str, list[dict[str, Any]]]:
+    """Apply top-level ``priority``/``timing`` directives to event headers.
+
+    The pinned tcl-lsp loader already handles explicit ``when EVENT priority N``
+    headers, but it intentionally does not interpret the outer-scope forms.
+    Segmenting the source with tcl-lsp keeps directives inside braced handler
+    bodies from being mistaken for outer-scope declarations. The returned
+    source is only a normalized copy; the user's source remains unchanged.
+    """
+    try:
+        _load_session_class(root)
+        from compiler.parsing.green_tree import tokenise
+        from shared.tokens import TokenType
+    except ImportError as exc:  # pragma: no cover - depends on external checkout
+        raise EmulatorInputError(f"could not load tcl-lsp source parser: {exc}") from exc
+
+    try:
+        lex_tokens, _ = tokenise(source, 0, 0, 0)
+        commands: list[tuple[list[str], list[Any]]] = []
+        argv: list[Any] = []
+        texts: list[str] = []
+
+        def flush() -> None:
+            if argv:
+                commands.append((list(texts), list(argv)))
+            argv.clear()
+            texts.clear()
+
+        previous_type = TokenType.EOL
+        for token in lex_tokens:
+            if token.type is TokenType.COMMENT:
+                previous_type = token.type
+                continue
+            if token.type is TokenType.EOL:
+                flush()
+                previous_type = token.type
+                continue
+            if token.type is TokenType.SEP:
+                previous_type = token.type
+                continue
+            # The upstream loader accepts adjacent ``when`` blocks in a
+            # single line even though Tcl normally requires a separator. A
+            # braced body is an unambiguous boundary for that compatibility
+            # form, so split it here before interpreting attributes.
+            if (
+                token.text == "when"
+                and texts
+                and texts[0] == "when"
+                and argv[-1].type is TokenType.STR
+            ):
+                flush()
+                previous_type = TokenType.SEP
+            if previous_type in (TokenType.SEP, TokenType.EOL):
+                argv.append(token)
+                texts.append(token.text)
+            elif texts:
+                texts[-1] += token.text
+            previous_type = token.type
+        flush()
+    except Exception as exc:  # pragma: no cover - parser compatibility guard
+        raise EmulatorInputError(f"could not parse iRule source controls: {exc}") from exc
+
+    active_priority = 500
+    active_timing = "on"
+    replacements: list[tuple[int, int, str]] = []
+    controls: list[dict[str, Any]] = []
+
+    for texts, argv in commands:
+        command_name = texts[0] if texts else ""
+        if command_name == "priority":
+            if len(texts) != 2:
+                raise EmulatorInputError("priority requires exactly one value")
+            active_priority = _rule_priority(texts[1], "outer")
+            continue
+        if command_name == "timing":
+            if len(texts) != 2:
+                raise EmulatorInputError("timing requires exactly one value")
+            active_timing = _rule_timing(texts[1], "outer")
+            continue
+        if command_name != "when" or len(texts) < 3 or not argv:
+            continue
+        body_token = argv[-1]
+        if body_token.type is not TokenType.STR or len(texts) < 3:
+            continue
+
+        event_name = texts[1]
+        priority = active_priority
+        timing = active_timing
+        header = texts[2:-1]
+        index = 0
+        while index < len(header):
+            keyword = header[index]
+            if keyword == "priority":
+                if index + 1 >= len(header):
+                    raise EmulatorInputError(
+                        f"when {event_name} priority requires a value"
+                    )
+                priority = _rule_priority(header[index + 1], f"when {event_name}")
+                index += 2
+                continue
+            if keyword == "timing":
+                if index + 1 >= len(header):
+                    raise EmulatorInputError(
+                        f"when {event_name} timing requires a value"
+                    )
+                timing = _rule_timing(header[index + 1], f"when {event_name}")
+                index += 2
+                continue
+            raise EmulatorInputError(
+                f"when {event_name} has unsupported event attribute {keyword}"
+            )
+
+        # Replace only the command header, leaving the body byte-for-byte
+        # intact. Offsets are character offsets in the tcl-lsp token model,
+        # which matches Python string slicing for the decoded source.
+        header_start = argv[0].start.offset
+        body_start = body_token.start.offset
+        replacements.append(
+            (
+                header_start,
+                body_start,
+                f"when {event_name} priority {priority} timing {timing} ",
+            )
+        )
+        controls.append(
+            {
+                "ordinal": len(controls),
+                "event": event_name,
+                "priority": priority,
+                "timing": timing,
+            }
+        )
+
+    prepared = source
+    for start, end, replacement in reversed(replacements):
+        prepared = prepared[:start] + replacement + prepared[end:]
+    return prepared, controls
 
 
 def _analyze_rule_capabilities(
@@ -13054,6 +13218,7 @@ class EmulatorSession:
         self._root = root
         self._backend = backend
         self._source = source
+        self._prepared_source, self._event_controls = _prepare_irule_source(root, source)
         self._profiles = profiles
         self._pools = pools
         self._resolvers = resolvers
@@ -13074,7 +13239,7 @@ class EmulatorSession:
         self._sideband_config = sideband_config
         self._ifile_config = ifile_config
         self._urlcat_config = urlcat_config
-        self._fidelity = _analyze_rule_capabilities(root, source, profiles)
+        self._fidelity = _analyze_rule_capabilities(root, self._prepared_source, profiles)
         incompatible = [
             warning
             for warning in self._fidelity.get("warnings", [])
@@ -13152,6 +13317,10 @@ class EmulatorSession:
     def fidelity(self) -> dict[str, Any]:
         return self._fidelity
 
+    @property
+    def event_controls(self) -> list[dict[str, Any]]:
+        return [dict(control) for control in self._event_controls]
+
     def _worker_main(self) -> None:
         session_class: Any = None
         try:
@@ -13166,7 +13335,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::session_reset")
                 session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
                 for procedure, arguments, body in _extract_irule_procedures(
-                    self._root, self._source
+                    self._root, self._prepared_source
                 ):
                     procedure_name = (
                         procedure if procedure.startswith("::") else "::" + procedure
@@ -13178,7 +13347,7 @@ class EmulatorSession:
                             _tcl_quote(body),
                         )
                     )
-                self._registered_events = session.load_irule(self._source)
+                self._registered_events = session.load_irule(self._prepared_source)
                 session.eval_tcl("::itest::semantic::lb_reset_connection")
                 session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
                 session.eval_tcl("::itest::semantic::crypto_reset_connection")
@@ -13932,7 +14101,10 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::eca_reset_connection")
                 session.eval_tcl("::itest::semantic::avr_reset_connection")
                 session.eval_tcl("::itest::semantic::am_reset_connection")
-            return self._fire_event_on_worker(session, event_name, normalised_state)
+            result = self._fire_event_on_worker(session, event_name, normalised_state)
+            if event_name == "RULE_INIT" and result.get("fired"):
+                session.eval_tcl("set ::orch::_init_done 1")
+            return result
 
         return self._call(
             dispatch
@@ -15057,7 +15229,12 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::icap_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
-        events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
+        # RULE_INIT belongs to the loaded iRule/TMM lifetime, not to each
+        # client connection. The HTTP orchestrator already owns this flag;
+        # consult it so packet replay and HTTP replay share one lifecycle.
+        if session.eval_tcl("set ::orch::_init_done") != "1":
+            events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
+            session.eval_tcl("set ::orch::_init_done 1")
         packet_has_tcp_layer = (
             packet["protocol"] in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp", "ftp", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}
             or (packet["protocol"] == "sip" and packet.get("transport", "tcp") == "tcp")
@@ -17169,6 +17346,7 @@ class EmulatorSession:
                 "tmos_version": TMOS_VERSION,
                 "session_id": session_id,
                 "registered_events": self.registered_events,
+                "event_controls": self.event_controls,
                 "fidelity": self.fidelity,
                 "request_count": self._request_count,
                 "connection_open": self._connection_open,
@@ -17861,6 +18039,7 @@ def run_scenario(
             registered_events = session.registered_events
             session.close()
         packet_result["registered_events"] = registered_events
+        packet_result["event_controls"] = session.event_controls
         packet_result["fidelity"] = session.fidelity
         return packet_result
 
@@ -17895,6 +18074,7 @@ def run_scenario(
         "profile": "tmos-17.5",
         "tmos_version": TMOS_VERSION,
         "registered_events": registered_events,
+        "event_controls": session.event_controls,
         "fidelity": session.fidelity,
         "results": results,
     }

@@ -1961,7 +1961,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 18)
+        self.assertEqual(queue["command_count"], 16)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -6505,6 +6505,56 @@ when HTTP_REQUEST {
                     tcl_lsp_root=self.tcl_lsp_root,
                 )
 
+    def test_outer_priority_orders_handlers_and_exposes_timing_metadata(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+priority 200
+when HTTP_REQUEST { log local0. late }
+priority 100
+when HTTP_REQUEST { log local0. early }
+timing off
+when CLIENT_ACCEPTED { log local0. timing-disabled }
+""",
+                "requests": [{"uri": "/"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(
+            result["event_controls"],
+            [
+                {"ordinal": 0, "event": "HTTP_REQUEST", "priority": 200, "timing": "on"},
+                {"ordinal": 1, "event": "HTTP_REQUEST", "priority": 100, "timing": "on"},
+                {"ordinal": 2, "event": "CLIENT_ACCEPTED", "priority": 100, "timing": "off"},
+            ],
+        )
+        request_logs = result["results"][0]["logs"]
+        self.assertLess(
+            next(index for index, entry in enumerate(request_logs) if "early" in entry),
+            next(index for index, entry in enumerate(request_logs) if "late" in entry),
+        )
+        self.assertTrue(any("timing-disabled" in entry for entry in request_logs))
+
+    def test_outer_priority_and_timing_validate_values(self) -> None:
+        for irule, message in (
+            ("priority 1001\nwhen HTTP_REQUEST { return }", "priority must be"),
+            ("timing sometimes\nwhen HTTP_REQUEST { return }", "timing must be"),
+        ):
+            with self.subTest(irule=irule), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                message,
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "requests": [{"uri": "/"}],
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+
     def test_semantic_overlay_models_connection_table_subtables_and_mutations(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -6759,6 +6809,49 @@ when HTTP_REQUEST {
         self.assertIn("CLIENTSSL_CLIENTHELLO", events)
         self.assertIn("CLIENTSSL_HANDSHAKE", events)
         self.assertIn("CLIENT_CLOSED", events)
+
+    def test_packet_trace_fires_rule_init_once_across_connections(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when RULE_INIT { log local0. init }
+when CLIENT_ACCEPTED { log local0. accepted }
+when CLIENT_CLOSED { log local0. closed }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "flags": ["SYN"],
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 80},
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "flags": ["FIN", "ACK"],
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "flags": ["SYN"],
+                        "source": {"address": "10.0.0.5", "port": 51001},
+                        "destination": {"address": "192.0.2.10", "port": 80},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        events = [
+            event["event"]
+            for packet in result["trace"]
+            for event in packet["events"]
+        ]
+        self.assertEqual(events.count("RULE_INIT"), 1)
+        self.assertEqual(events.count("CLIENT_ACCEPTED"), 2)
+        self.assertEqual(events.count("CLIENT_CLOSED"), 1)
 
     def test_packet_trace_models_client_and_server_ssl_controls(self) -> None:
         result = self.adapter.run_scenario(

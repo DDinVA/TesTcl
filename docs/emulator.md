@@ -44,6 +44,13 @@ and any events reported by the upstream framework. It also includes a
 `fidelity` report showing statically detected command/event usage and warnings
 when a recognized command is backed by a generated stub, has no runtime
 handler, or is gated by the attached profiles.
+Rule declarations honor the TMOS 17.5 [`priority`](https://clouddocs.f5.com/api/irules/priority.html)
+and [`timing`](https://clouddocs.f5.com/api/irules/timing.html) controls. Outer-scope
+directives apply to subsequent `when` blocks; per-event attributes override
+them. Lower priorities run first and equal-priority handlers retain source
+order. Timing is represented as event metadata (`on`/`off`) and does not invent
+wall-clock performance data. Effective controls are returned in the
+top-level `event_controls` array and in persistent-session metadata.
 The adapter-owned semantic-mock status identifies commands with behavior
 implemented against the scenario state. Semantic state is returned under
 `result.semantic`, including STATS counters, captured HSL messages, and

@@ -60,6 +60,12 @@ and refresh the timeout on lookup. Records survive connection resets and are
 bounded to 1,024 entries, 1 MiB per value, and 16 MiB of total value data.
 This is session-table behavior for iRule control-flow testing; it is not a
 shared BIG-IP persistence database or a cross-process store.
+The TMOS 17.5 [`priority`](https://clouddocs.f5.com/api/irules/priority.html)
+directive is applied to subsequent `when` blocks, while per-event priorities
+override the current outer value. Handlers execute in ascending priority and
+preserve source order for ties. The [`timing`](https://clouddocs.f5.com/api/irules/timing.html)
+directive is retained as normalized `on`/`off` metadata; because this emulator
+does not measure TMM execution time, it has no synthetic performance meaning.
 The TMOS 17.5 [`sharedvar`](https://clouddocs.f5.com/api/irules/sharedvar.html)
 command binds valid Tcl identifiers to connection-scoped shared storage, so
 handlers can exchange values across events and connection sides represented
