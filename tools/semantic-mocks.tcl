@@ -606,7 +606,19 @@ namespace eval ::itest::semantic {
     namespace eval ::state::classification {
         variable app ""
         variable category ""
+        variable classify_application_add {}
+        variable classify_application_set ""
+        variable classify_additions {}
+        variable classify_category_add {}
+        variable classify_category_set ""
+        variable classify_classified 0
+        variable classify_defer 0
+        variable classify_urlcat_add {}
+        variable classify_urlcat_set ""
+        variable classify_username ""
+        variable classify_username_context ""
         variable detected 1
+        variable deferred 0
         variable disabled 0
         variable enabled 1
         variable payload ""
@@ -12043,7 +12055,19 @@ namespace eval ::itest::semantic {
         foreach {name value} {
             app ""
             category ""
+            classify_application_add {}
+            classify_application_set ""
+            classify_additions {}
+            classify_category_add {}
+            classify_category_set ""
+            classify_classified 0
+            classify_defer 0
+            classify_urlcat_add {}
+            classify_urlcat_set ""
+            classify_username ""
+            classify_username_context ""
             detected 1
+            deferred 0
             disabled 0
             enabled 1
             payload ""
@@ -12114,6 +12138,135 @@ namespace eval ::itest::semantic {
 
     proc classification_username_command {args} {
         return [classification_field_command username CLASSIFICATION::username {*}$args]
+    }
+
+    proc _classify_require_http {command_name} {
+        if {$::itest::current_event ni {HTTP_REQUEST HTTP_RESPONSE}} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc _classify_require_value {command_name value} {
+        if {$value eq "" || [string first "\x00" $value] >= 0} {
+            error "$command_name requires a non-empty value without NUL bytes"
+        }
+    }
+
+    proc _classify_set_or_add {kind command_name args} {
+        _classify_require_http $command_name
+        if {[llength $args] != 2} {
+            error "$command_name requires set or add and a value"
+        }
+        set operation [lindex $args 0]
+        set value [lindex $args 1]
+        if {$operation ni {set add}} {
+            error "$command_name requires set or add"
+        }
+        _classify_require_value $command_name $value
+        if {$::state::classification::classify_classified} {
+            ::itest::log_decision classify "${kind}_${operation}_ignored" $value
+            return ""
+        }
+        if {$operation eq "set"} {
+            set ::state::classification::classify_${kind}_set $value
+            set ::state::classification::$kind $value
+            set ::state::classification::classify_classified 1
+        } else {
+            set additions [set ::state::classification::classify_${kind}_add]
+            lappend additions $value
+            set ::state::classification::classify_${kind}_add $additions
+            set ordered_additions $::state::classification::classify_additions
+            lappend ordered_additions [list $kind $value]
+            set ::state::classification::classify_additions $ordered_additions
+        }
+        ::itest::log_decision classify "${kind}_${operation}" $value
+        return ""
+    }
+
+    proc classify_application_command {args} {
+        return [_classify_set_or_add application CLASSIFY::application {*}$args]
+    }
+
+    proc classify_category_command {args} {
+        return [_classify_set_or_add category CLASSIFY::category {*}$args]
+    }
+
+    proc classify_urlcat_command {args} {
+        return [_classify_set_or_add urlcat CLASSIFY::urlcat {*}$args]
+    }
+
+    proc classify_defer_command {args} {
+        if {$::itest::current_event ne "FLOW_INIT"} {
+            error "CLASSIFY::defer is not valid during $::itest::current_event"
+        }
+        if {[llength $args] != 0} {
+            error "CLASSIFY::defer takes no arguments"
+        }
+        set ::state::classification::classify_defer 1
+        ::itest::log_decision classify defer 1
+        return ""
+    }
+
+    proc classify_disable_command {args} {
+        if {[llength $args] != 0} {
+            error "CLASSIFY::disable takes no arguments"
+        }
+        set ::state::classification::enabled 0
+        set ::state::classification::disabled 1
+        ::itest::log_decision classify disable 1
+        return ""
+    }
+
+    proc classify_username_command {args} {
+        if {[llength $args] ni {1 2}} {
+            error "CLASSIFY::username requires a username and optional context"
+        }
+        set username [lindex $args 0]
+        _classify_require_value CLASSIFY::username $username
+        set context ""
+        if {[llength $args] == 2} {
+            set context [lindex $args 1]
+            if {[string first "\x00" $context] >= 0} {
+                error "CLASSIFY::username context cannot contain NUL bytes"
+            }
+        }
+        set ::state::classification::classify_username $username
+        set ::state::classification::classify_username_context $context
+        set ::state::classification::username $username
+        ::itest::log_decision classify username [list $username $context]
+        return ""
+    }
+
+    proc classification_apply_overrides {} {
+        set result $::state::classification::result
+        if {$::state::classification::classify_classified} {
+            foreach {field value} {
+                classify_application_set app
+                classify_category_set category
+                classify_urlcat_set urlcat
+            } {
+                set override [set ::state::classification::$field]
+                if {$override ne ""} {
+                    set ::state::classification::$value $override
+                    set result [list $override]
+                    break
+                }
+            }
+        } else {
+            foreach addition $::state::classification::classify_additions {
+                lassign $addition kind value
+                lappend result $value
+            }
+        }
+        if {$::state::classification::classify_username ne ""} {
+            set ::state::classification::username $::state::classification::classify_username
+        }
+        set ::state::classification::result $result
+        # CLASSIFY::set/add only affect classification before the engine has
+        # produced its result. Prevent pending additions from being replayed
+        # if a synthetic trace supplies another detection on this connection.
+        set ::state::classification::classify_classified 1
+        return ""
     }
 
     proc category_reset_connection {} {
@@ -17104,6 +17257,12 @@ foreach {name proc_name} {
     CLASSIFICATION::result ::itest::semantic::classification_result_command
     CLASSIFICATION::urlcat ::itest::semantic::classification_urlcat_command
     CLASSIFICATION::username ::itest::semantic::classification_username_command
+    CLASSIFY::application ::itest::semantic::classify_application_command
+    CLASSIFY::category ::itest::semantic::classify_category_command
+    CLASSIFY::defer ::itest::semantic::classify_defer_command
+    CLASSIFY::disable ::itest::semantic::classify_disable_command
+    CLASSIFY::urlcat ::itest::semantic::classify_urlcat_command
+    CLASSIFY::username ::itest::semantic::classify_username_command
     CATEGORY::analytics ::itest::semantic::category_analytics_command
     CATEGORY::filetype ::itest::semantic::category_filetype_command
     CATEGORY::lookup ::itest::semantic::category_lookup_command

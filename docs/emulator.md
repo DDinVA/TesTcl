@@ -140,6 +140,13 @@ Structured `classification` packet traces dispatch
 URL-category, username, and result-token fields, plus connection-scoped
 enable/disable controls. Result tokens and payloads are bounded; no DPI,
 classification database, or PEM policy engine is executed.
+The six TMOS 17.5 `CLASSIFY::*` controls integrate with that same state:
+application, category, and URL-category `set`/`add` commands overlay the next
+supplied classification result, `CLASSIFY::username` assigns flow metadata,
+`CLASSIFY::disable` suppresses detection, and `CLASSIFY::defer` may be used in
+`FLOW_INIT` before an explicitly marked server-side classification packet.
+This is deterministic classification control state; it does not run a PEM
+classifier or infer results from payloads.
 Structured `category` packet traces dispatch `CATEGORY_MATCHED` for
 client-to-server TCP traffic when the `CATEGORY` profile is attached and the
 scenario marks a match. The six TMOS 17.5 `CATEGORY::*` commands are modeled:

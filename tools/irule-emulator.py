@@ -745,7 +745,19 @@ EVENT_STATE_FIELDS = {
     "classification": {
         "app",
         "category",
+        "classify_application_add",
+        "classify_application_set",
+        "classify_additions",
+        "classify_category_add",
+        "classify_category_set",
+        "classify_classified",
+        "classify_defer",
+        "classify_urlcat_add",
+        "classify_urlcat_set",
+        "classify_username",
+        "classify_username_context",
         "detected",
+        "deferred",
         "disabled",
         "enabled",
         "payload",
@@ -1046,6 +1058,12 @@ SEMANTIC_MOCK_COMMANDS = {
     "CATEGORY::matchtype",
     "CATEGORY::result",
     "CATEGORY::safesearch",
+    "CLASSIFY::application",
+    "CLASSIFY::category",
+    "CLASSIFY::defer",
+    "CLASSIFY::disable",
+    "CLASSIFY::urlcat",
+    "CLASSIFY::username",
     "ICAP::header",
     "ICAP::method",
     "ICAP::status",
@@ -5319,6 +5337,7 @@ PACKET_PROTOCOL_FIELDS = {
         "category",
         "classification_protocol",
         "detected",
+        "deferred",
         "result",
         "urlcat",
         "username",
@@ -9181,6 +9200,8 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = encoded_result
             elif protocol == "classification" and field == "detected":
                 normalised[field] = _packet_bool(packet[field], f"packet {index} detected")
+            elif protocol == "classification" and field == "deferred":
+                normalised[field] = _packet_bool(packet[field], f"packet {index} deferred")
             elif protocol == "category" and field in {"categories", "lookup", "safesearch"}:
                 value = packet[field]
                 if not isinstance(value, list) or len(value) > CATEGORY_RESULT_MAX_ITEMS:
@@ -9385,14 +9406,15 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             normalised.setdefault("ids", _tcl_list([]))
             normalised.setdefault("matched", "1")
         if protocol == "classification":
-            if direction != "client_to_server":
+            if direction != "client_to_server" and normalised.get("deferred") != "1":
                 raise EmulatorInputError(
-                    f"packet {index} CLASSIFICATION packets must be client_to_server"
+                    f"packet {index} CLASSIFICATION packets must be client_to_server unless deferred"
                 )
             normalised.setdefault("app", "")
             normalised.setdefault("category", "")
             normalised.setdefault("classification_protocol", "")
             normalised.setdefault("detected", "1")
+            normalised.setdefault("deferred", "0")
             normalised.setdefault("result", _tcl_list([]))
             normalised.setdefault("urlcat", "")
             normalised.setdefault("username", "")
@@ -10736,6 +10758,8 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::datagram_sync_from_layers")
         if "datagram" in state:
             install_state_layer("datagram", state["datagram"])
+        if event_name == "CLASSIFICATION_DETECTED":
+            session.eval_tcl("::itest::semantic::classification_apply_overrides")
         if "dns" in state:
             session.eval_tcl("::itest::semantic::dns_prepare_message")
         event_errors_before = len(_event_error_snapshot(session))
@@ -11065,6 +11089,7 @@ class EmulatorSession:
                 ("category", "category"),
                 ("classification_protocol", "protocol"),
                 ("detected", "detected"),
+                ("deferred", "deferred"),
                 ("result", "result"),
                 ("urlcat", "urlcat"),
                 ("username", "username"),
@@ -13468,6 +13493,14 @@ class EmulatorSession:
                 continue
             elif protocol == "classification":
                 self._activate_packet_connection(session, packet, entry["events"])
+                if packet["direction"] == "server_to_client":
+                    deferred = session.eval_tcl(
+                        "set ::state::classification::classify_defer"
+                    )
+                    if deferred != "1":
+                        entry["ignored"] = "classification packet was not deferred"
+                        finish_packet_connection(packet, entry, index)
+                        continue
                 if packet.get("detected") == "0":
                     entry["ignored"] = "classification packet was not detected"
                     finish_packet_connection(packet, entry, index)

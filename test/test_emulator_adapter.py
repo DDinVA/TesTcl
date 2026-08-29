@@ -495,7 +495,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("PROTOCOL_INSPECTION", "generated-stub"), queue_buckets)
         self.assertNotIn(("CLASSIFICATION", "generated-stub"), queue_buckets)
         self.assertNotIn(("CATEGORY", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 239)
+        self.assertNotIn(("CLASSIFY", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 233)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1620,7 +1621,7 @@ when CLASSIFICATION_DETECTED {
 
         with self.assertRaisesRegex(
             self.adapter.EmulatorInputError,
-            "CLASSIFICATION packets must be client_to_server",
+            "CLASSIFICATION packets must be client_to_server unless deferred",
         ):
             self.adapter.run_scenario(
                 {
@@ -1646,6 +1647,140 @@ when CLASSIFICATION_DETECTED {
                         "protocol": "classification",
                         "result": [""],
                     }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_classify_controls_overlay_results_disable_and_defer(self) -> None:
+        add_session = self.adapter.EmulatorSession(
+            self.tcl_lsp_root,
+            {
+                "profiles": ["HTTP", "CLASSIFICATION"],
+                "irule": """
+when HTTP_REQUEST {
+    CLASSIFY::application add manual-app
+    CLASSIFY::urlcat add manual-urlcat
+    CLASSIFY::category add manual-category
+    CLASSIFY::username alice auth-context
+}
+when CLASSIFICATION_DETECTED {
+    log local0. "app=[CLASSIFICATION::app] category=[CLASSIFICATION::category] urlcat=[CLASSIFICATION::urlcat] result=[CLASSIFICATION::result] user=[CLASSIFICATION::username]"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            add_session.fire_event("HTTP_REQUEST", {})
+            detected = add_session.fire_event(
+                "CLASSIFICATION_DETECTED",
+                {
+                    "classification": {
+                        "app": "engine-app",
+                        "category": "engine-category",
+                        "protocol": "https",
+                        "result": '"engine-app" "engine-category"',
+                        "urlcat": "engine-urlcat",
+                    }
+                },
+            )
+            repeated = add_session.fire_event(
+                "CLASSIFICATION_DETECTED",
+                {"classification": {
+                    "app": "later-app",
+                    "result": '"later-app"',
+                }},
+            )
+        finally:
+            add_session.close()
+        classification_state = detected["state"]["classification"]
+        self.assertEqual(classification_state["app"], "engine-app")
+        self.assertEqual(classification_state["category"], "engine-category")
+        self.assertEqual(classification_state["urlcat"], "engine-urlcat")
+        self.assertEqual(
+            classification_state["result"],
+            "engine-app engine-category manual-app manual-urlcat manual-category",
+        )
+        self.assertEqual(classification_state["username"], "alice")
+        self.assertTrue(any("manual-app" in str(log) for log in detected["logs"]))
+        self.assertEqual(
+            repeated["state"]["classification"]["result"], '"later-app"'
+        )
+
+        set_session = self.adapter.EmulatorSession(
+            self.tcl_lsp_root,
+            {
+                "profiles": ["HTTP", "CLASSIFICATION"],
+                "irule": """
+when HTTP_REQUEST { CLASSIFY::application set forced-app }
+when CLASSIFICATION_DETECTED { log local0. "app=[CLASSIFICATION::app] result=[CLASSIFICATION::result]" }
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            set_session.fire_event("HTTP_REQUEST", {})
+            forced = set_session.fire_event(
+                "CLASSIFICATION_DETECTED",
+                {"classification": {
+                    "app": "engine-app",
+                    "result": '"engine-app" "engine-category"',
+                }},
+            )
+        finally:
+            set_session.close()
+        self.assertEqual(forced["state"]["classification"]["app"], "forced-app")
+        self.assertEqual(forced["state"]["classification"]["result"], "forced-app")
+
+        disabled = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "CLASSIFICATION"],
+                "irule": "when CLIENT_ACCEPTED { CLASSIFY::disable } when CLASSIFICATION_DETECTED { return }",
+                "packets": [{"protocol": "classification"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(disabled["trace"][0]["ignored"], "classification is disabled")
+        self.assertTrue(disabled["trace"][0]["disabled"])
+
+        deferred = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "FLOW", "CLASSIFICATION"],
+                "irule": "when FLOW_INIT { CLASSIFY::defer } when CLASSIFICATION_DETECTED { log local0. \"deferred=[CLASSIFICATION::result]\" }",
+                "packets": [{
+                    "protocol": "classification",
+                    "direction": "server_to_client",
+                    "deferred": True,
+                    "result": ["response-app"],
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        deferred_event = next(
+            event for event in deferred["trace"][0]["events"]
+            if event["event"] == "CLASSIFICATION_DETECTED"
+        )
+        self.assertTrue(deferred_event["fired"])
+        self.assertEqual(
+            deferred_event["state"]["classification"]["deferred"], "1"
+        )
+        self.assertEqual(
+            deferred["trace"][0]["classification_result"], '{"response-app"}'
+        )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "CLASSIFY::application is not valid during CLASSIFICATION_DETECTED",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "CLASSIFICATION"],
+                    "irule": "when CLASSIFICATION_DETECTED { CLASSIFY::application add too-late }",
+                    "packets": [{"protocol": "classification"}],
                 },
                 tcl_lsp_root=self.tcl_lsp_root,
             )

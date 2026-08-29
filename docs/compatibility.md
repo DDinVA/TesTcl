@@ -118,6 +118,14 @@ Supplied application, category, protocol, URL-category, username, and
 result-token values are readable in the event; enable/disable state persists
 for the connection. It does not run a DPI classifier, classification
 database, or PEM policy engine.
+The six TMOS 17.5 `CLASSIFY::*` controls are also modeled: application,
+category, and URL-category `set`/`add` operations overlay supplied
+classification results; `CLASSIFY::username` assigns flow metadata;
+`CLASSIFY::disable` suppresses detection; and `CLASSIFY::defer` records a
+`FLOW_INIT` deferral that permits an explicitly marked server-side result.
+HTTP-only controls and `FLOW_INIT` restrictions are validated, and all
+classification values remain deterministic scenario state rather than a live
+PEM classification database.
 The CATEGORY adapter models the six TMOS 17.5 `CATEGORY::*` commands and
 dispatches `CATEGORY_MATCHED` for supplied client-side TCP matches. Lookup,
 safe-search, cached-result, match-type, filetype, and per-request analytics
