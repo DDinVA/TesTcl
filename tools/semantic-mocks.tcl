@@ -81,6 +81,8 @@ namespace eval ::itest::semantic {
     variable lb_queue_age_edm 0
     variable lb_queue_age_ema 0
     set lb_connlimits [dict create]
+    variable profile_settings
+    set profile_settings [dict create]
 
     variable sip_discarded 0
     variable sip_response_requested 0
@@ -3585,6 +3587,88 @@ namespace eval ::itest::semantic {
             error "PROFILE::exists requires a profile name"
         }
         return [_profile_enabled [lindex $args 0]]
+    }
+
+    proc profile_settings_clear {} {
+        variable profile_settings
+        set profile_settings [dict create]
+    }
+
+    proc profile_settings_set {profile raw_settings} {
+        variable profile_settings
+        if {[llength $raw_settings] % 2} {
+            error "profile settings require attribute/value pairs"
+        }
+        set attributes [dict create]
+        foreach {attribute value} $raw_settings {
+            if {$attribute eq ""} { error "profile attribute name cannot be empty" }
+            dict set attributes $attribute $value
+        }
+        dict set profile_settings [string toupper $profile] $attributes
+    }
+
+    proc _profile_setting {profile args} {
+        variable profile_settings
+        if {[llength $args] != 1} {
+            error "PROFILE::$profile requires one attribute"
+        }
+        if {![_profile_enabled $profile] ||
+            ![dict exists $profile_settings [string toupper $profile]]} {
+            return ""
+        }
+        set wanted [lindex $args 0]
+        set attributes [dict get $profile_settings [string toupper $profile]]
+        if {[dict exists $attributes $wanted]} {
+            return [dict get $attributes $wanted]
+        }
+        dict for {attribute value} $attributes {
+            if {[string equal -nocase $attribute $wanted]} { return $value }
+        }
+        return ""
+    }
+
+    proc profile_access_command {args} { return [_profile_setting ACCESS {*}$args] }
+    proc profile_antifraud_command {args} { return [_profile_setting ANTIFRAUD {*}$args] }
+    proc profile_auth_command {args} {
+        if {[llength $args] != 2} {
+            error "PROFILE::auth requires a profile instance and attribute"
+        }
+        return [_profile_setting AUTH [lindex $args 1]]
+    }
+    proc profile_avr_command {args} { return [_profile_setting AVR {*}$args] }
+    proc profile_diameter_command {args} { return [_profile_setting DIAMETER {*}$args] }
+    proc profile_exchange_command {args} { return [_profile_setting EXCHANGE {*}$args] }
+    proc profile_ftp_command {args} { return [_profile_setting FTP {*}$args] }
+    proc profile_httpclass_command {args} { return [_profile_setting HTTPCLASS {*}$args] }
+    proc profile_httpcompression_command {args} {
+        return [_profile_setting HTTPCOMPRESSION {*}$args]
+    }
+    proc profile_oneconnect_command {args} {
+        return [_profile_setting ONECONNECT {*}$args]
+    }
+    proc profile_persist_command {args} {
+        if {[llength $args] != 3 || [lindex $args 0] ni {instance mode}} {
+            error "PROFILE::persist requires instance/mode, profile, and attribute"
+        }
+        return [_profile_setting PERSIST [lindex $args 2]]
+    }
+    proc profile_stream_command {args} { return [_profile_setting STREAM {*}$args] }
+    proc profile_tftp_command {args} { return [_profile_setting TFTP {*}$args] }
+    proc profile_vdi_command {args} { return [_profile_setting VDI {*}$args] }
+    proc profile_webacceleration_command {args} {
+        return [_profile_setting WEBACCELERATION {*}$args]
+    }
+    proc profile_xml_command {args} { return [_profile_setting XML {*}$args] }
+
+    proc profile_settings_snapshot {} {
+        variable profile_settings
+        set result [list]
+        dict for {profile attributes} $profile_settings {
+            dict for {attribute value} $attributes {
+                lappend result [list $profile $attribute $value]
+            }
+        }
+        return $result
     }
 
     proc profile_clientssl {args} { return [_profile_enabled CLIENTSSL] }
@@ -8475,14 +8559,30 @@ foreach {name proc_name} {
     IP::addr ::itest::semantic::ip_addr
     IP::version ::itest::semantic::ip_version
     PROFILE::clientssl ::itest::semantic::profile_clientssl
+    PROFILE::access ::itest::semantic::profile_access_command
+    PROFILE::antifraud ::itest::semantic::profile_antifraud_command
+    PROFILE::auth ::itest::semantic::profile_auth_command
+    PROFILE::avr ::itest::semantic::profile_avr_command
     PROFILE::exists ::itest::semantic::profile_exists
+    PROFILE::diameter ::itest::semantic::profile_diameter_command
+    PROFILE::exchange ::itest::semantic::profile_exchange_command
     PROFILE::fastL4 ::itest::semantic::profile_fastL4
     PROFILE::fasthttp ::itest::semantic::profile_fasthttp
+    PROFILE::ftp ::itest::semantic::profile_ftp_command
     PROFILE::http ::itest::semantic::profile_http
+    PROFILE::httpclass ::itest::semantic::profile_httpclass_command
+    PROFILE::httpcompression ::itest::semantic::profile_httpcompression_command
     PROFILE::list ::itest::semantic::profile_list
+    PROFILE::oneconnect ::itest::semantic::profile_oneconnect_command
+    PROFILE::persist ::itest::semantic::profile_persist_command
     PROFILE::serverssl ::itest::semantic::profile_serverssl
+    PROFILE::stream ::itest::semantic::profile_stream_command
     PROFILE::tcp ::itest::semantic::profile_tcp
+    PROFILE::tftp ::itest::semantic::profile_tftp_command
     PROFILE::udp ::itest::semantic::profile_udp
+    PROFILE::vdi ::itest::semantic::profile_vdi_command
+    PROFILE::webacceleration ::itest::semantic::profile_webacceleration_command
+    PROFILE::xml ::itest::semantic::profile_xml_command
     STATS::get ::itest::semantic::stats_get
     STATS::incr ::itest::semantic::stats_incr
     STATS::set ::itest::semantic::stats_set

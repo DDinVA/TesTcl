@@ -65,6 +65,14 @@ and `LB::src_tag` as deterministic connection and pool-selection state.
 `LB::connect` and `LB::prime` can select a configured pool member, while
 connection limits and queue values are inspectable records rather than a live
 TMM scheduler or kernel connection-control implementation.
+The profile-attribute commands `PROFILE::access`, `PROFILE::antifraud`,
+`PROFILE::auth`, `PROFILE::avr`, `PROFILE::diameter`, `PROFILE::exchange`,
+`PROFILE::ftp`, `PROFILE::httpclass`, `PROFILE::httpcompression`,
+`PROFILE::oneconnect`, `PROFILE::persist`, `PROFILE::stream`, `PROFILE::tftp`,
+`PROFILE::vdi`, `PROFILE::webacceleration`, and `PROFILE::xml` read scalar
+values supplied by the scenario's `profile_settings` object. They return an
+empty value for unattached or unspecified profiles; they do not load live
+BIG-IP profile objects or infer undocumented defaults.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

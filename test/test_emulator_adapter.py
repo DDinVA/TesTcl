@@ -555,6 +555,130 @@ when HTTP_REQUEST {
             },
         )
 
+    def test_profile_attribute_commands_read_configured_17_5_settings(self) -> None:
+        profiles = [
+            "TCP",
+            "HTTP",
+            "ACCESS",
+            "ANTIFRAUD",
+            "AUTH",
+            "AVR",
+            "DIAMETER",
+            "EXCHANGE",
+            "FTP",
+            "HTTPCLASS",
+            "HTTPCOMPRESSION",
+            "ONECONNECT",
+            "PERSIST",
+            "STREAM",
+            "TFTP",
+            "VDI",
+            "WEBACCELERATION",
+            "XML",
+        ]
+        settings = {
+            "ACCESS": {"enabled": True},
+            "ANTIFRAUD": {"mode": "strict"},
+            "AUTH": {"method": "ldap"},
+            "AVR": {"analytics": "enabled"},
+            "DIAMETER": {"realm": "example.net"},
+            "EXCHANGE": {"version": "2019"},
+            "FTP": {"mode": "passive"},
+            "HTTPCLASS": {"default": "class-a"},
+            "HTTPCOMPRESSION": {"gzip": "enabled"},
+            "ONECONNECT": {"reuse": "enabled"},
+            "PERSIST": {"timeout": 300},
+            "STREAM": {"replacement": "enabled"},
+            "TFTP": {"mode": "read"},
+            "VDI": {"msrdp_ntlm_auth_name": "corp"},
+            "WEBACCELERATION": {"cache": "enabled"},
+            "XML": {"validation": "strict"},
+        }
+        result = self.adapter.run_scenario(
+            {
+                "profiles": profiles,
+                "profile_settings": settings,
+                "irule": """
+when HTTP_REQUEST {
+    log local0. "access=[PROFILE::access enabled] antifraud=[PROFILE::antifraud mode] auth=[PROFILE::auth /Common/auth method] avr=[PROFILE::avr analytics] diameter=[PROFILE::diameter realm] exchange=[PROFILE::exchange version] ftp=[PROFILE::ftp mode] httpclass=[PROFILE::httpclass default] compression=[PROFILE::httpcompression gzip] oneconnect=[PROFILE::oneconnect reuse] persist=[PROFILE::persist instance /Common/persist timeout] stream=[PROFILE::stream replacement] tftp=[PROFILE::tftp mode] vdi=[PROFILE::vdi msrdp_ntlm_auth_name] webacceleration=[PROFILE::webacceleration cache] xml=[PROFILE::xml validation]"
+}
+""",
+                "requests": [{"uri": "/profile-settings"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        entry = result["results"][0]
+        self.assertTrue(
+            any(
+                "access=1 antifraud=strict auth=ldap avr=enabled "
+                "diameter=example.net exchange=2019 ftp=passive "
+                "httpclass=class-a compression=enabled oneconnect=enabled "
+                "persist=300 stream=enabled tftp=read vdi=corp "
+                "webacceleration=enabled xml=strict" in log
+                for log in entry["logs"]
+            )
+        )
+        expected_settings = {
+            profile: {
+                attribute: "1" if isinstance(value, bool) and value else
+                "0" if isinstance(value, bool) else str(value)
+                for attribute, value in attributes.items()
+            }
+            for profile, attributes in settings.items()
+        }
+        self.assertEqual(entry["semantic"]["profile_settings"], expected_settings)
+        self.assertEqual(
+            {
+                command["name"]: command["runtime_status"]
+                for command in result["fidelity"]["commands"]
+                if command["name"].startswith("PROFILE::")
+                and command["name"] not in {
+                    "PROFILE::clientssl",
+                    "PROFILE::exists",
+                    "PROFILE::fastL4",
+                    "PROFILE::fasthttp",
+                    "PROFILE::http",
+                    "PROFILE::list",
+                    "PROFILE::serverssl",
+                    "PROFILE::tcp",
+                    "PROFILE::udp",
+                }
+            },
+            {
+                f"PROFILE::{name.lower()}": "semantic-mock"
+                for name in (
+                    "access",
+                    "antifraud",
+                    "auth",
+                    "avr",
+                    "diameter",
+                    "exchange",
+                    "ftp",
+                    "httpclass",
+                    "httpcompression",
+                    "oneconnect",
+                    "persist",
+                    "stream",
+                    "tftp",
+                    "vdi",
+                    "webacceleration",
+                    "xml",
+                )
+            },
+        )
+
+        gated = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "profile_settings": {"FTP": {"mode": "passive"}},
+                "irule": "when HTTP_REQUEST { log local0. \"ftp=[PROFILE::ftp mode]\" }",
+                "requests": [{"uri": "/gated"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any("ftp=" in log for log in gated["results"][0]["logs"]))
+
     def test_semantic_overlay_tracks_lb_node_and_pool_state(self) -> None:
         result = self.adapter.run_scenario(
             {

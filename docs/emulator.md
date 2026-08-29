@@ -80,6 +80,12 @@ server-connect/prime requests. These controls update semantic state and
 decision output, and pool selection still uses the configured deterministic
 members. The emulator does not open real sideband connections, implement
 kernel connection limits, or run a production queue scheduler.
+Profile attribute commands can be backed by a scenario-level
+`profile_settings` object. Keys are profile names such as `AUTH`, `PERSIST`,
+or `HTTPCOMPRESSION`, and values are attribute/value maps; attributes are
+returned only when the corresponding profile is attached. This provides a
+deterministic way to exercise profile-aware rules without requiring a BIG-IP
+configuration export.
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose

@@ -684,6 +684,22 @@ SEMANTIC_MOCK_COMMANDS = {
     "PROFILE::serverssl",
     "PROFILE::tcp",
     "PROFILE::udp",
+    "PROFILE::access",
+    "PROFILE::antifraud",
+    "PROFILE::auth",
+    "PROFILE::avr",
+    "PROFILE::diameter",
+    "PROFILE::exchange",
+    "PROFILE::ftp",
+    "PROFILE::httpclass",
+    "PROFILE::httpcompression",
+    "PROFILE::oneconnect",
+    "PROFILE::persist",
+    "PROFILE::stream",
+    "PROFILE::tftp",
+    "PROFILE::vdi",
+    "PROFILE::webacceleration",
+    "PROFILE::xml",
     "persist",
     "STATS::get",
     "STATS::incr",
@@ -1411,6 +1427,15 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         name: value
         for name, value in zip(cache_parts[::2], cache_parts[1::2])
     }
+    profile_settings: dict[str, dict[str, str]] = {}
+    for raw_setting in _split_tcl_list(
+        session.eval_tcl("::itest::semantic::profile_settings_snapshot")
+    ):
+        setting_parts = _split_tcl_list(raw_setting)
+        if len(setting_parts) != 3:
+            raise EmulatorInputError("invalid profile settings state")
+        profile_name, attribute, value = setting_parts
+        profile_settings.setdefault(profile_name, {})[attribute] = value
     return {
         "stats": stats,
         "hsl_messages": hsl_messages,
@@ -1419,6 +1444,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "table": table_entries,
         "psm": psm,
         "cache": cache,
+        "profile_settings": profile_settings,
     }
 
 
@@ -1520,6 +1546,49 @@ def _normalise_pools(raw: Any) -> dict[str, list[str]]:
             raise EmulatorInputError(f"pool {name!r} members must be an array of strings")
         pools[name] = members
     return pools
+
+
+def _normalise_profile_settings(raw: Any) -> dict[str, dict[str, str]]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError(
+            "profile_settings must map profile names to attribute objects"
+        )
+    settings: dict[str, dict[str, str]] = {}
+    for profile, attributes in raw.items():
+        profile_name = _require_string(profile, "profile settings name")
+        if not profile_name or "\x00" in profile_name:
+            raise EmulatorInputError(
+                "profile settings names cannot be empty or contain NUL"
+            )
+        if not isinstance(attributes, dict):
+            raise EmulatorInputError(
+                f"profile settings for {profile_name!r} must be an object"
+            )
+        normalised_attributes: dict[str, str] = {}
+        for attribute, value in attributes.items():
+            attribute_name = _require_string(attribute, "profile attribute name")
+            if not attribute_name or "\x00" in attribute_name:
+                raise EmulatorInputError(
+                    "profile attribute names cannot be empty or contain NUL"
+                )
+            if isinstance(value, bool):
+                normalised_attributes[attribute_name] = "1" if value else "0"
+            elif isinstance(value, (str, int, float)):
+                normalised_attributes[attribute_name] = str(value)
+            else:
+                raise EmulatorInputError(
+                    f"profile attribute {profile_name}.{attribute_name} "
+                    "must be a string, number, or boolean"
+                )
+        canonical_profile = profile_name.upper()
+        if canonical_profile in settings:
+            raise EmulatorInputError(
+                f"profile_settings contains duplicate profile {profile_name!r}"
+            )
+        settings[canonical_profile] = normalised_attributes
+    return settings
 
 
 def _normalise_resolvers(raw: Any) -> dict[str, list[dict[str, Any]]]:
@@ -1793,6 +1862,7 @@ def _normalise_scenario_config(
         "pools",
         "resolvers",
         "datagroups",
+        "profile_settings",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -1833,6 +1903,7 @@ def _normalise_scenario_config(
         _normalise_pools(scenario.get("pools")),
         _normalise_resolvers(scenario.get("resolvers")),
         _normalise_datagroups(scenario.get("datagroups")),
+        _normalise_profile_settings(scenario.get("profile_settings")),
     )
 
 
@@ -6097,7 +6168,14 @@ class EmulatorSession:
         allow_packets: bool = False,
         backend: str = "inprocess",
     ) -> None:
-        source, profiles, pools, resolvers, datagroups = _normalise_scenario_config(
+        (
+            source,
+            profiles,
+            pools,
+            resolvers,
+            datagroups,
+            profile_settings,
+        ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
             allow_requests=allow_requests,
@@ -6111,6 +6189,7 @@ class EmulatorSession:
         self._pools = pools
         self._resolvers = resolvers
         self._datagroups = datagroups
+        self._profile_settings = profile_settings
         self._fidelity = _analyze_rule_capabilities(root, source, profiles)
         incompatible = [
             warning
@@ -6193,6 +6272,17 @@ class EmulatorSession:
                 _install_runtime_shims(session)
                 self._registered_events = session.load_irule(self._source)
                 session.eval_tcl("::itest::semantic::lb_reset_connection")
+                session.eval_tcl("::itest::semantic::profile_settings_clear")
+                for profile_name, attributes in self._profile_settings.items():
+                    flattened = [
+                        item
+                        for attribute_name, value in attributes.items()
+                        for item in (attribute_name, value)
+                    ]
+                    session.eval_tcl(
+                        "::itest::semantic::profile_settings_set "
+                        f"{_tcl_quote(profile_name)} {_tcl_list(flattened)}"
+                    )
                 if any(
                     str(profile).upper() in {"CACHE", "WEBACCELERATION"}
                     for profile in self._profiles
