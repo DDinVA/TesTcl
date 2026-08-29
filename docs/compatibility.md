@@ -185,8 +185,18 @@ require an explicit `-alg`; subsequent chunks may reuse the context name, and
 `ripemd160`, `sha1`, `sha224`, `sha256`, `sha384`, and `sha512`; signing and
 verification cover the corresponding HMAC algorithms. Binary results are
 preserved, including `-keyhex` inputs. Context data is capped at 16 MiB and
-cleared at connection boundaries. Encryption/decryption and key generation
-remain explicitly queued rather than approximated.
+cleared at connection boundaries.
+
+The TMOS 17.5 `AES::key`, `AES::encrypt`, and `AES::decrypt` commands are
+implemented as a binary-safe semantic layer. `AES::key` returns the documented
+`AES <bits> <hex>` key shape for 128-, 192-, and 256-bit keys; encrypt/decrypt
+support formatted keys and deterministic passphrase handling with bounded
+16-MiB inputs. The adapter uses AES-ECB with PKCS-style padding for portable
+round trips. F5's public reference does not specify the passphrase KDF or a
+ciphertext test vector, so formatted keys are the interoperability path and
+live-device ciphertext compatibility remains a validation item. Generated
+keys are random per emulator session and are never included in semantic
+snapshots.
 
 The complete TMOS 17.5 `BWC::` family is represented by deterministic
 connection-scoped flow state. Policy attachment, category assignment, rate and

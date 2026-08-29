@@ -20317,6 +20317,59 @@ namespace eval ::itest::semantic {
     }
 }
 
+# AES::key/encrypt/decrypt are a separate legacy AES surface from CRYPTO::*.
+# The Tcl layer owns argument validation and binary-safe marshalling; Python
+# supplies the portable AES primitive so the emulator does not depend on a
+# host-specific openssl executable.
+namespace eval ::itest::semantic {
+    proc aes_key_command {args} {
+        if {[llength $args] > 1} {
+            error "AES::key accepts an optional size of 128, 192, or 256"
+        }
+        if {[llength $args] == 1 && [lindex $args 0] ni {128 192 256}} {
+            error "AES::key size must be 128, 192, or 256"
+        }
+        set key [::itest::semantic::py_aes_key {*}$args]
+        ::itest::log_decision aes key [expr {[llength $args] ? [lindex $args 0] : 128}]
+        return $key
+    }
+
+    proc _aes_command {command_name operation args} {
+        if {[llength $args] != 2} {
+            error "$command_name requires a key and data"
+        }
+        set key [lindex $args 0]
+        set data [lindex $args 1]
+        if {$key eq ""} {
+            error "$command_name requires a non-empty key"
+        }
+        if {[regexp {^AES (128|192|256) ([0-9A-Fa-f]+)$} $key -> bits key_hex] &&
+            [string length $key_hex] != [expr {$bits / 4}]} {
+            error "$command_name key must contain exactly [expr {$bits / 4}] hexadecimal characters"
+        }
+        if {$operation eq "decrypt" &&
+            ([string length $data] == 0 || [string length $data] % 16 != 0)} {
+            error "$command_name ciphertext length must be a positive multiple of 16"
+        }
+        set encoded [::itest::semantic::py_aes $operation \
+            [binary encode base64 $key] [binary encode base64 $data]]
+        set result [binary decode base64 $encoded]
+        ::itest::log_decision aes $operation [list \
+            key_bytes [string length $key] \
+            input_bytes [string length $data] \
+            output_bytes [string length $result]]
+        return $result
+    }
+
+    proc aes_encrypt_command {args} {
+        return [_aes_command AES::encrypt encrypt {*}$args]
+    }
+
+    proc aes_decrypt_command {args} {
+        return [_aes_command AES::decrypt decrypt {*}$args]
+    }
+}
+
 # Preserve the upstream pool behavior and replace only its member choice.
 if {[::tmm::_orig_info commands ::itest::cmd::cmd_pool] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::cmd_pool ::itest::cmd::_testcl_pool_orig
@@ -21242,6 +21295,9 @@ foreach {name proc_name} {
     CRYPTO::hash ::itest::semantic::crypto_hash_command
     CRYPTO::sign ::itest::semantic::crypto_sign_command
     CRYPTO::verify ::itest::semantic::crypto_verify_command
+    AES::decrypt ::itest::semantic::aes_decrypt_command
+    AES::encrypt ::itest::semantic::aes_encrypt_command
+    AES::key ::itest::semantic::aes_key_command
     ISTATS::get ::itest::semantic::istats_get
     ISTATS::incr ::itest::semantic::istats_incr
     ISTATS::remove ::itest::semantic::istats_remove

@@ -14,3 +14,8 @@ maintainer.
 The wire-level HTTP/2 adapter uses `hpack==4.1.0`, licensed under the **MIT**
 license. Its source distribution and license metadata are installed into the
 container environment by the pinned dependency installation.
+
+The AES semantic adapter uses `cryptography==45.0.7`, licensed under the
+**Apache-2.0 OR BSD-3-Clause** license. Its transitive `cffi` and `pycparser`
+dependencies are installed from the pinned environment and retain their
+upstream license metadata.

@@ -1172,6 +1172,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "ADAPT::select",
     "ADAPT::service_down_action",
     "ADAPT::timeout",
+    "AES::decrypt",
+    "AES::encrypt",
+    "AES::key",
     "DATAGRAM::dns",
     "DATAGRAM::ip",
     "DATAGRAM::ip6",
@@ -4016,6 +4019,7 @@ def _install_runtime_shims(session: Any) -> None:
     )
     _install_python_digest_helper(session)
     _install_python_crypto_helper(session)
+    _install_python_aes_helper(session)
     _install_python_codec_helper(session)
     semantic_path = Path(__file__).with_name("semantic-mocks.tcl")
     if not semantic_path.exists():
@@ -4110,6 +4114,97 @@ def _install_python_crypto_helper(session: Any) -> None:
 
     interpreter.createcommand("::itest::semantic::py_crypto", crypto_callback)
     setattr(session, "_testcl_crypto_callback", crypto_callback)
+
+
+def _install_python_aes_helper(session: Any) -> None:
+    """Expose the bounded AES-ECB primitive used by the AES iRule family."""
+    inner = getattr(session, "_session", None)
+    inprocess = getattr(inner, "_inprocess", None)
+    interpreter = getattr(inprocess, "_interp", None)
+    if interpreter is None or not hasattr(interpreter, "createcommand"):
+        raise EmulatorInputError("AES support requires the in-process Tcl backend")
+
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    except ImportError as exc:  # pragma: no cover - dependency installation failure
+        raise EmulatorInputError(
+            "AES support requires the cryptography package in the uv environment"
+        ) from exc
+
+    max_bytes = 16 * 1024 * 1024
+    key_pattern = re.compile(r"^AES (128|192|256) ([0-9a-fA-F]+)$")
+
+    def decode(value: str, field: str) -> bytes:
+        try:
+            raw = base64.b64decode(value.encode("ascii"), validate=True)
+        except (UnicodeEncodeError, ValueError, binascii.Error) as exc:
+            raise ValueError(f"AES {field} is not valid base64") from exc
+        if len(raw) > max_bytes:
+            raise ValueError(f"AES {field} exceeds the {max_bytes}-byte limit")
+        return raw
+
+    def parse_key(value: bytes) -> bytes:
+        try:
+            text = value.decode("utf-8")
+        except UnicodeDecodeError:
+            text = ""
+        match = key_pattern.fullmatch(text)
+        if match is not None:
+            bits = int(match.group(1))
+            encoded = match.group(2)
+            if len(encoded) != bits // 4:
+                raise ValueError(
+                    f"AES key must contain exactly {bits // 4} hexadecimal characters"
+                )
+            return bytes.fromhex(encoded)
+
+        if not value:
+            raise ValueError("AES key or pass phrase must not be empty")
+        # F5 accepts a pass phrase as a convenience. The public command
+        # reference specifies that behavior but not its internal KDF. Keep the
+        # emulator deterministic and bounded, while recommending formatted
+        # AES keys for cross-device interoperability.
+        return hashlib.sha256(value).digest()[:16]
+
+    def aes_callback(*args: str) -> str:
+        if len(args) != 3:
+            raise ValueError("AES helper requires operation, key, and data")
+        operation, key_encoded, data_encoded = args
+        key = parse_key(decode(key_encoded, "key"))
+        data = decode(data_encoded, "data")
+        pad_length = 16 - (len(data) % 16)
+        if operation == "encrypt":
+            padded = data + bytes([pad_length]) * pad_length
+            cipher = Cipher(algorithms.AES(key), modes.ECB())
+            encryptor = cipher.encryptor()
+            output = encryptor.update(padded) + encryptor.finalize()
+        elif operation == "decrypt":
+            if not data or len(data) % 16:
+                raise ValueError("AES ciphertext length must be a positive multiple of 16")
+            cipher = Cipher(algorithms.AES(key), modes.ECB())
+            decryptor = cipher.decryptor()
+            padded = decryptor.update(data) + decryptor.finalize()
+            pad_length = padded[-1]
+            if (
+                not 1 <= pad_length <= 16
+                or padded[-pad_length:] != bytes([pad_length]) * pad_length
+            ):
+                raise ValueError("AES ciphertext has invalid PKCS padding")
+            output = padded[:-pad_length]
+        else:
+            raise ValueError(f"unsupported AES operation: {operation}")
+        return base64.b64encode(output).decode("ascii")
+
+    def key_callback(*args: str) -> str:
+        if len(args) > 1 or (args and args[0] not in {"128", "192", "256"}):
+            raise ValueError("AES::key accepts an optional size of 128, 192, or 256")
+        bits = int(args[0]) if args else 128
+        return f"AES {bits} {secrets.token_hex(bits // 8)}"
+
+    interpreter.createcommand("::itest::semantic::py_aes", aes_callback)
+    interpreter.createcommand("::itest::semantic::py_aes_key", key_callback)
+    setattr(session, "_testcl_aes_callback", aes_callback)
+    setattr(session, "_testcl_aes_key_callback", key_callback)
 
 
 def _install_python_codec_helper(session: Any) -> None:

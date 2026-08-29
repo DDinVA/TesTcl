@@ -1851,7 +1851,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
         self.assertNotIn(("BWC", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 131)
+        self.assertNotIn(("AES", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 128)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -4322,6 +4323,65 @@ when HTTP_REQUEST {
             ('when HTTP_REQUEST { CRYPTO::hash hello }', "requires -alg"),
             ('when HTTP_REQUEST { CRYPTO::hash -alg sha256 -final hello }', "-final requires -ctx"),
             ('when HTTP_REQUEST { CRYPTO::hash -alg sha256 -key secret hello }', "does not accept a key"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, message
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "request": {"uri": "/"},
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+
+    def test_aes_key_encrypt_decrypt_round_trip_and_validation(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when RULE_INIT {
+    set ::aes_key_128 [AES::key 128]
+    set ::aes_key_192 [AES::key 192]
+    set ::aes_key_256 [AES::key 256]
+}
+when HTTP_REQUEST {
+    set plaintext "hello binary"
+    set encrypted_128 [AES::encrypt $::aes_key_128 $plaintext]
+    set encrypted_192 [AES::encrypt $::aes_key_192 $plaintext]
+    set encrypted_256 [AES::encrypt $::aes_key_256 $plaintext]
+    set static_key "AES 128 00112233445566778899aabbccddeeff"
+    set passphrase_encrypted [AES::encrypt passphrase $plaintext]
+    set binary_data [binary format H* 00010203fffe7f80101112131415161718]
+    set binary_cipher [AES::encrypt $static_key $binary_data]
+    set binary_plain [AES::decrypt $static_key $binary_cipher]
+    log local0. "bits=[lindex $::aes_key_128 1]/[lindex $::aes_key_192 1]/[lindex $::aes_key_256 1] lengths=[string length $encrypted_128]/[string length $encrypted_192]/[string length $encrypted_256] plain=[b64encode [AES::decrypt $::aes_key_128 $encrypted_128]] static=[b64encode [AES::decrypt $static_key [AES::encrypt $static_key $plaintext]]] pass=[b64encode [AES::decrypt passphrase $passphrase_encrypted]] binary_equal=[expr {$binary_plain eq $binary_data}] binary_len=[string length $binary_cipher]"
+}
+""",
+                "request": {"uri": "/"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertTrue(any(
+            "bits=128/192/256" in entry
+            and "lengths=16/16/16" in entry
+            and "plain=aGVsbG8gYmluYXJ5" in entry
+            and "static=aGVsbG8gYmluYXJ5" in entry
+            and "pass=aGVsbG8gYmluYXJ5" in entry
+            and "binary_equal=1" in entry
+            and "binary_len=32" in entry
+            for entry in result["results"][0]["logs"]
+        ))
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in ("AES::key", "AES::encrypt", "AES::decrypt"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+        for irule, message in (
+            ("when HTTP_REQUEST { AES::key 64 }", "AES::key size must be 128, 192, or 256"),
+            ("when HTTP_REQUEST { AES::encrypt {AES 128 deadbeef} data }", "exactly 32 hexadecimal characters"),
+            ("when HTTP_REQUEST { AES::decrypt passphrase short }", "ciphertext length must be a positive multiple of 16"),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(
                 self.adapter.EmulatorInputError, message

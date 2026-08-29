@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "TMOS 17.5 iRule emulator adapter"
 requires-python = ">=3.13"
 dependencies = [
+    "cryptography==45.0.7",
     "hpack==4.1.0",
 ]
 

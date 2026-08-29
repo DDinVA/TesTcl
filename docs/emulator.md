@@ -259,8 +259,17 @@ TMOS 17.5 catalog, while signing and verification use the corresponding
 `hmac-*` names. Results are binary Tcl values, so `b64encode` is useful when a
 rule logs or stores them. The adapter validates algorithm, key, signature, and
 data options, supports `-keyhex`, bounds accumulated context data at 16 MiB,
-and clears contexts at connection boundaries. Encryption/decryption and key
-generation are not claimed as implemented yet.
+and clears contexts at connection boundaries.
+
+The AES layer provides binary-safe `AES::key`, `AES::encrypt`, and
+`AES::decrypt` operations. `AES::key` returns the F5-shaped `AES <bits> <hex>`
+format for 128, 192, or 256 bits; encryption and decryption accept those
+formatted keys as well as non-empty passphrases. The portable emulator model
+uses AES-ECB with PKCS-style padding and bounds each input at 16 MiB. Because
+the public F5 reference does not define the passphrase KDF or publish a
+ciphertext vector, use formatted keys when interoperability with a live
+BIG-IP matters; live-device golden-vector validation remains separate from
+the deterministic in-process round-trip test.
 
 The ADAPT layer models the 17.5 request/response static and dynamic context
 surface. `ADAPT::context_create` returns deterministic opaque handles whose
