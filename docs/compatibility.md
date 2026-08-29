@@ -320,6 +320,14 @@ aging, or enforcement of a configured limit.
 for common HTTP, TLS, SSH, FTP, and SMTP forms and returns a boolean result;
 unknown application classifiers return false. It does not perform licensed
 APM/AFM/PEM classification, deep packet inspection, or external lookups.
+`L7CHECK::protocol` supports the documented `set VALUE` and `get` forms during
+`L7CHECK_CLIENT_DATA`, `L7CHECK_SERVER_DATA`, and `CONNECTOR_OPEN`. The value
+is connection-scoped and can be supplied or inspected through the structured
+event-state API. The four `LINK::*` commands (`lasthop`, `nexthop`, `qos`, and
+`vlan_id`) read deterministic link metadata from that same API; a next-hop MAC
+defaults to the documented broadcast value until the caller supplies one.
+This models iRule-visible state and command validation, not live Ethernet,
+ARP, VLAN, route, QoS, or TMM forwarding behavior.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

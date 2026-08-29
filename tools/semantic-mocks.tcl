@@ -449,6 +449,24 @@ namespace eval ::itest::semantic {
         variable cleared 0
     }
 
+    namespace eval ::state::l7check {
+        variable protocol ""
+    }
+
+    namespace eval ::state::link {
+        variable qos 0
+        variable vlan_id 0
+        variable lasthop_mac ""
+        variable lasthop_id ""
+        variable lasthop_type ""
+        variable lasthop_name ""
+        # TMOS reports broadcast until a server-side next hop is known.
+        variable nexthop_mac "ff:ff:ff:ff:ff:ff"
+        variable nexthop_id ""
+        variable nexthop_type ""
+        variable nexthop_name ""
+    }
+
     namespace eval ::state::udp {
         variable payload ""
         variable payload_length 0
@@ -5383,6 +5401,114 @@ namespace eval ::itest::semantic {
         set lb_src_tag [lindex $args 0]
         ::itest::log_decision lb src_tag $lb_src_tag
         return ""
+    }
+
+    proc l7check_reset_connection {} {
+        set ::state::l7check::protocol ""
+    }
+
+    proc _l7check_require_event {} {
+        if {$::itest::current_event ni {
+            L7CHECK_CLIENT_DATA L7CHECK_SERVER_DATA CONNECTOR_OPEN
+        }} {
+            error "L7CHECK::protocol is not valid in $::itest::current_event"
+        }
+        if {![_profile_enabled L7CHECK] && ![_profile_enabled CONNECTOR]} {
+            error "L7CHECK::protocol requires the L7CHECK or CONNECTOR profile"
+        }
+    }
+
+    proc l7check_protocol_command {args} {
+        _l7check_require_event
+        if {[llength $args] < 1} {
+            error "L7CHECK::protocol requires set VALUE or get"
+        }
+        set operation [lindex $args 0]
+        switch -exact -- $operation {
+            get {
+                if {[llength $args] != 1} {
+                    error "L7CHECK::protocol get takes no arguments"
+                }
+                set result $::state::l7check::protocol
+            }
+            set {
+                if {[llength $args] != 2} {
+                    error "L7CHECK::protocol set requires VALUE"
+                }
+                set result [lindex $args 1]
+                if {[string first "\x00" $result] >= 0} {
+                    error "L7CHECK::protocol value must not contain NUL"
+                }
+                set ::state::l7check::protocol $result
+            }
+            default {
+                error "L7CHECK::protocol expects set VALUE or get"
+            }
+        }
+        ::itest::log_decision l7check protocol [list $operation $result]
+        return $result
+    }
+
+    proc link_reset_connection {} {
+        set ::state::link::qos 0
+        set ::state::link::vlan_id 0
+        set ::state::link::lasthop_mac ""
+        set ::state::link::lasthop_id ""
+        set ::state::link::lasthop_type ""
+        set ::state::link::lasthop_name ""
+        set ::state::link::nexthop_mac "ff:ff:ff:ff:ff:ff"
+        set ::state::link::nexthop_id ""
+        set ::state::link::nexthop_type ""
+        set ::state::link::nexthop_name ""
+    }
+
+    proc _link_selector {command args} {
+        if {[llength $args] > 1} {
+            error "$command accepts at most one selector"
+        }
+        if {[llength $args] == 0} {
+            return mac
+        }
+        set selector [lindex $args 0]
+        if {$selector ni {id type name}} {
+            error "$command selector must be id, type, or name"
+        }
+        return $selector
+    }
+
+    proc link_hop_command {hop args} {
+        set command "LINK::$hop"
+        set selector [_link_selector $command {*}$args]
+        set field "${hop}_${selector}"
+        set result [set ::state::link::$field]
+        ::itest::log_decision link [string tolower $hop] [list $selector $result]
+        return $result
+    }
+
+    proc link_lasthop_command {args} {
+        return [link_hop_command lasthop {*}$args]
+    }
+
+    proc link_nexthop_command {args} {
+        return [link_hop_command nexthop {*}$args]
+    }
+
+    proc link_qos_command {args} {
+        if {[llength $args] != 0} {
+            error "LINK::qos takes no arguments"
+        }
+        set result $::state::link::qos
+        ::itest::log_decision link qos $result
+        return $result
+    }
+
+    proc link_vlan_id_command {args} {
+        if {[llength $args] != 0} {
+            error "LINK::vlan_id takes no arguments"
+        }
+        set result $::state::link::vlan_id
+        ::itest::log_decision link vlan_id $result
+        return $result
     }
 
     proc _flow_require_profile {command} {
@@ -17608,6 +17734,11 @@ foreach {name proc_name} {
     FLOW::this ::itest::semantic::flow_this
     FLOWTABLE::count ::itest::semantic::flowtable_count_command
     FLOWTABLE::limit ::itest::semantic::flowtable_limit_command
+    L7CHECK::protocol ::itest::semantic::l7check_protocol_command
+    LINK::lasthop ::itest::semantic::link_lasthop_command
+    LINK::nexthop ::itest::semantic::link_nexthop_command
+    LINK::qos ::itest::semantic::link_qos_command
+    LINK::vlan_id ::itest::semantic::link_vlan_id_command
     VALIDATE::protocol ::itest::semantic::validate_protocol_command
     STATS::get ::itest::semantic::stats_get
     STATS::incr ::itest::semantic::stats_incr

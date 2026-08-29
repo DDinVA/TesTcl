@@ -465,6 +465,127 @@ when CLIENT_ACCEPTED {
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+    def test_l7check_protocol_is_connection_state_with_event_validation(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "L7CHECK", "CONNECTOR"],
+                "irule": """
+when L7CHECK_CLIENT_DATA {
+    set before [L7CHECK::protocol get]
+    set changed [L7CHECK::protocol set https]
+    log local0. "before=$before changed=$changed after=[L7CHECK::protocol get]"
+}
+when L7CHECK_SERVER_DATA {
+    log local0. "server=[L7CHECK::protocol get]"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            client = session.fire_event(
+                "L7CHECK_CLIENT_DATA", {"l7check": {"protocol": "http"}}
+            )
+            self.assertTrue(client["fired"])
+            self.assertEqual(client["state"]["l7check"]["protocol"], "https")
+            self.assertTrue(any(
+                "before=http changed=https after=https" in entry
+                for entry in client["logs"]
+            ))
+
+            server = session.fire_event("L7CHECK_SERVER_DATA")
+            self.assertTrue(server["fired"])
+            self.assertTrue(any("server=https" in entry for entry in server["logs"]))
+        finally:
+            session.close()
+
+        invalid = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "L7CHECK", "CONNECTOR"],
+                "irule": "when CLIENT_ACCEPTED { L7CHECK::protocol get }",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, "not valid in CLIENT_ACCEPTED"
+            ):
+                invalid.fire_event("CLIENT_ACCEPTED")
+        finally:
+            invalid.close()
+
+    def test_link_commands_read_structured_event_link_state(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    log local0. "last=[LINK::lasthop]/[LINK::lasthop id]/[LINK::lasthop type]/[LINK::lasthop name] next=[LINK::nexthop]/[LINK::nexthop id]/[LINK::nexthop type]/[LINK::nexthop name] qos=[LINK::qos] vlan=[LINK::vlan_id]"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event(
+                "CLIENT_ACCEPTED",
+                {
+                    "link": {
+                        "qos": 5,
+                        "vlan_id": 4094,
+                        "lasthop_mac": "aa:bb:cc:dd:ee:ff",
+                        "lasthop_id": "last-1",
+                        "lasthop_type": "router",
+                        "lasthop_name": "edge-a",
+                        "nexthop_mac": "11:22:33:44:55:66",
+                        "nexthop_id": "next-1",
+                        "nexthop_type": "router",
+                        "nexthop_name": "core-a",
+                    }
+                },
+            )
+            self.assertTrue(result["fired"])
+            self.assertEqual(result["state"]["link"]["qos"], "5")
+            self.assertEqual(result["state"]["link"]["vlan_id"], "4094")
+            self.assertTrue(any(
+                "last=aa:bb:cc:dd:ee:ff/last-1/router/edge-a" in entry
+                and "next=11:22:33:44:55:66/next-1/router/core-a" in entry
+                and "qos=5 vlan=4094" in entry
+                for entry in result["logs"]
+            ))
+
+            default = session.fire_event("CLIENT_ACCEPTED")
+            self.assertTrue(any(
+                "next=ff:ff:ff:ff:ff:ff///" in entry
+                and "qos=0 vlan=0" in entry
+                for entry in default["logs"]
+            ))
+        finally:
+            session.close()
+
+        invalid = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP"],
+                "irule": "when CLIENT_ACCEPTED { LINK::lasthop bogus }",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, "selector must be id, type, or name"
+            ):
+                invalid.fire_event("CLIENT_ACCEPTED")
+        finally:
+            invalid.close()
+
     def test_server_endpoint_aliases_clear_stale_member_after_pool_failure(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -534,8 +655,10 @@ when HTTP_REQUEST {
         self.assertNotIn(("CATEGORY", "generated-stub"), queue_buckets)
         self.assertNotIn(("CLASSIFY", "generated-stub"), queue_buckets)
         self.assertNotIn(("FLOWTABLE", "generated-stub"), queue_buckets)
+        self.assertNotIn(("L7CHECK", "generated-stub"), queue_buckets)
+        self.assertNotIn(("LINK", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 230)
+        self.assertEqual(queue["command_count"], 225)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)

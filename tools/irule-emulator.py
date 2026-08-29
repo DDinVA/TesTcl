@@ -242,6 +242,21 @@ EVENT_STATE_FIELDS = {
         "bandwidth",
         "cleared",
     },
+    "l7check": {
+        "protocol",
+    },
+    "link": {
+        "qos",
+        "vlan_id",
+        "lasthop_mac",
+        "lasthop_id",
+        "lasthop_type",
+        "lasthop_name",
+        "nexthop_mac",
+        "nexthop_id",
+        "nexthop_type",
+        "nexthop_name",
+    },
     "tls_client": {
         "sni",
         "sni_required",
@@ -868,6 +883,8 @@ EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
     "datagram": "::state::datagram",
     "route": "::state::route",
+    "l7check": "::state::l7check",
+    "link": "::state::link",
     "tls_client": "::state::tls::client",
     "tls_server": "::state::tls::server",
     "http2": "::state::http2",
@@ -1066,6 +1083,11 @@ SEMANTIC_MOCK_COMMANDS = {
     "CLASSIFY::username",
     "FLOWTABLE::count",
     "FLOWTABLE::limit",
+    "L7CHECK::protocol",
+    "LINK::lasthop",
+    "LINK::nexthop",
+    "LINK::qos",
+    "LINK::vlan_id",
     "ICAP::header",
     "ICAP::method",
     "ICAP::status",
@@ -10351,6 +10373,8 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::adapt_reset_connection")
                 session.eval_tcl("::itest::semantic::datagram_reset_connection")
                 session.eval_tcl("::itest::semantic::sctp_reset_connection")
+                session.eval_tcl("::itest::semantic::l7check_reset_connection")
+                session.eval_tcl("::itest::semantic::link_reset_connection")
                 session.eval_tcl("::itest::semantic::dhcp_reset_connection")
                 session.eval_tcl("::itest::semantic::ftp_reset_connection")
                 session.eval_tcl("::itest::semantic::imap_reset_connection")
@@ -10699,6 +10723,8 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
             session.eval_tcl("::itest::semantic::datagram_reset_connection")
             session.eval_tcl("::itest::semantic::sctp_reset_connection")
+            session.eval_tcl("::itest::semantic::l7check_reset_connection")
+            session.eval_tcl("::itest::semantic::link_reset_connection")
             self._connection_open = False
             self._server_connection_open = False
             self._server_connection_detached = False
@@ -10958,8 +10984,18 @@ class EmulatorSession:
         event_name, normalised_state = _normalise_event(event, state)
         if event_name not in self._event_profiles:
             raise EmulatorInputError(f"unknown iRule event: {event_name}")
+
+        def dispatch(session: Any) -> dict[str, Any]:
+            # CLIENT_ACCEPTED starts a new client-side connection. Reset only
+            # the connection-scoped network-observation layers here, before
+            # installing any caller-supplied state for this event.
+            if event_name == "CLIENT_ACCEPTED":
+                session.eval_tcl("::itest::semantic::l7check_reset_connection")
+                session.eval_tcl("::itest::semantic::link_reset_connection")
+            return self._fire_event_on_worker(session, event_name, normalised_state)
+
         return self._call(
-            lambda session: self._fire_event_on_worker(session, event_name, normalised_state)
+            dispatch
         )
 
     @staticmethod
@@ -12040,6 +12076,8 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::adapt_reset_connection")
         session.eval_tcl("::itest::semantic::datagram_reset_connection")
         session.eval_tcl("::itest::semantic::sctp_reset_connection")
+        session.eval_tcl("::itest::semantic::l7check_reset_connection")
+        session.eval_tcl("::itest::semantic::link_reset_connection")
         session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::ftp_reset_connection")
         session.eval_tcl("::itest::semantic::imap_reset_connection")
@@ -12092,6 +12130,8 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::datagram_reset_connection")
         session.eval_tcl("::itest::semantic::sctp_reset_connection")
+        session.eval_tcl("::itest::semantic::l7check_reset_connection")
+        session.eval_tcl("::itest::semantic::link_reset_connection")
         session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::ftp_reset_connection")
         session.eval_tcl("::itest::semantic::icap_reset_connection")

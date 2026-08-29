@@ -622,6 +622,42 @@ or commands, and SMTP greetings or commands. Other classifier names are
 conservative non-matches; no external inspection or licensed APM/AFM/PEM
 classification is performed.
 
+### L7 check and link metadata
+
+`L7CHECK::protocol set VALUE` and `L7CHECK::protocol get` are available in
+`L7CHECK_CLIENT_DATA`, `L7CHECK_SERVER_DATA`, and `CONNECTOR_OPEN` when the
+session has the `L7CHECK` or `CONNECTOR` profile. The value persists across
+events in one connection and is reset when a new client connection starts.
+
+The link commands read a caller-supplied `link` event-state layer:
+
+```json
+{
+  "event": "CLIENT_ACCEPTED",
+  "state": {
+    "link": {
+      "qos": 5,
+      "vlan_id": 4094,
+      "lasthop_mac": "aa:bb:cc:dd:ee:ff",
+      "lasthop_id": "last-1",
+      "lasthop_type": "router",
+      "lasthop_name": "edge-a",
+      "nexthop_mac": "11:22:33:44:55:66",
+      "nexthop_id": "next-1",
+      "nexthop_type": "router",
+      "nexthop_name": "core-a"
+    }
+  }
+}
+```
+
+`LINK::lasthop` and `LINK::nexthop` return the MAC address by default, or the
+`id`, `type`, or `name` selector when supplied. `LINK::qos` and
+`LINK::vlan_id` return the corresponding values. If no link state is supplied,
+QoS and VLAN return `0`, last-hop fields are empty, and next-hop MAC returns
+`ff:ff:ff:ff:ff:ff`, matching the documented pre-server-connection behavior.
+This is structured metadata, not a live NIC, ARP, VLAN, routing, or QoS model.
+
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose
