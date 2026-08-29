@@ -1812,6 +1812,8 @@ when HTTP_REQUEST {
             report["commands"]["catalog_count"] - 10,
         )
         self.assertIn("JSON::parse", report["commands"]["post_target_commands"])
+        self.assertIn("IKE_AUTH", report["events"]["unmapped_events"])
+        self.assertIn("IKE_AUTH", report["source"]["event_overrides"])
         queue = report["commands"]["implementation_queue"]
         self.assertEqual(queue["candidate_statuses"], ["generated-stub", "no-runtime-handler"])
         queue_buckets = {
@@ -1860,7 +1862,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("SIPALG", "generated-stub"), queue_buckets)
         self.assertNotIn(("REST", "generated-stub"), queue_buckets)
         self.assertNotIn(("TDS", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 82)
+        self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 70)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -8742,6 +8745,76 @@ when TDS_RESPONSE {
         )
         self.assertEqual(
             response["semantic"]["tds"]["session"]["username"], "alice"
+        )
+
+    def test_ike_auth_commands_model_certificate_and_san_state(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["IPSEC"],
+                "irule": """
+when IKE_AUTH {
+    log local0. "cert=[IKE::cert 0] dns=[IKE::san_dns] email=[IKE::san_email] subject=[IKE::subjectAltName]"
+    if {[IKE::san_dns] eq "vpn.example.test"} {
+        IKE::auth_success
+    }
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = session.fire_event(
+                "IKE_AUTH",
+                {
+                    "ike": {
+                        "cert": "CERTIFICATE-DATA",
+                        "san_dirname": "ou=VPN,o=Example",
+                        "san_dns": "vpn.example.test",
+                        "san_ediparty": "",
+                        "san_email": "vpn@example.test",
+                        "san_ipadd": "192.0.2.10",
+                        "san_othername": "",
+                        "san_rid": "",
+                        "san_uri": "https://vpn.example.test",
+                        "san_x400": "",
+                        "subjectAltName": "DNS:vpn.example.test,email:vpn@example.test",
+                    }
+                },
+            )
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            for command in (
+                "IKE::auth_success",
+                "IKE::cert",
+                "IKE::san_dns",
+                "IKE::subjectAltName",
+            ):
+                self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "event state ike is only valid during IKE_AUTH",
+            ):
+                session.fire_event(
+                    "CLIENT_ACCEPTED", {"ike": {"cert": "unexpected"}}
+                )
+        finally:
+            session.close()
+
+        self.assertTrue(
+            any(
+                "cert=CERTIFICATE-DATA dns=vpn.example.test email=vpn@example.test"
+                in entry
+                for entry in result["logs"]
+            )
+        )
+        self.assertIn("ike auth_success 1", result["decisions"])
+        self.assertEqual(result["state"]["ike"]["auth_success"], "1")
+        self.assertEqual(result["state"]["ike"]["cert"], "CERTIFICATE-DATA")
+        self.assertEqual(
+            result["state"]["ike"]["subjectAltName"],
+            "DNS:vpn.example.test,email:vpn@example.test",
         )
 
     def test_sdp_commands_model_fields_media_and_session_id(self) -> None:

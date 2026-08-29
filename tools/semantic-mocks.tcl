@@ -624,6 +624,21 @@ namespace eval ::itest::semantic {
         variable version ""
     }
 
+    namespace eval ::state::ike {
+        variable auth_success 0
+        variable cert ""
+        variable san_dirname ""
+        variable san_dns ""
+        variable san_ediparty ""
+        variable san_email ""
+        variable san_ipadd ""
+        variable san_othername ""
+        variable san_rid ""
+        variable san_uri ""
+        variable san_x400 ""
+        variable subjectAltName ""
+    }
+
     namespace eval ::state::ftp {
         variable allow_active_mode disable
         variable command ""
@@ -3663,6 +3678,102 @@ namespace eval ::itest::semantic {
             dbname $::state::tds::dbname \
             loginoption $::state::tds::loginoption \
             version $::state::tds::version]
+    }
+
+    proc ike_reset_event {} {
+        set ::state::ike::auth_success 0
+        set ::state::ike::cert ""
+        set ::state::ike::san_dirname ""
+        set ::state::ike::san_dns ""
+        set ::state::ike::san_ediparty ""
+        set ::state::ike::san_email ""
+        set ::state::ike::san_ipadd ""
+        set ::state::ike::san_othername ""
+        set ::state::ike::san_rid ""
+        set ::state::ike::san_uri ""
+        set ::state::ike::san_x400 ""
+        set ::state::ike::subjectAltName ""
+    }
+
+    proc _ike_require_event {command_name} {
+        if {$::itest::current_event ne "IKE_AUTH"} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc ike_auth_success_command {args} {
+        _ike_require_event IKE::auth_success
+        if {[llength $args] != 0} {
+            error "IKE::auth_success takes no arguments"
+        }
+        set ::state::ike::auth_success 1
+        ::itest::log_decision ike auth_success 1
+        return ""
+    }
+
+    proc ike_cert_command {args} {
+        _ike_require_event IKE::cert
+        if {[llength $args] > 1} {
+            error "IKE::cert accepts an optional zero-based certificate index"
+        }
+        if {[llength $args] == 1} {
+            set index [lindex $args 0]
+            if {![string is integer -strict $index] || $index < 0} {
+                error "IKE::cert index must be a non-negative integer"
+            }
+            if {$index != 0} {
+                error "IKE::cert certificate index is unavailable"
+            }
+        }
+        return $::state::ike::cert
+    }
+
+    proc ike_san_command {field command_name args} {
+        _ike_require_event $command_name
+        if {[llength $args] != 0} {
+            error "$command_name takes no arguments"
+        }
+        return [set ::state::ike::$field]
+    }
+
+    proc ike_san_dirname_command {args} {
+        return [ike_san_command san_dirname IKE::san_dirname {*}$args]
+    }
+
+    proc ike_san_dns_command {args} {
+        return [ike_san_command san_dns IKE::san_dns {*}$args]
+    }
+
+    proc ike_san_ediparty_command {args} {
+        return [ike_san_command san_ediparty IKE::san_ediparty {*}$args]
+    }
+
+    proc ike_san_email_command {args} {
+        return [ike_san_command san_email IKE::san_email {*}$args]
+    }
+
+    proc ike_san_ipadd_command {args} {
+        return [ike_san_command san_ipadd IKE::san_ipadd {*}$args]
+    }
+
+    proc ike_san_othername_command {args} {
+        return [ike_san_command san_othername IKE::san_othername {*}$args]
+    }
+
+    proc ike_san_rid_command {args} {
+        return [ike_san_command san_rid IKE::san_rid {*}$args]
+    }
+
+    proc ike_san_uri_command {args} {
+        return [ike_san_command san_uri IKE::san_uri {*}$args]
+    }
+
+    proc ike_san_x400_command {args} {
+        return [ike_san_command san_x400 IKE::san_x400 {*}$args]
+    }
+
+    proc ike_subject_alt_name_command {args} {
+        return [ike_san_command subjectAltName IKE::subjectAltName {*}$args]
     }
 
     proc feature_controls_reset_connection {} {
@@ -22702,6 +22813,18 @@ foreach {name proc_name} {
     REST::send ::itest::semantic::rest_send_command
     TDS::msg ::itest::semantic::tds_msg_command
     TDS::session ::itest::semantic::tds_session_command
+    IKE::auth_success ::itest::semantic::ike_auth_success_command
+    IKE::cert ::itest::semantic::ike_cert_command
+    IKE::san_dirname ::itest::semantic::ike_san_dirname_command
+    IKE::san_dns ::itest::semantic::ike_san_dns_command
+    IKE::san_ediparty ::itest::semantic::ike_san_ediparty_command
+    IKE::san_email ::itest::semantic::ike_san_email_command
+    IKE::san_ipadd ::itest::semantic::ike_san_ipadd_command
+    IKE::san_othername ::itest::semantic::ike_san_othername_command
+    IKE::san_rid ::itest::semantic::ike_san_rid_command
+    IKE::san_uri ::itest::semantic::ike_san_uri_command
+    IKE::san_x400 ::itest::semantic::ike_san_x400_command
+    IKE::subjectAltName ::itest::semantic::ike_subject_alt_name_command
     FTP::allow_active_mode ::itest::semantic::ftp_allow_active_mode_command
     FTP::disable ::itest::semantic::ftp_disable_command
     FTP::enable ::itest::semantic::ftp_enable_command

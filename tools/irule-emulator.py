@@ -80,6 +80,22 @@ TMOS_17_5_POST_TARGET_EVENTS = frozenset(
         "SSE_RESPONSE",
     }
 )
+# The pinned command registry includes the IKE namespace but omits the
+# IKE_AUTH event listed in the F5 event reference. Keep the event usable in
+# the direct-event API without inventing profile or transport gates that the
+# source registry does not provide.
+TMOS_17_5_EVENT_OVERRIDES = {
+    "IKE_AUTH": {
+        "multiplicity": "unknown",
+        "client_side": False,
+        "server_side": False,
+        "transport": None,
+        "implied_profiles": frozenset(),
+        "flow": True,
+        "deprecated": False,
+        "common": False,
+    }
+}
 ASM_LOGIN_STATUSES = frozenset({"not_logged_in", "logging_in", "logged_in", "failed"})
 ASM_CAPTCHA_STATUSES = frozenset({"not_received", "correct", "incorrect", "empty"})
 ASM_STATUSES = frozenset({"Alarm", "Blocked", "Clear"})
@@ -854,6 +870,20 @@ EVENT_STATE_FIELDS = {
         "loginoption",
         "version",
     },
+    "ike": {
+        "auth_success",
+        "cert",
+        "san_dirname",
+        "san_dns",
+        "san_ediparty",
+        "san_email",
+        "san_ipadd",
+        "san_othername",
+        "san_rid",
+        "san_uri",
+        "san_x400",
+        "subjectAltName",
+    },
     "ftp": {
         "allow_active_mode",
         "command",
@@ -1095,6 +1125,7 @@ EVENT_STATE_NAMESPACES = {
     "dhcpv4": "::state::dhcpv4",
     "dhcpv6": "::state::dhcpv6",
     "tds": "::state::tds",
+    "ike": "::state::ike",
     "ftp": "::state::ftp",
     "imap": "::state::imap",
     "pop3": "::state::pop3",
@@ -1254,6 +1285,18 @@ SEMANTIC_MOCK_COMMANDS = {
     "REST::send",
     "TDS::msg",
     "TDS::session",
+    "IKE::auth_success",
+    "IKE::cert",
+    "IKE::san_dirname",
+    "IKE::san_dns",
+    "IKE::san_ediparty",
+    "IKE::san_email",
+    "IKE::san_ipadd",
+    "IKE::san_othername",
+    "IKE::san_rid",
+    "IKE::san_uri",
+    "IKE::san_x400",
+    "IKE::subjectAltName",
     "FTP::allow_active_mode",
     "FTP::disable",
     "FTP::enable",
@@ -2072,6 +2115,11 @@ def _capability_status(proc_name: str, handwritten: set[str], generated: set[str
     return "no-runtime-handler"
 
 
+def _catalog_event_names(namespace_registry: Any) -> list[str]:
+    """Return the pinned event catalog plus documented 17.5 compatibility overrides."""
+    return sorted(set(namespace_registry.all_event_names()) | set(TMOS_17_5_EVENT_OVERRIDES))
+
+
 def _build_capabilities(
     root: Path,
     offset: int,
@@ -2163,23 +2211,34 @@ def _build_capabilities(
         )
 
     events: list[dict[str, Any]] = []
-    for name in sorted(NAMESPACE_REGISTRY.all_event_names()):
+    for name in _catalog_event_names(NAMESPACE_REGISTRY):
         props = NAMESPACE_REGISTRY.get_props(name)
-        if props is None:  # pragma: no cover - registry contract guard
+        override = TMOS_17_5_EVENT_OVERRIDES.get(name)
+        if props is None and override is None:  # pragma: no cover - registry contract guard
             continue
-        transport = props.transport
+        event_data = override if props is None else {
+            "multiplicity": NAMESPACE_REGISTRY.event_multiplicity(name),
+            "client_side": bool(props.client_side),
+            "server_side": bool(props.server_side),
+            "transport": props.transport,
+            "implied_profiles": props.implied_profiles,
+            "flow": bool(props.flow),
+            "deprecated": bool(props.deprecated),
+            "common": bool(props.common),
+        }
+        transport = event_data["transport"]
         events.append(
             {
                 "name": name,
                 "target_status": _target_status(name, TMOS_17_5_POST_TARGET_EVENTS),
-                "multiplicity": NAMESPACE_REGISTRY.event_multiplicity(name),
-                "client_side": bool(props.client_side),
-                "server_side": bool(props.server_side),
+                "multiplicity": event_data["multiplicity"],
+                "client_side": event_data["client_side"],
+                "server_side": event_data["server_side"],
                 "transport": list(transport) if isinstance(transport, tuple) else transport,
-                "implied_profiles": sorted(props.implied_profiles),
-                "flow": bool(props.flow),
-                "deprecated": bool(props.deprecated),
-                "common": bool(props.common),
+                "implied_profiles": sorted(event_data["implied_profiles"]),
+                "flow": event_data["flow"],
+                "deprecated": event_data["deprecated"],
+                "common": event_data["common"],
             }
         )
 
@@ -2215,6 +2274,7 @@ def _build_capabilities(
         "source": {
             "name": "tcl-lsp f5-irules registry",
             "commit": os.environ.get("TCL_LSP_COMMIT", "unknown"),
+            "event_overrides": sorted(TMOS_17_5_EVENT_OVERRIDES),
         },
         "summary": {
             "command_count": len(commands),
@@ -2258,7 +2318,7 @@ def _build_conformance(root: Path) -> dict[str, Any]:
     }
     for status in status_map.values():
         command_counts[status] = command_counts.get(status, 0) + 1
-    event_names = sorted(NAMESPACE_REGISTRY.all_event_names())
+    event_names = _catalog_event_names(NAMESPACE_REGISTRY)
     post_target_commands = sorted(
         name for name in status_map if name in TMOS_17_5_POST_TARGET_COMMANDS
     )
@@ -2299,6 +2359,7 @@ def _build_conformance(root: Path) -> dict[str, Any]:
         "source": {
             "name": "tcl-lsp f5-irules registry",
             "commit": os.environ.get("TCL_LSP_COMMIT", "unknown"),
+            "event_overrides": sorted(TMOS_17_5_EVENT_OVERRIDES),
         },
         "commands": {
             "catalog_count": len(status_map),
@@ -6452,11 +6513,16 @@ def _load_event_profiles(root: Path) -> dict[str, set[str]]:
     except ImportError as exc:  # pragma: no cover - depends on external checkout
         raise EmulatorInputError(f"could not load tcl-lsp event registry: {exc}") from exc
     event_profiles: dict[str, set[str]] = {}
-    for name in NAMESPACE_REGISTRY.all_event_names():
+    for name in _catalog_event_names(NAMESPACE_REGISTRY):
         if name in TMOS_17_5_POST_TARGET_EVENTS:
             continue
         props = NAMESPACE_REGISTRY.get_props(name)
-        event_profiles[name] = set(props.implied_profiles) if props is not None else set()
+        if props is not None:
+            event_profiles[name] = set(props.implied_profiles)
+        else:
+            event_profiles[name] = set(
+                TMOS_17_5_EVENT_OVERRIDES[name]["implied_profiles"]
+            )
     return event_profiles
 
 
@@ -6670,6 +6736,12 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
                 f"event DHCP version {supplied_version!r} does not match {dhcp_family_layers[0]}"
             )
         normalised.setdefault("dhcp", {})["version"] = inferred_version
+    if "tds" in normalised and event_name not in {"TDS_REQUEST", "TDS_RESPONSE"}:
+        raise EmulatorInputError(
+            "event state tds is only valid during TDS_REQUEST or TDS_RESPONSE"
+        )
+    if "ike" in normalised and event_name != "IKE_AUTH":
+        raise EmulatorInputError("event state ike is only valid during IKE_AUTH")
     return event_name, normalised
 
 
@@ -11880,6 +11952,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::sdp_reset_connection")
                 session.eval_tcl("::itest::semantic::dhcp_reset_connection")
                 session.eval_tcl("::itest::semantic::tds_reset_connection")
+                session.eval_tcl("::itest::semantic::ike_reset_event")
                 session.eval_tcl("::itest::semantic::ftp_reset_connection")
                 session.eval_tcl("::itest::semantic::imap_reset_connection")
                 session.eval_tcl("::itest::semantic::pop3_reset_connection")
@@ -12366,6 +12439,8 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::dhcp_prepare_event")
         if event_name in {"TDS_REQUEST", "TDS_RESPONSE"}:
             session.eval_tcl("::itest::semantic::tds_prepare_event")
+        if event_name == "IKE_AUTH":
+            session.eval_tcl("::itest::semantic::ike_reset_event")
         if "ftp" in state:
             session.eval_tcl("::itest::semantic::ftp_prepare_event")
         for protocol in STARTTLS_PROTOCOLS.intersection(state):

@@ -1509,6 +1509,17 @@ the emulator does not yet decode or synthesize TDS wire packets. See the F5
 [`TDS::msg`](https://clouddocs.f5.com/api/irules/TDS__msg.html) and
 [`TDS::session`](https://clouddocs.f5.com/api/irules/TDS__session.html)
 references for the production command contract.
+The IKE surface is also available through the direct `IKE_AUTH` event API.
+Supply an `ike` object with the certificate and subjectAltName values, then
+use `IKE::cert` (optionally with index `0`), the SAN accessors, and
+`IKE::auth_success` from the rule. The event result exposes the supplied
+certificate/SAN state and whether the rule accepted authentication under
+`state.ike`. This is a certificate-authentication decision model only: it
+does not perform IKE negotiation, X.509 parsing, or IPsec packet processing.
+The pinned tcl-lsp registry does not currently list `IKE_AUTH`, so the
+emulator reports it as a documented TMOS 17.5 event compatibility override in
+the catalog metadata. See the F5 [`IKE` reference](https://clouddocs.f5.com/api/irules/IKE.html)
+and [`IKE_AUTH` event reference](https://clouddocs.f5.com/api/irules/IKE_AUTH.html).
 Diameter support is pinned to the 17.5 catalog. Structured
 `protocol: "diameter"` packets and raw Diameter-over-TCP packets drive
 `DIAMETER_INGRESS` or `DIAMETER_EGRESS`; a packet with the retransmit flag also

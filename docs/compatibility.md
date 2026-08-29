@@ -282,6 +282,13 @@ username, database, login-option, and version metadata. Message state resets
 between TDS events while session metadata persists, and the result is exposed
 under `semantic.tds`. Packet-level TDS decoding is not implemented yet.
 
+The IKE namespace is implemented for direct `IKE_AUTH` events. The emulator
+models certificate retrieval, SAN getters, and the `IKE::auth_success` decision
+against caller-supplied certificate/SAN state. It does not negotiate IKE,
+parse X.509 certificates, or process IPsec packets. `IKE_AUTH` is included as
+a transparent 17.5 event compatibility override because it is documented by
+F5 but absent from the pinned tcl-lsp event registry.
+
 The six catalogued TMOS 17.5 `NSH::*` commands are modeled as connection-
 scoped rule state. `NSH::chain` records a direction-specific chain name;
 `NSH::context`, `NSH::path_id`, and `NSH::service_index` validate and retain
