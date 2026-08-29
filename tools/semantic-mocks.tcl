@@ -6,6 +6,11 @@
 # tcl-lsp checkout.
 
 namespace eval ::itest::semantic {
+    proc _asn1_signed_byte {value} {
+        set value [expr {$value & 0xff}]
+        return [expr {$value >= 128 ? $value - 256 : $value}]
+    }
+
     variable stats
     array set stats {}
     variable istats
@@ -21,6 +26,9 @@ namespace eval ::itest::semantic {
     variable crypto_contexts {}
     variable crypto_cipher_contexts {}
     variable crypto_context_max_bytes 16777216
+    variable asn1_elements {}
+    variable asn1_counter 0
+    variable asn1_max_bytes 16777216
     variable hsl_handles
     array set hsl_handles {}
     variable hsl_messages {}
@@ -12256,8 +12264,12 @@ namespace eval ::itest::semantic {
     proc crypto_reset_connection {} {
         variable crypto_contexts
         variable crypto_cipher_contexts
+        variable asn1_elements
+        variable asn1_counter
         set crypto_contexts {}
         set crypto_cipher_contexts {}
+        set asn1_elements {}
+        set asn1_counter 0
     }
 
     proc _adapt_default_record {side} {
@@ -20336,6 +20348,432 @@ namespace eval ::itest::semantic {
     }
 }
 
+# ASN.1 BER/DER support. Element handles are adapter-owned opaque strings;
+# their parsed nodes retain the original transport payload so offset, size,
+# and format operations remain deterministic and binary-safe.
+namespace eval ::itest::semantic {
+    proc _asn1_byte {data offset} {
+        if {$offset < 0 || $offset >= [string length $data]} { error "ASN1 offset is outside the payload" }
+        binary scan [string range $data $offset $offset] c value
+        return [expr {$value & 0xff}]
+    }
+
+    proc _asn1_length {data offset encoding} {
+        set first [_asn1_byte $data $offset]
+        if {$first < 0x80} { return [list $first 1 0] }
+        if {$first == 0x80} {
+            if {$encoding eq "DER"} { error "ASN1 DER does not allow indefinite lengths" }
+            return [list -1 1 1]
+        }
+        set count [expr {$first & 0x7f}]
+        if {$count == 0 || $count > 4 || $offset + $count >= [string length $data]} {
+            error "ASN1 length encoding is invalid or exceeds the limit"
+        }
+        set length 0
+        for {set index 1} {$index <= $count} {incr index} {
+            set length [expr {($length << 8) | [_asn1_byte $data [expr {$offset + $index}]]}]
+        }
+        return [list $length [expr {$count + 1}] 0]
+    }
+
+    proc _asn1_parse_node {data offset limit encoding} {
+        variable asn1_elements
+        variable asn1_counter
+        if {$offset < 0 || $offset >= $limit} { error "ASN1 element starts outside the payload" }
+        set tag_first [_asn1_byte $data $offset]
+        set cursor [expr {$offset + 1}]
+        set tag $tag_first
+        if {($tag_first & 0x1f) == 0x1f} {
+            set tag 0
+            set count 0
+            while {1} {
+                if {$cursor >= $limit} { error "ASN1 high-tag number is truncated" }
+                set part [_asn1_byte $data $cursor]
+                incr cursor
+                set tag [expr {($tag << 7) | ($part & 0x7f)}]
+                incr count
+                if {$count > 5} { error "ASN1 high-tag number is too large" }
+                if {!($part & 0x80)} { break }
+            }
+            set tag [expr {($tag_first & 0xe0) | 0x1f | ($tag & 0x1fffffff)}]
+        }
+        lassign [_asn1_length $data $cursor $encoding] content_length length_bytes indefinite
+        set content_start [expr {$cursor + $length_bytes}]
+        if {$content_start > $limit} { error "ASN1 length exceeds the payload" }
+        set constructed [expr {($tag_first & 0x20) != 0}]
+        set children {}
+        if {$indefinite} {
+            if {!$constructed} { error "ASN1 primitive elements cannot use indefinite length" }
+            set child_cursor $content_start
+            while {1} {
+                if {$child_cursor + 1 >= $limit} { error "ASN1 indefinite element is missing end-of-contents" }
+                if {[_asn1_byte $data $child_cursor] == 0 && [_asn1_byte $data [expr {$child_cursor + 1}]] == 0} {
+                    set content_end $child_cursor
+                    set end [expr {$child_cursor + 2}]
+                    break
+                }
+                set child [_asn1_parse_node $data $child_cursor $limit $encoding]
+                lappend children $child
+                set child_node [dict get $asn1_elements $child]
+                set child_cursor [dict get $child_node end]
+            }
+            set content_length [expr {$content_end - $content_start}]
+        } else {
+            set content_end [expr {$content_start + $content_length}]
+            set end $content_end
+            if {$end > $limit} { error "ASN1 element exceeds the payload" }
+            if {$constructed} {
+                set child_cursor $content_start
+                while {$child_cursor < $content_end} {
+                    set child [_asn1_parse_node $data $child_cursor $content_end $encoding]
+                    lappend children $child
+                    set child_node [dict get $asn1_elements $child]
+                    set child_cursor [dict get $child_node end]
+                }
+            }
+        }
+        incr asn1_counter
+        set id "asn1:$asn1_counter"
+        set node [dict create id $id data $data encoding $encoding start $offset \
+            tag $tag tag_first $tag_first header [expr {$content_start - $offset}] \
+            content_start $content_start length $content_length length_override "" \
+            content_end $content_end end $end children $children]
+        dict set asn1_elements $id $node
+        return $id
+    }
+
+    proc _asn1_parse_payload {data encoding} {
+        variable asn1_max_bytes
+        variable asn1_elements
+        if {[string length $data] > $asn1_max_bytes} { error "ASN1 payload exceeds the $asn1_max_bytes-byte limit" }
+        if {[string length $data] == 0} { error "ASN1 payload must not be empty" }
+        set roots {}
+        set payload_cursor 0
+        while {$payload_cursor < [string length $data]} {
+            set root [_asn1_parse_node $data $payload_cursor [string length $data] $encoding]
+            lappend roots $root
+            set root_node [dict get $asn1_elements $root]
+            set payload_cursor [dict get $root_node end]
+        }
+        set order {}
+        proc ::itest::semantic::_asn1_collect {id order_name} {
+            variable asn1_elements
+            upvar 1 $order_name order
+            lappend order $id
+            foreach child [dict get $asn1_elements $id children] { _asn1_collect $child order }
+        }
+        foreach root $roots { _asn1_collect $root order }
+        foreach id $order {
+            set node [dict get $asn1_elements $id]
+            dict set asn1_elements $id [dict replace $node order $order]
+        }
+        return [list [lindex $roots 0] $order]
+    }
+
+    proc _asn1_node {handle} {
+        variable asn1_elements
+        if {![dict exists $asn1_elements $handle]} { error "invalid ASN1 element handle" }
+        return [dict get $asn1_elements $handle]
+    }
+
+    proc _asn1_find_at {order offset limit} {
+        variable asn1_elements
+        foreach id $order {
+            set node [dict get $asn1_elements $id]
+            if {[dict get $node start] == $offset && [dict get $node end] <= $limit} { return $id }
+        }
+        return ""
+    }
+
+    proc _asn1_decode_integer {value} {
+        if {[string length $value] == 0} { error "ASN1 integer has an empty value" }
+        binary scan [string index $value 0] c first
+        set result 0
+        binary scan $value c* bytes
+        foreach byte $bytes { set result [expr {($result << 8) | ($byte & 0xff)}] }
+        if {$first < 0} { set result [expr {$result - (1 << (8 * [string length $value]))}] }
+        return $result
+    }
+
+    proc _asn1_decode_format {data cursor_name limit format names index_name order scope_level} {
+        upvar 1 $cursor_name cursor
+        upvar 1 $index_name variable_index
+        set count 0
+        set format_pos 0
+        while {$format_pos < [string length $format]} {
+            set spec [string index $format $format_pos]
+            if {$spec eq ")" || $spec eq ">"} { break }
+            incr format_pos
+            set optional 0
+            set expected_tag ""
+            if {$spec eq "?"} {
+                set optional 1
+                if {$format_pos + 2 < [string length $format] &&
+                    [string is xdigit -strict [string range $format $format_pos [expr {$format_pos + 1}]]] &&
+                    [string index $format [expr {$format_pos + 2}]] in {a B b e i l t x ( <}} {
+                    scan [string range $format $format_pos [expr {$format_pos + 1}]] %x expected_tag
+                    incr format_pos 2
+                }
+                if {$format_pos >= [string length $format]} { error "ASN1 optional marker needs a format specifier" }
+                set spec [string index $format $format_pos]
+                incr format_pos
+            }
+            if {$spec eq "(" || $spec eq "<"} {
+                set close [expr {$spec eq "(" ? [string first ")" $format $format_pos] : [string first ">" $format $format_pos]}]
+                if {$close < 0} { error "ASN1 format has an unclosed sequence or set" }
+                set node_id [_asn1_find_at $order $cursor $limit]
+                if {$node_id eq ""} {
+                    if {$optional} { continue }
+                    error "ASN1 sequence or set is missing"
+                }
+                set node [_asn1_node $node_id]
+                set expected [expr {$spec eq "(" ? 0x30 : 0x31}]
+                if {$optional && [dict get $node tag_first] != $expected} { continue }
+                if {[dict get $node tag_first] != $expected} { error "ASN1 sequence or set tag does not match the format" }
+                set inner_cursor [dict get $node content_start]
+                set inner_limit [dict get $node content_end]
+                set inner_format [string range $format $format_pos $close]
+                incr count [_asn1_decode_format $data inner_cursor $inner_limit $inner_format $names variable_index $order [expr {$scope_level + 1}]]
+                set cursor [dict get $node end]
+                set format_pos [expr {$close + 1}]
+                continue
+            }
+            if {$optional && $expected_tag eq ""} {
+                switch -exact -- $spec {
+                    a { set expected_tag 0x04 }
+                    B { set expected_tag 0x03 }
+                    b { set expected_tag 0x01 }
+                    e { set expected_tag 0x0a }
+                    i { set expected_tag 0x02 }
+                }
+            }
+            set node_id [_asn1_find_at $order $cursor $limit]
+            set variable_name ""
+            if {$spec ne "x"} {
+                if {$variable_index >= [llength $names]} { error "ASN1 decode needs one variable name per output value" }
+                set variable_name [lindex $names $variable_index]
+                incr variable_index
+            }
+            if {$node_id eq "" || ($expected_tag ne "" && [dict get [_asn1_node $node_id] tag_first] != $expected_tag)} {
+                if {$optional} {
+                    if {$variable_name ne ""} { uplevel $scope_level [list unset -nocomplain $variable_name] }
+                    continue
+                }
+                error "ASN1 element does not match the decode format"
+            }
+            set node [_asn1_node $node_id]
+            if {$expected_tag ne "" && [dict get $node tag_first] != $expected_tag} {
+                if {$optional} { if {$variable_name ne ""} { uplevel $scope_level [list unset -nocomplain $variable_name] }; continue }
+                error "ASN1 element tag does not match the optional format tag"
+            }
+            set value [string range $data [dict get $node content_start] [expr {[dict get $node content_end] - 1}]]
+            switch -exact -- $spec {
+                a { set decoded $value }
+                B { if {[string length $value] == 0} { error "ASN1 bit string is empty" }; set decoded [string range $value 1 end] }
+                b { if {[string length $value] != 1} { error "ASN1 boolean must contain one byte" }; set decoded [expr {[_asn1_byte $value 0] != 0}] }
+                e - i { set decoded [_asn1_decode_integer $value] }
+                l { set decoded [dict get $node length] }
+                t { set decoded [dict get $node tag] }
+                x { set decoded "" }
+                default { error "ASN1 decode format contains unsupported specifier $spec" }
+            }
+            if {$spec ne "x"} { uplevel $scope_level [list set $variable_name $decoded] }
+            set cursor [dict get $node end]
+            incr count
+        }
+        return $count
+    }
+
+    proc _asn1_integer_bytes {value} {
+        if {![string is integer -strict $value]} { error "ASN1 integer value must be an integer" }
+        set value [expr {$value + 0}]
+        if {$value >= 0} {
+            set bytes ""
+            while {$value > 0} {
+                set byte [binary format c [_asn1_signed_byte $value]]
+                set bytes "${byte}${bytes}"
+                set value [expr {$value >> 8}]
+            }
+            if {$bytes eq ""} { set bytes [binary format c 0] }
+            binary scan [string index $bytes 0] c first
+            if {$first & 0x80} { set bytes "[binary format c [_asn1_signed_byte 0]]${bytes}" }
+            return $bytes
+        }
+        set width 1
+        while {$value < -(1 << (8 * $width - 1))} { incr width }
+        set unsigned [expr {$value + (1 << (8 * $width))}]
+        set bytes ""
+        for {set index [expr {$width - 1}]} {$index >= 0} {incr index -1} {
+            append bytes [binary format c [_asn1_signed_byte [expr {($unsigned >> (8 * $index)) & 0xff}]]]
+        }
+        return $bytes
+    }
+
+    proc _asn1_tlv {tag value} {
+        set length [string length $value]
+        if {$length < 0x80} { set encoded_length [binary format c [_asn1_signed_byte $length]] } else {
+            set octets ""
+            set remaining $length
+            while {$remaining > 0} {
+                set byte [binary format c [_asn1_signed_byte $remaining]]
+                set octets "${byte}${octets}"
+                set remaining [expr {$remaining >> 8}]
+            }
+            set encoded_length "[binary format c [_asn1_signed_byte [expr {0x80 | [string length $octets]}]]]${octets}"
+        }
+        return "[binary format c [_asn1_signed_byte $tag]]${encoded_length}${value}"
+    }
+
+    proc _asn1_encode_components {format values index_name} {
+        upvar 1 $index_name value_index
+        set result ""
+        set format_pos 0
+        while {$format_pos < [string length $format]} {
+            set spec [string index $format $format_pos]
+            incr format_pos
+            if {$spec eq ")" || $spec eq ">"} { break }
+            set optional 0
+            if {$spec eq "?"} {
+                set optional 1
+                if {$format_pos + 2 < [string length $format] &&
+                    [string is xdigit -strict [string range $format $format_pos [expr {$format_pos + 1}]]] &&
+                    [string index $format [expr {$format_pos + 2}]] in {a B b e i l t x ( <}} { incr format_pos 2 }
+                if {$format_pos >= [string length $format]} { error "ASN1 optional marker needs a format specifier" }
+                set spec [string index $format $format_pos]
+                incr format_pos
+            }
+            if {$spec eq "(" || $spec eq "<"} {
+                set close [expr {$spec eq "(" ? [string first ")" $format $format_pos] : [string first ">" $format $format_pos]}]
+                if {$close < 0} { error "ASN1 format has an unclosed sequence or set" }
+                set inner [string range $format $format_pos $close]
+                append result [_asn1_tlv [expr {$spec eq "(" ? 0x30 : 0x31}] [_asn1_encode_components $inner $values value_index]]
+                set format_pos [expr {$close + 1}]
+                continue
+            }
+            if {$spec eq "x" || $spec eq "l" || $spec eq "t"} { error "ASN1 encode format does not support specifier $spec" }
+            if {$value_index >= [llength $values]} { error "ASN1 encode needs one value per format specifier" }
+            set value [lindex $values $value_index]
+            incr value_index
+            if {$optional && $value eq ""} { continue }
+            switch -exact -- $spec {
+                a { set encoded [_asn1_tlv 0x04 $value] }
+                B { set encoded [_asn1_tlv 0x03 [binary format c [_asn1_signed_byte 0]]$value] }
+                b { set encoded [_asn1_tlv 0x01 [binary format c [_asn1_signed_byte [expr {$value ? 0xff : 0}]]] ] }
+                e { set encoded [_asn1_tlv 0x0a [_asn1_integer_bytes $value]] }
+                i { set encoded [_asn1_tlv 0x02 [_asn1_integer_bytes $value]] }
+                default { error "ASN1 encode format contains unsupported specifier $spec" }
+            }
+            append result $encoded
+        }
+        return $result
+    }
+
+    proc asn1_element_command {args} {
+        variable asn1_elements
+        set subcommand [lindex $args 0]
+        switch -exact -- $subcommand {
+            init {
+                if {[llength $args] != 2 || [lindex $args 1] ni {BER DER}} { error "ASN1::element init requires BER or DER" }
+                lassign [_asn1_parse_payload [::itest::cmd::tcp_payload] [lindex $args 1]] root order
+                dict set asn1_elements $root [dict replace [dict get $asn1_elements $root] order $order]
+                return $root
+            }
+            next {
+                if {[llength $args] ni {2 3}} { error "ASN1::element next requires an element and optional count" }
+                set node [_asn1_node [lindex $args 1]]
+                set order [dict get $node order]
+                set step [expr {[llength $args] == 3 ? [lindex $args 2] : 1}]
+                if {![string is integer -strict $step] || $step < 1} { error "ASN1::element next count must be a positive integer" }
+                set position [lsearch -exact $order [lindex $args 1]]
+                set target [expr {$position + $step}]
+                if {$position < 0 || $target >= [llength $order]} { return "" }
+                return [lindex $order $target]
+            }
+            byte_offset - length {
+                if {[llength $args] ni {2 3}} { error "ASN1::element $subcommand requires an element and optional value" }
+                set id [lindex $args 1]
+                set node [_asn1_node $id]
+                if {[llength $args] == 2} {
+                    if {$subcommand eq "byte_offset"} { return [dict get $node start] }
+                    if {[dict get $node length_override] ne ""} { return [dict get $node length_override] }
+                    return [dict get $node length]
+                }
+                set value [lindex $args 2]
+                if {![string is integer -strict $value] || $value < 0} { error "ASN1::element $subcommand value must be a non-negative integer" }
+                dict set node [expr {$subcommand eq "byte_offset" ? "start" : "length_override"}] $value
+                dict set asn1_elements $id $node
+                return $value
+            }
+            tag - size {
+                if {[llength $args] != 2} { error "ASN1::element $subcommand requires an element" }
+                set node [_asn1_node [lindex $args 1]]
+                if {$subcommand eq "tag"} { return [dict get $node tag] }
+                set length [dict get $node length]
+                if {[dict get $node length_override] ne ""} { set length [dict get $node length_override] }
+                return [expr {[dict get $node header] + $length}]
+            }
+            default { error "ASN1::element does not support subcommand $subcommand" }
+        }
+    }
+
+    proc asn1_decode_command {args} {
+        variable asn1_elements
+        if {[llength $args] < 2} { error "ASN1::decode requires an element, format, and optional variable names" }
+        set source [lindex $args 0]
+        set format [lindex $args 1]
+        set names [lrange $args 2 end]
+        if {[dict exists $asn1_elements $source]} {
+            set node [_asn1_node $source]
+            set data [dict get $node data]
+            if {[string index $format 0] in {( <} || [llength [dict get $node children]] == 0} {
+                set cursor [dict get $node start]
+                set limit [dict get $node end]
+            } else {
+                set cursor [dict get $node content_start]
+                set limit [dict get $node content_end]
+            }
+            set order [dict get $node order]
+        } else {
+            lassign [_asn1_parse_payload $source BER] root order
+            set data $source
+            set cursor 0
+            set limit [string length $source]
+        }
+        set variable_index 0
+        return [_asn1_decode_format $data cursor $limit $format $names variable_index $order 3]
+    }
+
+    proc asn1_encode_command {args} {
+        if {[llength $args] < 2} { error "ASN1::encode requires an encoding and format" }
+        set mode [lindex $args 0]
+        if {$mode in {insert replace}} {
+            if {[llength $args] < 5} { error "ASN1::encode $mode requires element, offset, format, and values" }
+            set node [_asn1_node [lindex $args 1]]
+            set offset [lindex $args 2]
+            if {![string is integer -strict $offset] || $offset < 0} { error "ASN1::encode offset must be a non-negative integer" }
+            set format [lindex $args 3]
+            set values [lrange $args 4 end]
+            set value_index 0
+            set encoded [_asn1_encode_components $format $values value_index]
+            set absolute [expr {[dict get $node start] + $offset}]
+            set replacement_length 0
+            if {$mode eq "replace"} {
+                set target [_asn1_find_at [dict get $node order] $absolute [string length [dict get $node data]]]
+                if {$target eq ""} { error "ASN1::encode replace offset does not identify an element" }
+                set target_node [_asn1_node $target]
+                set replacement_length [expr {[dict get $target_node end] - [dict get $target_node start]}]
+            }
+            ::itest::cmd::tcp_payload replace $absolute $replacement_length $encoded
+            return $encoded
+        }
+        if {$mode ni {BER DER}} { error "ASN1::encode requires BER or DER" }
+        set value_index 0
+        set encoded [_asn1_encode_components [lindex $args 1] [lrange $args 2 end] value_index]
+        if {[string length $encoded] > 16777216} { error "ASN1 encoded result exceeds the 16777216-byte limit" }
+        return $encoded
+    }
+}
+
 # CRYPTO::encrypt/decrypt/keygen use the same option and context contract as
 # the hash/sign/verify family. Python supplies standard cipher primitives;
 # this Tcl layer remains responsible for binary-safe argument handling and
@@ -21759,6 +22197,9 @@ foreach {name proc_name} {
     CRYPTO::decrypt ::itest::semantic::crypto_decrypt_command
     CRYPTO::encrypt ::itest::semantic::crypto_encrypt_command
     CRYPTO::keygen ::itest::semantic::crypto_keygen_command
+    ASN1::decode ::itest::semantic::asn1_decode_command
+    ASN1::element ::itest::semantic::asn1_element_command
+    ASN1::encode ::itest::semantic::asn1_encode_command
     AES::decrypt ::itest::semantic::aes_decrypt_command
     AES::encrypt ::itest::semantic::aes_encrypt_command
     AES::key ::itest::semantic::aes_key_command

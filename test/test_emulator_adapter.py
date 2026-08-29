@@ -1854,7 +1854,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("AES", "generated-stub"), queue_buckets)
         self.assertNotIn(("IPFIX", "generated-stub"), queue_buckets)
         self.assertNotIn(("CRYPTO", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 122)
+        self.assertNotIn(("ASN1", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 119)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -4391,6 +4392,60 @@ when HTTP_REQUEST {
             'when HTTP_REQUEST { CRYPTO::hash -alg sha256 -ctx collision hello; CRYPTO::encrypt -alg rc4 -ctx collision -key secret hello }',
         ):
             with self.subTest(irule=irule), self.assertRaises(self.adapter.EmulatorInputError):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "request": {"uri": "/"},
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+
+    def test_asn1_element_encode_decode_and_payload_replacement(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    set ::state::connection::client_payload [binary format H* 30080201020403686579]
+    set root [ASN1::element init BER]
+    set version [ASN1::element next $root]
+    set message [ASN1::element next $version]
+    set decoded [ASN1::decode $root "(ia)" number value]
+    set primitive_count [ASN1::decode $version i version_value]
+    set optional_encoded [ASN1::encode DER "?ia" "" payload]
+    set optional_count [ASN1::decode $optional_encoded "?ia" missing payload_value]
+    ASN1::encode replace $root 2 i 3
+    set root_after [ASN1::element init DER]
+    log local0. "decoded=$decoded number=$number value=$value primitive=$primitive_count/$version_value optional=$optional_count/[info exists missing]/$payload_value tag=[ASN1::element tag $message] size=[ASN1::element size $root] offset=[ASN1::element byte_offset $message] length=[ASN1::element length $root_after] payload=[b64encode [TCP::payload]]"
+}
+""",
+                "request": {"uri": "/"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any(
+            "decoded=2 number=2 value=hey" in entry
+            and "primitive=1/2" in entry
+            and "optional=1/0/payload" in entry
+            and "tag=4" in entry
+            and "size=10" in entry
+            and "offset=5" in entry
+            and "length=8" in entry
+            and "payload=MAgCAQMEA2hleQ==" in entry
+            for entry in result["results"][0]["logs"]
+        ))
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in ("ASN1::decode", "ASN1::element", "ASN1::encode"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+        for irule, message in (
+            ('when HTTP_REQUEST { ASN1::encode DER i not-an-integer }', "ASN1 integer value must be an integer"),
+            ('when HTTP_REQUEST { set ::state::connection::client_payload {}; ASN1::element init DER }', "ASN1 payload must not be empty"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, message
+            ):
                 self.adapter.run_scenario(
                     {
                         "profiles": ["TCP", "HTTP"],

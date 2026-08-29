@@ -224,6 +224,17 @@ documented zero-based `-pos` occurrence index, and destination sends are
 captured in a bounded semantic history. The adapter does not connect to a
 configured log publisher, serialize IPFIX datagrams, or transmit telemetry.
 
+The TMOS 17.5 ASN.1 surface is modeled by `ASN1::element`, `ASN1::encode`,
+and `ASN1::decode`. Element handles retain parsed BER/DER TLV trees and
+support `init`, `next`, `tag`, `size`, `byte_offset`, and `length`. Encode and
+decode support octet strings, bit strings, booleans, enumerations, integers,
+optional components, sequences, sets, and iterative length/tag/skip fields.
+`ASN1::encode insert|replace` updates the modeled client TCP payload using
+element-relative offsets. The parser is bounded at 16 MiB; encoded output is
+definite-length, while BER decoding also accepts constructed indefinite
+lengths. This is a portable rule-behavior model, not a claim of complete
+ASN.1 schema validation or full TMM payload scheduling.
+
 The complete TMOS 17.5 `BWC::` family is represented by deterministic
 connection-scoped flow state. Policy attachment, category assignment, rate and
 PPS overrides, TOS/QoS marks, priority weights, debug state, and measurement

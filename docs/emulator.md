@@ -297,6 +297,15 @@ connection; repeated template elements use the documented zero-based
 `semantic.ipfix.sends` history for inspection. The adapter does not open a
 real log publisher, encode IPFIX wire records, or transmit UDP traffic.
 
+The ASN.1 layer provides binary-safe BER/DER `ASN1::element`, `ASN1::encode`,
+and `ASN1::decode` behavior. It supports opaque element handles, tree
+navigation, tag/size/offset/length inspection, optional fields, sequences,
+sets, octet and bit strings, booleans, enumerations, integers, and payload
+`insert`/`replace` operations. Decode assigns values into the calling Tcl
+scope, and parsed payloads are capped at 16 MiB. This portable model accepts
+constructed BER indefinite lengths but emits definite-length encodings; it
+does not attempt complete schema validation or emulate TMM scheduling.
+
 The ADAPT layer models the 17.5 request/response static and dynamic context
 surface. `ADAPT::context_create` returns deterministic opaque handles whose
 attributes inherit from the static context; the remaining ADAPT commands can
