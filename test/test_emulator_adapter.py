@@ -1907,7 +1907,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 43)
+        self.assertEqual(queue["command_count"], 42)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -9289,6 +9289,72 @@ when HTTP_REQUEST {
             try:
                 with self.assertRaisesRegex(
                     self.adapter.EmulatorInputError, "ripemd160 requires one value"
+                ):
+                    invalid.fire_event("HTTP_REQUEST")
+            finally:
+                invalid.close()
+
+    def test_md4_returns_legacy_binary_digest_for_one_value(self) -> None:
+        for value, expected in (
+            (b"", "31d6cfe0d16ae931b73c59d7e0c089c0"),
+            (b"a", "bde52cb31de33e46245e05fbdbd6fb24"),
+            (b"abc", "a448017aaf21d8525fc10ae87aa6729d"),
+            (
+                b"message digest",
+                "d9130a8164549fe818874806e1c7014b",
+            ),
+            (
+                b"abcdefghijklmnopqrstuvwxyz",
+                "d79e1c308aa5bbcdeea8ed63df412da9",
+            ),
+            (
+                b"1234567890" * 8,
+                "e33b4ddc9c38f2199c3e7b164fcc0536",
+            ),
+        ):
+            self.assertEqual(self.adapter._md4_digest(value).hex(), expected)
+
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    log local0. "digest=[binary encode hex [md4 abc]]"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = session.fire_event("HTTP_REQUEST")
+            self.assertTrue(
+                any(
+                    "digest=a448017aaf21d8525fc10ae87aa6729d" in entry
+                    for entry in result["logs"]
+                )
+            )
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            self.assertEqual(usage["md4"]["runtime_status"], "semantic-mock")
+        finally:
+            session.close()
+
+        for invalid_rule in (
+            "when HTTP_REQUEST { md4 }",
+            "when HTTP_REQUEST { md4 one two }",
+        ):
+            invalid = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {"profiles": ["HTTP"], "irule": invalid_rule},
+                allow_irule_file=True,
+                allow_requests=False,
+                allow_packets=False,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError, "md4 requires one value"
                 ):
                     invalid.fire_event("HTTP_REQUEST")
             finally:

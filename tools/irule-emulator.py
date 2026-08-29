@@ -1728,6 +1728,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "llookup",
     "matchclass",
     "md5",
+    "md4",
     "members",
     "nodes",
     "peer",
@@ -5012,19 +5013,102 @@ def _install_python_digest_helper(session: Any) -> None:
     if interpreter is None or not hasattr(interpreter, "createcommand"):
         raise EmulatorInputError("binary digest support requires the in-process Tcl backend")
 
-    algorithms = {"md5", "ripemd160", "sha1", "sha224", "sha256", "sha384", "sha512"}
+    algorithms = {
+        "md4",
+        "md5",
+        "ripemd160",
+        "sha1",
+        "sha224",
+        "sha256",
+        "sha384",
+        "sha512",
+    }
 
     def digest_callback(*args: str) -> str:
         if len(args) != 2 or args[0] not in algorithms:
             raise ValueError("digest helper requires a supported algorithm and one value")
         raw_value = base64.b64decode(args[1].encode("ascii"), validate=True)
-        digest = hashlib.new(args[0], raw_value).digest()
+        digest = (
+            _md4_digest(raw_value)
+            if args[0] == "md4"
+            else hashlib.new(args[0], raw_value).digest()
+        )
         return base64.b64encode(digest).decode("ascii")
 
     interpreter.createcommand("::itest::semantic::py_digest", digest_callback)
     # Keep a strong reference on the session for bridge implementations that
     # do not retain Python callbacks independently of tkinter's command table.
     setattr(session, "_testcl_digest_callback", digest_callback)
+
+
+def _md4_digest(value: bytes) -> bytes:
+    """Return the legacy MD4 digest used by the iRules compatibility command."""
+    mask = 0xFFFFFFFF
+    bit_length = (len(value) * 8) & ((1 << 64) - 1)
+    padded = value + b"\x80"
+    padded += b"\x00" * ((56 - len(padded) % 64) % 64)
+    padded += bit_length.to_bytes(8, "little")
+
+    def rotate_left(number: int, amount: int) -> int:
+        return ((number << amount) | (number >> (32 - amount))) & mask
+
+    def round_f(x: int, y: int, z: int) -> int:
+        return ((x & y) | (~x & z)) & mask
+
+    def round_g(x: int, y: int, z: int) -> int:
+        return ((x & y) | (x & z) | (y & z)) & mask
+
+    def round_h(x: int, y: int, z: int) -> int:
+        return (x ^ y ^ z) & mask
+
+    state = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476]
+    round_one_shifts = (3, 7, 11, 19)
+    round_two_indices = (0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15)
+    round_three_indices = (0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15)
+
+    for offset in range(0, len(padded), 64):
+        words = struct.unpack("<16I", padded[offset : offset + 64])
+        a, b, c, d = state
+
+        for index in range(16):
+            shift = round_one_shifts[index % 4]
+            if index % 4 == 0:
+                a = rotate_left((a + round_f(b, c, d) + words[index]) & mask, shift)
+            elif index % 4 == 1:
+                d = rotate_left((d + round_f(a, b, c) + words[index]) & mask, shift)
+            elif index % 4 == 2:
+                c = rotate_left((c + round_f(d, a, b) + words[index]) & mask, shift)
+            else:
+                b = rotate_left((b + round_f(c, d, a) + words[index]) & mask, shift)
+
+        for index, word_index in enumerate(round_two_indices):
+            shift = (3, 5, 9, 13)[index % 4]
+            if index % 4 == 0:
+                a = rotate_left((a + round_g(b, c, d) + words[word_index] + 0x5A827999) & mask, shift)
+            elif index % 4 == 1:
+                d = rotate_left((d + round_g(a, b, c) + words[word_index] + 0x5A827999) & mask, shift)
+            elif index % 4 == 2:
+                c = rotate_left((c + round_g(d, a, b) + words[word_index] + 0x5A827999) & mask, shift)
+            else:
+                b = rotate_left((b + round_g(c, d, a) + words[word_index] + 0x5A827999) & mask, shift)
+
+        for index, word_index in enumerate(round_three_indices):
+            shift = (3, 9, 11, 15)[index % 4]
+            if index % 4 == 0:
+                a = rotate_left((a + round_h(b, c, d) + words[word_index] + 0x6ED9EBA1) & mask, shift)
+            elif index % 4 == 1:
+                d = rotate_left((d + round_h(a, b, c) + words[word_index] + 0x6ED9EBA1) & mask, shift)
+            elif index % 4 == 2:
+                c = rotate_left((c + round_h(d, a, b) + words[word_index] + 0x6ED9EBA1) & mask, shift)
+            else:
+                b = rotate_left((b + round_h(c, d, a) + words[word_index] + 0x6ED9EBA1) & mask, shift)
+
+        state = [
+            (previous + current) & mask
+            for previous, current in zip(state, (a, b, c, d))
+        ]
+
+    return struct.pack("<4I", *state)
 
 
 def _install_python_fasthash_helper(session: Any) -> None:

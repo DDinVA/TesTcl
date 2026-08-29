@@ -452,6 +452,9 @@ hash values.
 The global `rmd160` command is modeled as a one-value binary RIPEMD-160 digest
 using the existing bounded digest bridge. It does not add BIG-IP-specific
 digest behavior beyond the documented hash operation.
+The global `md4` command is also modeled as a one-value binary legacy digest,
+with standard test vectors covered by the adapter suite. It is provided for
+compatibility only and is not a recommendation for security-sensitive use.
 The seven catalogued `AM::*` commands are represented by a deterministic
 acceleration-metadata layer: the six no-argument readers return caller-supplied
 metadata and `AM::disable` records connection-scoped disable state. The

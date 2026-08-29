@@ -682,6 +682,14 @@ so it can be consumed by Tcl binary commands such as `binary encode hex` or
 `binary scan`. The digest is computed by the bounded Python standard-library
 bridge and is available in any event context supported by the catalog.
 
+### `md4`
+
+`md4` accepts exactly one value and returns the binary legacy MD4 digest. The
+adapter includes a self-contained implementation because MD4 is not exposed
+by Python 3.13's OpenSSL-backed `hashlib` on the supported runtime. It exists
+for compatibility with older iRules; it should not be used for new security
+designs.
+
 ### AM acceleration metadata
 
 The seven catalogued `AM::*` commands are available with deterministic

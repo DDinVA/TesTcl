@@ -21277,6 +21277,7 @@ namespace eval ::itest::semantic {
     }
 
     proc md5_command {args} { return [_digest_command md5 {*}$args] }
+    proc md4_command {args} { return [_digest_command md4 {*}$args] }
     proc rmd160_command {args} { return [_digest_command ripemd160 {*}$args] }
     proc sha1_command {args} { return [_digest_command sha1 {*}$args] }
     proc sha256_command {args} { return [_digest_command sha256 {*}$args] }
@@ -22751,6 +22752,7 @@ foreach {original replacement} {
     getfield getfield_command
     llookup llookup_command
     matchclass matchclass_command
+    md4 md4_command
     md5 md5_command
     members members_command
     nodes nodes_command
