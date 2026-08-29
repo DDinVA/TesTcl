@@ -114,11 +114,14 @@ keys read as zero. The adapter does not aggregate values across emulator
 processes or expose a live control-plane iStats database.
 
 The TMOS 17.5 `CRYPTO::hash`, `CRYPTO::sign`, and `CRYPTO::verify` commands
-have one-shot semantic support and require an explicit `-alg`. Hashes cover `md5`, `ripemd160`, `sha1`,
-`sha224`, `sha256`, `sha384`, and `sha512`; signing and verification cover the
-corresponding HMAC algorithms. Binary results are preserved, including
-`-keyhex` inputs. Context streaming (`-ctx`/`-final`), encryption/decryption,
-and key generation remain explicitly queued rather than approximated.
+have one-shot and bounded context-streaming semantic support. New contexts
+require an explicit `-alg`; subsequent chunks may reuse the context name, and
+`-final` returns the binary result and releases the context. Hashes cover `md5`,
+`ripemd160`, `sha1`, `sha224`, `sha256`, `sha384`, and `sha512`; signing and
+verification cover the corresponding HMAC algorithms. Binary results are
+preserved, including `-keyhex` inputs. Context data is capped at 16 MiB and
+cleared at connection boundaries. Encryption/decryption and key generation
+remain explicitly queued rather than approximated.
 
 The TMOS 17.5 `ONECONNECT::detach`, `ONECONNECT::label`,
 `ONECONNECT::reuse`, and `ONECONNECT::select` commands model the rule-visible

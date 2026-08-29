@@ -14,6 +14,8 @@ namespace eval ::itest::semantic {
     variable oneconnect_reuse_enabled 1
     variable oneconnect_select_mode none
     variable oneconnect_label ""
+    variable crypto_contexts {}
+    variable crypto_context_max_bytes 16777216
     variable hsl_handles
     array set hsl_handles {}
     variable hsl_messages {}
@@ -8601,6 +8603,11 @@ namespace eval ::itest::semantic {
         set oneconnect_label ""
     }
 
+    proc crypto_reset_connection {} {
+        variable crypto_contexts
+        set crypto_contexts {}
+    }
+
     proc _oneconnect_require_profile {command_name} {
         if {![_profile_enabled ONECONNECT]} {
             error "$command_name requires a OneConnect profile"
@@ -14259,7 +14266,8 @@ namespace eval ::itest::semantic {
     }
 
     proc _crypto_parse {args command_name operation} {
-        set parsed [dict create algorithm "" key "" signature "" data "" has_data 0 key_set 0 signature_set 0]
+        set parsed [dict create algorithm "" key "" signature "" data "" has_data 0 \
+            key_set 0 signature_set 0 context "" context_set 0 final 0]
         set index 0
         set end_options 0
         while {$index < [llength $args]} {
@@ -14271,12 +14279,21 @@ namespace eval ::itest::semantic {
             }
             if {!$end_options && [string match -* $token]} {
                 switch -exact -- $token {
-                    -alg - -key - -keyhex - -signature {
+                    -alg - -key - -keyhex - -signature - -ctx {
                         if {$index + 1 >= [llength $args]} {
                             error "$command_name option $token requires a value"
                         }
                         set value [lindex $args [incr index]]
-                        if {$token eq "-alg"} {
+                        if {$token eq "-ctx"} {
+                            if {$value eq "" || [string first "\x00" $value] >= 0} {
+                                error "$command_name -ctx requires a non-empty name without NUL bytes"
+                            }
+                            if {[dict get $parsed context_set]} {
+                                error "$command_name accepts -ctx only once"
+                            }
+                            dict set parsed context $value
+                            dict set parsed context_set 1
+                        } elseif {$token eq "-alg"} {
                             if {[dict get $parsed algorithm] ne ""} {
                                 error "$command_name accepts -alg only once"
                             }
@@ -14300,8 +14317,8 @@ namespace eval ::itest::semantic {
                             dict set parsed key_set 1
                         }
                     }
-                    -ctx - -final {
-                        error "$command_name context mode is not implemented in this emulator slice"
+                    -final {
+                        dict set parsed final 1
                     }
                     default {
                         error "$command_name does not support option $token"
@@ -14316,13 +14333,24 @@ namespace eval ::itest::semantic {
             }
             incr index
         }
-        if {[dict get $parsed algorithm] eq ""} {
+        if {[dict get $parsed final] && ![dict get $parsed context_set]} {
+            error "$command_name -final requires -ctx"
+        }
+        if {[dict get $parsed algorithm] eq "" && ![dict get $parsed context_set]} {
             error "$command_name requires -alg"
         }
-        if {$operation in {sign verify} && ![dict get $parsed key_set]} {
+        if {$operation eq "hash" && [dict get $parsed key_set]} {
+            error "$command_name does not accept a key"
+        }
+        if {$operation in {sign verify} && ![dict get $parsed context_set] &&
+            ![dict get $parsed key_set]} {
             error "$command_name requires -key or -keyhex"
         }
-        if {$operation eq "verify" && ![dict get $parsed signature_set]} {
+        if {$operation ne "verify" && [dict get $parsed signature_set]} {
+            error "$command_name does not accept -signature"
+        }
+        if {$operation eq "verify" && ![dict get $parsed context_set] &&
+            ![dict get $parsed signature_set]} {
             error "$command_name requires -signature"
         }
         return $parsed
@@ -14332,33 +14360,95 @@ namespace eval ::itest::semantic {
         return [binary encode base64 $value]
     }
 
-    proc crypto_hash_command {args} {
-        set parsed [_crypto_parse $args CRYPTO::hash hash]
-        set encoded [::itest::semantic::py_crypto hash \
-            [dict get $parsed algorithm] \
-            [_crypto_encoded [dict get $parsed key]] \
-            [_crypto_encoded [dict get $parsed data]] \
-            [_crypto_encoded [dict get $parsed signature]]]
+    proc _crypto_execute {operation algorithm key data signature} {
+        set encoded [::itest::semantic::py_crypto $operation $algorithm \
+            [_crypto_encoded $key] [_crypto_encoded $data] [_crypto_encoded $signature]]
+        if {$operation eq "verify"} {
+            return $encoded
+        }
         return [binary decode base64 $encoded]
+    }
+
+    proc _crypto_context_execute {parsed command_name operation} {
+        variable crypto_contexts
+        variable crypto_context_max_bytes
+        set context [dict get $parsed context]
+        if {[dict exists $crypto_contexts $context]} {
+            set entry [dict get $crypto_contexts $context]
+            if {[dict get $entry operation] ne $operation} {
+                error "$command_name context is already used for another CRYPTO command"
+            }
+            if {[dict get $parsed algorithm] ne "" &&
+                [dict get $parsed algorithm] ne [dict get $entry algorithm]} {
+                error "$command_name cannot change the context algorithm"
+            }
+            if {[dict get $parsed key_set]} {
+                if {[dict get $entry data_started] ||
+                    [dict get $parsed key] ne [dict get $entry key]} {
+                    error "$command_name cannot change the context key after it starts"
+                }
+                dict set entry key [dict get $parsed key]
+            }
+        } else {
+            if {[dict get $parsed algorithm] eq ""} {
+                error "$command_name requires -alg for a new context"
+            }
+            if {$operation in {sign verify} && ![dict get $parsed key_set]} {
+                error "$command_name requires -key or -keyhex for a new context"
+            }
+            set entry [dict create \
+                operation $operation \
+                algorithm [dict get $parsed algorithm] \
+                key [dict get $parsed key] \
+                data "" \
+                data_started 0]
+        }
+        if {[dict get $parsed has_data]} {
+            set data [string cat [dict get $entry data] [dict get $parsed data]]
+            if {[string bytelength $data] > $crypto_context_max_bytes} {
+                error "$command_name context data exceeds the $crypto_context_max_bytes-byte limit"
+            }
+            dict set entry data $data
+            dict set entry data_started 1
+        }
+        if {$operation eq "verify" && [dict get $parsed signature_set] &&
+            ![dict get $parsed final]} {
+            error "$command_name -signature requires -final in context mode"
+        }
+        if {![dict get $parsed final]} {
+            dict set crypto_contexts $context $entry
+            return ""
+        }
+        if {$operation eq "verify" && ![dict get $parsed signature_set]} {
+            error "$command_name requires -signature when finalizing a context"
+        }
+        set result [_crypto_execute $operation \
+            [dict get $entry algorithm] [dict get $entry key] \
+            [dict get $entry data] [dict get $parsed signature]]
+        dict unset crypto_contexts $context
+        return $result
+    }
+
+    proc _crypto_command {args command_name operation} {
+        set parsed [_crypto_parse $args $command_name $operation]
+        if {[dict get $parsed context_set]} {
+            return [_crypto_context_execute $parsed $command_name $operation]
+        }
+        return [_crypto_execute $operation \
+            [dict get $parsed algorithm] [dict get $parsed key] \
+            [dict get $parsed data] [dict get $parsed signature]]
+    }
+
+    proc crypto_hash_command {args} {
+        return [_crypto_command $args CRYPTO::hash hash]
     }
 
     proc crypto_sign_command {args} {
-        set parsed [_crypto_parse $args CRYPTO::sign sign]
-        set encoded [::itest::semantic::py_crypto sign \
-            [dict get $parsed algorithm] \
-            [_crypto_encoded [dict get $parsed key]] \
-            [_crypto_encoded [dict get $parsed data]] \
-            [_crypto_encoded [dict get $parsed signature]]]
-        return [binary decode base64 $encoded]
+        return [_crypto_command $args CRYPTO::sign sign]
     }
 
     proc crypto_verify_command {args} {
-        set parsed [_crypto_parse $args CRYPTO::verify verify]
-        return [::itest::semantic::py_crypto verify \
-            [dict get $parsed algorithm] \
-            [_crypto_encoded [dict get $parsed key]] \
-            [_crypto_encoded [dict get $parsed data]] \
-            [_crypto_encoded [dict get $parsed signature]]]
+        return [_crypto_command $args CRYPTO::verify verify]
     }
 }
 

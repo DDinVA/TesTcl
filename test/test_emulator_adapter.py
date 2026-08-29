@@ -1478,7 +1478,16 @@ when HTTP_REQUEST {
     set digest [CRYPTO::hash -alg sha256 hello]
     set signature [CRYPTO::sign -alg hmac-sha256 -key secret hello]
     set hex_signature [CRYPTO::sign -alg hmac-sha256 -keyhex 736563726574 hello]
-    log local0. "hash=[b64encode $digest] signature=[b64encode $signature] hex=[b64encode $hex_signature] valid=[CRYPTO::verify -alg hmac-sha256 -key secret -signature $signature hello] invalid=[CRYPTO::verify -alg hmac-sha256 -key secret -signature $signature changed]"
+    set stream_partial [CRYPTO::hash -alg sha256 -ctx digest_ctx he]
+    set stream_middle [CRYPTO::hash -ctx digest_ctx llo]
+    set stream_digest [CRYPTO::hash -ctx digest_ctx -final]
+    CRYPTO::sign -alg hmac-sha256 -ctx sign_ctx -key secret he
+    CRYPTO::sign -ctx sign_ctx llo
+    set stream_signature [CRYPTO::sign -ctx sign_ctx -final]
+    CRYPTO::verify -alg hmac-sha256 -ctx verify_ctx -key secret he
+    CRYPTO::verify -ctx verify_ctx llo
+    set stream_valid [CRYPTO::verify -ctx verify_ctx -final -signature $stream_signature]
+    log local0. "hash=[b64encode $digest] signature=[b64encode $signature] hex=[b64encode $hex_signature] valid=[CRYPTO::verify -alg hmac-sha256 -key secret -signature $signature hello] invalid=[CRYPTO::verify -alg hmac-sha256 -key secret -signature $signature changed] stream=[b64encode $stream_digest] partial=<$stream_partial><$stream_middle> stream_valid=$stream_valid"
 }
 """,
                 "request": {"uri": "/"},
@@ -1487,21 +1496,25 @@ when HTTP_REQUEST {
         )
 
         self.assertTrue(any(
-            "hash=LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=" in entry
-            and "signature=iKqz7ejTrflNJquQ07r9SiCDBww7zOnAFO4EpEOEfAs=" in entry
-            and "hex=iKqz7ejTrflNJquQ07r9SiCDBww7zOnAFO4EpEOEfAs=" in entry
-            and "valid=1 invalid=0" in entry
-            for entry in result["results"][0]["logs"]
-        ))
+                "hash=LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=" in entry
+                and "signature=iKqz7ejTrflNJquQ07r9SiCDBww7zOnAFO4EpEOEfAs=" in entry
+                and "hex=iKqz7ejTrflNJquQ07r9SiCDBww7zOnAFO4EpEOEfAs=" in entry
+                and "valid=1 invalid=0" in entry
+                and "stream=LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=" in entry
+                and "partial=<><>" in entry
+                and "stream_valid=1" in entry
+                for entry in result["results"][0]["logs"]
+            ))
         usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
         for command in ("CRYPTO::hash", "CRYPTO::sign", "CRYPTO::verify"):
             self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
 
         for irule, message in (
-            ('when HTTP_REQUEST { CRYPTO::hash -alg sha256 -ctx ctx hello }', "context mode"),
             ('when HTTP_REQUEST { CRYPTO::sign -alg hmac-sha256 hello }', "requires -key"),
             ('when HTTP_REQUEST { CRYPTO::verify -alg hmac-sha256 -key secret hello }', "requires -signature"),
             ('when HTTP_REQUEST { CRYPTO::hash hello }', "requires -alg"),
+            ('when HTTP_REQUEST { CRYPTO::hash -alg sha256 -final hello }', "-final requires -ctx"),
+            ('when HTTP_REQUEST { CRYPTO::hash -alg sha256 -key secret hello }', "does not accept a key"),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(
                 self.adapter.EmulatorInputError, message
@@ -1620,6 +1633,70 @@ when HTTP_REQUEST {
         )
         self.assertFalse(plain["results"][0]["server_connection"]["enabled"])
         self.assertFalse(plain["results"][0]["server_connection"]["reuse_enabled"])
+
+    def test_crypto_context_lifecycle_and_reuse_validation(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::path] eq "/start"} {
+        CRYPTO::hash -alg sha256 -ctx rolling hello
+        log local0. "context=started"
+    } elseif {[HTTP::path] eq "/finish"} {
+        set digest [CRYPTO::hash -ctx rolling -final]
+        log local0. "context=finished digest=[b64encode $digest]"
+    } else {
+        set digest [CRYPTO::hash -alg sha1 -ctx rolling hello]
+        set final [CRYPTO::hash -ctx rolling -final]
+        log local0. "context=reset digest=[b64encode $final] partial=<$digest>"
+    }
+}
+""",
+                "requests": [
+                    {"uri": "/start"},
+                    {"uri": "/finish"},
+                    {"uri": "/reset", "new_connection": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any("context=started" in entry for entry in result["results"][0]["logs"]))
+        self.assertTrue(any(
+            "context=finished digest=LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=" in entry
+            for entry in result["results"][1]["logs"]
+        ))
+        self.assertTrue(any(
+            "context=reset digest=qvTGHdzF6KLavt4PO0gs2a6pQ00=" in entry
+            for entry in result["results"][2]["logs"]
+        ))
+
+        invalid_rules = (
+            (
+                "when HTTP_REQUEST { CRYPTO::hash -alg sha256 -ctx ctx a; CRYPTO::sign -alg hmac-sha256 -ctx ctx -key secret b }",
+                "already used for another CRYPTO command",
+            ),
+            (
+                "when HTTP_REQUEST { CRYPTO::hash -alg sha256 -ctx ctx a; CRYPTO::hash -alg sha1 -ctx ctx b }",
+                "cannot change the context algorithm",
+            ),
+            (
+                "when HTTP_REQUEST { CRYPTO::sign -alg hmac-sha256 -ctx ctx -key secret a; CRYPTO::sign -ctx ctx -key other b }",
+                "cannot change the context key after it starts",
+            ),
+        )
+        for irule, message in invalid_rules:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, message
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "request": {"uri": "/"},
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
 
     def test_ip_semantics_record_packet_state_and_seeded_lookups(self) -> None:
         result = self.adapter.run_scenario(

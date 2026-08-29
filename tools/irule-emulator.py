@@ -3260,7 +3260,7 @@ def _install_python_digest_helper(session: Any) -> None:
 
 
 def _install_python_crypto_helper(session: Any) -> None:
-    """Expose bounded one-shot hash and HMAC operations to semantic Tcl."""
+    """Expose bounded hash and HMAC operations to semantic Tcl."""
     inner = getattr(session, "_session", None)
     inprocess = getattr(inner, "_inprocess", None)
     interpreter = getattr(inprocess, "_interp", None)
@@ -9264,6 +9264,7 @@ class EmulatorSession:
                 self._registered_events = session.load_irule(self._source)
                 session.eval_tcl("::itest::semantic::lb_reset_connection")
                 session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
+                session.eval_tcl("::itest::semantic::crypto_reset_connection")
                 session.eval_tcl("::itest::semantic::profile_settings_clear")
                 for profile_name, attributes in self._profile_settings.items():
                     flattened = [
@@ -9302,6 +9303,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::compression_reset_connection")
                 session.eval_tcl("::itest::semantic::httplog_reset_connection")
                 session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
+                session.eval_tcl("::itest::semantic::crypto_reset_connection")
                 session.eval_tcl("::itest::semantic::flow_reset_connection")
                 if any(str(profile).upper() == "REWRITE" for profile in self._profiles):
                     session.eval_tcl("::itest::semantic::rewrite_install_flow_hooks")
@@ -9589,6 +9591,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::compression_reset_connection")
             session.eval_tcl("::itest::semantic::httplog_reset_connection")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
+            session.eval_tcl("::itest::semantic::crypto_reset_connection")
             self._connection_open = False
             self._server_connection_open = False
             self._server_connection_detached = False
@@ -9612,6 +9615,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::compression_reset_connection")
             session.eval_tcl("::itest::semantic::httplog_reset_connection")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
+            session.eval_tcl("::itest::semantic::crypto_reset_connection")
             self._connection_open = False
             self._server_connection_open = False
             self._server_connection_detached = False
@@ -10614,6 +10618,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::compression_reset_connection")
         session.eval_tcl("::itest::semantic::httplog_reset_connection")
         session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
+        session.eval_tcl("::itest::semantic::crypto_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))

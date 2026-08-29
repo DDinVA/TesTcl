@@ -167,13 +167,17 @@ other missing keys read as `0`. This models the rule-visible state and
 deterministic aggregate view, but not multi-TMM aggregation, tmsh
 synchronization, or a live BIG-IP iStats database.
 
-The CRYPTO layer provides one-shot `CRYPTO::hash`, `CRYPTO::sign`, and
-`CRYPTO::verify` operations; this slice requires an explicit `-alg`. Hashes use the standard digest names supported by
-the TMOS 17.5 catalog, while signing and verification use the corresponding
+The CRYPTO layer provides one-shot and bounded context-streaming
+`CRYPTO::hash`, `CRYPTO::sign`, and `CRYPTO::verify` operations. New contexts
+require an explicit `-alg`; later chunks can reuse the context name without
+repeating the algorithm or key, and `-final` returns the binary result and
+releases the context. Hashes use the standard digest names supported by the
+TMOS 17.5 catalog, while signing and verification use the corresponding
 `hmac-*` names. Results are binary Tcl values, so `b64encode` is useful when a
 rule logs or stores them. The adapter validates algorithm, key, signature, and
-data options and supports `-keyhex`; context streaming, encryption/decryption,
-and key generation are not claimed as implemented yet.
+data options, supports `-keyhex`, bounds accumulated context data at 16 MiB,
+and clears contexts at connection boundaries. Encryption/decryption and key
+generation are not claimed as implemented yet.
 
 The ONECONNECT layer models the four TMOS 17.5 rule controls
 `ONECONNECT::detach`, `ONECONNECT::label`, `ONECONNECT::reuse`, and
