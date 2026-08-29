@@ -80,6 +80,11 @@ release, and direct response emission. It dispatches the SCTP client/server
 accept, connect, and data event path for structured packets. It does not parse
 SCTP chunks or emulate associations, multihoming, retransmission, SACK, or
 congestion-control behavior.
+The DHCP adapter models the 17.5 `DHCP::version`, `DHCPv4::*`, and `DHCPv6::*`
+surfaces for structured client/server data events, DHCP header readers, option
+lookup/mutation, and drop/reject decisions. DHCPv6 option deletion is modeled
+explicitly. It does not parse raw DHCP messages, run a lease allocator, or
+send real ICMP rejection traffic.
 The TMOS 17.5 `ROUTE::*` surface uses scenario-seeded route-domain and
 congestion-metric entries. Metric getters return deterministic values and
 `ROUTE::clear` removes a matching entry for the session; connection lifecycle

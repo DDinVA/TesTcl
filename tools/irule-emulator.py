@@ -635,6 +635,41 @@ EVENT_STATE_FIELDS = {
         "rto_min",
         "sack_timeout",
     },
+    "dhcp": {
+        "version",
+    },
+    "dhcpv4": {
+        "chaddr",
+        "ciaddr",
+        "drop",
+        "giaddr",
+        "hlen",
+        "hops",
+        "len",
+        "opcode",
+        "options",
+        "reject",
+        "secs",
+        "siaddr",
+        "type",
+        "xid",
+        "yiaddr",
+        "payload",
+        "payload_length",
+    },
+    "dhcpv6": {
+        "drop",
+        "hop_count",
+        "len",
+        "link_address",
+        "msg_type",
+        "options",
+        "peer_address",
+        "reject",
+        "transaction_id",
+        "payload",
+        "payload_length",
+    },
     "tcp": {
         "abc",
         "analytics",
@@ -728,6 +763,9 @@ EVENT_STATE_NAMESPACES = {
     "gtp": "::state::gtp",
     "udp": "::state::udp",
     "sctp": "::state::sctp",
+    "dhcp": "::state::dhcp",
+    "dhcpv4": "::state::dhcpv4",
+    "dhcpv6": "::state::dhcpv6",
     "tcp": "::state::tcp",
     "rtsp": "::state::rtsp",
     "cache": "::state::cache",
@@ -829,6 +867,31 @@ SEMANTIC_MOCK_COMMANDS = {
     "SCTP::rto_min",
     "SCTP::sack_timeout",
     "SCTP::server_port",
+    "DHCP::version",
+    "DHCPv4::chaddr",
+    "DHCPv4::ciaddr",
+    "DHCPv4::drop",
+    "DHCPv4::giaddr",
+    "DHCPv4::hlen",
+    "DHCPv4::hops",
+    "DHCPv4::len",
+    "DHCPv4::opcode",
+    "DHCPv4::option",
+    "DHCPv4::reject",
+    "DHCPv4::secs",
+    "DHCPv4::siaddr",
+    "DHCPv4::type",
+    "DHCPv4::xid",
+    "DHCPv4::yiaddr",
+    "DHCPv6::drop",
+    "DHCPv6::hop_count",
+    "DHCPv6::len",
+    "DHCPv6::link_address",
+    "DHCPv6::msg_type",
+    "DHCPv6::option",
+    "DHCPv6::peer_address",
+    "DHCPv6::reject",
+    "DHCPv6::transaction_id",
     "CRYPTO::hash",
     "CRYPTO::sign",
     "CRYPTO::verify",
@@ -4868,6 +4931,19 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
             ):
                 raise EmulatorInputError("TLS payload must not contain NUL bytes")
         normalised[layer] = layer_values
+    supplied_version = normalised.get("dhcp", {}).get("version")
+    if supplied_version is not None and supplied_version not in {"4", "6"}:
+        raise EmulatorInputError("event DHCP version must be 4 or 6")
+    dhcp_family_layers = [layer for layer in ("dhcpv4", "dhcpv6") if layer in normalised]
+    if len(dhcp_family_layers) > 1:
+        raise EmulatorInputError("event state cannot contain both dhcpv4 and dhcpv6 layers")
+    if dhcp_family_layers:
+        inferred_version = "4" if dhcp_family_layers[0] == "dhcpv4" else "6"
+        if supplied_version is not None and supplied_version != inferred_version:
+            raise EmulatorInputError(
+                f"event DHCP version {supplied_version!r} does not match {dhcp_family_layers[0]}"
+            )
+        normalised.setdefault("dhcp", {})["version"] = inferred_version
     return event_name, normalised
 
 
@@ -4960,7 +5036,7 @@ TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "sctp", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "wire"}
+PACKET_PROTOCOLS = {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -4994,6 +5070,34 @@ PACKET_PROTOCOL_FIELDS = {
         "rto_max",
         "rto_min",
         "sack_timeout",
+    },
+    "dhcpv4": {
+        "payload_hex",
+        "options",
+        "chaddr",
+        "ciaddr",
+        "giaddr",
+        "hlen",
+        "hops",
+        "len",
+        "opcode",
+        "reject",
+        "secs",
+        "siaddr",
+        "type",
+        "xid",
+        "yiaddr",
+    },
+    "dhcpv6": {
+        "payload_hex",
+        "options",
+        "hop_count",
+        "len",
+        "link_address",
+        "msg_type",
+        "peer_address",
+        "reject",
+        "transaction_id",
     },
     "tls": {"type"}
     | (EVENT_STATE_FIELDS["tls_client"] | EVENT_STATE_FIELDS["tls_server"])
@@ -6480,6 +6584,19 @@ def _packet_scalar(value: Any, field: str) -> str:
         except (TypeError, ValueError) as exc:
             raise EmulatorInputError(f"packet field {field} must be JSON-serialisable") from exc
     raise EmulatorInputError(f"packet field {field} must be a scalar or JSON value")
+
+
+def _dhcp_options_tcl(options: dict[str, str]) -> str:
+    flattened: list[str] = []
+    for option_id in sorted(options, key=lambda item: (len(item), item)):
+        flattened.extend((option_id, options[option_id]))
+    # The result is installed as one Tcl scalar and later consumed by
+    # ``dict``.  Do not wrap it in braces: braces would make the inner quotes
+    # literal and turn the complete dictionary into one malformed key.
+    return " ".join(
+        value if re.fullmatch(r"[A-Za-z0-9_./:+-]+", value) else _tcl_quote(value)
+        for value in flattened
+    )
 
 
 def _packet_bool(value: Any, field: str) -> str:
@@ -8405,7 +8522,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             raise EmulatorInputError(
                 f"unsupported packet {index} field(s): {', '.join(unknown)}"
             )
-        if protocol in {"tcp", "sctp"} and "payload" in packet and "payload_hex" in packet:
+        if protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6"} and "payload" in packet and "payload_hex" in packet:
             raise EmulatorInputError(
                 f"packet {index} {protocol.upper()} packets must use payload or payload_hex, not both"
             )
@@ -8518,7 +8635,35 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = _normalise_http2_state(
                     packet[field], f"packet {index} http2"
                 )
-            elif protocol in {"tcp", "sctp"} and field == "payload_hex":
+            elif field == "options" and protocol in {"dhcpv4", "dhcpv6"}:
+                value = packet[field]
+                if not isinstance(value, dict):
+                    raise EmulatorInputError(
+                        f"packet {index} {protocol.upper()} options must be an object"
+                    )
+                options: dict[str, str] = {}
+                for option_id, option_value in value.items():
+                    if not isinstance(option_id, str) or not option_id:
+                        raise EmulatorInputError(
+                            f"packet {index} {protocol.upper()} option IDs must be non-empty strings"
+                        )
+                    if not option_id.isdigit() or not 0 <= int(option_id) <= 65535:
+                        raise EmulatorInputError(
+                            f"packet {index} {protocol.upper()} option IDs must be integers from 0 to 65535"
+                        )
+                    canonical_id = str(int(option_id))
+                    if canonical_id in options:
+                        raise EmulatorInputError(
+                            f"packet {index} {protocol.upper()} contains duplicate option ID {canonical_id}"
+                        )
+                    if isinstance(option_value, bool):
+                        options[canonical_id] = "1" if option_value else "0"
+                    elif isinstance(option_value, (str, int, float)):
+                        options[canonical_id] = str(option_value)
+                    else:
+                        options[canonical_id] = _packet_scalar(option_value, "options")
+                normalised[field] = options
+            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6"} and field == "payload_hex":
                 value = _require_string(packet[field], f"packet {index} payload_hex")
                 if len(value) % 2:
                     raise EmulatorInputError(
@@ -8554,6 +8699,53 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                         f"packet {index} ppi must be an integer from 0 to 65535"
                     )
                 normalised[field] = value
+            elif protocol in {"dhcpv4", "dhcpv6"} and field in {
+                "hlen",
+                "hops",
+                "len",
+                "opcode",
+                "secs",
+                "xid",
+                "hop_count",
+            }:
+                value = packet[field]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise EmulatorInputError(
+                        f"packet {index} {field} must be a non-negative integer"
+                    )
+                limits = {
+                    "hlen": 255,
+                    "hops": 255,
+                    "len": 65535,
+                    "opcode": 255,
+                    "secs": 65535,
+                    "xid": 2**32 - 1,
+                    "hop_count": 255,
+                }
+                if value > limits[field]:
+                    raise EmulatorInputError(
+                        f"packet {index} {field} must be an integer from 0 to {limits[field]}"
+                    )
+                normalised[field] = value
+            elif protocol in {"dhcpv4", "dhcpv6"} and field in {"drop", "reject"}:
+                normalised[field] = _packet_bool(packet[field], f"packet {index} {field}")
+            elif protocol == "dhcpv4" and field in {
+                "chaddr",
+                "ciaddr",
+                "giaddr",
+                "siaddr",
+                "type",
+            }:
+                normalised[field] = _require_string(packet[field], f"packet {index} {field}")
+            elif protocol == "dhcpv6" and field in {
+                "link_address",
+                "msg_type",
+                "peer_address",
+                "transaction_id",
+            }:
+                normalised[field] = _require_string(packet[field], f"packet {index} {field}")
+            elif protocol in {"dhcpv4", "dhcpv6"}:
+                normalised[field] = _packet_scalar(packet[field], field)
             elif protocol == "http2" and field == "payload_hex":
                 value = _require_string(packet[field], f"packet {index} payload_hex")
                 if len(value) % 2:
@@ -9541,6 +9733,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::adapt_reset_connection")
                 session.eval_tcl("::itest::semantic::datagram_reset_connection")
                 session.eval_tcl("::itest::semantic::sctp_reset_connection")
+                session.eval_tcl("::itest::semantic::dhcp_reset_connection")
                 session.eval_tcl("::itest::semantic::profile_settings_clear")
                 for profile_name, attributes in self._profile_settings.items():
                     flattened = [
@@ -9972,6 +10165,8 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::udp_prepare_event")
         if "sctp" in state:
             session.eval_tcl("::itest::semantic::sctp_prepare_event")
+        if "dhcpv4" in state or "dhcpv6" in state:
+            session.eval_tcl("::itest::semantic::dhcp_prepare_event")
         session.eval_tcl("::itest::semantic::datagram_prepare_event")
         if "rtsp" in state:
             session.eval_tcl("::itest::semantic::rtsp_prepare_event")
@@ -9996,7 +10191,7 @@ class EmulatorSession:
         def install_state_layer(layer: str, values: dict[str, str]) -> None:
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "sctp", "rtsp", "cache", "datagram", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "sctp", "dhcpv4", "dhcpv6", "rtsp", "cache", "datagram", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -10146,7 +10341,7 @@ class EmulatorSession:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol == "sctp":
             connection.update({"protocol": "132", "transport": "sctp"})
-        elif protocol in {"udp", "dns", "radius"}:
+        elif protocol in {"udp", "dns", "radius", "dhcpv4", "dhcpv6"}:
             connection.update({"protocol": "17", "transport": "udp"})
         elif protocol == "gtp":
             endpoints = {
@@ -10177,7 +10372,7 @@ class EmulatorSession:
         inferred_version = 6 if any(":" in address for address in addresses) else 4
         protocol = (
             17
-            if packet["protocol"] in {"udp", "dns", "radius"}
+            if packet["protocol"] in {"udp", "dns", "radius", "dhcpv4", "dhcpv6"}
             or (packet["protocol"] == "sip" and packet.get("transport", "tcp") == "udp")
             else 6
             if packet["protocol"] in {
@@ -10289,6 +10484,50 @@ class EmulatorSession:
                 "remote_port": str(remote.get("port", 0)),
             }
             state["udp"] = udp_state
+        elif protocol in {"dhcpv4", "dhcpv6"}:
+            payload = packet.get("_wire_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                payload = str(packet.get("payload", "")).encode("utf-8")
+            version = "4" if protocol == "dhcpv4" else "6"
+            state["dhcp"] = {"version": version}
+            common_state = {
+                "payload": bytes(payload),
+                "payload_length": str(len(payload)),
+            }
+            if protocol == "dhcpv4":
+                dhcp_state: dict[str, Any] = {
+                    **common_state,
+                    "chaddr": str(packet.get("chaddr", "")),
+                    "ciaddr": str(packet.get("ciaddr", "0.0.0.0")),
+                    "drop": str(packet.get("drop", "0")),
+                    "giaddr": str(packet.get("giaddr", "0.0.0.0")),
+                    "hlen": str(packet.get("hlen", 6)),
+                    "hops": str(packet.get("hops", 0)),
+                    "len": str(packet.get("len", len(payload))),
+                    "opcode": str(packet.get("opcode", 1)),
+                    "options": _dhcp_options_tcl(packet.get("options", {})),
+                    "reject": str(packet.get("reject", "0")),
+                    "secs": str(packet.get("secs", 0)),
+                    "siaddr": str(packet.get("siaddr", "0.0.0.0")),
+                    "type": str(packet.get("type", "DISCOVER")),
+                    "xid": str(packet.get("xid", 0)),
+                    "yiaddr": str(packet.get("yiaddr", "0.0.0.0")),
+                }
+                state["dhcpv4"] = dhcp_state
+            else:
+                dhcp_state = {
+                    **common_state,
+                    "drop": str(packet.get("drop", "0")),
+                    "hop_count": str(packet.get("hop_count", 0)),
+                    "len": str(packet.get("len", len(payload))),
+                    "link_address": str(packet.get("link_address", "::")),
+                    "msg_type": str(packet.get("msg_type", "SOLICIT")),
+                    "options": _dhcp_options_tcl(packet.get("options", {})),
+                    "peer_address": str(packet.get("peer_address", "::")),
+                    "reject": str(packet.get("reject", "0")),
+                    "transaction_id": str(packet.get("transaction_id", "000000")),
+                }
+                state["dhcpv6"] = dhcp_state
         elif protocol == "sctp":
             source = packet.get("source", {})
             destination = packet.get("destination", {})
@@ -11011,7 +11250,7 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
@@ -11043,6 +11282,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::adapt_reset_connection")
         session.eval_tcl("::itest::semantic::datagram_reset_connection")
         session.eval_tcl("::itest::semantic::sctp_reset_connection")
+        session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
@@ -11052,7 +11292,7 @@ class EmulatorSession:
         )
         accepted_state = (
             self._packet_event_state(packet)
-            if packet["protocol"] in {"udp", "sctp"} or packet_has_tcp_layer
+            if packet["protocol"] in {"udp", "sctp", "dhcpv4", "dhcpv6"} or packet_has_tcp_layer
             else {"connection": self._packet_connection_state(packet)}
         )
         if any(str(profile).upper() == "FLOW" for profile in self._profiles):
@@ -11084,6 +11324,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::datagram_reset_connection")
         session.eval_tcl("::itest::semantic::sctp_reset_connection")
+        session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
@@ -12447,6 +12688,59 @@ class EmulatorSession:
                         entry["disabled"] = True
                     if response_dns.get("response_sent") in {"1", "true"}:
                         entry["responded"] = True
+                continue
+            elif protocol in {"dhcpv4", "dhcpv6"}:
+                self._activate_packet_connection(session, packet, entry["events"])
+                layer = protocol
+                accepted_event = next(
+                    (
+                        event
+                        for event in reversed(entry["events"])
+                        if event.get("event") == "CLIENT_ACCEPTED"
+                    ),
+                    None,
+                )
+                accepted_state = (
+                    accepted_event.get("state", {}).get(layer, {})
+                    if accepted_event is not None
+                    else {}
+                )
+                if accepted_state.get("drop") in {"1", "true"}:
+                    entry["dropped"] = True
+                    entry["drop_reason"] = layer
+                if accepted_state.get("reject") in {"1", "true"}:
+                    entry["rejected"] = True
+                    entry["dropped"] = True
+                    entry["drop_reason"] = f"{layer} reject"
+                if entry.get("dropped"):
+                    continue
+                if direction == "server_to_client" and not self._server_connection_open:
+                    self._configure_packet_connection(session, packet)
+                    entry["events"].append(
+                        self._fire_event_on_worker(
+                            session,
+                            "SERVER_CONNECTED",
+                            {"connection": self._packet_connection_state(packet)},
+                        )
+                    )
+                    self._server_connection_open = True
+                event_name = "CLIENT_DATA" if direction == "client_to_server" else "SERVER_DATA"
+                event_result = self._fire_event_on_worker(
+                    session, event_name, self._packet_event_state(packet)
+                )
+                entry["events"].append(event_result)
+                dhcp_state = event_result.get("state", {}).get(layer, {})
+                if dhcp_state.get("drop") in {"1", "true"}:
+                    entry["dropped"] = True
+                    entry["drop_reason"] = layer
+                if dhcp_state.get("reject") in {"1", "true"}:
+                    entry["rejected"] = True
+                    entry["dropped"] = True
+                    entry["drop_reason"] = f"{layer} reject"
+                if "payload" in dhcp_state:
+                    entry["payload_after"] = dhcp_state["payload"]
+                if "options" in dhcp_state:
+                    entry["options_after"] = dhcp_state["options"]
                 continue
             elif protocol == "sctp":
                 self._activate_packet_connection(session, packet, entry["events"])

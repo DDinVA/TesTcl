@@ -486,6 +486,44 @@ namespace eval ::itest::semantic {
         variable sack_timeout 200
     }
 
+    namespace eval ::state::dhcp {
+        variable version 4
+    }
+
+    namespace eval ::state::dhcpv4 {
+        variable chaddr ""
+        variable ciaddr 0.0.0.0
+        variable drop 0
+        variable giaddr 0.0.0.0
+        variable hlen 6
+        variable hops 0
+        variable len 0
+        variable opcode 1
+        variable options {}
+        variable reject 0
+        variable secs 0
+        variable siaddr 0.0.0.0
+        variable type DISCOVER
+        variable xid 0
+        variable yiaddr 0.0.0.0
+        variable payload ""
+        variable payload_length 0
+    }
+
+    namespace eval ::state::dhcpv6 {
+        variable drop 0
+        variable hop_count 0
+        variable len 0
+        variable link_address ::
+        variable msg_type SOLICIT
+        variable options {}
+        variable peer_address ::
+        variable reject 0
+        variable transaction_id 000000
+        variable payload ""
+        variable payload_length 0
+    }
+
     namespace eval ::state::datagram {
         variable ip_version 4
         variable ip_tos 0
@@ -11471,6 +11509,135 @@ namespace eval ::itest::semantic {
     proc sctp_rto_min_command {args} { return [sctp_timeout_command rto_min {*}$args] }
     proc sctp_sack_timeout_command {args} { return [sctp_timeout_command sack_timeout {*}$args] }
 
+    proc dhcp_reset_connection {} {
+        set ::state::dhcp::version 4
+        namespace eval ::state::dhcpv4 {
+            variable chaddr ""
+            variable ciaddr 0.0.0.0
+            variable drop 0
+            variable giaddr 0.0.0.0
+            variable hlen 6
+            variable hops 0
+            variable len 0
+            variable opcode 1
+            variable options {}
+            variable reject 0
+            variable secs 0
+            variable siaddr 0.0.0.0
+            variable type DISCOVER
+            variable xid 0
+            variable yiaddr 0.0.0.0
+            variable payload ""
+            variable payload_length 0
+        }
+        namespace eval ::state::dhcpv6 {
+            variable drop 0
+            variable hop_count 0
+            variable len 0
+            variable link_address ::
+            variable msg_type SOLICIT
+            variable options {}
+            variable peer_address ::
+            variable reject 0
+            variable transaction_id 000000
+            variable payload ""
+            variable payload_length 0
+        }
+    }
+
+    proc dhcp_prepare_event {} {
+        set ::state::dhcpv4::drop 0
+        set ::state::dhcpv4::reject 0
+        set ::state::dhcpv6::drop 0
+        set ::state::dhcpv6::reject 0
+    }
+
+    proc dhcp_version_command {args} {
+        if {[llength $args] != 0} { error "DHCP::version takes no arguments" }
+        return $::state::dhcp::version
+    }
+
+    proc dhcp_field_command {family field args} {
+        if {[llength $args] != 0} { error "DHCP${family}::$field takes no arguments" }
+        return [set ::state::dhcp${family}::$field]
+    }
+
+    proc dhcp_flag_command {family field args} {
+        if {[llength $args] != 0} { error "DHCP${family}::$field takes no arguments" }
+        set ::state::dhcp${family}::$field 1
+        ::itest::log_decision dhcp${family} $field 1
+        return ""
+    }
+
+    proc dhcp_option_id {family value} {
+        if {![string is integer -strict $value] || $value < 0 || $value > 65535} {
+            error "DHCP${family}::option ID must be an integer from 0 to 65535"
+        }
+        return [expr {int($value)}]
+    }
+
+    proc dhcp_option_command {family args} {
+        set namespace "::state::dhcp${family}"
+        if {[llength $args] == 0 || [llength $args] > 3} {
+            error "DHCP${family}::option requires an ID and optional value"
+        }
+        set operation get
+        set id_index 0
+        if {[lindex $args 0] eq "delete"} {
+            if {$family ne "v6" || [llength $args] != 2} {
+                set version [expr {$family eq "v4" ? 4 : 6}]
+                error "DHCPv${version}::option delete is not valid"
+            }
+            set operation delete
+            set id_index 1
+        }
+        set id [dhcp_option_id $family [lindex $args $id_index]]
+        set options [set ${namespace}::options]
+        if {$operation eq "delete"} {
+            dict unset options $id
+            set ${namespace}::options $options
+            ::itest::log_decision dhcp${family} option_delete $id
+            return ""
+        }
+        if {[llength $args] == $id_index + 1} {
+            if {[dict exists $options $id]} { return [dict get $options $id] }
+            return ""
+        }
+        if {[llength $args] != $id_index + 2} {
+            error "DHCP${family}::option accepts one optional value"
+        }
+        set value [lindex $args [expr {$id_index + 1}]]
+        dict set options $id $value
+        set ${namespace}::options $options
+        ::itest::log_decision dhcp${family} option_set [list $id $value]
+        return ""
+    }
+
+    proc dhcpv4_chaddr_command {args} { return [dhcp_field_command v4 chaddr {*}$args] }
+    proc dhcpv4_ciaddr_command {args} { return [dhcp_field_command v4 ciaddr {*}$args] }
+    proc dhcpv4_drop_command {args} { return [dhcp_flag_command v4 drop {*}$args] }
+    proc dhcpv4_giaddr_command {args} { return [dhcp_field_command v4 giaddr {*}$args] }
+    proc dhcpv4_hlen_command {args} { return [dhcp_field_command v4 hlen {*}$args] }
+    proc dhcpv4_hops_command {args} { return [dhcp_field_command v4 hops {*}$args] }
+    proc dhcpv4_len_command {args} { return [dhcp_field_command v4 len {*}$args] }
+    proc dhcpv4_opcode_command {args} { return [dhcp_field_command v4 opcode {*}$args] }
+    proc dhcpv4_option_command {args} { return [dhcp_option_command v4 {*}$args] }
+    proc dhcpv4_reject_command {args} { return [dhcp_flag_command v4 reject {*}$args] }
+    proc dhcpv4_secs_command {args} { return [dhcp_field_command v4 secs {*}$args] }
+    proc dhcpv4_siaddr_command {args} { return [dhcp_field_command v4 siaddr {*}$args] }
+    proc dhcpv4_type_command {args} { return [dhcp_field_command v4 type {*}$args] }
+    proc dhcpv4_xid_command {args} { return [dhcp_field_command v4 xid {*}$args] }
+    proc dhcpv4_yiaddr_command {args} { return [dhcp_field_command v4 yiaddr {*}$args] }
+    proc dhcpv6_drop_command {args} { return [dhcp_flag_command v6 drop {*}$args] }
+    proc dhcpv6_hop_count_command {args} { return [dhcp_field_command v6 hop_count {*}$args] }
+    proc dhcpv6_len_command {args} { return [dhcp_field_command v6 len {*}$args] }
+    proc dhcpv6_link_address_command {args} { return [dhcp_field_command v6 link_address {*}$args] }
+    proc dhcpv6_msg_type_command {args} { return [dhcp_field_command v6 msg_type {*}$args] }
+    proc dhcpv6_option_command {args} { return [dhcp_option_command v6 {*}$args] }
+    proc dhcpv6_peer_address_command {args} { return [dhcp_field_command v6 peer_address {*}$args] }
+    proc dhcpv6_reject_command {args} { return [dhcp_flag_command v6 reject {*}$args] }
+    proc dhcpv6_transaction_id_command {args} { return [dhcp_field_command v6 transaction_id {*}$args] }
+
     proc tcp_reset_transport {} {
         namespace eval ::state::tcp {
             set abc enable
@@ -16019,6 +16186,31 @@ foreach {name proc_name} {
     SCTP::rto_min ::itest::semantic::sctp_rto_min_command
     SCTP::sack_timeout ::itest::semantic::sctp_sack_timeout_command
     SCTP::server_port ::itest::semantic::sctp_server_port_command
+    DHCP::version ::itest::semantic::dhcp_version_command
+    DHCPv4::chaddr ::itest::semantic::dhcpv4_chaddr_command
+    DHCPv4::ciaddr ::itest::semantic::dhcpv4_ciaddr_command
+    DHCPv4::drop ::itest::semantic::dhcpv4_drop_command
+    DHCPv4::giaddr ::itest::semantic::dhcpv4_giaddr_command
+    DHCPv4::hlen ::itest::semantic::dhcpv4_hlen_command
+    DHCPv4::hops ::itest::semantic::dhcpv4_hops_command
+    DHCPv4::len ::itest::semantic::dhcpv4_len_command
+    DHCPv4::opcode ::itest::semantic::dhcpv4_opcode_command
+    DHCPv4::option ::itest::semantic::dhcpv4_option_command
+    DHCPv4::reject ::itest::semantic::dhcpv4_reject_command
+    DHCPv4::secs ::itest::semantic::dhcpv4_secs_command
+    DHCPv4::siaddr ::itest::semantic::dhcpv4_siaddr_command
+    DHCPv4::type ::itest::semantic::dhcpv4_type_command
+    DHCPv4::xid ::itest::semantic::dhcpv4_xid_command
+    DHCPv4::yiaddr ::itest::semantic::dhcpv4_yiaddr_command
+    DHCPv6::drop ::itest::semantic::dhcpv6_drop_command
+    DHCPv6::hop_count ::itest::semantic::dhcpv6_hop_count_command
+    DHCPv6::len ::itest::semantic::dhcpv6_len_command
+    DHCPv6::link_address ::itest::semantic::dhcpv6_link_address_command
+    DHCPv6::msg_type ::itest::semantic::dhcpv6_msg_type_command
+    DHCPv6::option ::itest::semantic::dhcpv6_option_command
+    DHCPv6::peer_address ::itest::semantic::dhcpv6_peer_address_command
+    DHCPv6::reject ::itest::semantic::dhcpv6_reject_command
+    DHCPv6::transaction_id ::itest::semantic::dhcpv6_transaction_id_command
     peer ::itest::cmd::cmd_peer
     clientside ::itest::cmd::cmd_clientside
     serverside ::itest::cmd::cmd_serverside

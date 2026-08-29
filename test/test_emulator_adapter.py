@@ -482,7 +482,10 @@ when HTTP_REQUEST {
         self.assertNotIn(("ADAPT", "generated-stub"), queue_buckets)
         self.assertNotIn(("DATAGRAM", "generated-stub"), queue_buckets)
         self.assertNotIn(("SCTP", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 304)
+        self.assertNotIn(("DHCP", "generated-stub"), queue_buckets)
+        self.assertNotIn(("DHCPV4", "generated-stub"), queue_buckets)
+        self.assertNotIn(("DHCPV6", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 279)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -885,6 +888,26 @@ when CLIENT_ACCEPTED {
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "xid must be an integer"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["UDP"],
+                    "irule": "when CLIENT_DATA { log local0. ok }",
+                    "packets": [{"protocol": "dhcpv4", "xid": 2**32}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "option IDs must be integers"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["UDP"],
+                    "irule": "when CLIENT_DATA { log local0. ok }",
+                    "packets": [{"protocol": "dhcpv6", "options": {"client-id": "x"}}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_sctp_collection_buffers_partial_payloads(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -907,6 +930,102 @@ when CLIENT_ACCEPTED {
         ]
         self.assertEqual(len(data_events), 1)
         self.assertTrue(any("payload=ping" in line for line in data_events[0]["logs"]))
+
+    def test_dhcpv4_packet_fields_options_and_reject(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": """
+when CLIENT_DATA {
+    log local0. "v=[DHCP::version] type=[DHCPv4::type] xid=[DHCPv4::xid] ch=[DHCPv4::chaddr] o=[DHCPv4::option 53]"
+    DHCPv4::option 12 updated-host
+    DHCPv4::reject
+}
+""",
+                "packets": [{
+                    "protocol": "dhcpv4",
+                    "source": {"address": "0.0.0.0", "port": 68},
+                    "destination": {"address": "255.255.255.255", "port": 67},
+                    "type": "DISCOVER",
+                    "xid": 42,
+                    "chaddr": "00:11:22:33:44:55",
+                    "options": {"053": "DISCOVER", "012": "client host"},
+                    "payload": "discover",
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        data = next(event for event in result["trace"][0]["events"] if event["event"] == "CLIENT_DATA")
+        self.assertTrue(any("v=4 type=DISCOVER xid=42 ch=00:11:22:33:44:55 o=DISCOVER" in line
+                            for line in data["logs"]))
+        self.assertEqual(data["state"]["dhcp"]["version"], "4")
+        self.assertIn("12 updated-host", data["state"]["dhcpv4"]["options"])
+        self.assertTrue(result["trace"][0]["rejected"])
+        self.assertEqual(result["trace"][0]["drop_reason"], "dhcpv4 reject")
+
+    def test_dhcp_direct_event_infers_version_and_rejects_duplicate_numeric_options(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.tcl_lsp_root,
+            {
+                "profiles": ["UDP"],
+                "irule": 'when CLIENT_DATA { log local0. "v=[DHCP::version]" }',
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = session.fire_event(
+                "CLIENT_DATA",
+                {"dhcpv6": {"msg_type": "REPLY"}},
+            )
+        finally:
+            session.close()
+        self.assertEqual(result["state"]["dhcp"]["version"], "6")
+        self.assertTrue(any("v=6" in line for line in result["logs"]))
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "duplicate option ID 1"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["UDP"],
+                    "irule": "when CLIENT_DATA { log local0. ok }",
+                    "packets": [{
+                        "protocol": "dhcpv4",
+                        "options": {"1": "one", "01": "duplicate"},
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_dhcpv6_packet_fields_options_and_drop(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": """
+when CLIENT_DATA {
+    log local0. "v=[DHCP::version] type=[DHCPv6::msg_type] tx=[DHCPv6::transaction_id] opt=[DHCPv6::option 18]"
+    DHCPv6::option delete 18
+    DHCPv6::drop
+}
+""",
+                "packets": [{
+                    "protocol": "dhcpv6",
+                    "source": {"address": "fe80::1", "port": 546},
+                    "destination": {"address": "ff02::1:2", "port": 547},
+                    "msg_type": "SOLICIT",
+                    "transaction_id": "010203",
+                    "hop_count": 1,
+                    "options": {"18": "relay-id", "1": "client-id"},
+                    "payload_hex": "01020304",
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        data = next(event for event in result["trace"][0]["events"] if event["event"] == "CLIENT_DATA")
+        self.assertTrue(any("v=6 type=SOLICIT tx=010203 opt=relay-id" in line for line in data["logs"]))
+        self.assertEqual(data["state"]["dhcp"]["version"], "6")
+        self.assertNotIn("18 relay-id", data["state"]["dhcpv6"]["options"])
+        self.assertTrue(result["trace"][0]["dropped"])
 
     def test_post_tmos_17_5_features_are_reported_and_rejected(self) -> None:
         with self.assertRaisesRegex(
