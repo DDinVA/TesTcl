@@ -487,7 +487,10 @@ when HTTP_REQUEST {
         self.assertNotIn(("DHCPV6", "generated-stub"), queue_buckets)
         self.assertNotIn(("FTP", "generated-stub"), queue_buckets)
         self.assertNotIn(("ICAP", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 269)
+        self.assertNotIn(("IMAP", "generated-stub"), queue_buckets)
+        self.assertNotIn(("POP3", "generated-stub"), queue_buckets)
+        self.assertNotIn(("LDAP", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 260)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1186,6 +1189,137 @@ when ICAP_RESPONSE {
         self.assertNotIn("X-Trace", response_event["state"]["icap"]["headers"])
         self.assertIn("ICAP_REQUEST", result["registered_events"])
         self.assertIn("ICAP_RESPONSE", result["registered_events"])
+
+    def test_starttls_protocol_controls_and_packet_state(self) -> None:
+        for protocol, namespace in (("imap", "IMAP"), ("pop3", "POP3"), ("ldap", "LDAP")):
+            result = self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP"],
+                    "irule": f"""
+when CLIENT_ACCEPTED {{
+    {namespace}::activation_mode require
+    {namespace}::enable
+}}
+""",
+                    "packets": [
+                        {
+                            "protocol": protocol,
+                            "source": {"address": "192.0.2.10", "port": 40000},
+                            "destination": {"address": "198.51.100.20", "port": 143},
+                            "type": "command",
+                            "command": "STARTTLS",
+                            "tls_active": False,
+                            "payload": "STARTTLS\r\n",
+                        },
+                        {
+                            "protocol": protocol,
+                            "direction": "server_to_client",
+                            "source": {"address": "198.51.100.20", "port": 143},
+                            "destination": {"address": "192.0.2.10", "port": 40000},
+                            "type": "response",
+                            "command": "OK Begin TLS negotiation now",
+                            "tls_active": True,
+                            "payload": "OK\r\n",
+                        },
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+            client_event = next(
+                event
+                for event in result["trace"][0]["events"]
+                if event["event"] == "CLIENT_DATA"
+            )
+            server_event = next(
+                event
+                for event in result["trace"][1]["events"]
+                if event["event"] == "SERVER_DATA"
+            )
+            self.assertEqual(client_event["state"][protocol]["activation_mode"], "require")
+            self.assertEqual(client_event["state"][protocol]["enabled"], "1")
+            self.assertEqual(client_event["state"][protocol]["command"], "STARTTLS")
+            self.assertEqual(client_event["state"][protocol]["tls_active"], "0")
+            self.assertEqual(client_event["state"][protocol]["payload"], "STARTTLS\r\n")
+            self.assertEqual(server_event["state"][protocol]["type"], "response")
+            self.assertEqual(server_event["state"][protocol]["tls_active"], "1")
+            self.assertEqual(
+                server_event["state"][protocol]["command"],
+                "OK Begin TLS negotiation now",
+            )
+
+        disabled = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": "when CLIENT_ACCEPTED { IMAP::disable }",
+                "packets": [
+                    {"protocol": "imap", "payload": "first"},
+                    {"protocol": "imap", "payload": "second"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(disabled["trace"][0]["ignored"], "IMAP processing is disabled")
+        self.assertTrue(disabled["trace"][0]["disabled"])
+        self.assertEqual(disabled["trace"][1]["ignored"], "IMAP processing is disabled")
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "LDAP::activation_mode is not valid during CLIENT_DATA",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP"],
+                    "irule": "when CLIENT_DATA { LDAP::activation_mode allow }",
+                    "packets": [{"protocol": "ldap", "payload": "bind"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "POP3::activation_mode requires none, allow, or require",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP"],
+                    "irule": "when CLIENT_ACCEPTED { POP3::activation_mode opportunistic }",
+                    "packets": [{"protocol": "pop3", "payload": "+OK"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "IMAP responses must be server_to_client",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP"],
+                    "irule": "when CLIENT_DATA { log local0. ok }",
+                    "packets": [{
+                        "protocol": "imap",
+                        "type": "response",
+                        "command": "bad direction",
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "LDAP command exceeds 65536 bytes",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP"],
+                    "irule": "when CLIENT_DATA { log local0. ok }",
+                    "packets": [{
+                        "protocol": "ldap",
+                        "command": "x" * 65537,
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_post_tmos_17_5_features_are_reported_and_rejected(self) -> None:
         with self.assertRaisesRegex(

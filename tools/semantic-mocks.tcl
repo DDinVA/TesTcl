@@ -543,6 +543,39 @@ namespace eval ::itest::semantic {
         variable rejected 0
     }
 
+    namespace eval ::state::imap {
+        variable activation_mode none
+        variable command ""
+        variable disabled 0
+        variable enabled 1
+        variable payload ""
+        variable payload_length 0
+        variable tls_active 0
+        variable type command
+    }
+
+    namespace eval ::state::pop3 {
+        variable activation_mode none
+        variable command ""
+        variable disabled 0
+        variable enabled 1
+        variable payload ""
+        variable payload_length 0
+        variable tls_active 0
+        variable type command
+    }
+
+    namespace eval ::state::ldap {
+        variable activation_mode none
+        variable command ""
+        variable disabled 0
+        variable enabled 1
+        variable payload ""
+        variable payload_length 0
+        variable tls_active 0
+        variable type command
+    }
+
     namespace eval ::state::icap {
         variable headers {Host icap.example.net}
         variable method REQMOD
@@ -11775,6 +11808,102 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc starttls_reset_connection {protocol} {
+        foreach {name value} {
+            activation_mode none
+            command ""
+            disabled 0
+            enabled 1
+            payload ""
+            payload_length 0
+            tls_active 0
+            type command
+        } {
+            set ::state::${protocol}::$name $value
+        }
+    }
+
+    proc starttls_prepare_event {protocol} {}
+
+    proc imap_reset_connection {} { starttls_reset_connection imap }
+    proc imap_prepare_event {} { starttls_prepare_event imap }
+    proc pop3_reset_connection {} { starttls_reset_connection pop3 }
+    proc pop3_prepare_event {} { starttls_prepare_event pop3 }
+    proc ldap_reset_connection {} { starttls_reset_connection ldap }
+    proc ldap_prepare_event {} { starttls_prepare_event ldap }
+
+    proc _starttls_require_event {allowed command_name} {
+        if {$allowed ne "ANY_EVENT" && $::itest::current_event ni $allowed} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc starttls_activation_mode_command {protocol command_name allowed args} {
+        _starttls_require_event $allowed $command_name
+        if {[llength $args] > 1} {
+            error "$command_name accepts zero or one argument"
+        }
+        set variable_name ::state::${protocol}::activation_mode
+        if {[llength $args] == 0} {
+            return [set $variable_name]
+        }
+        set mode [string tolower [lindex $args 0]]
+        if {$mode ni {none allow require}} {
+            error "$command_name requires none, allow, or require"
+        }
+        set $variable_name $mode
+        ::itest::log_decision $protocol activation_mode $mode
+        return ""
+    }
+
+    proc starttls_toggle_command {protocol command_name allowed enabled args} {
+        _starttls_require_event $allowed $command_name
+        if {[llength $args] != 0} {
+            error "$command_name takes no arguments"
+        }
+        set enabled_value [expr {$enabled ? 1 : 0}]
+        set ::state::${protocol}::enabled $enabled_value
+        set ::state::${protocol}::disabled [expr {!$enabled_value}]
+        ::itest::log_decision $protocol [expr {$enabled_value ? "enable" : "disable"}] 1
+        return ""
+    }
+
+    proc imap_activation_mode_command {args} {
+        return [starttls_activation_mode_command imap IMAP::activation_mode {ANY_EVENT} {*}$args]
+    }
+
+    proc imap_enable_command {args} {
+        return [starttls_toggle_command imap IMAP::enable {SERVER_CONNECTED CLIENT_ACCEPTED} 1 {*}$args]
+    }
+
+    proc imap_disable_command {args} {
+        return [starttls_toggle_command imap IMAP::disable {ANY_EVENT} 0 {*}$args]
+    }
+
+    proc pop3_activation_mode_command {args} {
+        return [starttls_activation_mode_command pop3 POP3::activation_mode {SERVER_CONNECTED CLIENT_ACCEPTED} {*}$args]
+    }
+
+    proc pop3_enable_command {args} {
+        return [starttls_toggle_command pop3 POP3::enable {ANY_EVENT} 1 {*}$args]
+    }
+
+    proc pop3_disable_command {args} {
+        return [starttls_toggle_command pop3 POP3::disable {ANY_EVENT} 0 {*}$args]
+    }
+
+    proc ldap_activation_mode_command {args} {
+        return [starttls_activation_mode_command ldap LDAP::activation_mode {SERVER_CONNECTED CLIENT_ACCEPTED} {*}$args]
+    }
+
+    proc ldap_enable_command {args} {
+        return [starttls_toggle_command ldap LDAP::enable {SERVER_CONNECTED CLIENT_ACCEPTED} 1 {*}$args]
+    }
+
+    proc ldap_disable_command {args} {
+        return [starttls_toggle_command ldap LDAP::disable {SERVER_CONNECTED CLIENT_ACCEPTED} 0 {*}$args]
+    }
+
     proc icap_reset_connection {} {
         set ::state::icap::headers [list Host icap.example.net]
         set ::state::icap::method REQMOD
@@ -16536,6 +16665,15 @@ foreach {name proc_name} {
     FTP::enforce_tls_session_reuse ::itest::semantic::ftp_enforce_tls_session_reuse_command
     FTP::ftps_mode ::itest::semantic::ftp_ftps_mode_command
     FTP::port ::itest::semantic::ftp_port_command
+    IMAP::activation_mode ::itest::semantic::imap_activation_mode_command
+    IMAP::disable ::itest::semantic::imap_disable_command
+    IMAP::enable ::itest::semantic::imap_enable_command
+    POP3::activation_mode ::itest::semantic::pop3_activation_mode_command
+    POP3::disable ::itest::semantic::pop3_disable_command
+    POP3::enable ::itest::semantic::pop3_enable_command
+    LDAP::activation_mode ::itest::semantic::ldap_activation_mode_command
+    LDAP::disable ::itest::semantic::ldap_disable_command
+    LDAP::enable ::itest::semantic::ldap_enable_command
     ICAP::header ::itest::semantic::icap_header_command
     ICAP::method ::itest::semantic::icap_method_command
     ICAP::status ::itest::semantic::icap_status_command

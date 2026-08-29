@@ -92,6 +92,12 @@ selection. It dispatches the client-accepted, client-data, server-connected,
 and server-data path and preserves those controls across messages on one
 connection. It does not parse FTP commands, negotiate TLS, create a data
 channel, or allocate live passive ports.
+The IMAP, POP3, and LDAP adapters model their TMOS 17.5 STARTTLS control
+commands over structured TCP lifecycle traces. Activation modes (`none`,
+`allow`, and `require`) and protocol-handler enable/disable state persist per
+connection, with bounded command text, TLS-active metadata, and payload
+snapshots. They intentionally do not parse the protocol wire formats,
+negotiate TLS, or enforce STARTTLS against a real peer.
 The ICAP adapter models the four 17.5 `ICAP::*` commands and dispatches
 `ICAP_REQUEST`/`ICAP_RESPONSE` for structured messages with an `ICAP` profile.
 It supports method, URI, status, and case-insensitive header reads and
