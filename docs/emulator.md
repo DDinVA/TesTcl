@@ -73,6 +73,16 @@ events, case-insensitive header lookup and mutation, byte-oriented payload
 collection/replacement, release, metadata getters, and deterministic
 `RTSP::respond` emissions. The packet interface is structured rather than a
 full RTSP wire parser or media-session implementation.
+With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
+deterministic per-session cache model. The adapter derives a cache key from the
+user key, host, URI, accepted encoding, and user agent; cache hits expose
+`CACHE_REQUEST` and `CACHE_RESPONSE`, while origin responses can populate the
+cache through `CACHE_UPDATE`. The `CACHE::header` surface supports
+case-insensitive value, existence, insertion, replacement, and removal, and
+the emulator exposes payload, hit/age/freshness, priority, expiry, trace, and
+enable/disable controls. This is a bounded behavioral model: it does not
+implement TMM cache eviction policy, wall-clock freshness, disk storage, or a
+live Web Accelerator service.
 
 ## HTTP API
 

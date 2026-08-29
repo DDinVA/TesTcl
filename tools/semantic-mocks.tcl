@@ -56,6 +56,10 @@ namespace eval ::itest::semantic {
     variable rtsp_collection_requested 0
     variable rtsp_collection_length 0
     variable rtsp_release_requested 0
+    variable cache_tick 0
+    variable cache_update_tick -1
+    variable cache_objects
+    array set cache_objects {}
 
     variable sip_discarded 0
     variable sip_response_requested 0
@@ -142,6 +146,26 @@ namespace eval ::itest::semantic {
         variable response_phrase ""
         variable response_headers {}
         variable response_body ""
+    }
+
+    namespace eval ::state::cache {
+        variable uri ""
+        variable useragent ""
+        variable userkey ""
+        variable accept_encoding ""
+        variable key ""
+        variable headers {}
+        variable payload ""
+        variable age 0
+        variable hits 0
+        variable fresh 0
+        variable disabled 0
+        variable forced 0
+        variable expired 0
+        variable priority 0
+        variable statskey ""
+        variable stored 0
+        variable hit 0
     }
 
     foreach tls_side {client server} {
@@ -4291,6 +4315,363 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc _cache_profile_enabled {} {
+        foreach profile $::orch::config(profiles) {
+            if {[string toupper $profile] in {CACHE WEBACCELERATION}} {
+                return 1
+            }
+        }
+        return 0
+    }
+
+    proc _cache_header_matches {actual wanted} {
+        return [string equal -nocase $actual $wanted]
+    }
+
+    proc _cache_require_event {allowed command_name} {
+        if {$::itest::current_event ni $allowed} {
+            error "$command_name is not valid during $::itest::current_event"
+        }
+    }
+
+    proc _cache_key {} {
+        set host $::state::http::request::host
+        if {$host eq ""} {
+            set host [::state::http::request::header get host]
+        }
+        set key [list $::state::cache::userkey $host \
+            $::state::cache::uri $::state::cache::accept_encoding \
+            $::state::cache::useragent]
+        set ::state::cache::key $key
+        set ::state::cache::statskey $key
+        return $key
+    }
+
+    proc _cache_response_headers {} {
+        set headers {}
+        dict for {name values} $::state::http::response::headers {
+            lappend headers $name [lindex $values 0]
+        }
+        return $headers
+    }
+
+    proc _cache_load_object {object} {
+        foreach field {uri useragent userkey accept_encoding key headers payload \
+                       age hits fresh priority statskey stored hit} {
+            if {[dict exists $object $field]} {
+                set ::state::cache::$field [dict get $object $field]
+            }
+        }
+        set ::state::cache::status [dict get $object status]
+        set ::state::cache::reason [dict get $object reason]
+    }
+
+    proc _cache_sync_http_response {} {
+        set ::state::http::response::status $::state::cache::status
+        set ::state::http::response::reason $::state::cache::reason
+        set ::state::http::response::headers {}
+        foreach {name value} $::state::cache::headers {
+            ::state::http::response::header set $name $value
+        }
+        set ::state::http::response::payload $::state::cache::payload
+    }
+
+    proc _cache_fire {event_name} {
+        if {[lsearch -exact [::itest::registered_events] $event_name] < 0} {
+            return ""
+        }
+        return [::itest::_testcl_fire_event_orig $event_name]
+    }
+
+    proc cache_flow_hook {} {
+        return ""
+    }
+
+    proc cache_install_flow_hooks {} {
+        foreach event_name {HTTP_REQUEST HTTP_RESPONSE} {
+            set handlers {}
+            if {[info exists ::itest::event_handlers($event_name)]} {
+                set handlers $::itest::event_handlers($event_name)
+            }
+            set already_installed 0
+            foreach handler $handlers {
+                if {[lindex $handler 1] eq "::itest::semantic::cache_flow_hook"} {
+                    set already_installed 1
+                    break
+                }
+            }
+            if {!$already_installed} {
+                lappend handlers [list 100000 ::itest::semantic::cache_flow_hook]
+                set ::itest::event_handlers($event_name) $handlers
+            }
+        }
+    }
+
+    proc cache_prepare_request {} {
+        variable cache_tick
+        variable cache_update_tick
+        incr cache_tick
+        set cache_update_tick -1
+        foreach {name value} {
+            uri ""
+            useragent ""
+            userkey ""
+            accept_encoding ""
+            key ""
+            headers {}
+            payload ""
+            age 0
+            hits 0
+            fresh 0
+            disabled 0
+            forced 0
+            expired 0
+            priority 0
+            statskey ""
+            stored 0
+            hit 0
+            status 200
+            reason OK
+        } {
+            set ::state::cache::$name $value
+        }
+        set ::state::cache::uri $::state::http::request::uri
+        set ::state::cache::useragent [::state::http::request::header get user-agent]
+        set ::state::cache::accept_encoding [::state::http::request::header get accept-encoding]
+        set ::state::cache::headers {}
+        set ::state::cache::statskey ""
+        set ::state::cache::key [_cache_key]
+    }
+
+    proc cache_request_event {} {
+        variable cache_objects
+        variable cache_tick
+        if {![_cache_profile_enabled]} { return 0 }
+        set key [_cache_key]
+        set found [info exists cache_objects($key)]
+        if {$found} {
+            set object $cache_objects($key)
+            set hits [expr {[dict get $object hits] + 1}]
+            dict set object hits $hits
+            set age [expr {$cache_tick - [dict get $object stored_tick]}]
+            dict set object age $age
+            set cache_objects($key) $object
+            _cache_load_object $object
+            set ::state::cache::age $age
+            set ::state::cache::hits $hits
+            set ::state::cache::fresh 1
+            set ::state::cache::hit 1
+            set ::state::cache::stored 1
+        }
+        _cache_fire CACHE_REQUEST
+        if {$found && !$::state::cache::disabled && !$::state::cache::expired} {
+            _cache_load_object $cache_objects($key)
+            _cache_fire CACHE_RESPONSE
+            _cache_sync_http_response
+            set ::state::http::response_committed 1
+            if {$::state::cache::expired} {
+                unset -nocomplain cache_objects($key)
+            }
+            return 1
+        }
+        if {$found && $::state::cache::expired} {
+            unset -nocomplain cache_objects($key)
+        }
+        return 0
+    }
+
+    proc cache_update_event {} {
+        variable cache_objects
+        variable cache_tick
+        variable cache_update_tick
+        if {![_cache_profile_enabled]} { return 0 }
+        if {$cache_update_tick == $cache_tick} { return 0 }
+        set cache_update_tick $cache_tick
+        set method [string toupper $::state::http::request::method]
+        if {$method ni {GET HEAD} && !$::state::cache::forced} { return 0 }
+        set key [_cache_key]
+        set ::state::cache::key $key
+        set ::state::cache::headers [_cache_response_headers]
+        set ::state::cache::payload $::state::http::response::payload
+        set ::state::cache::status $::state::http::response::status
+        set ::state::cache::reason $::state::http::response::reason
+        set ::state::cache::age 0
+        set ::state::cache::hits 0
+        set ::state::cache::fresh 1
+        set ::state::cache::hit 0
+        set ::state::cache::stored 0
+        set ::state::cache::expired 0
+        _cache_fire CACHE_UPDATE
+        if {$::state::cache::disabled || $::state::cache::expired} { return 0 }
+        set cache_objects($key) [dict create \
+            uri $::state::cache::uri \
+            useragent $::state::cache::useragent \
+            userkey $::state::cache::userkey \
+            accept_encoding $::state::cache::accept_encoding \
+            key $key headers $::state::cache::headers \
+            payload $::state::cache::payload \
+            status $::state::cache::status reason $::state::cache::reason \
+            age 0 hits 0 fresh 1 priority $::state::cache::priority \
+            statskey $::state::cache::statskey stored 1 hit 0 \
+            stored_tick $cache_tick]
+        set ::state::cache::stored 1
+        return 1
+    }
+
+    proc cache_header_command {args} {
+        _cache_require_event {CACHE_RESPONSE} CACHE::header
+        if {[llength $args] == 0} { error "CACHE::header requires a subcommand" }
+        set subcommand [string tolower [lindex $args 0]]
+        set headers $::state::cache::headers
+        switch -exact -- $subcommand {
+            value {
+                if {[llength $args] != 2} { error "CACHE::header value requires a name" }
+                foreach {name value} $headers {
+                    if {[_cache_header_matches $name [lindex $args 1]]} { return $value }
+                }
+                return ""
+            }
+            exists {
+                if {[llength $args] ni {2 3}} { error "CACHE::header exists requires a name and optional value" }
+                set wanted [lindex $args 1]
+                foreach {name value} $headers {
+                    if {[_cache_header_matches $name $wanted] &&
+                        ([llength $args] == 2 || $value eq [lindex $args 2])} { return 1 }
+                }
+                return 0
+            }
+            insert {
+                if {[llength $args] != 3} { error "CACHE::header insert requires name and value" }
+                lappend headers [lindex $args 1] [lindex $args 2]
+            }
+            remove {
+                if {[llength $args] ni {2 3}} { error "CACHE::header remove requires a name and optional value" }
+                set updated {}
+                foreach {name value} $headers {
+                    set remove [expr {[_cache_header_matches $name [lindex $args 1]] &&
+                        ([llength $args] == 2 || $value eq [lindex $args 2])}]
+                    if {!$remove} { lappend updated $name $value }
+                }
+                set headers $updated
+            }
+            replace {
+                if {[llength $args] != 3} { error "CACHE::header replace requires name and value" }
+                set updated {}
+                set replaced 0
+                foreach {name value} $headers {
+                    if {[_cache_header_matches $name [lindex $args 1]]} {
+                        if {!$replaced} {
+                            lappend updated [lindex $args 1] [lindex $args 2]
+                            set replaced 1
+                        }
+                    } else { lappend updated $name $value }
+                }
+                if {!$replaced} { lappend updated [lindex $args 1] [lindex $args 2] }
+                set headers $updated
+            }
+            default { error "unsupported CACHE::header subcommand $subcommand" }
+        }
+        set ::state::cache::headers $headers
+        return ""
+    }
+
+    proc cache_simple_set {field command_name args} {
+        if {[llength $args] != 1} { error "$command_name requires one value" }
+        set ::state::cache::$field [lindex $args 0]
+        return ""
+    }
+
+    proc cache_noarg {field command_name args} {
+        if {[llength $args] != 0} { error "$command_name takes no arguments" }
+        return [set ::state::cache::$field]
+    }
+
+    proc cache_disable_command {args} {
+        if {[llength $args] != 0} { error "CACHE::disable takes no arguments" }
+        set ::state::cache::disabled 1
+        return ""
+    }
+
+    proc cache_enable_command {args} {
+        if {[llength $args] != 0} { error "CACHE::enable takes no arguments" }
+        set ::state::cache::disabled 0
+        set ::state::cache::forced 1
+        return ""
+    }
+
+    proc cache_expire_command {args} {
+        if {[llength $args] != 0} { error "CACHE::expire takes no arguments" }
+        set ::state::cache::expired 1
+        return ""
+    }
+
+    proc cache_priority_command {args} {
+        if {[llength $args] != 1 || ![string is integer -strict [lindex $args 0]] ||
+            [lindex $args 0] < 1 || [lindex $args 0] > 10} {
+            error "CACHE::priority requires an integer from 1 through 10"
+        }
+        set ::state::cache::priority [lindex $args 0]
+        return ""
+    }
+
+    proc cache_trace_command {args} {
+        variable cache_objects
+        if {[llength $args] > 1} { error "CACHE::trace accepts an optional maximum" }
+        set maximum [array size cache_objects]
+        if {[llength $args] == 1} {
+            set maximum [lindex $args 0]
+            if {![string is integer -strict $maximum] || $maximum < 0} {
+                error "CACHE::trace maximum must be a non-negative integer"
+            }
+        }
+        set output {}
+        set index 0
+        foreach key [lsort [array names cache_objects]] {
+            if {$index >= $maximum} { break }
+            lappend output $key
+            incr index
+        }
+        return $output
+    }
+
+    proc cache_snapshot {} {
+        variable cache_objects
+        return [list uri $::state::cache::uri useragent $::state::cache::useragent \
+            userkey $::state::cache::userkey accept_encoding $::state::cache::accept_encoding \
+            key $::state::cache::key age $::state::cache::age hits $::state::cache::hits \
+            fresh $::state::cache::fresh disabled $::state::cache::disabled \
+            forced $::state::cache::forced expired $::state::cache::expired \
+            priority $::state::cache::priority statskey $::state::cache::statskey \
+            stored $::state::cache::stored hit $::state::cache::hit \
+            object_count [array size cache_objects]]
+    }
+
+    proc cache_accept_encoding_command {args} {
+        return [cache_simple_set accept_encoding CACHE::accept_encoding {*}$args]
+    }
+    proc cache_age_command {args} { return [cache_noarg age CACHE::age {*}$args] }
+    proc cache_disabled_command {args} {
+        return [cache_noarg disabled CACHE::disabled {*}$args]
+    }
+    proc cache_fresh_command {args} { return [cache_noarg fresh CACHE::fresh {*}$args] }
+    proc cache_headers_command {args} {
+        return [cache_noarg headers CACHE::headers {*}$args]
+    }
+    proc cache_hits_command {args} { return [cache_noarg hits CACHE::hits {*}$args] }
+    proc cache_payload_command {args} {
+        return [cache_noarg payload CACHE::payload {*}$args]
+    }
+    proc cache_statskey_command {args} {
+        return [cache_noarg statskey CACHE::statskey {*}$args]
+    }
+    proc cache_uri_command {args} { return [cache_simple_set uri CACHE::uri {*}$args] }
+    proc cache_useragent_command {args} {
+        return [cache_simple_set useragent CACHE::useragent {*}$args]
+    }
+    proc cache_userkey_command {args} {
+        return [cache_simple_set userkey CACHE::userkey {*}$args]
+    }
+
     proc udp_reset_connection {} {
         namespace eval ::state::udp {
             variable payload ""
@@ -7502,9 +7883,15 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                 set ::state::http::collect_response 0
             }
         }
+        if {$gated && $event_name eq "HTTP_REQUEST" && [::itest::semantic::_cache_profile_enabled]} {
+            ::itest::semantic::cache_prepare_request
+        }
         set result [uplevel 1 [list ::itest::_testcl_fire_event_orig $event_name]]
         if {$gated && $event_name eq "HTTP_REQUEST"} {
             ::itest::semantic::_maybe_fire_lb_failed
+            ::itest::semantic::cache_request_event
+        } elseif {$gated && $event_name eq "HTTP_RESPONSE"} {
+            ::itest::semantic::cache_update_event
         }
         return $result
     }
@@ -7731,6 +8118,23 @@ foreach {name proc_name} {
     RTSP::status ::itest::semantic::rtsp_status_command
     RTSP::uri ::itest::semantic::rtsp_uri_command
     RTSP::version ::itest::semantic::rtsp_version_command
+    CACHE::accept_encoding ::itest::semantic::cache_accept_encoding_command
+    CACHE::age ::itest::semantic::cache_age_command
+    CACHE::disable ::itest::semantic::cache_disable_command
+    CACHE::disabled ::itest::semantic::cache_disabled_command
+    CACHE::enable ::itest::semantic::cache_enable_command
+    CACHE::expire ::itest::semantic::cache_expire_command
+    CACHE::fresh ::itest::semantic::cache_fresh_command
+    CACHE::header ::itest::semantic::cache_header_command
+    CACHE::headers ::itest::semantic::cache_headers_command
+    CACHE::hits ::itest::semantic::cache_hits_command
+    CACHE::payload ::itest::semantic::cache_payload_command
+    CACHE::priority ::itest::semantic::cache_priority_command
+    CACHE::statskey ::itest::semantic::cache_statskey_command
+    CACHE::trace ::itest::semantic::cache_trace_command
+    CACHE::uri ::itest::semantic::cache_uri_command
+    CACHE::useragent ::itest::semantic::cache_useragent_command
+    CACHE::userkey ::itest::semantic::cache_userkey_command
     UDP::client_port ::itest::semantic::udp_client_port_command
     UDP::debug_queue ::itest::semantic::udp_debug_queue_command
     UDP::drop ::itest::semantic::udp_drop_command

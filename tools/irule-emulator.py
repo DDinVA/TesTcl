@@ -456,6 +456,25 @@ EVENT_STATE_FIELDS = {
         "response_headers",
         "response_body",
     },
+    "cache": {
+        "uri",
+        "useragent",
+        "userkey",
+        "accept_encoding",
+        "key",
+        "headers",
+        "payload",
+        "age",
+        "hits",
+        "fresh",
+        "disabled",
+        "forced",
+        "expired",
+        "priority",
+        "statskey",
+        "stored",
+        "hit",
+    },
 }
 EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
@@ -474,6 +493,7 @@ EVENT_STATE_NAMESPACES = {
     "udp": "::state::udp",
     "tcp": "::state::tcp",
     "rtsp": "::state::rtsp",
+    "cache": "::state::cache",
 }
 
 
@@ -871,6 +891,23 @@ SEMANTIC_MOCK_COMMANDS = {
     "RTSP::status",
     "RTSP::uri",
     "RTSP::version",
+    "CACHE::accept_encoding",
+    "CACHE::age",
+    "CACHE::disable",
+    "CACHE::disabled",
+    "CACHE::enable",
+    "CACHE::expire",
+    "CACHE::fresh",
+    "CACHE::header",
+    "CACHE::headers",
+    "CACHE::hits",
+    "CACHE::payload",
+    "CACHE::priority",
+    "CACHE::statskey",
+    "CACHE::trace",
+    "CACHE::uri",
+    "CACHE::useragent",
+    "CACHE::userkey",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -1345,12 +1382,20 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         value not in {"0", "1"} for value in psm_parts[1::2]
     ):
         raise EmulatorInputError("invalid PSM state")
+    cache_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::cache_snapshot"))
+    if len(cache_parts) % 2:
+        raise EmulatorInputError("invalid cache state")
+    cache = {
+        name: value
+        for name, value in zip(cache_parts[::2], cache_parts[1::2])
+    }
     return {
         "stats": stats,
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "table": table_entries,
         "psm": psm,
+        "cache": cache,
     }
 
 
@@ -2138,6 +2183,9 @@ PACKET_EVENT_ADAPTERS = {
     "RTSP_REQUEST_DATA": "collected RTSP request payload",
     "RTSP_RESPONSE": "RTSP response ingress",
     "RTSP_RESPONSE_DATA": "collected RTSP response payload",
+    "CACHE_REQUEST": "cache lookup request",
+    "CACHE_RESPONSE": "cached response delivery",
+    "CACHE_UPDATE": "cache object update",
     "DIAMETER_INGRESS": "Diameter client-side message ingress",
     "DIAMETER_EGRESS": "Diameter message egress",
     "DIAMETER_RETRANSMISSION": "Diameter request retransmission",
@@ -6121,6 +6169,11 @@ class EmulatorSession:
             with backend_session as session:
                 _install_runtime_shims(session)
                 self._registered_events = session.load_irule(self._source)
+                if any(
+                    str(profile).upper() in {"CACHE", "WEBACCELERATION"}
+                    for profile in self._profiles
+                ):
+                    session.eval_tcl("::itest::semantic::cache_install_flow_hooks")
                 for name, members in self._pools.items():
                     session.add_pool(name, members)
                 session.eval_tcl("::itest::semantic::resolver_clear")
@@ -6316,7 +6369,7 @@ class EmulatorSession:
         for layer, values in state.items():
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "rtsp"} and field in {"payload", "message", "authenticator"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "rtsp", "cache"} and field in {"payload", "message", "authenticator"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the

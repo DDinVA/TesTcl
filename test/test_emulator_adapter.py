@@ -1808,6 +1808,139 @@ when RTSP_RESPONSE_DATA {
         self.assertEqual(response_entry["response"]["body"], "blocked")
         self.assertEqual(response["emitted"][0]["protocol"], "rtsp")
 
+    def test_cache_profile_replays_hits_and_exposes_cache_controls(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "CACHE"],
+                "irule": """
+when HTTP_REQUEST {
+    CACHE::userkey tenant-a
+    CACHE::accept_encoding gzip
+    CACHE::uri /canonical-asset.js
+    CACHE::useragent cache-test-agent
+    CACHE::priority 5
+}
+when CACHE_REQUEST {
+    log local0. "lookup age=[CACHE::age] hits=[CACHE::hits] fresh=[CACHE::fresh]"
+}
+when CACHE_RESPONSE {
+    if {[CACHE::header exists content-type]} {
+        log local0. "hit payload=[CACHE::payload] headers=[CACHE::headers] type=[CACHE::header value CONTENT-TYPE]"
+    }
+    CACHE::header replace X-Cache HIT
+    CACHE::header insert X-Temporary remove-me
+    CACHE::header remove X-Temporary
+    log local0. "cache-header=[CACHE::header value x-cache] exists=[CACHE::header exists X-CACHE HIT] removed=[CACHE::header exists X-Temporary] trace=[CACHE::trace 1]"
+}
+when CACHE_UPDATE {
+    log local0. "update stats=[CACHE::statskey] uri=[CACHE::uri] ua=[CACHE::useragent] encoding=[CACHE::accept_encoding] priority=[CACHE::priority]"
+}
+""",
+                "requests": [
+                    {
+                        "method": "GET",
+                        "host": "cache.example",
+                        "uri": "/asset.js",
+                        "response_headers": {"Content-Type": "application/javascript"},
+                        "response_body": "console.log(1)",
+                    },
+                    {
+                        "method": "GET",
+                        "host": "cache.example",
+                        "uri": "/asset.js",
+                        "response_status": 503,
+                        "response_body": "origin-unavailable",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        first, second = result["results"]
+        self.assertEqual(first["response"]["body"], "console.log(1)")
+        self.assertEqual(second["response"]["body"], "console.log(1)")
+        self.assertEqual(second["response"]["headers"]["x-cache"], "HIT")
+        self.assertIn("CACHE_REQUEST", first["events_fired"])
+        self.assertIn("CACHE_UPDATE", first["events_fired"])
+        self.assertIn("CACHE_RESPONSE", second["events_fired"])
+        self.assertNotIn("HTTP_RESPONSE", second["events_fired"])
+        self.assertTrue(any("lookup age=1 hits=1 fresh=1" in log for log in second["logs"]))
+        self.assertTrue(any("type=application/javascript" in log for log in second["logs"]))
+        self.assertTrue(any("cache-header=HIT exists=1 removed=0" in log for log in second["logs"]))
+        self.assertEqual(first["semantic"]["cache"]["uri"], "/canonical-asset.js")
+        self.assertEqual(first["semantic"]["cache"]["useragent"], "cache-test-agent")
+        self.assertEqual(first["semantic"]["cache"]["accept_encoding"], "gzip")
+        self.assertEqual(first["semantic"]["cache"]["priority"], "5")
+        self.assertEqual(second["semantic"]["cache"]["object_count"], "1")
+
+        disabled = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "CACHE"],
+                "irule": "when HTTP_REQUEST { CACHE::disable }",
+                "requests": [
+                    {
+                        "uri": "/private",
+                        "response_body": "private",
+                    },
+                    {
+                        "uri": "/private",
+                        "response_body": "private-again",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertNotIn("CACHE_RESPONSE", disabled["results"][1]["events_fired"])
+        self.assertEqual(disabled["results"][1]["response"]["body"], "private-again")
+        self.assertEqual(disabled["results"][0]["semantic"]["cache"]["disabled"], "1")
+
+        revalidated = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "CACHE"],
+                "irule": """
+when CACHE_REQUEST {
+    if {[CACHE::hits] > 1} { CACHE::expire }
+}
+when CACHE_RESPONSE { }
+when CACHE_UPDATE { }
+""",
+                "requests": [
+                    {"uri": "/revalidate", "response_body": "version-1"},
+                    {"uri": "/revalidate", "response_body": "origin-not-used"},
+                    {"uri": "/revalidate", "response_body": "version-2"},
+                    {"uri": "/revalidate", "response_body": "origin-not-used-again"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            [entry["response"]["body"] for entry in revalidated["results"]],
+            ["version-1", "version-1", "version-2", "version-2"],
+        )
+        self.assertIn("CACHE_RESPONSE", revalidated["results"][1]["events_fired"])
+        self.assertNotIn("CACHE_RESPONSE", revalidated["results"][2]["events_fired"])
+        self.assertIn("CACHE_UPDATE", revalidated["results"][2]["events_fired"])
+        self.assertIn("CACHE_RESPONSE", revalidated["results"][3]["events_fired"])
+
+        forced_post = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "CACHE"],
+                "irule": """
+when HTTP_REQUEST { CACHE::enable }
+when CACHE_RESPONSE { }
+when CACHE_UPDATE { }
+""",
+                "requests": [
+                    {"method": "POST", "uri": "/forced", "response_body": "post-1"},
+                    {"method": "POST", "uri": "/forced", "response_body": "origin-not-used"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(forced_post["results"][1]["response"]["body"], "post-1")
+        self.assertIn("CACHE_RESPONSE", forced_post["results"][1]["events_fired"])
+        self.assertEqual(forced_post["results"][1]["semantic"]["cache"]["forced"], "1")
+
     def test_websocket_processing_honors_collection_thresholds_and_drops(self) -> None:
         threshold = self.adapter.run_scenario(
             {

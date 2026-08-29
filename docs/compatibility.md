@@ -58,6 +58,14 @@ collection and replacement, release, metadata getters, and deterministic
 response emission. RTSP currently requires structured packets and the RTSP
 profile; it does not parse raw RTSP wire messages or implement media transport,
 session negotiation, or interleaved RTP.
+The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
+HTTP cache model covering all 17 catalogued `CACHE::` commands and the
+`CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,
+headers, payloads, hits, age, freshness, expiry, priorities, and forced or
+disabled storage are represented in semantic state; `CACHE::header` matching
+is case-insensitive. This does not claim full TMM cache fidelity: eviction,
+wall-clock freshness, disk persistence, cache policies, and live Web
+Accelerator behavior remain outside the emulator.
 RADIUS packet handling validates standard and Vendor-Specific attributes and
 exposes the four TMOS 17.5 AAA request/response events. It intentionally does
 not implement shared-secret cryptography, password obfuscation, live AAA
