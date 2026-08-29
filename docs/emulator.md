@@ -808,6 +808,44 @@ submission state; it does not contact or reproduce the external TAP service.
 See the F5 [TAP namespace](https://clouddocs.f5.com/api/irules/TAP.html)
 reference.
 
+### HA active/standby state
+
+`HA::status active|standby` compares the requested role with
+`event state.ha.status`, which defaults to `active`. This supports rules that
+avoid sideband or HSL work on a standby unit:
+
+```json
+{
+  "event": "CLIENT_ACCEPTED",
+  "state": {"ha": {"status": "standby"}}
+}
+```
+
+The semantic mock validates both roles and returns Tcl boolean values (`1` or
+`0`). See the F5 [`HA::status`](https://clouddocs.f5.com/api/irules/HA__status.html)
+reference.
+
+### DS-Lite and BIGPROTO controls
+
+`DSLITE::remote_addr` reads the scenario connection's `remote_addr`. The
+`BIGPROTO::enable_fix_reset` setter accepts Tcl boolean values and exposes its
+canonical state as `bigproto.enable_fix_reset`, allowing FIX-flow rules to
+exercise the reset decision without ePVA hardware:
+
+```json
+{
+  "event": "CLIENT_ACCEPTED",
+  "state": {
+    "connection": {"remote_addr": "192.0.2.55"},
+    "bigproto": {"enable_fix_reset": false}
+  }
+}
+```
+
+See the F5 [`DSLITE::remote_addr`](https://clouddocs.f5.com/api/irules/DSLITE__remote_addr.html)
+and [`BIGPROTO::enable_fix_reset`](https://clouddocs.f5.com/api/irules/BIGPROTO__enable_fix_reset.html)
+references.
+
 ### FLOWTABLE query inputs
 
 The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,

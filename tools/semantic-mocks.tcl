@@ -1089,6 +1089,14 @@ namespace eval ::itest::semantic {
         variable insight {}
     }
 
+    namespace eval ::state::ha {
+        variable status active
+    }
+
+    namespace eval ::state::bigproto {
+        variable enable_fix_reset 1
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -5939,6 +5947,40 @@ namespace eval ::itest::semantic {
             error "TAP insight_requested state must be boolean"
         }
         return $::state::tap::insight_requested
+    }
+
+    proc ha_status_command {args} {
+        if {$::itest::current_event eq "RULE_INIT"} {
+            error "HA::status is not valid in RULE_INIT"
+        }
+        if {[llength $args] != 1} {
+            error "HA::status requires active or standby"
+        }
+        set requested [lindex $args 0]
+        if {$requested ni {active standby}} {
+            error "HA::status argument must be active or standby"
+        }
+        if {$::state::ha::status ni {active standby}} {
+            error "HA status state must be active or standby"
+        }
+        return [expr {$requested eq $::state::ha::status}]
+    }
+
+    proc dslite_remote_addr_command {args} {
+        return [_connection_value remote_addr {*}$args]
+    }
+
+    proc bigproto_enable_fix_reset_command {args} {
+        if {[llength $args] != 1} {
+            error "BIGPROTO::enable_fix_reset requires a boolean"
+        }
+        set value [lindex $args 0]
+        if {![string is boolean -strict $value]} {
+            error "BIGPROTO::enable_fix_reset requires a boolean"
+        }
+        set ::state::bigproto::enable_fix_reset [expr {$value ? 1 : 0}]
+        ::itest::log_decision bigproto enable_fix_reset $::state::bigproto::enable_fix_reset
+        return ""
     }
 
     proc diameter_reset_connection {} {
@@ -20050,6 +20092,9 @@ foreach {original replacement} {
     tap_insight tap_insight_command
     tap_insight_requested tap_insight_requested_command
     tap_score tap_score_command
+    ha_status ha_status_command
+    dslite_remote_addr dslite_remote_addr_command
+    bigproto_enable_fix_reset bigproto_enable_fix_reset_command
     psc_aaa_reporting_interval psc_aaa_reporting_interval_command
     psc_attr psc_attr_command
     psc_calling_id psc_calling_id_command
@@ -20715,6 +20760,9 @@ foreach {name proc_name} {
     TAP::insight ::itest::semantic::tap_insight_command
     TAP::insight_requested ::itest::semantic::tap_insight_requested_command
     TAP::score ::itest::semantic::tap_score_command
+    HA::status ::itest::semantic::ha_status_command
+    DSLITE::remote_addr ::itest::semantic::dslite_remote_addr_command
+    BIGPROTO::enable_fix_reset ::itest::semantic::bigproto_enable_fix_reset_command
     PSC::aaa_reporting_interval ::itest::semantic::psc_aaa_reporting_interval_command
     PSC::attr ::itest::semantic::psc_attr_command
     PSC::calling_id ::itest::semantic::psc_calling_id_command

@@ -650,6 +650,8 @@ EVENT_STATE_FIELDS = {
         "config",
         "insight",
     },
+    "ha": {"status"},
+    "bigproto": {"enable_fix_reset"},
     "diameter": {
         "type",
         "version",
@@ -1030,6 +1032,8 @@ EVENT_STATE_NAMESPACES = {
     "wam": "::state::wam",
     "vdi": "::state::vdi",
     "tap": "::state::tap",
+    "ha": "::state::ha",
+    "bigproto": "::state::bigproto",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
     "message": "::state::message",
@@ -1613,6 +1617,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "TAP::insight",
     "TAP::insight_requested",
     "TAP::score",
+    "HA::status",
+    "DSLITE::remote_addr",
+    "BIGPROTO::enable_fix_reset",
     "DIAMETER::avp",
     "DIAMETER::command",
     "DIAMETER::disconnect",
@@ -5532,6 +5539,19 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
                         "event state tmm.cmp_groups must be a non-empty array of non-negative integers"
                     )
                 layer_values[field] = " ".join(str(item) for item in value)
+            elif layer == "bigproto" and field == "enable_fix_reset":
+                if isinstance(value, bool):
+                    layer_values[field] = "1" if value else "0"
+                elif isinstance(value, str) and value.lower() in {
+                    "0", "1", "true", "false", "yes", "no", "on", "off"
+                }:
+                    layer_values[field] = "1" if value.lower() in {"1", "true", "yes", "on"} else "0"
+                elif isinstance(value, int) and value in {0, 1}:
+                    layer_values[field] = str(value)
+                else:
+                    raise EmulatorInputError(
+                        "event state bigproto.enable_fix_reset must be a Tcl boolean"
+                    )
             elif isinstance(value, bool):
                 layer_values[field] = "1" if value else "0"
             elif isinstance(value, (str, int, float)):

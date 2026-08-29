@@ -785,6 +785,113 @@ when TAP_REQUEST {
         finally:
             session.close()
 
+    def test_ha_status_reads_active_or_standby_scenario_state(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "irule": """
+when CLIENT_ACCEPTED {
+    log local0. "active=[HA::status active] standby=[HA::status standby]"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            active = session.fire_event("CLIENT_ACCEPTED", {"ha": {"status": "active"}})
+            self.assertTrue(active["fired"])
+            self.assertEqual(active["state"]["ha"]["status"], "active")
+            self.assertTrue(any("active=1 standby=0" in entry for entry in active["logs"]))
+
+            standby = session.fire_event("CLIENT_ACCEPTED", {"ha": {"status": "standby"}})
+            self.assertTrue(standby["fired"])
+            self.assertEqual(standby["state"]["ha"]["status"], "standby")
+            self.assertTrue(any("active=0 standby=1" in entry for entry in standby["logs"]))
+
+            invalid = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {"irule": "when CLIENT_ACCEPTED { HA::status unknown }"},
+                allow_irule_file=False,
+                allow_requests=False,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError,
+                    "HA::status argument must be active or standby",
+                ):
+                    invalid.fire_event("CLIENT_ACCEPTED", {"ha": {"status": "active"}})
+            finally:
+                invalid.close()
+
+            init_only = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {"irule": "when RULE_INIT { HA::status active }"},
+                allow_irule_file=False,
+                allow_requests=False,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError,
+                    "HA::status is not valid in RULE_INIT",
+                ):
+                    init_only.fire_event("RULE_INIT", {"ha": {"status": "active"}})
+            finally:
+                init_only.close()
+        finally:
+            session.close()
+
+    def test_dslite_remote_addr_and_bigproto_reset_control(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "irule": """
+when CLIENT_ACCEPTED {
+    set remote [DSLITE::remote_addr]
+    BIGPROTO::enable_fix_reset false
+    log local0. "remote=$remote reset=[set ::state::bigproto::enable_fix_reset]"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event(
+                "CLIENT_ACCEPTED",
+                {"connection": {"remote_addr": "192.0.2.55"}, "bigproto": {}},
+            )
+            self.assertTrue(result["fired"])
+            self.assertEqual(result["state"]["connection"]["remote_addr"], "192.0.2.55")
+            self.assertEqual(result["state"]["bigproto"]["enable_fix_reset"], "0")
+            self.assertTrue(any("remote=192.0.2.55 reset=0" in entry for entry in result["logs"]))
+
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "event state bigproto.enable_fix_reset must be a Tcl boolean",
+            ):
+                session.fire_event(
+                    "CLIENT_ACCEPTED",
+                    {"connection": {"remote_addr": "192.0.2.55"}, "bigproto": {"enable_fix_reset": "maybe"}},
+                )
+
+            invalid = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {"irule": "when CLIENT_ACCEPTED { BIGPROTO::enable_fix_reset maybe }"},
+                allow_irule_file=False,
+                allow_requests=False,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError,
+                    "BIGPROTO::enable_fix_reset requires a boolean",
+                ):
+                    invalid.fire_event("CLIENT_ACCEPTED", {"bigproto": {}})
+            finally:
+                invalid.close()
+        finally:
+            session.close()
+
     def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1392,7 +1499,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
         self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 158)
+        self.assertEqual(queue["command_count"], 155)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
