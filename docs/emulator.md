@@ -101,7 +101,9 @@ congestion control.
 Structured DHCPv4 and DHCPv6 packet traces expose the shared
 `DHCP::version` reader plus the version-specific header and option commands.
 Use `protocol: "dhcpv4"` or `protocol: "dhcpv6"` with structured fields and
-an optional `options` object. `DHCPv4::option` supports lookup/set while
+an optional `options` object. DHCPv4 exposes the hardware type through
+`DHCPv4::htype` (default `1`, Ethernet) alongside the other header readers.
+`DHCPv4::option` supports lookup/set while
 `DHCPv6::option` also supports delete; drop and reject actions are returned in
 the trace. The adapter fires the normal client/server data path and preserves
 option mutations as deterministic state. It does not parse raw DHCP wire

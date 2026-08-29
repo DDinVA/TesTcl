@@ -572,6 +572,7 @@ namespace eval ::itest::semantic {
         variable giaddr 0.0.0.0
         variable hlen 6
         variable hops 0
+        variable htype 1
         variable len 0
         variable opcode 1
         variable options {}
@@ -15661,6 +15662,7 @@ namespace eval ::itest::semantic {
             variable giaddr 0.0.0.0
             variable hlen 6
             variable hops 0
+            variable htype 1
             variable len 0
             variable opcode 1
             variable options {}
@@ -15762,6 +15764,7 @@ namespace eval ::itest::semantic {
     proc dhcpv4_giaddr_command {args} { return [dhcp_field_command v4 giaddr {*}$args] }
     proc dhcpv4_hlen_command {args} { return [dhcp_field_command v4 hlen {*}$args] }
     proc dhcpv4_hops_command {args} { return [dhcp_field_command v4 hops {*}$args] }
+    proc dhcpv4_htype_command {args} { return [dhcp_field_command v4 htype {*}$args] }
     proc dhcpv4_len_command {args} { return [dhcp_field_command v4 len {*}$args] }
     proc dhcpv4_opcode_command {args} { return [dhcp_field_command v4 opcode {*}$args] }
     proc dhcpv4_option_command {args} { return [dhcp_option_command v4 {*}$args] }
@@ -22510,6 +22513,7 @@ foreach {name proc_name} {
     DHCPv4::giaddr ::itest::semantic::dhcpv4_giaddr_command
     DHCPv4::hlen ::itest::semantic::dhcpv4_hlen_command
     DHCPv4::hops ::itest::semantic::dhcpv4_hops_command
+    DHCPv4::htype ::itest::semantic::dhcpv4_htype_command
     DHCPv4::len ::itest::semantic::dhcpv4_len_command
     DHCPv4::opcode ::itest::semantic::dhcpv4_opcode_command
     DHCPv4::option ::itest::semantic::dhcpv4_option_command

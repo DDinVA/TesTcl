@@ -1858,7 +1858,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("ILX", "generated-stub"), queue_buckets)
         self.assertNotIn(("NSH", "generated-stub"), queue_buckets)
         self.assertNotIn(("SIPALG", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 86)
+        self.assertEqual(queue["command_count"], 85)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -2319,7 +2319,7 @@ when CLIENT_ACCEPTED {
                 "profiles": ["UDP"],
                 "irule": """
 when CLIENT_DATA {
-    log local0. "v=[DHCP::version] type=[DHCPv4::type] xid=[DHCPv4::xid] ch=[DHCPv4::chaddr] o=[DHCPv4::option 53]"
+    log local0. "v=[DHCP::version] type=[DHCPv4::type] htype=[DHCPv4::htype] xid=[DHCPv4::xid] ch=[DHCPv4::chaddr] o=[DHCPv4::option 53]"
     DHCPv4::option 12 updated-host
     DHCPv4::reject
 }
@@ -2329,6 +2329,7 @@ when CLIENT_DATA {
                     "source": {"address": "0.0.0.0", "port": 68},
                     "destination": {"address": "255.255.255.255", "port": 67},
                     "type": "DISCOVER",
+                    "htype": 1,
                     "xid": 42,
                     "chaddr": "00:11:22:33:44:55",
                     "options": {"053": "DISCOVER", "012": "client host"},
@@ -2338,12 +2339,41 @@ when CLIENT_DATA {
             tcl_lsp_root=self.tcl_lsp_root,
         )
         data = next(event for event in result["trace"][0]["events"] if event["event"] == "CLIENT_DATA")
-        self.assertTrue(any("v=4 type=DISCOVER xid=42 ch=00:11:22:33:44:55 o=DISCOVER" in line
+        self.assertTrue(any("v=4 type=DISCOVER htype=1 xid=42 ch=00:11:22:33:44:55 o=DISCOVER" in line
                             for line in data["logs"]))
         self.assertEqual(data["state"]["dhcp"]["version"], "4")
         self.assertIn("12 updated-host", data["state"]["dhcpv4"]["options"])
         self.assertTrue(result["trace"][0]["rejected"])
         self.assertEqual(result["trace"][0]["drop_reason"], "dhcpv4 reject")
+
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        self.assertEqual(usage["DHCPv4::htype"]["runtime_status"], "semantic-mock")
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "packet 0 htype must be an integer from 0 to 255",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["UDP"],
+                    "irule": "when CLIENT_DATA { log local0. [DHCPv4::htype] }",
+                    "packets": [{"protocol": "dhcpv4", "htype": 256}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "packet 0 htype must be a non-negative integer",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["UDP"],
+                    "irule": "when CLIENT_DATA { log local0. [DHCPv4::htype] }",
+                    "packets": [{"protocol": "dhcpv4", "htype": True}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_dhcp_direct_event_infers_version_and_rejects_duplicate_numeric_options(self) -> None:
         session = self.adapter.EmulatorSession(
@@ -2365,6 +2395,60 @@ when CLIENT_DATA {
             session.close()
         self.assertEqual(result["state"]["dhcp"]["version"], "6")
         self.assertTrue(any("v=6" in line for line in result["logs"]))
+
+        session = self.adapter.EmulatorSession(
+            self.tcl_lsp_root,
+            {
+                "profiles": ["UDP"],
+                "irule": 'when CLIENT_DATA { log local0. "htype=[DHCPv4::htype]" }',
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = session.fire_event("CLIENT_DATA", {"dhcpv4": {"htype": 255}})
+        finally:
+            session.close()
+        self.assertTrue(any("htype=255" in line for line in result["logs"]))
+        self.assertEqual(result["state"]["dhcpv4"]["htype"], "255")
+
+        default_result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": 'when CLIENT_DATA { log local0. "htype=[DHCPv4::htype]" }',
+                "packets": [
+                    {"protocol": "dhcpv4", "htype": 255},
+                    {"protocol": "dhcpv4"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        default_data_events = [
+            event
+            for packet_trace in default_result["trace"]
+            for event in packet_trace["events"]
+            if event["event"] == "CLIENT_DATA"
+        ]
+        self.assertTrue(
+            any("htype=255" in line for line in default_data_events[0]["logs"])
+        )
+        self.assertTrue(
+            any("htype=1" in line for line in default_data_events[1]["logs"])
+        )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "DHCPv4::htype takes no arguments",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["UDP"],
+                    "irule": "when CLIENT_DATA { log local0. [DHCPv4::htype 1] }",
+                    "packets": [{"protocol": "dhcpv4"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "duplicate option ID 1"):
             self.adapter.run_scenario(
