@@ -93,6 +93,12 @@ The TMOS 17.5 HTML surface models `HTML::comment`, `HTML::disable`,
 body and exposes ordered tag/comment match events with deterministic token
 mutations. It does not implement a DOM, script execution, compression
 decoding, or the full TMM HTML filter.
+The TMOS 17.5 compression surface models `COMPRESS::buffer_size`,
+`COMPRESS::disable`, `COMPRESS::enable`, `COMPRESS::gzip`, `COMPRESS::method`,
+`COMPRESS::nodelay`, `DECOMPRESS::disable`, and `DECOMPRESS::enable`, including
+bounded gzip/deflate transforms and content-encoding/length updates. It does
+not implement content negotiation, streaming flush behavior, or compression
+resource timing.
 The IP semantic layer models the seven TMOS 17.5 commands `IP::hops`,
 `IP::idle_timeout`, `IP::ingress_drop_rate`, `IP::ingress_rate_limit`,
 `IP::intelligence`, `IP::reputation`, and `IP::stats`. Path hops, directional

@@ -27,6 +27,7 @@ import struct
 import sys
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -875,6 +876,14 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTML::enable",
     "HTML::encode",
     "HTML::tag",
+    "COMPRESS::buffer_size",
+    "COMPRESS::disable",
+    "COMPRESS::enable",
+    "COMPRESS::gzip",
+    "COMPRESS::method",
+    "COMPRESS::nodelay",
+    "DECOMPRESS::disable",
+    "DECOMPRESS::enable",
     "WS::collect",
     "WS::disconnect",
     "WS::enabled",
@@ -2274,6 +2283,85 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         raise EmulatorInputError("invalid HTML token count state") from None
     if html_token_count < 0:
         raise EmulatorInputError("invalid HTML token count state")
+    compression_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::compression_snapshot")
+    )
+    if len(compression_parts) % 2:
+        raise EmulatorInputError("invalid compression state")
+    compression_keys = compression_parts[::2]
+    if len(set(compression_keys)) != len(compression_keys):
+        raise EmulatorInputError("duplicate compression state field")
+    compression_values = dict(
+        zip(compression_parts[::2], compression_parts[1::2])
+    )
+    expected_compression_fields = {
+        "compress_request_enabled", "compress_response_enabled",
+        "compress_request_method", "compress_response_method",
+        "compress_request_buffer_size", "compress_response_buffer_size",
+        "compress_request_gzip_level", "compress_response_gzip_level",
+        "compress_request_gzip_memory_level", "compress_response_gzip_memory_level",
+        "compress_request_gzip_window_size", "compress_response_gzip_window_size",
+        "compress_request_nodelay", "compress_response_nodelay",
+        "decompress_request_enabled", "decompress_response_enabled",
+        "compress_applied", "compress_applied_side",
+        "compress_input_length", "compress_output_length",
+        "decompress_applied", "decompress_applied_side",
+        "decompress_input_length", "decompress_output_length", "codec_error",
+    }
+    if set(compression_values) != expected_compression_fields:
+        raise EmulatorInputError("invalid compression state fields")
+    compression_bool_fields = {
+        "compress_request_enabled", "compress_response_enabled",
+        "compress_request_nodelay", "compress_response_nodelay",
+        "decompress_request_enabled", "decompress_response_enabled",
+        "compress_applied", "decompress_applied",
+    }
+    if any(
+        compression_values[name] not in {"0", "1"}
+        for name in compression_bool_fields
+    ):
+        raise EmulatorInputError("invalid compression boolean state")
+    if any(
+        compression_values[name] not in {"gzip", "deflate"}
+        for name in ("compress_request_method", "compress_response_method")
+    ):
+        raise EmulatorInputError("invalid compression method state")
+    if any(
+        compression_values[name] not in {"", "request", "response"}
+        for name in ("compress_applied_side", "decompress_applied_side")
+    ):
+        raise EmulatorInputError("invalid compression side state")
+    compression_ints: dict[str, int] = {}
+    for name in (
+        "compress_request_buffer_size", "compress_response_buffer_size",
+        "compress_request_gzip_level", "compress_response_gzip_level",
+        "compress_request_gzip_memory_level", "compress_response_gzip_memory_level",
+        "compress_request_gzip_window_size", "compress_response_gzip_window_size",
+        "compress_input_length", "compress_output_length",
+        "decompress_input_length", "decompress_output_length",
+    ):
+        try:
+            value = int(compression_values[name])
+        except (KeyError, TypeError, ValueError):
+            raise EmulatorInputError(f"invalid compression {name} state") from None
+        if value < 0:
+            raise EmulatorInputError(f"invalid compression {name} state")
+        compression_ints[name] = value
+    for name in (
+        "compress_request_gzip_level", "compress_response_gzip_level",
+    ):
+        if not 0 <= compression_ints[name] <= 9:
+            raise EmulatorInputError(f"invalid compression {name} state")
+    for name in (
+        "compress_request_gzip_memory_level", "compress_response_gzip_memory_level",
+    ):
+        if not 1 <= compression_ints[name] <= 9:
+            raise EmulatorInputError(f"invalid compression {name} state")
+    for name in (
+        "compress_request_gzip_window_size", "compress_response_gzip_window_size",
+    ):
+        if not 8 <= compression_ints[name] <= 15:
+            raise EmulatorInputError(f"invalid compression {name} state")
     cache_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::cache_snapshot"))
     if len(cache_parts) % 2:
         raise EmulatorInputError("invalid cache state")
@@ -2800,6 +2888,33 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "token_count": html_token_count,
             "mutated": html_values["mutated"] == "1",
         },
+        "compression": {
+            "compress_request_enabled": compression_values["compress_request_enabled"] == "1",
+            "compress_response_enabled": compression_values["compress_response_enabled"] == "1",
+            "compress_request_method": compression_values["compress_request_method"],
+            "compress_response_method": compression_values["compress_response_method"],
+            "compress_request_buffer_size": compression_ints["compress_request_buffer_size"],
+            "compress_response_buffer_size": compression_ints["compress_response_buffer_size"],
+            "compress_request_gzip_level": compression_ints["compress_request_gzip_level"],
+            "compress_response_gzip_level": compression_ints["compress_response_gzip_level"],
+            "compress_request_gzip_memory_level": compression_ints["compress_request_gzip_memory_level"],
+            "compress_response_gzip_memory_level": compression_ints["compress_response_gzip_memory_level"],
+            "compress_request_gzip_window_size": compression_ints["compress_request_gzip_window_size"],
+            "compress_response_gzip_window_size": compression_ints["compress_response_gzip_window_size"],
+            "compress_request_nodelay": compression_values["compress_request_nodelay"] == "1",
+            "compress_response_nodelay": compression_values["compress_response_nodelay"] == "1",
+            "decompress_request_enabled": compression_values["decompress_request_enabled"] == "1",
+            "decompress_response_enabled": compression_values["decompress_response_enabled"] == "1",
+            "compress_applied": compression_values["compress_applied"] == "1",
+            "compress_applied_side": compression_values["compress_applied_side"],
+            "compress_input_length": compression_ints["compress_input_length"],
+            "compress_output_length": compression_ints["compress_output_length"],
+            "decompress_applied": compression_values["decompress_applied"] == "1",
+            "decompress_applied_side": compression_values["decompress_applied_side"],
+            "decompress_input_length": compression_ints["decompress_input_length"],
+            "decompress_output_length": compression_ints["decompress_output_length"],
+            "codec_error": compression_values["codec_error"],
+        },
         "cache": cache,
         "profile_settings": profile_settings,
         "asm": {
@@ -2989,6 +3104,7 @@ def _install_runtime_shims(session: Any) -> None:
         """
     )
     _install_python_digest_helper(session)
+    _install_python_codec_helper(session)
     semantic_path = Path(__file__).with_name("semantic-mocks.tcl")
     if not semantic_path.exists():
         raise EmulatorInputError(f"missing adapter semantic mock file: {semantic_path}")
@@ -3021,6 +3137,74 @@ def _install_python_digest_helper(session: Any) -> None:
     # Keep a strong reference on the session for bridge implementations that
     # do not retain Python callbacks independently of tkinter's command table.
     setattr(session, "_testcl_digest_callback", digest_callback)
+
+
+def _install_python_codec_helper(session: Any) -> None:
+    """Expose bounded gzip/deflate codecs to semantic Tcl commands."""
+    inner = getattr(session, "_session", None)
+    inprocess = getattr(inner, "_inprocess", None)
+    interpreter = getattr(inprocess, "_interp", None)
+    if interpreter is None or not hasattr(interpreter, "createcommand"):
+        raise EmulatorInputError("compression support requires the in-process Tcl backend")
+
+    max_bytes = 16 * 1024 * 1024
+
+    def codec_callback(*args: str) -> str:
+        if len(args) != 6:
+            raise ValueError("codec helper requires operation, method, level, memory level, window, and data")
+        operation, method, level_text, memory_text, window_text, encoded = args
+        if operation not in {"compress", "decompress"}:
+            raise ValueError("codec operation must be compress or decompress")
+        if method not in {"gzip", "deflate"}:
+            raise ValueError("codec method must be gzip or deflate")
+        try:
+            level = int(level_text)
+            memory_level = int(memory_text)
+            window_size = int(window_text)
+        except ValueError as exc:
+            raise ValueError("codec tuning values must be integers") from exc
+        if not 0 <= level <= 9:
+            raise ValueError("codec level must be between 0 and 9")
+        if not 1 <= memory_level <= 9:
+            raise ValueError("codec memory level must be between 1 and 9")
+        if not 8 <= window_size <= 15:
+            raise ValueError("codec window size must be between 8 and 15")
+        try:
+            raw = base64.b64decode(encoded.encode("ascii"), validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("codec input is not valid base64") from exc
+        if len(raw) > max_bytes:
+            raise ValueError(f"codec input exceeds the {max_bytes}-byte limit")
+
+        if operation == "compress":
+            wbits = window_size + (16 if method == "gzip" else 0)
+            compressor = zlib.compressobj(level, zlib.DEFLATED, wbits, memory_level)
+            result = compressor.compress(raw) + compressor.flush()
+        else:
+            windows = [window_size + 16] if method == "gzip" else [window_size, -window_size]
+            last_error: zlib.error | None = None
+            for wbits in windows:
+                try:
+                    decompressor = zlib.decompressobj(wbits)
+                    result = decompressor.decompress(raw, max_bytes + 1)
+                    if len(result) > max_bytes or decompressor.unconsumed_tail:
+                        raise ValueError(f"codec output exceeds the {max_bytes}-byte limit")
+                    result += decompressor.flush(max_bytes + 1 - len(result))
+                    if len(result) > max_bytes:
+                        raise ValueError(f"codec output exceeds the {max_bytes}-byte limit")
+                    if not decompressor.eof:
+                        raise ValueError("codec input is incomplete")
+                    break
+                except zlib.error as exc:
+                    last_error = exc
+            else:
+                raise ValueError("codec input is not valid compressed data") from last_error
+        if len(result) > max_bytes:
+            raise ValueError(f"codec output exceeds the {max_bytes}-byte limit")
+        return base64.b64encode(result).decode("ascii")
+
+    interpreter.createcommand("::itest::semantic::py_codec", codec_callback)
+    setattr(session, "_testcl_codec_callback", codec_callback)
 
 
 def _normalise_pools(raw: Any) -> dict[str, list[str]]:
@@ -8924,6 +9108,7 @@ class EmulatorSession:
                 _configure_http_proxy(session, self._http_proxy_config)
                 session.eval_tcl("::itest::semantic::rewrite_reset_connection")
                 session.eval_tcl("::itest::semantic::html_reset_connection")
+                session.eval_tcl("::itest::semantic::compression_reset_connection")
                 session.eval_tcl("::itest::semantic::flow_reset_connection")
                 if any(str(profile).upper() == "REWRITE" for profile in self._profiles):
                     session.eval_tcl("::itest::semantic::rewrite_install_flow_hooks")
@@ -8984,6 +9169,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
                 session.eval_tcl("::itest::semantic::rewrite_reset_connection")
                 session.eval_tcl("::itest::semantic::html_reset_connection")
+                session.eval_tcl("::itest::semantic::compression_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         if not self._connection_open:
@@ -9003,6 +9189,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
             session.eval_tcl("::itest::semantic::rewrite_reset_connection")
             session.eval_tcl("::itest::semantic::html_reset_connection")
+            session.eval_tcl("::itest::semantic::compression_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -9029,6 +9216,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::http_proxy_prepare_request")
                 session.eval_tcl("::itest::semantic::rewrite_prepare_request")
                 session.eval_tcl("::itest::semantic::html_prepare_request")
+                session.eval_tcl("::itest::semantic::compression_prepare_request")
                 attempt_failure = lb_failure if retry_count == 0 else ""
                 dosl7_mitigated = "0"
                 if dosl7_request is not None and dosl7_request["mitigated"]:
@@ -9161,6 +9349,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
             session.eval_tcl("::itest::semantic::rewrite_reset_connection")
             session.eval_tcl("::itest::semantic::html_reset_connection")
+            session.eval_tcl("::itest::semantic::compression_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         result["decisions"] = decision_history
@@ -9179,6 +9368,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
             session.eval_tcl("::itest::semantic::rewrite_reset_connection")
             session.eval_tcl("::itest::semantic::html_reset_connection")
+            session.eval_tcl("::itest::semantic::compression_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         return result
@@ -10176,6 +10366,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
         session.eval_tcl("::itest::semantic::rewrite_reset_connection")
         session.eval_tcl("::itest::semantic::html_reset_connection")
+        session.eval_tcl("::itest::semantic::compression_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
@@ -10218,6 +10409,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
         session.eval_tcl("::itest::semantic::rewrite_reset_connection")
         session.eval_tcl("::itest::semantic::html_reset_connection")
+        session.eval_tcl("::itest::semantic::compression_reset_connection")
         self._packet_streams.clear()
         self._http2_decoder = None
         self._http2_streams.clear()

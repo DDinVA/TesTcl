@@ -17,6 +17,7 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.request
+import zlib
 from pathlib import Path
 
 from hpack import Encoder
@@ -478,7 +479,7 @@ when HTTP_REQUEST {
         }
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
-        self.assertGreaterEqual(queue["command_count"], 357)
+        self.assertGreaterEqual(queue["command_count"], 349)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -6015,6 +6016,95 @@ when HTML_COMMENT_MATCHED {
         self.assertTrue(any("encoded=&lt;x&gt;&amp;&quot;&#39;" in entry for entry in request_result["logs"]))
         usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
         for command in ("HTML::comment", "HTML::disable", "HTML::enable", "HTML::encode", "HTML::tag"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+    def test_http_compression_controls_transform_response_and_decode_before_response(self) -> None:
+        compressed = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_RESPONSE {
+    if {[HTTP::uri] eq "/gzip"} {
+        COMPRESS::disable response
+        COMPRESS::gzip response level 9
+        COMPRESS::gzip response memory_level 9
+        COMPRESS::gzip response window_size 15
+        COMPRESS::buffer_size response 4096
+        COMPRESS::method response prefer gzip
+        COMPRESS::nodelay response
+        COMPRESS::enable response
+    }
+}
+""",
+                "requests": [
+                    {
+                        "uri": "/gzip",
+                        "host": "compress.example.com",
+                        "response_body": "payload that should be gzip encoded",
+                        "response_headers": {"Content-Length": "36"},
+                    },
+                    {
+                        "uri": "/plain",
+                        "host": "compress.example.com",
+                        "response_body": "keep alive remains plain",
+                        "response_headers": {"Content-Length": "24"},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        compressed_result = compressed["results"][0]
+        compressed_body = compressed_result["response"]["body"].encode("latin-1")
+        self.assertEqual(zlib.decompress(compressed_body, 31), b"payload that should be gzip encoded")
+        self.assertEqual(compressed_result["response"]["headers"]["content-encoding"], "gzip")
+        self.assertEqual(
+            compressed_result["response"]["headers"]["content-length"],
+            str(len(compressed_body)),
+        )
+        compression = compressed_result["semantic"]["compression"]
+        self.assertTrue(compression["compress_applied"])
+        self.assertEqual(compression["compress_applied_side"], "response")
+        self.assertEqual(compression["compress_response_gzip_level"], 9)
+        self.assertEqual(compression["compress_response_buffer_size"], 4096)
+        self.assertTrue(compression["compress_response_nodelay"])
+        plain_result = compressed["results"][1]
+        self.assertEqual(plain_result["response"]["body"], "keep alive remains plain")
+        self.assertNotIn("content-encoding", plain_result["response"]["headers"])
+        self.assertFalse(plain_result["semantic"]["compression"]["compress_applied"])
+
+        encoded = base64.b64encode(zlib.compress(b"decoded response", 9, wbits=31)).decode("ascii")
+        decompressed = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": f"""
+when HTTP_RESPONSE {{
+    DECOMPRESS::disable response
+    DECOMPRESS::enable response
+    HTTP::header replace Content-Encoding gzip
+    HTTP::respond 200 content [binary decode base64 {{{encoded}}}]
+}}
+""",
+                "request": {"host": "decompress.example.com"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        decompressed_result = decompressed["results"][0]
+        self.assertEqual(decompressed_result["response"]["body"], "decoded response")
+        self.assertNotIn("content-encoding", decompressed_result["response"]["headers"])
+        self.assertTrue(decompressed_result["semantic"]["compression"]["decompress_applied"])
+        self.assertEqual(
+            decompressed_result["semantic"]["compression"]["decompress_applied_side"],
+            "response",
+        )
+        usage = {
+            entry["name"]: entry
+            for entry in compressed["fidelity"]["commands"] + decompressed["fidelity"]["commands"]
+        }
+        for command in (
+            "COMPRESS::buffer_size", "COMPRESS::disable", "COMPRESS::enable",
+            "COMPRESS::gzip", "COMPRESS::method", "COMPRESS::nodelay",
+            "DECOMPRESS::disable", "DECOMPRESS::enable",
+        ):
             self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
 
     def test_tls_semantics_expose_sni_cipher_and_peer_certificate(self) -> None:

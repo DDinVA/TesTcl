@@ -130,6 +130,20 @@ fires `HTML_COMMENT_MATCHED` or `HTML_TAG_MATCHED`. `HTML::comment` and
 `<!-- ... -->` comments and simple `< ... >` tags only; it is not a browser,
 DOM parser, JavaScript engine, or compression-aware HTML filter.
 
+The HTTP compression slice models `COMPRESS::buffer_size`,
+`COMPRESS::disable`, `COMPRESS::enable`, `COMPRESS::gzip`,
+`COMPRESS::method`, `COMPRESS::nodelay`, `DECOMPRESS::disable`, and
+`DECOMPRESS::enable`. It supports deterministic gzip and deflate transforms
+through the in-process Python standard library codec. Response decompression
+is applied before `HTTP_RESPONSE` when already enabled, or after the current
+handler when the rule enables it there; response compression is applied after
+HTML and REWRITE response mutations. Request-side transforms use the same
+ordering around `HTTP_REQUEST`. Existing `Content-Encoding` is not
+double-compressed, and decompression removes it after a successful transform.
+The adapter records buffer and no-delay controls but does not emulate
+streaming flush boundaries, Accept-Encoding negotiation, chunk scheduling, or
+compression CPU/memory timing.
+
 ```json
 {
   "route": {

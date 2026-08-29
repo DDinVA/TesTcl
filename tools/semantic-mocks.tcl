@@ -59,6 +59,31 @@ namespace eval ::itest::semantic {
     variable html_current_removed 0
     variable html_token_count 0
     variable html_mutated 0
+    variable compress_request_enabled 0
+    variable compress_response_enabled 0
+    variable compress_request_method "gzip"
+    variable compress_response_method "gzip"
+    variable compress_request_buffer_size 0
+    variable compress_response_buffer_size 0
+    variable compress_request_gzip_level 6
+    variable compress_response_gzip_level 6
+    variable compress_request_gzip_memory_level 8
+    variable compress_response_gzip_memory_level 8
+    variable compress_request_gzip_window_size 15
+    variable compress_response_gzip_window_size 15
+    variable compress_request_nodelay 0
+    variable compress_response_nodelay 0
+    variable decompress_request_enabled 0
+    variable decompress_response_enabled 0
+    variable compress_applied 0
+    variable compress_applied_side ""
+    variable compress_input_length 0
+    variable compress_output_length 0
+    variable decompress_applied 0
+    variable decompress_applied_side ""
+    variable decompress_input_length 0
+    variable decompress_output_length 0
+    variable compression_codec_error ""
     variable psm_enabled
     array set psm_enabled {FTP 1 HTTP 1 SMTP 1}
     variable ws_enabled 1
@@ -1527,6 +1552,297 @@ namespace eval ::itest::semantic {
             ::state::http::response::header set content-length \
                 [::itest::cmd::_payload_bytelength $::state::http::response::payload]
         }
+    }
+
+    proc compression_reset_connection {} {
+        compression_prepare_request
+    }
+
+    proc compression_prepare_request {} {
+        foreach side {request response} {
+            set ::itest::semantic::compress_${side}_enabled 0
+            set ::itest::semantic::compress_${side}_method gzip
+            set ::itest::semantic::compress_${side}_buffer_size 0
+            set ::itest::semantic::compress_${side}_gzip_level 6
+            set ::itest::semantic::compress_${side}_gzip_memory_level 8
+            set ::itest::semantic::compress_${side}_gzip_window_size 15
+            set ::itest::semantic::compress_${side}_nodelay 0
+            set ::itest::semantic::decompress_${side}_enabled 0
+        }
+        variable compress_applied
+        variable compress_applied_side
+        variable compress_input_length
+        variable compress_output_length
+        variable decompress_applied
+        variable decompress_applied_side
+        variable decompress_input_length
+        variable decompress_output_length
+        variable compression_codec_error
+        set compress_applied 0
+        set compress_applied_side ""
+        set compress_input_length 0
+        set compress_output_length 0
+        set decompress_applied 0
+        set decompress_applied_side ""
+        set decompress_input_length 0
+        set decompress_output_length 0
+        set compression_codec_error ""
+    }
+
+    proc compression_snapshot {} {
+        variable compress_applied
+        variable compress_applied_side
+        variable compress_input_length
+        variable compress_output_length
+        variable decompress_applied
+        variable decompress_applied_side
+        variable decompress_input_length
+        variable decompress_output_length
+        variable compression_codec_error
+        return [list \
+            compress_request_enabled $::itest::semantic::compress_request_enabled \
+            compress_response_enabled $::itest::semantic::compress_response_enabled \
+            compress_request_method $::itest::semantic::compress_request_method \
+            compress_response_method $::itest::semantic::compress_response_method \
+            compress_request_buffer_size $::itest::semantic::compress_request_buffer_size \
+            compress_response_buffer_size $::itest::semantic::compress_response_buffer_size \
+            compress_request_gzip_level $::itest::semantic::compress_request_gzip_level \
+            compress_response_gzip_level $::itest::semantic::compress_response_gzip_level \
+            compress_request_gzip_memory_level $::itest::semantic::compress_request_gzip_memory_level \
+            compress_response_gzip_memory_level $::itest::semantic::compress_response_gzip_memory_level \
+            compress_request_gzip_window_size $::itest::semantic::compress_request_gzip_window_size \
+            compress_response_gzip_window_size $::itest::semantic::compress_response_gzip_window_size \
+            compress_request_nodelay $::itest::semantic::compress_request_nodelay \
+            compress_response_nodelay $::itest::semantic::compress_response_nodelay \
+            decompress_request_enabled $::itest::semantic::decompress_request_enabled \
+            decompress_response_enabled $::itest::semantic::decompress_response_enabled \
+            compress_applied $compress_applied compress_applied_side $compress_applied_side \
+            compress_input_length $compress_input_length compress_output_length $compress_output_length \
+            decompress_applied $decompress_applied decompress_applied_side $decompress_applied_side \
+            decompress_input_length $decompress_input_length decompress_output_length $decompress_output_length \
+            codec_error $compression_codec_error]
+    }
+
+    proc _compression_parse_side {args command_name} {
+        set side ""
+        if {[llength $args] > 0 && [lindex $args 0] in {request response}} {
+            set side [lindex $args 0]
+            set args [lrange $args 1 end]
+        }
+        if {$side eq ""} {
+            set event_name $::itest::current_event
+            if {[string match "*RESPONSE*" $event_name]} {
+                set side response
+            } elseif {[string match "*REQUEST*" $event_name] || $event_name eq "CLIENT_ACCEPTED"} {
+                set side request
+            } else {
+                error "$command_name requires request or response outside an HTTP event"
+            }
+        }
+        return [list $side $args]
+    }
+
+    proc _compression_require_integer {value field minimum maximum} {
+        if {![string is integer -strict $value] || $value < $minimum || $value > $maximum} {
+            error "$field must be an integer between $minimum and $maximum"
+        }
+    }
+
+    proc compression_enable_command {args} {
+        lassign [_compression_parse_side $args COMPRESS::enable] side remaining
+        if {[llength $remaining] != 0} {
+            error "COMPRESS::enable takes only an optional request or response side"
+        }
+        set ::itest::semantic::compress_${side}_enabled 1
+        ::itest::log_decision compression enable $side
+        return ""
+    }
+
+    proc compression_disable_command {args} {
+        lassign [_compression_parse_side $args COMPRESS::disable] side remaining
+        if {[llength $remaining] != 0} {
+            error "COMPRESS::disable takes only an optional request or response side"
+        }
+        set ::itest::semantic::compress_${side}_enabled 0
+        ::itest::log_decision compression disable $side
+        return ""
+    }
+
+    proc decompression_enable_command {args} {
+        lassign [_compression_parse_side $args DECOMPRESS::enable] side remaining
+        if {[llength $remaining] != 0} {
+            error "DECOMPRESS::enable takes only an optional request or response side"
+        }
+        set ::itest::semantic::decompress_${side}_enabled 1
+        ::itest::log_decision decompression enable $side
+        return ""
+    }
+
+    proc decompression_disable_command {args} {
+        lassign [_compression_parse_side $args DECOMPRESS::disable] side remaining
+        if {[llength $remaining] != 0} {
+            error "DECOMPRESS::disable takes only an optional request or response side"
+        }
+        set ::itest::semantic::decompress_${side}_enabled 0
+        ::itest::log_decision decompression disable $side
+        return ""
+    }
+
+    proc compression_method_command {args} {
+        lassign [_compression_parse_side $args COMPRESS::method] side remaining
+        if {[llength $remaining] != 2 || [lindex $remaining 0] ne "prefer" ||
+            [lindex $remaining 1] ni {gzip deflate}} {
+            error "COMPRESS::method requires prefer gzip or prefer deflate"
+        }
+        set ::itest::semantic::compress_${side}_method [lindex $remaining 1]
+        ::itest::log_decision compression method [list $side [lindex $remaining 1]]
+        return ""
+    }
+
+    proc compression_buffer_size_command {args} {
+        lassign [_compression_parse_side $args COMPRESS::buffer_size] side remaining
+        if {[llength $remaining] != 1} {
+            error "COMPRESS::buffer_size requires one size"
+        }
+        set size [lindex $remaining 0]
+        _compression_require_integer $size COMPRESS::buffer_size 0 16777216
+        set ::itest::semantic::compress_${side}_buffer_size $size
+        ::itest::log_decision compression buffer_size [list $side $size]
+        return ""
+    }
+
+    proc compression_gzip_command {args} {
+        lassign [_compression_parse_side $args COMPRESS::gzip] side remaining
+        if {[llength $remaining] != 2 || [lindex $remaining 0] ni {level memory_level window_size}} {
+            error "COMPRESS::gzip requires level, memory_level, or window_size and a value"
+        }
+        set option [lindex $remaining 0]
+        set value [lindex $remaining 1]
+        switch -exact -- $option {
+            level { _compression_require_integer $value COMPRESS::gzip_level 0 9 }
+            memory_level { _compression_require_integer $value COMPRESS::gzip_memory_level 1 9 }
+            window_size { _compression_require_integer $value COMPRESS::gzip_window_size 8 15 }
+        }
+        set ::itest::semantic::compress_${side}_gzip_${option} $value
+        ::itest::log_decision compression gzip [list $side $option $value]
+        return ""
+    }
+
+    proc compression_nodelay_command {args} {
+        lassign [_compression_parse_side $args COMPRESS::nodelay] side remaining
+        if {[llength $remaining] != 0} {
+            error "COMPRESS::nodelay takes only an optional request or response side"
+        }
+        set ::itest::semantic::compress_${side}_nodelay 1
+        ::itest::log_decision compression nodelay $side
+        return ""
+    }
+
+    proc _compression_payload_var {side} {
+        return ::state::http::${side}::payload
+    }
+
+    proc _compression_header_var {side} {
+        return ::state::http::${side}::header
+    }
+
+    proc _compression_adjust_content_length {side} {
+        set header_var [_compression_header_var $side]
+        if {[${header_var} get content-length] ne ""} {
+            set payload_var [_compression_payload_var $side]
+            ${header_var} set content-length \
+                [::itest::cmd::_payload_bytelength [set $payload_var]]
+        }
+    }
+
+    proc _compression_encoding {side} {
+        set header_var [_compression_header_var $side]
+        set value [string tolower [string trim [${header_var} get content-encoding]]]
+        if {$value eq ""} { return "" }
+        return [string trim [lindex [split $value ,] 0]]
+    }
+
+    proc compression_process_decompress {side} {
+        variable decompress_applied
+        variable decompress_applied_side
+        variable decompress_input_length
+        variable decompress_output_length
+        variable compression_codec_error
+        if {![set ::itest::semantic::decompress_${side}_enabled]} { return }
+        set encoding [_compression_encoding $side]
+        if {$encoding ni {gzip x-gzip deflate}} { return }
+        set method [expr {$encoding eq "deflate" ? "deflate" : "gzip"}]
+        set payload_var [_compression_payload_var $side]
+        set payload [set $payload_var]
+        set input_length [::itest::cmd::_payload_bytelength $payload]
+        if {$input_length == 0} { return }
+        set encoded [binary encode base64 [::itest::cmd::_payload_bytes $payload]]
+        if {[catch {
+            set result [::itest::semantic::py_codec decompress $method 6 8 15 $encoded]
+            set $payload_var [binary decode base64 $result]
+        } error]} {
+            set compression_codec_error "${side} decompression failed: $error"
+            ::itest::log_decision compression error $compression_codec_error
+            return
+        }
+        set header_var [_compression_header_var $side]
+        ${header_var} remove content-encoding
+        _compression_adjust_content_length $side
+        set decompress_applied 1
+        set decompress_applied_side $side
+        set decompress_input_length $input_length
+        set decompress_output_length [::itest::cmd::_payload_bytelength [set $payload_var]]
+        ::itest::log_decision decompression applied [list $side $method]
+    }
+
+    proc compression_process_compress {side} {
+        variable compress_applied
+        variable compress_applied_side
+        variable compress_input_length
+        variable compress_output_length
+        variable compression_codec_error
+        if {![set ::itest::semantic::compress_${side}_enabled]} { return }
+        if {$side eq "response" && [info exists ::state::http::response::status]} {
+            set status $::state::http::response::status
+            if {[string is integer -strict $status] &&
+                ($status < 200 || $status in {204 304})} { return }
+        }
+        if {[_compression_encoding $side] ne ""} { return }
+        set payload_var [_compression_payload_var $side]
+        set payload [set $payload_var]
+        set input_length [::itest::cmd::_payload_bytelength $payload]
+        if {$input_length == 0} { return }
+        set method [set ::itest::semantic::compress_${side}_method]
+        set level [set ::itest::semantic::compress_${side}_gzip_level]
+        set memory_level [set ::itest::semantic::compress_${side}_gzip_memory_level]
+        set window_size [set ::itest::semantic::compress_${side}_gzip_window_size]
+        set encoded [binary encode base64 [::itest::cmd::_payload_bytes $payload]]
+        if {[catch {
+            set result [::itest::semantic::py_codec compress $method $level $memory_level $window_size $encoded]
+            set $payload_var [binary decode base64 $result]
+        } error]} {
+            set compression_codec_error "${side} compression failed: $error"
+            ::itest::log_decision compression error $compression_codec_error
+            return
+        }
+        set header_var [_compression_header_var $side]
+        ${header_var} set content-encoding $method
+        _compression_adjust_content_length $side
+        set compress_applied 1
+        set compress_applied_side $side
+        set compress_input_length $input_length
+        set compress_output_length [::itest::cmd::_payload_bytelength [set $payload_var]]
+        ::itest::log_decision compression applied [list $side $method]
+    }
+
+    proc compression_process_request {} {
+        compression_process_decompress request
+        compression_process_compress request
+    }
+
+    proc compression_process_response {} {
+        compression_process_decompress response
+        compression_process_compress response
     }
 
     proc psm_reset_connection {} {
@@ -13894,11 +14210,17 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::auth_reset_connection
             ::itest::semantic::rewrite_reset_connection
             ::itest::semantic::html_reset_connection
+            ::itest::semantic::compression_reset_connection
         }
         set rewrite_auto [expr {$gated && !$::itest::semantic::rewrite_injecting &&
             [::itest::semantic::_profile_enabled REWRITE]}]
         if {$gated && $event_name eq "HTTP_REQUEST" && [::itest::semantic::_cache_profile_enabled]} {
             ::itest::semantic::cache_prepare_request
+        }
+        if {$gated && $event_name eq "HTTP_REQUEST"} {
+            ::itest::semantic::compression_process_decompress request
+        } elseif {$gated && $event_name eq "HTTP_RESPONSE"} {
+            ::itest::semantic::compression_process_decompress response
         }
         set result [uplevel 1 [list ::itest::_testcl_fire_event_orig $event_name]]
         if {$gated && $event_name eq "HTTP_REQUEST"} {
@@ -13923,6 +14245,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             }
             ::itest::semantic::_maybe_fire_lb_failed
             ::itest::semantic::cache_request_event
+            ::itest::semantic::compression_process_request
         } elseif {$gated && $event_name eq "HTTP_RESPONSE"} {
             if {[::itest::semantic::_profile_enabled HTML]} {
                 ::itest::semantic::html_process_response
@@ -13935,6 +14258,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                 set ::itest::semantic::rewrite_injecting 0
                 ::itest::semantic::event_errors_record REWRITE_RESPONSE_DONE $rewrite_result
             }
+            ::itest::semantic::compression_process_response
         }
         return $result
     }
@@ -14512,6 +14836,14 @@ foreach {name proc_name} {
     HTML::enable ::itest::semantic::html_enable_command
     HTML::encode ::itest::semantic::html_encode_command
     HTML::tag ::itest::semantic::html_tag_command
+    COMPRESS::buffer_size ::itest::semantic::compression_buffer_size_command
+    COMPRESS::disable ::itest::semantic::compression_disable_command
+    COMPRESS::enable ::itest::semantic::compression_enable_command
+    COMPRESS::gzip ::itest::semantic::compression_gzip_command
+    COMPRESS::method ::itest::semantic::compression_method_command
+    COMPRESS::nodelay ::itest::semantic::compression_nodelay_command
+    DECOMPRESS::disable ::itest::semantic::decompression_disable_command
+    DECOMPRESS::enable ::itest::semantic::decompression_enable_command
     ROUTE::age ::itest::semantic::route_age_command
     ROUTE::bandwidth ::itest::semantic::route_bandwidth_command
     ROUTE::clear ::itest::semantic::route_clear_command
