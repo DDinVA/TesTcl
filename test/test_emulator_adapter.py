@@ -953,6 +953,74 @@ when CLIENT_ACCEPTED {
         finally:
             session.close()
 
+    def test_bigtcp_release_flow_enters_passthrough_for_later_events(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "irule": """
+when CLIENT_ACCEPTED {
+    if {[set ::state::connection::client_port] eq "1000"} {
+        BIGTCP::release_flow
+    }
+    log local0. "released=[set ::state::bigtcp::released]"
+}
+when CLIENT_DATA {
+    log local0. "must-not-run"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            accepted = session.fire_event(
+                "CLIENT_ACCEPTED",
+                {"connection": {"client_port": 1000}, "bigtcp": {}},
+            )
+            self.assertTrue(accepted["fired"])
+            self.assertEqual(accepted["state"]["bigtcp"]["released"], "1")
+            self.assertTrue(any("released=1" in entry for entry in accepted["logs"]))
+
+            data = session.fire_event(
+                "CLIENT_DATA",
+                {"connection": {"client_payload": "ignored"}, "bigtcp": {}},
+            )
+            self.assertFalse(data["fired"])
+            self.assertEqual(data["reason"], "bigtcp_passthrough")
+            self.assertEqual(data["logs"], [])
+
+            next_accept = session.fire_event(
+                "CLIENT_ACCEPTED",
+                {"connection": {"client_port": 1001}, "bigtcp": {}},
+            )
+            self.assertEqual(next_accept["state"]["bigtcp"]["released"], "0")
+            next_data = session.fire_event(
+                "CLIENT_DATA",
+                {"connection": {"client_payload": "new-flow"}, "bigtcp": {}},
+            )
+            self.assertTrue(next_data["fired"])
+            self.assertTrue(any("must-not-run" in entry for entry in next_data["logs"]))
+
+            invalid = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {
+                    "profiles": ["FIX"],
+                    "irule": "when FIX_MESSAGE { BIGTCP::release_flow }",
+                },
+                allow_irule_file=False,
+                allow_requests=False,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError,
+                    "BIGTCP::release_flow is not valid in FIX_MESSAGE",
+                ):
+                    invalid.fire_event("FIX_MESSAGE", {})
+            finally:
+                invalid.close()
+        finally:
+            session.close()
+
     def test_fix_tag_message_lookup_and_persistent_sender_mapping(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1621,7 +1689,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
         self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 151)
+        self.assertEqual(queue["command_count"], 150)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)

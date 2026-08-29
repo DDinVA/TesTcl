@@ -1102,6 +1102,10 @@ namespace eval ::itest::semantic {
         variable enable_fix_reset 1
     }
 
+    namespace eval ::state::bigtcp {
+        variable released 0
+    }
+
     namespace eval ::state::fix {
         variable tags {}
         variable tag_maps {}
@@ -6044,6 +6048,22 @@ namespace eval ::itest::semantic {
         }
         set ::state::bigproto::enable_fix_reset [expr {$value ? 1 : 0}]
         ::itest::log_decision bigproto enable_fix_reset $::state::bigproto::enable_fix_reset
+        return ""
+    }
+
+    proc bigtcp_prepare_connection {} {
+        set ::state::bigtcp::released 0
+    }
+
+    proc bigtcp_release_flow_command {args} {
+        if {$::itest::current_event ni {CLIENT_ACCEPTED SERVER_ACCEPTED SERVER_CONNECTED}} {
+            error "BIGTCP::release_flow is not valid in $::itest::current_event"
+        }
+        if {[llength $args] != 0} {
+            error "BIGTCP::release_flow takes no arguments"
+        }
+        set ::state::bigtcp::released 1
+        ::itest::log_decision bigtcp release_flow
         return ""
     }
 
@@ -20244,6 +20264,7 @@ foreach {original replacement} {
     ha_status ha_status_command
     dslite_remote_addr dslite_remote_addr_command
     bigproto_enable_fix_reset bigproto_enable_fix_reset_command
+    bigtcp_release_flow bigtcp_release_flow_command
     fix_tag fix_tag_command
     psc_aaa_reporting_interval psc_aaa_reporting_interval_command
     psc_attr psc_attr_command
@@ -20916,6 +20937,7 @@ foreach {name proc_name} {
     HA::status ::itest::semantic::ha_status_command
     DSLITE::remote_addr ::itest::semantic::dslite_remote_addr_command
     BIGPROTO::enable_fix_reset ::itest::semantic::bigproto_enable_fix_reset_command
+    BIGTCP::release_flow ::itest::semantic::bigtcp_release_flow_command
     FIX::tag ::itest::semantic::fix_tag_command
     PSC::aaa_reporting_interval ::itest::semantic::psc_aaa_reporting_interval_command
     PSC::attr ::itest::semantic::psc_attr_command

@@ -653,6 +653,7 @@ EVENT_STATE_FIELDS = {
     },
     "ha": {"status"},
     "bigproto": {"enable_fix_reset"},
+    "bigtcp": {"released"},
     "fix": {"tags", "tag_maps"},
     "diameter": {
         "type",
@@ -1037,6 +1038,7 @@ EVENT_STATE_NAMESPACES = {
     "tap": "::state::tap",
     "ha": "::state::ha",
     "bigproto": "::state::bigproto",
+    "bigtcp": "::state::bigtcp",
     "fix": "::state::fix",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
@@ -1619,6 +1621,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "WEBSSO::disable",
     "WEBSSO::enable",
     "WEBSSO::select",
+    "BIGTCP::release_flow",
     "TAP::action",
     "TAP::config",
     "TAP::insight",
@@ -11292,6 +11295,29 @@ class EmulatorSession:
             "::itest::semantic::adapt_prepare_event "
             f"{_tcl_quote(event_name)}"
         )
+        if event_name == "CLIENT_ACCEPTED":
+            session.eval_tcl("::itest::semantic::bigtcp_prepare_connection")
+        if (
+            event_name not in {
+                "CLIENT_ACCEPTED",
+                "SERVER_ACCEPTED",
+                "SERVER_CONNECTED",
+                "CLIENT_CLOSED",
+                "SERVER_CLOSED",
+                "RULE_INIT",
+            }
+            and session.eval_tcl("info exists ::state::bigtcp::released") == "1"
+            and session.eval_tcl("set ::state::bigtcp::released") == "1"
+        ):
+            return {
+                "event": event_name,
+                "fired": False,
+                "reason": "bigtcp_passthrough",
+                "events_fired": [],
+                "state": {},
+                "decisions": [],
+                "logs": [],
+            }
         if event_name == "FIX_MESSAGE" or "fix" in state:
             session.eval_tcl("::itest::semantic::fix_prepare_event")
         if event_name == "HTTP_REQUEST":
@@ -12583,6 +12609,7 @@ class EmulatorSession:
     def _close_packet_connection(self, session: Any) -> None:
         session.eval_tcl("set ::orch::_connection_active 0")
         session.eval_tcl("::state::reset_connection_state")
+        session.eval_tcl("::itest::semantic::bigtcp_prepare_connection")
         session.eval_tcl("::itest::semantic::psm_reset_connection")
         session.eval_tcl("::itest::semantic::dosl7_reset_connection")
         session.eval_tcl("::itest::semantic::asm_reset_connection")

@@ -873,6 +873,19 @@ See the F5 [`DSLITE::remote_addr`](https://clouddocs.f5.com/api/irules/DSLITE__r
 and [`BIGPROTO::enable_fix_reset`](https://clouddocs.f5.com/api/irules/BIGPROTO__enable_fix_reset.html)
 references.
 
+### BIGTCP flow release
+
+`BIGTCP::release_flow` marks the current connection as
+`bigtcp.released=1`. Subsequent data and protocol events are
+returned with `reason: "bigtcp_passthrough"` without executing their iRule
+handlers; connection lifecycle events remain available so a scenario can be
+closed cleanly. The command is accepted in `CLIENT_ACCEPTED`,
+`SERVER_ACCEPTED`, and `SERVER_CONNECTED` to support the documented flow
+migration patterns. This models the control-plane transition, not ePVA
+offload or wire-speed forwarding. See the F5
+[`BIGTCP::release_flow`](https://clouddocs.f5.com/api/irules/BIGTCP__release_flow.html)
+reference.
+
 ### FIX tag state
 
 The direct `FIX_MESSAGE` adapter accepts a `fix.tags` object and exposes it to
