@@ -9460,7 +9460,14 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     )
                 eca_state: dict[str, str] = {}
                 for eca_field, eca_value in value.items():
-                    if isinstance(eca_value, bool):
+                    if eca_field == "enabled":
+                        try:
+                            eca_text = _packet_bool(
+                                eca_value, f"packet {index} NTLM eca.enabled"
+                            )
+                        except EmulatorInputError:
+                            raise
+                    elif isinstance(eca_value, bool):
                         eca_text = "1" if eca_value else "0"
                     elif isinstance(eca_value, (str, int, float)):
                         eca_text = str(eca_value)
@@ -9475,6 +9482,10 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     eca_state[eca_field] = eca_text
                 normalised[field] = eca_state
             elif field == "eca_result" and protocol == "ntlm":
+                if direction != "client_to_server":
+                    raise EmulatorInputError(
+                        f"packet {index} eca_result must be client_to_server"
+                    )
                 result = _require_string(packet[field], f"packet {index} eca_result").lower()
                 if result not in {"allowed", "denied"}:
                     raise EmulatorInputError(

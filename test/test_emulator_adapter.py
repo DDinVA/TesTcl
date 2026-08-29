@@ -1123,6 +1123,27 @@ when ECA_REQUEST_DENIED { log local0. "denied=[ECA::username] status=[ECA::statu
         self.assertEqual(result["trace"][0]["eca_result"], "allowed")
         self.assertEqual(result["trace"][1]["eca_result"], "denied")
 
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "eca_result must be client_to_server",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "ECA"],
+                    "irule": "when ECA_REQUEST_ALLOWED { log local0. allowed }",
+                    "packets": [
+                        {
+                            "protocol": "ntlm",
+                            "direction": "server_to_client",
+                            "payload": "response",
+                            "eca_result": "allowed",
+                            "eca": {"enabled": "true"},
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_fix_tag_message_lookup_and_persistent_sender_mapping(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
