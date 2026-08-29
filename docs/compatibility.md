@@ -57,6 +57,13 @@ ports, and the `CLIENT_DATA`/`SERVER_DATA` path. The UDP semantic layer models
 payload replacement, drop, hold/release, response emission, and bounded buffer,
 rate, send-buffer, debug-queue, MSS, and unused-port controls. It does not run
 TMM queue scheduling, NAT, connection tracking, or a live upstream UDP socket.
+The six TMOS 17.5 `DATAGRAM::*` readers are also modeled. They expose validated
+IPv4/IPv6 header values, TCP/UDP payload and header metadata, DNS header fields,
+and Layer-2 destination values from a direct event state layer or a packet's
+optional `datagram` object. The adapter dispatches `FLOW_INIT` for packet
+connections carrying a `FLOW` profile, and keeps command event/protocol
+restrictions explicit. This is deterministic header inspection; it does not
+replace a kernel network stack or mutate captured packets.
 The TCP semantic layer additionally models documented connection tuning
 controls including Appropriate Byte Counting, analytics state and key,
 automatic window tuning, delayed ACK, D-SACK, early retransmit, ECN, enhanced

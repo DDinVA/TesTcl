@@ -464,6 +464,30 @@ namespace eval ::itest::semantic {
         variable response_length 0
     }
 
+    namespace eval ::state::datagram {
+        variable ip_version 4
+        variable ip_tos 0
+        variable ip_ttl 64
+        variable ip_flags 0
+        variable ip_options {}
+        variable ip6_hop_limit 64
+        variable ip6_options {}
+        variable l2_dest ""
+        variable protocol 0
+        variable tcp_flags 0
+        variable tcp_window 0
+        variable tcp_options {}
+        variable payload ""
+        variable payload_length 0
+        variable dns_id 0
+        variable dns_qr 0
+        variable dns_opcode QUERY
+        variable dns_qdcount 0
+        variable dns_ancount 0
+        variable dns_nscount 0
+        variable dns_arcount 0
+    }
+
     namespace eval ::state::tcp {
         variable abc enable
         variable analytics disable
@@ -10699,6 +10723,313 @@ namespace eval ::itest::semantic {
         return [cache_simple_set userkey CACHE::userkey {*}$args]
     }
 
+    proc _datagram_reset_state {} {
+        set ::state::datagram::ip_version 4
+        set ::state::datagram::ip_tos 0
+        set ::state::datagram::ip_ttl 64
+        set ::state::datagram::ip_flags 0
+        set ::state::datagram::ip_options {}
+        set ::state::datagram::ip6_hop_limit 64
+        set ::state::datagram::ip6_options {}
+        set ::state::datagram::l2_dest ""
+        set ::state::datagram::protocol 0
+        set ::state::datagram::tcp_flags 0
+        set ::state::datagram::tcp_window 0
+        set ::state::datagram::tcp_options {}
+        set ::state::datagram::payload ""
+        set ::state::datagram::payload_length 0
+        set ::state::datagram::dns_id 0
+        set ::state::datagram::dns_qr 0
+        set ::state::datagram::dns_opcode QUERY
+        set ::state::datagram::dns_qdcount 0
+        set ::state::datagram::dns_ancount 0
+        set ::state::datagram::dns_nscount 0
+        set ::state::datagram::dns_arcount 0
+    }
+
+    proc datagram_reset_connection {} {
+        _datagram_reset_state
+    }
+
+    proc datagram_prepare_event {} {
+        _datagram_reset_state
+    }
+
+    proc datagram_sync_from_layers {} {
+        if {[info exists ::state::connection::protocol]} {
+            set ::state::datagram::protocol $::state::connection::protocol
+        }
+        foreach field {tos ttl} {
+            if {[info exists ::state::connection::$field]} {
+                set ::state::datagram::ip_$field [set ::state::connection::$field]
+            }
+        }
+        foreach field {client_addr local_addr server_addr remote_addr} {
+            if {[info exists ::state::connection::$field] &&
+                [string first ":" [set ::state::connection::$field]] >= 0} {
+                set ::state::datagram::ip_version 6
+                break
+            }
+        }
+        if {[info exists ::state::udp::payload]} {
+            set ::state::datagram::payload $::state::udp::payload
+            set ::state::datagram::payload_length \
+                [::itest::cmd::_payload_bytelength $::state::udp::payload]
+        } elseif {[info exists ::state::connection::client_payload]} {
+            set ::state::datagram::payload $::state::connection::client_payload
+            set ::state::datagram::payload_length \
+                [::itest::cmd::_payload_bytelength $::state::connection::client_payload]
+        }
+        if {[info exists ::state::dns::id]} {
+            foreach field {id qr opcode qdcount ancount nscount arcount} {
+                if {[info exists ::state::dns::$field]} {
+                    set ::state::datagram::dns_$field [set ::state::dns::$field]
+                }
+            }
+        }
+    }
+
+    proc _datagram_require {command_name events} {
+        if {![_profile_enabled DATAGRAM]} {
+            error "$command_name requires the DATAGRAM profile"
+        }
+        if {$::itest::current_event ni $events} {
+            error "$command_name is not valid in $::itest::current_event"
+        }
+    }
+
+    proc _datagram_protocol {command_name} {
+        set protocol [string tolower $::state::datagram::protocol]
+        if {$protocol in {tcp 6}} { return 6 }
+        if {$protocol in {udp 17}} { return 17 }
+        error "$command_name requires a TCP or UDP datagram"
+    }
+
+    proc _datagram_require_protocol {command_name expected} {
+        if {[_datagram_protocol $command_name] != $expected} {
+            set label [expr {$expected == 6 ? "TCP" : "UDP"}]
+            error "$command_name requires a $label datagram"
+        }
+    }
+
+    proc _datagram_ip_version {command_name} {
+        set version $::state::datagram::ip_version
+        if {![string is integer -strict $version] || $version ni {4 6}} {
+            error "$command_name has an invalid IP version"
+        }
+        return $version
+    }
+
+    proc _datagram_option_query {raw command_name args} {
+        if {[llength $args] > 1} {
+            error "$command_name accepts at most one option code"
+        }
+        set filter ""
+        if {[llength $args] == 1} {
+            set filter [lindex $args 0]
+            if {![string is integer -strict $filter] || $filter < 0 || $filter > 255} {
+                error "$command_name option code must be an integer from 0 to 255"
+            }
+        }
+        set result {}
+        foreach option $raw {
+            if {[llength $option] ni {1 2} ||
+                ![string is integer -strict [lindex $option 0]] ||
+                [lindex $option 0] < 0 || [lindex $option 0] > 255} {
+                error "$command_name has an invalid option list"
+            }
+            if {$filter eq "" || [lindex $option 0] == $filter} {
+                lappend result $option
+            }
+        }
+        return $result
+    }
+
+    proc _datagram_option_command {raw operation command_name args} {
+        set matches [_datagram_option_query $raw $command_name {*}$args]
+        if {$operation eq "option_count"} {
+            return [llength $matches]
+        }
+        return $matches
+    }
+
+    proc _datagram_dns_port_available {} {
+        foreach field {client_port server_port local_port remote_port} {
+            if {[info exists ::state::connection::$field]} {
+                set value [set ::state::connection::$field]
+                if {[string is integer -strict $value] && $value == 53} {
+                    return 1
+                }
+            }
+            if {[info exists ::state::udp::$field]} {
+                set value [set ::state::udp::$field]
+                if {[string is integer -strict $value] && $value == 53} {
+                    return 1
+                }
+            }
+        }
+        return 0
+    }
+
+    proc datagram_ip {args} {
+        _datagram_require DATAGRAM::ip {FLOW_INIT}
+        if {[_datagram_ip_version DATAGRAM::ip] != 4} {
+            error "DATAGRAM::ip requires an IPv4 datagram"
+        }
+        if {[llength $args] < 1} {
+            error "DATAGRAM::ip requires a property"
+        }
+        set property [lindex $args 0]
+        set remaining [lrange $args 1 end]
+        switch -exact -- $property {
+            tos - ttl - flags {
+                if {[llength $remaining] != 0} {
+                    error "DATAGRAM::ip $property takes no option code"
+                }
+                return [set ::state::datagram::ip_$property]
+            }
+            option - option_count {
+                return [_datagram_option_command \
+                    $::state::datagram::ip_options $property DATAGRAM::ip {*}$remaining]
+            }
+            default {
+                error "unsupported DATAGRAM::ip property $property"
+            }
+        }
+    }
+
+    proc datagram_ip6 {args} {
+        _datagram_require DATAGRAM::ip6 {FLOW_INIT}
+        if {[_datagram_ip_version DATAGRAM::ip6] != 6} {
+            error "DATAGRAM::ip6 requires an IPv6 datagram"
+        }
+        if {[llength $args] < 1} {
+            error "DATAGRAM::ip6 requires a property"
+        }
+        set property [lindex $args 0]
+        set remaining [lrange $args 1 end]
+        switch -exact -- $property {
+            hop_limit {
+                if {[llength $remaining] != 0} {
+                    error "DATAGRAM::ip6 hop_limit takes no option code"
+                }
+                return $::state::datagram::ip6_hop_limit
+            }
+            option - option_count {
+                return [_datagram_option_command \
+                    $::state::datagram::ip6_options $property DATAGRAM::ip6 {*}$remaining]
+            }
+            default {
+                error "unsupported DATAGRAM::ip6 property $property"
+            }
+        }
+    }
+
+    proc datagram_l2 {args} {
+        _datagram_require DATAGRAM::l2 {
+            FLOW_INIT CLIENT_ACCEPTED SA_PICKED LB_SELECTED CLIENT_DATA
+            SERVER_DATA SERVER_CONNECTED
+        }
+        if {[llength $args] != 1 || [lindex $args 0] ne "dest"} {
+            error "DATAGRAM::l2 syntax is dest"
+        }
+        return $::state::datagram::l2_dest
+    }
+
+    proc datagram_tcp {args} {
+        _datagram_require DATAGRAM::tcp {FLOW_INIT}
+        _datagram_require_protocol DATAGRAM::tcp 6
+        if {[llength $args] < 1} {
+            error "DATAGRAM::tcp requires a property"
+        }
+        set property [lindex $args 0]
+        set remaining [lrange $args 1 end]
+        switch -exact -- $property {
+            flags - payload_length - window {
+                if {[llength $remaining] != 0} {
+                    error "DATAGRAM::tcp $property takes no arguments"
+                }
+                if {$property eq "payload_length"} {
+                    return [::itest::cmd::_payload_bytelength $::state::datagram::payload]
+                }
+                return [set ::state::datagram::tcp_$property]
+            }
+            payload {
+                if {[llength $remaining] > 1} {
+                    error "DATAGRAM::tcp payload accepts an optional size"
+                }
+                if {[llength $remaining] == 1} {
+                    set size [lindex $remaining 0]
+                    if {![string is integer -strict $size] || $size < 0} {
+                        error "DATAGRAM::tcp payload size must be a non-negative integer"
+                    }
+                    return [::itest::cmd::_payload_first $::state::datagram::payload $size]
+                }
+                return $::state::datagram::payload
+            }
+            option - option_count {
+                return [_datagram_option_command \
+                    $::state::datagram::tcp_options $property DATAGRAM::tcp {*}$remaining]
+            }
+            default {
+                error "unsupported DATAGRAM::tcp property $property"
+            }
+        }
+    }
+
+    proc datagram_udp {args} {
+        _datagram_require DATAGRAM::udp {FLOW_INIT CLIENT_DATA}
+        _datagram_require_protocol DATAGRAM::udp 17
+        if {[llength $args] < 1 || [llength $args] > 2} {
+            error "DATAGRAM::udp syntax is payload, optional size, or payload_length"
+        }
+        set property [lindex $args 0]
+        if {$property eq "payload_length"} {
+            if {[llength $args] != 1} {
+                error "DATAGRAM::udp payload_length takes no arguments"
+            }
+            return [::itest::cmd::_payload_bytelength $::state::datagram::payload]
+        }
+        if {$property ne "payload"} {
+            error "unsupported DATAGRAM::udp property $property"
+        }
+        if {[llength $args] == 2} {
+            set size [lindex $args 1]
+            if {![string is integer -strict $size] || $size < 0} {
+                error "DATAGRAM::udp payload size must be a non-negative integer"
+            }
+            return [::itest::cmd::_payload_first $::state::datagram::payload $size]
+        }
+        return $::state::datagram::payload
+    }
+
+    proc datagram_dns {args} {
+        _datagram_require DATAGRAM::dns {FLOW_INIT CLIENT_DATA}
+        set protocol [_datagram_protocol DATAGRAM::dns]
+        if {$protocol ni {6 17} || ![_datagram_dns_port_available]} {
+            error "DATAGRAM::dns requires TCP or UDP traffic on port 53"
+        }
+        if {[llength $args] != 1} {
+            error "DATAGRAM::dns requires a property"
+        }
+        set property [lindex $args 0]
+        if {$property ni {id qr opcode qdcount ancount nscount arcount}} {
+            error "unsupported DATAGRAM::dns property $property"
+        }
+        if {$property eq "opcode"} {
+            set opcode $::state::datagram::dns_opcode
+            switch -exact -- $opcode {
+                0 - QUERY { return QUERY }
+                1 - IQUERY { return IQUERY }
+                2 - STATUS { return STATUS }
+                4 - NOTIFY { return NOTIFY }
+                5 - UPDATE { return UPDATE }
+                default { return $opcode }
+            }
+        }
+        return [set ::state::datagram::dns_$property]
+    }
+
     proc udp_reset_connection {} {
         namespace eval ::state::udp {
             variable payload ""
@@ -15607,6 +15938,12 @@ foreach {name proc_name} {
     ADAPT::select ::itest::semantic::adapt_select
     ADAPT::service_down_action ::itest::semantic::adapt_service_down_action
     ADAPT::timeout ::itest::semantic::adapt_timeout
+    DATAGRAM::dns ::itest::semantic::datagram_dns
+    DATAGRAM::ip ::itest::semantic::datagram_ip
+    DATAGRAM::ip6 ::itest::semantic::datagram_ip6
+    DATAGRAM::l2 ::itest::semantic::datagram_l2
+    DATAGRAM::tcp ::itest::semantic::datagram_tcp
+    DATAGRAM::udp ::itest::semantic::datagram_udp
     CRYPTO::hash ::itest::semantic::crypto_hash_command
     CRYPTO::sign ::itest::semantic::crypto_sign_command
     CRYPTO::verify ::itest::semantic::crypto_verify_command

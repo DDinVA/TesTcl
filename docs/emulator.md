@@ -64,6 +64,15 @@ by wire-byte offset, and the adapter records UDP drop, hold/release, respond,
 port, buffer, rate, and debug-queue controls in the event trace. This is a
 bounded datagram model: it does not implement TMM queue scheduling, NAT, or a
 real upstream UDP socket.
+The six TMOS 17.5 `DATAGRAM::*` readers are semantic as well. `DATAGRAM::ip`,
+`DATAGRAM::ip6`, `DATAGRAM::tcp`, `DATAGRAM::udp`, `DATAGRAM::dns`, and
+`DATAGRAM::l2` expose validated IPv4/IPv6, TCP/UDP, DNS, and Layer-2 metadata
+in `FLOW_INIT` or data events where the catalog permits them. Packet records
+may provide a `datagram` object with header flags, options, payload metadata,
+DNS fields, and an L2 destination; direct event calls may provide the same
+fields under the `datagram` state layer. The packet adapter emits `FLOW_INIT`
+when a `FLOW` profile is attached. This is deterministic header inspection,
+not a kernel parser, live flow engine, or packet mutation path.
 TCP packet traces also expose a bounded transport-control state layer. Rules
 can inspect or set Appropriate Byte Counting, analytics, automatic window
 tuning, delayed ACK, D-SACK, early retransmit, ECN, enhanced loss recovery,

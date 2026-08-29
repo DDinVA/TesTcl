@@ -206,6 +206,29 @@ EVENT_STATE_FIELDS = {
         "server_payload",
         "state",
     },
+    "datagram": {
+        "ip_version",
+        "ip_tos",
+        "ip_ttl",
+        "ip_flags",
+        "ip_options",
+        "ip6_hop_limit",
+        "ip6_options",
+        "l2_dest",
+        "protocol",
+        "tcp_flags",
+        "tcp_window",
+        "tcp_options",
+        "payload",
+        "payload_length",
+        "dns_id",
+        "dns_qr",
+        "dns_opcode",
+        "dns_qdcount",
+        "dns_ancount",
+        "dns_nscount",
+        "dns_arcount",
+    },
     "route": {
         "domain",
         "destination",
@@ -667,6 +690,7 @@ EVENT_STATE_FIELDS = {
 }
 EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
+    "datagram": "::state::datagram",
     "route": "::state::route",
     "tls_client": "::state::tls::client",
     "tls_server": "::state::tls::server",
@@ -763,6 +787,12 @@ SEMANTIC_MOCK_COMMANDS = {
     "ADAPT::select",
     "ADAPT::service_down_action",
     "ADAPT::timeout",
+    "DATAGRAM::dns",
+    "DATAGRAM::ip",
+    "DATAGRAM::ip6",
+    "DATAGRAM::l2",
+    "DATAGRAM::tcp",
+    "DATAGRAM::udp",
     "CRYPTO::hash",
     "CRYPTO::sign",
     "CRYPTO::verify",
@@ -4913,6 +4943,7 @@ PACKET_COMMON_FIELDS = {
     "hops",
     "ttl",
     "tos",
+    "datagram",
 }
 PACKET_PROTOCOL_FIELDS = {
     "tcp": {
@@ -6414,6 +6445,115 @@ def _packet_bool(value: Any, field: str) -> str:
     if isinstance(value, str) and value.lower() in {"0", "1", "false", "true"}:
         return "1" if value.lower() in {"1", "true"} else "0"
     raise EmulatorInputError(f"{field} must be a boolean or 0/1")
+
+
+DATAGRAM_METADATA_FIELDS = frozenset(
+    {
+        "ip_version",
+        "ip_tos",
+        "ip_ttl",
+        "ip_flags",
+        "ip_options",
+        "ip6_hop_limit",
+        "ip6_options",
+        "l2_dest",
+        "tcp_flags",
+        "tcp_window",
+        "tcp_options",
+        "dns_id",
+        "dns_qr",
+        "dns_opcode",
+        "dns_qdcount",
+        "dns_ancount",
+        "dns_nscount",
+        "dns_arcount",
+    }
+)
+DATAGRAM_OPTION_FIELDS = frozenset({"ip_options", "ip6_options", "tcp_options"})
+DATAGRAM_INTEGER_RANGES = {
+    "ip_tos": (0, 255),
+    "ip_ttl": (0, 255),
+    "ip_flags": (0, 7),
+    "ip6_hop_limit": (0, 255),
+    "tcp_flags": (0, 65535),
+    "tcp_window": (0, 65535),
+    "dns_id": (0, 65535),
+    "dns_qdcount": (0, 65535),
+    "dns_ancount": (0, 65535),
+    "dns_nscount": (0, 65535),
+    "dns_arcount": (0, 65535),
+}
+
+
+def _normalise_datagram_options(value: Any, field: str) -> list[list[str]]:
+    if not isinstance(value, list):
+        raise EmulatorInputError(f"packet datagram {field} must be an array")
+    options: list[list[str]] = []
+    for index, option in enumerate(value):
+        if not isinstance(option, list) or len(option) not in {1, 2}:
+            raise EmulatorInputError(
+                f"packet datagram {field}[{index}] must be [code] or [code, value]"
+            )
+        code = option[0]
+        if isinstance(code, bool) or not isinstance(code, int) or not 0 <= code <= 255:
+            raise EmulatorInputError(
+                f"packet datagram {field}[{index}] code must be an integer from 0 to 255"
+            )
+        normalised = [str(code)]
+        if len(option) == 2:
+            item = _require_string(option[1], f"packet datagram {field}[{index}] value")
+            if "\x00" in item:
+                raise EmulatorInputError(
+                    f"packet datagram {field}[{index}] value must not contain NUL bytes"
+                )
+            normalised.append(item)
+        options.append(normalised)
+    return options
+
+
+def _normalise_datagram_metadata(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise EmulatorInputError(f"{field} must be an object")
+    unknown = sorted(set(value) - DATAGRAM_METADATA_FIELDS)
+    if unknown:
+        raise EmulatorInputError(
+            f"{field} contains unsupported field(s): {', '.join(unknown)}"
+        )
+    result: dict[str, Any] = {}
+    for name, raw in value.items():
+        if name in DATAGRAM_OPTION_FIELDS:
+            result[name] = _normalise_datagram_options(raw, name)
+            continue
+        if name == "ip_version":
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw not in {4, 6}:
+                raise EmulatorInputError(f"{field}.ip_version must be 4 or 6")
+            result[name] = raw
+            continue
+        if name in DATAGRAM_INTEGER_RANGES:
+            low, high = DATAGRAM_INTEGER_RANGES[name]
+            if isinstance(raw, bool) or not isinstance(raw, int) or not low <= raw <= high:
+                raise EmulatorInputError(
+                    f"{field}.{name} must be an integer from {low} to {high}"
+                )
+            result[name] = raw
+            continue
+        if name == "dns_qr":
+            result[name] = _packet_bool(raw, f"{field}.dns_qr")
+            continue
+        if name in {"dns_opcode", "l2_dest"}:
+            item = _require_string(raw, f"{field}.{name}")
+            if "\x00" in item:
+                raise EmulatorInputError(f"{field}.{name} must not contain NUL bytes")
+            result[name] = item
+            continue
+    return result
+
+
+def _datagram_options_tcl(options: list[list[str]]) -> str:
+    return " ".join(
+        "{" + " ".join(_tcl_quote(item) for item in option) + "}"
+        for option in options
+    )
 
 
 WEBSOCKET_FRAME_TYPES = frozenset(
@@ -8231,6 +8371,10 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             "source": _packet_endpoint(packet.get("source"), "source", index),
             "destination": _packet_endpoint(packet.get("destination"), "destination", index),
         }
+        if "datagram" in packet:
+            normalised["datagram"] = _normalise_datagram_metadata(
+                packet["datagram"], f"packet {index} datagram"
+            )
         if "timestamp" in packet:
             timestamp = packet["timestamp"]
             if (
@@ -9331,6 +9475,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
                 session.eval_tcl("::itest::semantic::crypto_reset_connection")
                 session.eval_tcl("::itest::semantic::adapt_reset_connection")
+                session.eval_tcl("::itest::semantic::datagram_reset_connection")
                 session.eval_tcl("::itest::semantic::profile_settings_clear")
                 for profile_name, attributes in self._profile_settings.items():
                     flattened = [
@@ -9371,6 +9516,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
                 session.eval_tcl("::itest::semantic::crypto_reset_connection")
                 session.eval_tcl("::itest::semantic::adapt_reset_connection")
+                session.eval_tcl("::itest::semantic::datagram_reset_connection")
                 session.eval_tcl("::itest::semantic::flow_reset_connection")
                 if any(str(profile).upper() == "REWRITE" for profile in self._profiles):
                     session.eval_tcl("::itest::semantic::rewrite_install_flow_hooks")
@@ -9473,6 +9619,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::html_reset_connection")
             session.eval_tcl("::itest::semantic::compression_reset_connection")
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
+            session.eval_tcl("::itest::semantic::datagram_reset_connection")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -9661,6 +9808,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::crypto_reset_connection")
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
+            session.eval_tcl("::itest::semantic::datagram_reset_connection")
             self._connection_open = False
             self._server_connection_open = False
             self._server_connection_detached = False
@@ -9686,6 +9834,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::crypto_reset_connection")
             session.eval_tcl("::itest::semantic::adapt_reset_connection")
+            session.eval_tcl("::itest::semantic::datagram_reset_connection")
             self._connection_open = False
             self._server_connection_open = False
             self._server_connection_detached = False
@@ -9752,6 +9901,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::tcp_clear_event_state")
         if "udp" in state:
             session.eval_tcl("::itest::semantic::udp_prepare_event")
+        session.eval_tcl("::itest::semantic::datagram_prepare_event")
         if "rtsp" in state:
             session.eval_tcl("::itest::semantic::rtsp_prepare_event")
         if "stream" in state or event_name == "STREAM_MATCHED":
@@ -9772,10 +9922,10 @@ class EmulatorSession:
             "::itest::semantic::adapt_prepare_event "
             f"{_tcl_quote(event_name)}"
         )
-        for layer, values in state.items():
+        def install_state_layer(layer: str, values: dict[str, str]) -> None:
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "rtsp", "cache", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "rtsp", "cache", "datagram", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -9789,6 +9939,12 @@ class EmulatorSession:
                     )
                 else:
                     session.eval_tcl(f"set {namespace}::{field} {_tcl_quote(value)}")
+        for layer, values in state.items():
+            if layer != "datagram":
+                install_state_layer(layer, values)
+        session.eval_tcl("::itest::semantic::datagram_sync_from_layers")
+        if "datagram" in state:
+            install_state_layer("datagram", state["datagram"])
         if "dns" in state:
             session.eval_tcl("::itest::semantic::dns_prepare_message")
         event_errors_before = len(_event_error_snapshot(session))
@@ -9937,11 +10093,91 @@ class EmulatorSession:
         return connection
 
     @staticmethod
+    def _packet_datagram_state(packet: dict[str, Any]) -> dict[str, Any]:
+        """Build the packet-facing state consumed by DATAGRAM::* commands."""
+        metadata = packet.get("datagram", {})
+        if not isinstance(metadata, dict):  # guarded by packet normalisation
+            metadata = {}
+        source = packet["source"]
+        destination = packet["destination"]
+        addresses = [str(source.get("address", "")), str(destination.get("address", ""))]
+        inferred_version = 6 if any(":" in address for address in addresses) else 4
+        protocol = (
+            17
+            if packet["protocol"] in {"udp", "dns", "radius"}
+            or (packet["protocol"] == "sip" and packet.get("transport", "tcp") == "udp")
+            else 6
+            if packet["protocol"] in {
+                "tcp",
+                "tls",
+                "http",
+                "http2",
+                "websocket",
+                "mqtt",
+                "sip",
+                "diameter",
+                "mr",
+                "rtsp",
+            }
+            else 0
+        )
+        payload = packet.get("_wire_payload")
+        if not isinstance(payload, (bytes, bytearray)):
+            payload = str(packet.get("payload", "")).encode("utf-8")
+        tcp_flags = 0
+        tcp_flag_bits = {
+            "FIN": 0x01,
+            "SYN": 0x02,
+            "RST": 0x04,
+            "PSH": 0x08,
+            "ACK": 0x10,
+            "URG": 0x20,
+            "ECE": 0x40,
+            "CWR": 0x80,
+            "NS": 0x100,
+        }
+        for flag in packet.get("flags", []):
+            tcp_flags |= tcp_flag_bits.get(str(flag).upper(), 0)
+        state: dict[str, Any] = {
+            "ip_version": metadata.get("ip_version", inferred_version),
+            "ip_tos": metadata.get("ip_tos", packet.get("tos", 0)),
+            "ip_ttl": metadata.get("ip_ttl", packet.get("ttl", 64)),
+            "ip_flags": metadata.get("ip_flags", 0),
+            "ip_options": _datagram_options_tcl(metadata.get("ip_options", [])),
+            "ip6_hop_limit": metadata.get(
+                "ip6_hop_limit", packet.get("ttl", 64)
+            ),
+            "ip6_options": _datagram_options_tcl(metadata.get("ip6_options", [])),
+            "l2_dest": metadata.get("l2_dest", ""),
+            "protocol": protocol,
+            "tcp_flags": metadata.get("tcp_flags", tcp_flags),
+            "tcp_window": metadata.get("tcp_window", 0),
+            "tcp_options": _datagram_options_tcl(metadata.get("tcp_options", [])),
+            "payload": bytes(payload),
+            "payload_length": len(payload),
+            "dns_id": metadata.get("dns_id", packet.get("id", 0)),
+            "dns_qr": metadata.get("dns_qr", packet.get("qr", 0)),
+            "dns_opcode": metadata.get("dns_opcode", packet.get("opcode", "QUERY")),
+            "dns_qdcount": metadata.get("dns_qdcount", packet.get("qdcount", 0)),
+            "dns_ancount": metadata.get("dns_ancount", packet.get("ancount", 0)),
+            "dns_nscount": metadata.get("dns_nscount", packet.get("nscount", 0)),
+            "dns_arcount": metadata.get("dns_arcount", packet.get("arcount", 0)),
+        }
+        for field in DATAGRAM_OPTION_FIELDS:
+            if field in metadata:
+                state[field] = _datagram_options_tcl(metadata[field])
+        for field, value in state.items():
+            if field != "payload":
+                state[field] = str(value)
+        return state
+
+    @staticmethod
     def _packet_event_state(packet: dict[str, Any]) -> dict[str, dict[str, str]]:
         state: dict[str, dict[str, str]] = {}
         connection = EmulatorSession._packet_connection_state(packet)
         if connection:
             state["connection"] = connection
+        state["datagram"] = EmulatorSession._packet_datagram_state(packet)
         protocol = packet["protocol"]
         direction = packet["direction"]
         if protocol == "tls":
@@ -10695,6 +10931,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
         session.eval_tcl("::itest::semantic::crypto_reset_connection")
         session.eval_tcl("::itest::semantic::adapt_reset_connection")
+        session.eval_tcl("::itest::semantic::datagram_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
@@ -10707,6 +10944,8 @@ class EmulatorSession:
             if packet["protocol"] == "udp" or packet_has_tcp_layer
             else {"connection": self._packet_connection_state(packet)}
         )
+        if any(str(profile).upper() == "FLOW" for profile in self._profiles):
+            events.append(self._fire_event_on_worker(session, "FLOW_INIT", accepted_state))
         events.append(
             self._fire_event_on_worker(
                 session, "CLIENT_ACCEPTED", accepted_state
@@ -10732,6 +10971,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::flow_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
+        session.eval_tcl("::itest::semantic::datagram_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         session.eval_tcl("::itest::semantic::http_proxy_reset_connection")

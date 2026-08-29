@@ -480,7 +480,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
         self.assertNotIn(("X509", "generated-stub"), queue_buckets)
         self.assertNotIn(("ADAPT", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 324)
+        self.assertNotIn(("DATAGRAM", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 318)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -647,6 +648,168 @@ when ADAPT_REQUEST_RESULT {
             )
         finally:
             session.close()
+
+    def test_datagram_header_payload_and_option_queries(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["UDP", "DATAGRAM", "FLOW"],
+                "irule": """
+when FLOW_INIT {
+    if {[IP::protocol] == 17} {
+        log local0. "v4=[DATAGRAM::ip tos]/[DATAGRAM::ip ttl]/[DATAGRAM::ip flags] opts=[DATAGRAM::ip option] count=[DATAGRAM::ip option_count]/[DATAGRAM::ip option_count 7] udp=[DATAGRAM::udp payload 2]/[DATAGRAM::udp payload_length] dns=[DATAGRAM::dns id]/[DATAGRAM::dns qr]/[DATAGRAM::dns opcode]/[DATAGRAM::dns qdcount]/[DATAGRAM::dns ancount]/[DATAGRAM::dns nscount]/[DATAGRAM::dns arcount] l2=[DATAGRAM::l2 dest]"
+    } else {
+        log local0. "v6=[DATAGRAM::ip6 hop_limit]/[DATAGRAM::ip6 option]/[DATAGRAM::ip6 option_count] tcp=[DATAGRAM::tcp flags]/[DATAGRAM::tcp window]/[DATAGRAM::tcp payload]/[DATAGRAM::tcp payload_length] opts=[DATAGRAM::tcp option]/[DATAGRAM::tcp option_count 2]"
+    }
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=True,
+        )
+        try:
+            ipv4 = session.fire_event(
+                "FLOW_INIT",
+                {
+                    "connection": {
+                        "protocol": 17,
+                        "client_addr": "10.0.0.1",
+                        "local_addr": "192.0.2.53",
+                        "client_port": 53000,
+                        "local_port": 53,
+                        "tos": 16,
+                        "ttl": 44,
+                    },
+                    "datagram": {
+                        "ip_version": 4,
+                        "ip_flags": 2,
+                        "ip_options": "{1 foo} {7}",
+                        "l2_dest": "aa:bb:cc:dd:ee:ff",
+                        "dns_id": 4660,
+                        "dns_qr": 0,
+                        "dns_opcode": "QUERY",
+                        "dns_qdcount": 1,
+                        "dns_ancount": 2,
+                        "dns_nscount": 3,
+                        "dns_arcount": 4,
+                        "payload": "hello",
+                    },
+                },
+            )
+            self.assertTrue(any(
+                "v4=16/44/2" in entry
+                and "opts={1 foo} 7" in entry
+                and "count=2/1" in entry
+                and "udp=he/5" in entry
+                and "dns=4660/0/QUERY/1/2/3/4" in entry
+                and "l2=aa:bb:cc:dd:ee:ff" in entry
+                for entry in ipv4["logs"]
+            ))
+
+            ipv6 = session.fire_event(
+                "FLOW_INIT",
+                {
+                    "connection": {
+                        "protocol": 6,
+                        "client_addr": "2001:db8::1",
+                        "local_addr": "2001:db8::53",
+                        "client_port": 51000,
+                        "local_port": 443,
+                    },
+                    "datagram": {
+                        "ip_version": 6,
+                        "ip6_hop_limit": 31,
+                        "ip6_options": "{1 alpha} {2 beta} {2 gamma}",
+                        "tcp_flags": 18,
+                        "tcp_window": 65535,
+                        "tcp_options": "{2 mss} {3 ws} {2 sack}",
+                        "payload": "world",
+                    },
+                },
+            )
+            self.assertTrue(any(
+                "v6=31/{1 alpha} {2 beta} {2 gamma}/3" in entry
+                and "tcp=18/65535/world/5" in entry
+                and "opts={2 mss} {3 ws} {2 sack}/2" in entry
+                for entry in ipv6["logs"]
+            ))
+        finally:
+            session.close()
+
+    def test_datagram_packet_metadata_and_protocol_boundaries(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP", "DATAGRAM"],
+                "irule": """
+when CLIENT_DATA {
+    log local0. "udp=[DATAGRAM::udp payload 3]/[DATAGRAM::udp payload_length] dns=[DATAGRAM::dns id] l2=[DATAGRAM::l2 dest]"
+}
+""",
+                "packets": [{
+                    "protocol": "udp",
+                    "source": {"address": "10.0.0.1", "port": 53000},
+                    "destination": {"address": "192.0.2.53", "port": 53},
+                    "ttl": 48,
+                    "tos": 8,
+                    "payload": "abcdef",
+                    "datagram": {
+                        "ip_flags": 1,
+                        "l2_dest": "00:11:22:33:44:55",
+                        "dns_id": 99,
+                    },
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = next(
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] == "CLIENT_DATA"
+        )
+        self.assertEqual(event["state"]["datagram"]["ip_flags"], "1")
+        self.assertEqual(event["state"]["datagram"]["ip_ttl"], "48")
+        self.assertEqual(event["state"]["datagram"]["ip_tos"], "8")
+        self.assertEqual(event["state"]["datagram"]["dns_id"], "99")
+        self.assertTrue(any(
+            "udp=abc/6" in entry
+            and "dns=99" in entry
+            and "l2=00:11:22:33:44:55" in entry
+            for entry in event["logs"]
+        ))
+        statuses = {
+            entry["name"]: entry["runtime_status"]
+            for entry in result["fidelity"]["commands"]
+            if entry["name"].startswith("DATAGRAM::")
+        }
+        self.assertEqual(set(statuses), {
+            "DATAGRAM::dns", "DATAGRAM::l2", "DATAGRAM::udp",
+        })
+        self.assertTrue(all(value == "semantic-mock" for value in statuses.values()))
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "requires an IPv4 datagram"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["UDP", "DATAGRAM", "FLOW"],
+                    "irule": "when FLOW_INIT { DATAGRAM::ip ttl }",
+                    "packets": [{
+                        "protocol": "udp",
+                        "source": {"address": "2001:db8::1", "port": 53000},
+                        "destination": {"address": "2001:db8::53", "port": 53},
+                        "payload": "x",
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "requires the DATAGRAM profile"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["UDP", "FLOW"],
+                    "irule": "when FLOW_INIT { DATAGRAM::udp payload_length }",
+                    "packets": [{"protocol": "udp", "payload": "x"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_post_tmos_17_5_features_are_reported_and_rejected(self) -> None:
         with self.assertRaisesRegex(
