@@ -846,6 +846,31 @@ See the F5 [`DSLITE::remote_addr`](https://clouddocs.f5.com/api/irules/DSLITE__r
 and [`BIGPROTO::enable_fix_reset`](https://clouddocs.f5.com/api/irules/BIGPROTO__enable_fix_reset.html)
 references.
 
+### FIX tag state
+
+The direct `FIX_MESSAGE` adapter accepts a `fix.tags` object and exposes it to
+`FIX::tag get <tag>`. Missing tags return an empty string, and tags are reset
+when the next FIX message event begins. `FIX::tag map set SENDER DATA_GROUP`
+and `FIX::tag map delete` maintain a persistent, bounded sender-to-data-group
+mapping that can be configured from `RULE_INIT` or another event:
+
+```json
+{
+  "event": "FIX_MESSAGE",
+  "state": {
+    "fix": {
+      "tags": {"49": "client1", "35": "A", "56": "TARGET"},
+      "tag_maps": {"client1": "/Common/fix_tag_map"}
+    }
+  }
+}
+```
+
+Tag retrieval is restricted to `FIX_MESSAGE`; map mutation is available in any
+event. This models rule-visible FIX metadata and mapping state, not a complete
+FIX wire parser or data-group evaluator. See the F5
+[`FIX::tag`](https://clouddocs.f5.com/api/irules/FIX__tag.html) reference.
+
 ### FLOWTABLE query inputs
 
 The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,

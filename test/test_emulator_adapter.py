@@ -892,6 +892,67 @@ when CLIENT_ACCEPTED {
         finally:
             session.close()
 
+    def test_fix_tag_message_lookup_and_persistent_sender_mapping(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["FIX"],
+                "irule": """
+when RULE_INIT {
+    set mapped [FIX::tag map set client1 /Common/fix_tag_map]
+}
+when FIX_MESSAGE {
+    set sender [FIX::tag get 49]
+    set msg_type [FIX::tag get 35]
+    set missing [FIX::tag get 999]
+    log local0. "sender=$sender type=$msg_type missing=$missing"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            init_result = session.fire_event("RULE_INIT")
+            self.assertTrue(init_result["fired"])
+            self.assertTrue(any("fix tag_map_set" in entry for entry in init_result["decisions"]))
+
+            message = session.fire_event(
+                "FIX_MESSAGE",
+                {"fix": {"tags": {"49": "client1", "35": "A"}}},
+            )
+            self.assertTrue(message["fired"])
+            self.assertEqual(message["state"]["fix"]["tags"], '"49" "client1" "35" "A"')
+            self.assertEqual(
+                message["state"]["fix"]["tag_maps"],
+                "client1 /Common/fix_tag_map",
+            )
+            self.assertTrue(any("sender=client1 type=A missing=" in entry for entry in message["logs"]))
+
+            empty_message = session.fire_event("FIX_MESSAGE", {"fix": {}})
+            self.assertTrue(empty_message["fired"])
+            self.assertTrue(any("sender= type= missing=" in entry for entry in empty_message["logs"]))
+
+            invalid = self.adapter.EmulatorSession(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                {
+                    "profiles": ["FIX"],
+                    "irule": "when CLIENT_ACCEPTED { FIX::tag get 49 }",
+                },
+                allow_irule_file=False,
+                allow_requests=False,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError,
+                    "FIX::tag get is only valid in FIX_MESSAGE",
+                ):
+                    invalid.fire_event("CLIENT_ACCEPTED", {"fix": {}})
+            finally:
+                invalid.close()
+        finally:
+            session.close()
+
     def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1499,7 +1560,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
         self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 155)
+        self.assertEqual(queue["command_count"], 154)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1519,6 +1580,7 @@ when HTTP_REQUEST {
         self.assertIn("PEM_SUBS_SESS_CREATED", packet_adapters)
         self.assertIn("PEM_SUBS_SESS_UPDATED", packet_adapters)
         self.assertIn("PEM_SUBS_SESS_DELETED", packet_adapters)
+        self.assertEqual(packet_adapters["FIX_MESSAGE"], "structured FIX message event")
         self.assertEqual(
             packet_adapters["TAP_REQUEST"],
             "structured TAP security-token event",

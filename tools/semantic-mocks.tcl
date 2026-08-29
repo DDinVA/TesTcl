@@ -1097,6 +1097,11 @@ namespace eval ::itest::semantic {
         variable enable_fix_reset 1
     }
 
+    namespace eval ::state::fix {
+        variable tags {}
+        variable tag_maps {}
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -5981,6 +5986,88 @@ namespace eval ::itest::semantic {
         set ::state::bigproto::enable_fix_reset [expr {$value ? 1 : 0}]
         ::itest::log_decision bigproto enable_fix_reset $::state::bigproto::enable_fix_reset
         return ""
+    }
+
+    proc fix_prepare_event {} {
+        set ::state::fix::tags {}
+    }
+
+    proc _fix_text {value field_name} {
+        if {[string first "\x00" $value] >= 0 ||
+            [string first "\r" $value] >= 0 || [string first "\n" $value] >= 0} {
+            error "$field_name must not contain NUL bytes or newlines"
+        }
+        return $value
+    }
+
+    proc _fix_tag {value} {
+        set value [_fix_text $value "FIX tag"]
+        if {$value eq "" || ![string is integer -strict $value] || $value < 0} {
+            error "FIX tag must be a non-negative integer"
+        }
+        return $value
+    }
+
+    proc fix_tag_command {args} {
+        if {[llength $args] == 0} {
+            error "FIX::tag requires get or map"
+        }
+        set operation [lindex $args 0]
+        switch -exact -- $operation {
+            get {
+                if {$::itest::current_event ne "FIX_MESSAGE"} {
+                    error "FIX::tag get is only valid in FIX_MESSAGE"
+                }
+                if {[llength $args] != 2} {
+                    error "FIX::tag get requires a tag"
+                }
+                set tag [_fix_tag [lindex $args 1]]
+                if {[catch {dict exists $::state::fix::tags $tag} exists]} {
+                    error "FIX tag state must be a tag-to-value Tcl dictionary"
+                }
+                if {!$exists} { return "" }
+                return [_fix_text [dict get $::state::fix::tags $tag] "FIX tag value"]
+            }
+            map {
+                if {[llength $args] < 2} {
+                    error "FIX::tag map requires set or delete"
+                }
+                set map_operation [lindex $args 1]
+                switch -exact -- $map_operation {
+                    set {
+                        if {[llength $args] != 4} {
+                            error "FIX::tag map set requires SENDER and DATA_GROUP"
+                        }
+                        set sender [_fix_text [lindex $args 2] "FIX sender"]
+                        set data_group [_fix_text [lindex $args 3] "FIX data group"]
+                        if {$sender eq "" || $data_group eq ""} {
+                            error "FIX sender and data group must be non-empty"
+                        }
+                        if {![dict exists $::state::fix::tag_maps $sender] &&
+                            [dict size $::state::fix::tag_maps] >= 256} {
+                            error "FIX tag mappings cannot contain more than 256 senders"
+                        }
+                        dict set ::state::fix::tag_maps $sender $data_group
+                        ::itest::log_decision fix tag_map_set [list $sender $data_group]
+                        return 0
+                    }
+                    delete {
+                        if {[llength $args] != 2} {
+                            error "FIX::tag map delete takes no arguments"
+                        }
+                        set ::state::fix::tag_maps {}
+                        ::itest::log_decision fix tag_map_delete
+                        return 0
+                    }
+                    default {
+                        error "FIX::tag map supports set or delete"
+                    }
+                }
+            }
+            default {
+                error "FIX::tag supports get or map"
+            }
+        }
     }
 
     proc diameter_reset_connection {} {
@@ -20095,6 +20182,7 @@ foreach {original replacement} {
     ha_status ha_status_command
     dslite_remote_addr dslite_remote_addr_command
     bigproto_enable_fix_reset bigproto_enable_fix_reset_command
+    fix_tag fix_tag_command
     psc_aaa_reporting_interval psc_aaa_reporting_interval_command
     psc_attr psc_attr_command
     psc_calling_id psc_calling_id_command
@@ -20763,6 +20851,7 @@ foreach {name proc_name} {
     HA::status ::itest::semantic::ha_status_command
     DSLITE::remote_addr ::itest::semantic::dslite_remote_addr_command
     BIGPROTO::enable_fix_reset ::itest::semantic::bigproto_enable_fix_reset_command
+    FIX::tag ::itest::semantic::fix_tag_command
     PSC::aaa_reporting_interval ::itest::semantic::psc_aaa_reporting_interval_command
     PSC::attr ::itest::semantic::psc_attr_command
     PSC::calling_id ::itest::semantic::psc_calling_id_command

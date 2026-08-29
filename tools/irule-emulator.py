@@ -652,6 +652,7 @@ EVENT_STATE_FIELDS = {
     },
     "ha": {"status"},
     "bigproto": {"enable_fix_reset"},
+    "fix": {"tags", "tag_maps"},
     "diameter": {
         "type",
         "version",
@@ -1034,6 +1035,7 @@ EVENT_STATE_NAMESPACES = {
     "tap": "::state::tap",
     "ha": "::state::ha",
     "bigproto": "::state::bigproto",
+    "fix": "::state::fix",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
     "message": "::state::message",
@@ -1620,6 +1622,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "HA::status",
     "DSLITE::remote_addr",
     "BIGPROTO::enable_fix_reset",
+    "FIX::tag",
     "DIAMETER::avp",
     "DIAMETER::command",
     "DIAMETER::disconnect",
@@ -5552,6 +5555,39 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
                     raise EmulatorInputError(
                         "event state bigproto.enable_fix_reset must be a Tcl boolean"
                     )
+            elif layer == "fix" and field in {"tags", "tag_maps"} and isinstance(value, dict):
+                if len(value) > 256:
+                    raise EmulatorInputError(
+                        f"event state fix.{field} must contain at most 256 entries"
+                    )
+                encoded: dict[str, str] = {}
+                for key, item in value.items():
+                    if (
+                        not isinstance(key, str)
+                        or not key
+                        or any(character in key for character in "\x00\r\n")
+                    ):
+                        raise EmulatorInputError(
+                            f"event state fix.{field} keys must be non-empty strings without NUL or newlines"
+                        )
+                    if isinstance(item, bool):
+                        item_text = "1" if item else "0"
+                    elif isinstance(item, (str, int, float)):
+                        item_text = str(item)
+                    else:
+                        raise EmulatorInputError(
+                            f"event state fix.{field} values must be strings or numbers"
+                        )
+                    if any(character in item_text for character in "\x00\r\n"):
+                        raise EmulatorInputError(
+                            f"event state fix.{field} values must not contain NUL or newlines"
+                        )
+                    if field == "tag_maps" and not item_text:
+                        raise EmulatorInputError(
+                            "event state fix.tag_maps data-group names must be non-empty"
+                        )
+                    encoded[key] = item_text
+                layer_values[field] = _tcl_dict_value(encoded)
             elif isinstance(value, bool):
                 layer_values[field] = "1" if value else "0"
             elif isinstance(value, (str, int, float)):
@@ -6006,6 +6042,7 @@ PACKET_EVENT_ADAPTERS = {
     "CLIENT_CLOSED": "tcp FIN/RST from client",
     "SERVER_CLOSED": "tcp FIN/RST from server",
     "CLIENT_DATA": "client payload (TCP or generic UDP)",
+    "FIX_MESSAGE": "structured FIX message event",
     "SERVER_DATA": "server payload (TCP or generic UDP)",
     "CLIENTSSL_CLIENTHELLO": "TLS client hello",
     "CLIENTSSL_CLIENTCERT": "TLS client certificate",
@@ -11249,6 +11286,8 @@ class EmulatorSession:
             "::itest::semantic::adapt_prepare_event "
             f"{_tcl_quote(event_name)}"
         )
+        if event_name == "FIX_MESSAGE" or "fix" in state:
+            session.eval_tcl("::itest::semantic::fix_prepare_event")
         def install_state_layer(layer: str, values: dict[str, str]) -> None:
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
