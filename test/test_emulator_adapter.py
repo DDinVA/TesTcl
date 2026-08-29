@@ -1961,7 +1961,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 20)
+        self.assertEqual(queue["command_count"], 19)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -6335,6 +6335,111 @@ when HTTP_REQUEST {
                 if entry["name"] in {"LB::persist", "persist"}
             },
             {"LB::persist": "semantic-mock", "persist": "semantic-mock"},
+        )
+
+    def test_session_table_survives_connection_reset_and_normalizes_legacy_key_qualifiers(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/seed"} {
+        session add uie [list client-key any virtual] session-value
+    } elseif {[HTTP::uri] eq "/read"} {
+        HTTP::header insert X-Session [session lookup uie client-key]
+    } elseif {[HTTP::uri] eq "/delete"} {
+        session delete uie [list client-key any virtual]
+    }
+}
+""",
+                "requests": [
+                    {"uri": "/seed"},
+                    {"uri": "/read", "new_connection": True},
+                    {"uri": "/delete", "new_connection": True},
+                    {"uri": "/read", "new_connection": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        seeded, read, deleted, missing = result["results"]
+        self.assertEqual(seeded["semantic"]["session"]["count"], 1)
+        self.assertEqual(
+            seeded["semantic"]["session"]["records"],
+            [{"mode": "uie", "key": "client-key", "data": "session-value", "timeout": 180}],
+        )
+        self.assertEqual(read["request"]["headers"]["x-session"], "session-value")
+        self.assertEqual(deleted["semantic"]["session"]["count"], 0)
+        self.assertEqual(missing["request"]["headers"]["x-session"], "")
+        self.assertEqual(
+            [access["operation"] for access in missing["semantic"]["session"]["accesses"]],
+            ["add", "lookup", "delete", "lookup"],
+        )
+        self.assertEqual(
+            {
+                entry["name"]: entry["runtime_status"]
+                for entry in result["fidelity"]["commands"]
+                if entry["name"] == "session"
+            },
+            {"session": "semantic-mock"},
+        )
+
+    def test_session_table_rejects_empty_keys_and_unsupported_modes(self) -> None:
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "session key must not be empty"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when HTTP_REQUEST { session lookup uie \"\" }",
+                    "request": {"uri": "/"},
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "session mode must be"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when HTTP_REQUEST { session add invalid key value }",
+                    "request": {"uri": "/"},
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_session_table_supports_each_documented_mode_and_round_trips_values(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    session add simple simple-key "simple value"
+    session add source_addr source-key "source\nvalue" 0
+    session add sticky sticky-key sticky-value 0
+    session add dest_addr dest-key dest-value 0
+    session add ssl ssl-key ssl-value 0
+    session add uie uie-key uie-value 0
+    session add hash hash-key hash-value 0
+    session add sip sip-key sip-value 0
+    HTTP::header insert X-Session-Modes [list \
+        [session lookup simple simple-key] \
+        [session lookup source_addr source-key] \
+        [session lookup sticky sticky-key] \
+        [session lookup dest_addr dest-key] \
+        [session lookup ssl ssl-key] \
+        [session lookup uie uie-key] \
+        [session lookup hash hash-key] \
+        [session lookup sip sip-key]]
+}
+""",
+                "request": {"uri": "/"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        session_state = result["results"][0]["semantic"]["session"]
+        self.assertEqual(session_state["count"], 8)
+        self.assertEqual(
+            result["results"][0]["request"]["headers"]["x-session-modes"],
+            "{simple value} {source\nvalue} sticky-value dest-value ssl-value uie-value hash-value sip-value",
         )
 
     def test_semantic_overlay_models_connection_table_subtables_and_mutations(self) -> None:

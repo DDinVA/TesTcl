@@ -45,6 +45,14 @@ namespace eval ::itest::semantic {
     array set hsl_handles {}
     variable hsl_messages {}
     variable next_hsl_handle 0
+    # The TMOS session table is a global key/value store for the lifetime of
+    # one emulator interpreter.  Unlike ::state::persist, it must survive
+    # connection teardown and does not select or restore a pool member.
+    variable session_records [dict create]
+    variable session_accesses {}
+    variable session_max_records 1024
+    variable session_max_value_bytes 1048576
+    variable session_max_total_bytes 16777216
     # IPFIX templates and destinations are session-scoped, like the static
     # objects an iRule normally keeps in static variables. Messages are
     # connection-scoped and are cleared by ipfix_reset_connection.
@@ -1430,6 +1438,207 @@ namespace eval ::itest::semantic {
     proc hsl_snapshot {} {
         variable hsl_messages
         return $hsl_messages
+    }
+
+    proc session_reset {} {
+        variable session_records
+        variable session_accesses
+        set session_records [dict create]
+        set session_accesses {}
+    }
+
+    proc _session_require_event {command_name} {
+        set allowed {
+            AUTH_ERROR AUTH_FAILURE AUTH_RESULT AUTH_SUCCESS AUTH_WANTCREDENTIAL
+            CACHE_REQUEST CACHE_RESPONSE CACHE_UPDATE CLIENT_ACCEPTED CLIENT_CLOSED
+            CLIENT_DATA CLIENT_LINE CLIENTSSL_CLIENTCERT CLIENTSSL_HANDSHAKE
+            HTTP_CLASS_FAILED HTTP_CLASS_SELECTED HTTP_REQUEST HTTP_REQUEST_DATA
+            HTTP_REQUEST_SEND HTTP_RESPONSE HTTP_RESPONSE_CONTINUE HTTP_RESPONSE_DATA
+            LB_FAILED LB_SELECTED NAME_RESOLVED PERSIST_DOWN RTSP_REQUEST
+            RTSP_REQUEST_DATA RTSP_RESPONSE RTSP_RESPONSE_DATA SERVER_CLOSED
+            SERVER_CONNECTED SERVER_DATA SERVER_LINE SERVERSSL_HANDSHAKE SIP_REQUEST
+            SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_SEND STREAM_MATCHED
+            USER_REQUEST USER_RESPONSE
+        }
+        set event ""
+        if {[info exists ::itest::current_event]} {
+            set event $::itest::current_event
+        }
+        if {[lsearch -exact $allowed $event] < 0} {
+            error "$command_name is not valid in event $event"
+        }
+    }
+
+    proc _session_mode {value} {
+        set mode [string tolower $value]
+        if {$mode ni {simple source_addr sticky dest_addr ssl uie hash sip}} {
+            error "session mode must be simple, source_addr, sticky, dest_addr, ssl, uie, hash, or sip"
+        }
+        return $mode
+    }
+
+    proc _session_key {value} {
+        if {$value eq ""} {
+            error "session key must not be empty"
+        }
+        if {[string first "\x00" $value] >= 0} {
+            error "session key must not contain NUL"
+        }
+        if {[string bytelength $value] > 4096} {
+            error "session key cannot exceed 4096 bytes"
+        }
+        # BIG-IP 10+ ignores the legacy association qualifier.  Accept the
+        # documented {value any|service|pool [pool name]} list form and use
+        # its first element as the global key.  Preserve ordinary keys that
+        # happen to contain whitespace or an unrecognized second element.
+        set list_length 0
+        if {![catch {llength $value} list_length] && $list_length >= 2} {
+            set qualifier [string tolower [lindex $value 1]]
+            if {$qualifier in {any service pool}} {
+                set value [lindex $value 0]
+            }
+        }
+        if {$value eq ""} {
+            error "session key must not be empty"
+        }
+        return $value
+    }
+
+    proc _session_entry_key {mode key} {
+        return "$mode|$key"
+    }
+
+    proc _session_append_access {operation mode key} {
+        variable session_accesses
+        lappend session_accesses [list $operation $mode $key]
+        if {[llength $session_accesses] > 1024} {
+            set session_accesses [lrange $session_accesses end-1023 end]
+        }
+    }
+
+    proc _session_expired {record now} {
+        set timeout [dict get $record timeout]
+        return [expr {$timeout > 0 && $now >= ([dict get $record created] + $timeout)}]
+    }
+
+    proc _session_purge_expired {} {
+        variable session_records
+        set now [clock seconds]
+        foreach entry_key [dict keys $session_records] {
+            set record [dict get $session_records $entry_key]
+            if {[_session_expired $record $now]} {
+                dict unset session_records $entry_key
+            }
+        }
+    }
+
+    proc _session_total_value_bytes {} {
+        variable session_records
+        set total 0
+        foreach entry_key [dict keys $session_records] {
+            incr total [string bytelength [dict get [dict get $session_records $entry_key] data]]
+        }
+        return $total
+    }
+
+    proc session_command {args} {
+        variable session_records
+        variable session_max_records
+        variable session_max_value_bytes
+        variable session_max_total_bytes
+
+        if {[llength $args] == 0} {
+            error "session requires add, lookup, or delete"
+        }
+        set operation [string tolower [lindex $args 0]]
+        if {$operation ni {add lookup delete}} {
+            error "unsupported session operation \"$operation\""
+        }
+        _session_require_event "session $operation"
+
+        if {$operation eq "add"} {
+            if {[llength $args] < 4 || [llength $args] > 5} {
+                error "session add requires mode, key, data, and optional timeout"
+            }
+            set mode [_session_mode [lindex $args 1]]
+            set key [_session_key [lindex $args 2]]
+            set data [lindex $args 3]
+            if {[string first "\x00" $data] >= 0} {
+                error "session data must not contain NUL"
+            }
+            if {[string bytelength $data] > $session_max_value_bytes} {
+                error "session data cannot exceed $session_max_value_bytes bytes"
+            }
+            set timeout 180
+            if {[llength $args] == 5} {
+                set timeout [lindex $args 4]
+                if {![string is integer -strict $timeout] || $timeout < 0 || $timeout > 2147483647} {
+                    error "session timeout must be an integer from 0 to 2147483647"
+                }
+            }
+            _session_purge_expired
+            set entry_key [_session_entry_key $mode $key]
+            set old_bytes 0
+            if {[dict exists $session_records $entry_key]} {
+                set old_bytes [string bytelength [dict get [dict get $session_records $entry_key] data]]
+            }
+            set projected [expr {[_session_total_value_bytes] - $old_bytes + [string bytelength $data]}]
+            if {$projected > $session_max_total_bytes} {
+                error "session table data cannot exceed $session_max_total_bytes bytes"
+            }
+            if {![dict exists $session_records $entry_key] && [dict size $session_records] >= $session_max_records} {
+                error "session table cannot contain more than $session_max_records records"
+            }
+            dict set session_records $entry_key [list \
+                mode $mode key $key data $data timeout $timeout created [clock seconds]]
+            _session_append_access add $mode $key
+            ::itest::log_decision session add [list $mode $key $timeout]
+            return ""
+        }
+
+        if {[llength $args] != 3} {
+            error "session $operation requires mode and key"
+        }
+        set mode [_session_mode [lindex $args 1]]
+        set key [_session_key [lindex $args 2]]
+        _session_purge_expired
+        set entry_key [_session_entry_key $mode $key]
+        if {$operation eq "lookup"} {
+            if {![dict exists $session_records $entry_key]} {
+                _session_append_access lookup $mode $key
+                ::itest::log_decision session lookup_miss [list $mode $key]
+                return ""
+            }
+            set record [dict get $session_records $entry_key]
+            # A lookup touches the record and restarts its timeout counter.
+            dict set record created [clock seconds]
+            dict set session_records $entry_key $record
+            _session_append_access lookup $mode $key
+            ::itest::log_decision session lookup [list $mode $key]
+            return [dict get $record data]
+        }
+        if {[dict exists $session_records $entry_key]} {
+            dict unset session_records $entry_key
+        }
+        _session_append_access delete $mode $key
+        ::itest::log_decision session delete [list $mode $key]
+        return ""
+    }
+
+    proc session_snapshot {} {
+        variable session_records
+        variable session_accesses
+        _session_purge_expired
+        set records {}
+        foreach entry_key [lsort -ascii [dict keys $session_records]] {
+            set record [dict get $session_records $entry_key]
+            lappend records [list \
+                mode [dict get $record mode] \
+                key [dict get $record key] \
+                data [dict get $record data] \
+                timeout [dict get $record timeout]]
+        }
+        return [list count [llength $records] records $records accesses $session_accesses]
     }
 
     proc prepare_lb_failure {cause} {
@@ -23233,6 +23442,12 @@ if {[::tmm::_orig_info commands ::itest::cmd::cmd_persist] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::cmd_persist ::itest::cmd::_testcl_persist_orig
     proc ::itest::cmd::cmd_persist {args} {
         return [eval [linsert $args 0 ::itest::semantic::_persist_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_session] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_session ::itest::cmd::_testcl_session_orig
+    proc ::itest::cmd::cmd_session {args} {
+        return [eval [linsert $args 0 ::itest::semantic::session_command]]
     }
 }
 if {[::tmm::_orig_info commands ::itest::cmd::cmd_table] ne ""} {

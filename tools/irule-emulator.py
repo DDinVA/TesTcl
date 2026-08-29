@@ -1339,6 +1339,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "link_qos",
     "rateclass",
     "translate",
+    "session",
     "urlcatblindquery",
     "urlcatquery",
     "IPFIX::destination",
@@ -3477,6 +3478,73 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "blind_query_count": blind_query_count,
         "accesses": urlcat_accesses,
     }
+    session_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::session_snapshot")
+    )
+    if len(session_parts) != 6 or session_parts[::2] != [
+        "count", "records", "accesses"
+    ]:
+        raise EmulatorInputError("invalid session table state")
+    try:
+        session_count = int(session_parts[1])
+    except (TypeError, ValueError):
+        raise EmulatorInputError("invalid session table count") from None
+    if session_count < 0 or session_count > 1024:
+        raise EmulatorInputError("invalid session table count")
+    session_records: list[dict[str, Any]] = []
+    session_keys: set[tuple[str, str]] = set()
+    for raw_record in _split_tcl_list(session_parts[3]):
+        record_parts = _split_tcl_list(raw_record)
+        if len(record_parts) != 8 or record_parts[::2] != [
+            "mode", "key", "data", "timeout"
+        ]:
+            raise EmulatorInputError("invalid session table record")
+        record = dict(zip(record_parts[::2], record_parts[1::2]))
+        mode = record["mode"]
+        key = record["key"]
+        if mode not in {"simple", "source_addr", "sticky", "dest_addr", "ssl", "uie", "hash", "sip"}:
+            raise EmulatorInputError("invalid session table mode")
+        if not key or "\x00" in key or len(key.encode("utf-8")) > 4096:
+            raise EmulatorInputError("invalid session table key")
+        if "\x00" in record["data"] or len(record["data"].encode("utf-8")) > 1048576:
+            raise EmulatorInputError("invalid session table data")
+        try:
+            timeout = int(record["timeout"])
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid session table timeout") from None
+        if not 0 <= timeout <= 2147483647:
+            raise EmulatorInputError("invalid session table timeout")
+        identity = (mode, key)
+        if identity in session_keys:
+            raise EmulatorInputError("duplicate session table record")
+        session_keys.add(identity)
+        session_records.append({
+            "mode": mode,
+            "key": key,
+            "data": record["data"],
+            "timeout": timeout,
+        })
+    if len(session_records) != session_count:
+        raise EmulatorInputError("inconsistent session table count")
+    session_accesses: list[dict[str, str]] = []
+    for raw_access in _split_tcl_list(session_parts[5]):
+        access_parts = _split_tcl_list(raw_access)
+        if len(access_parts) != 3 or access_parts[0] not in {"add", "lookup", "delete"}:
+            raise EmulatorInputError("invalid session table access state")
+        if access_parts[1] not in {"simple", "source_addr", "sticky", "dest_addr", "ssl", "uie", "hash", "sip"}:
+            raise EmulatorInputError("invalid session table access mode")
+        if not access_parts[2] or "\x00" in access_parts[2] or len(access_parts[2].encode("utf-8")) > 4096:
+            raise EmulatorInputError("invalid session table access key")
+        session_accesses.append({
+            "operation": access_parts[0],
+            "mode": access_parts[1],
+            "key": access_parts[2],
+        })
+    session_state = {
+        "count": session_count,
+        "records": session_records,
+        "accesses": session_accesses,
+    }
     bwc_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::bwc_snapshot")
     )
@@ -5009,6 +5077,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "sideband": sideband,
         "ifile": ifile,
         "urlcat": urlcat,
+        "session": session_state,
         "bwc": bwc,
         "ipfix": ipfix,
         "ilx": ilx,
@@ -13068,6 +13137,7 @@ class EmulatorSession:
             )
             with backend_session as session:
                 _install_runtime_shims(session)
+                session.eval_tcl("::itest::semantic::session_reset")
                 for procedure, arguments, body in _extract_irule_procedures(
                     self._root, self._source
                 ):
@@ -13786,6 +13856,7 @@ class EmulatorSession:
                 "sideband": semantic_snapshot["sideband"],
                 "ifile": semantic_snapshot["ifile"],
                 "urlcat": semantic_snapshot["urlcat"],
+                "session": semantic_snapshot["session"],
                 "adapt": semantic_snapshot["adapt"],
                 "psm": semantic_snapshot["psm"],
                 "ip": semantic_snapshot["ip"],
