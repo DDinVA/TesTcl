@@ -29,6 +29,11 @@ namespace eval ::itest::semantic {
     variable asn1_elements {}
     variable asn1_counter 0
     variable asn1_max_bytes 16777216
+    variable ilx_handles {}
+    variable ilx_handle_counter 0
+    variable ilx_calls {}
+    variable ilx_notifies {}
+    variable ilx_max_messages 1024
     variable hsl_handles
     array set hsl_handles {}
     variable hsl_messages {}
@@ -12270,6 +12275,111 @@ namespace eval ::itest::semantic {
         set crypto_cipher_contexts {}
         set asn1_elements {}
         set asn1_counter 0
+        ilx_reset_connection
+    }
+
+    proc ilx_reset_connection {} {
+        variable ilx_handles
+        variable ilx_handle_counter
+        variable ilx_calls
+        variable ilx_notifies
+        set ilx_handles {}
+        set ilx_handle_counter 0
+        set ilx_calls {}
+        set ilx_notifies {}
+    }
+
+    proc _ilx_handle {handle command_name} {
+        variable ilx_handles
+        if {![dict exists $ilx_handles $handle]} { error "$command_name received an invalid ILX handle" }
+        return [dict get $ilx_handles $handle]
+    }
+
+    proc ilx_init_command {args} {
+        variable ilx_handles
+        variable ilx_handle_counter
+        if {$::itest::current_event eq "RULE_INIT"} { error "ILX::init is not valid during RULE_INIT" }
+        if {[llength $args] != 2} { error "ILX::init requires plugin and extension names" }
+        lassign $args plugin extension
+        foreach value [list $plugin $extension] {
+            if {$value eq "" || [string first "\x00" $value] >= 0} { error "ILX::init names must be non-empty and free of NUL bytes" }
+        }
+        incr ilx_handle_counter
+        set handle "ilx:$ilx_handle_counter"
+        dict set ilx_handles $handle [dict create plugin $plugin extension $extension]
+        ::itest::log_decision ilx init [list $handle $plugin $extension]
+        return $handle
+    }
+
+    proc _ilx_mock_reply {target method args} {
+        # These deterministic methods make a plugin boundary useful in
+        # offline tests while keeping unknown methods side-effect free.
+        switch -exact -- $method {
+            echo {
+                if {[llength $args] == 1} { return [lindex $args 0] }
+                return $args
+            }
+            sum {
+                set total 0
+                foreach value $args {
+                    if {![string is integer -strict $value]} { error "ILX mock sum requires integer arguments" }
+                    incr total $value
+                }
+                return $total
+            }
+            default { return "" }
+        }
+    }
+
+    proc ilx_call_command {args} {
+        variable ilx_calls
+        variable ilx_max_messages
+        if {[llength $args] < 2} { error "ILX::call requires a handle and method" }
+        set handle [lindex $args 0]
+        set target [_ilx_handle $handle ILX::call]
+        set index 1
+        set timeout 3000
+        if {[lindex $args $index] eq "-timeout"} {
+            if {$index + 1 >= [llength $args]} { error "ILX::call -timeout requires a value" }
+            set timeout [lindex $args [incr index]]
+            if {![string is integer -strict $timeout] || $timeout < 0} { error "ILX::call timeout must be a non-negative integer" }
+            incr index
+        }
+        if {$index >= [llength $args]} { error "ILX::call requires a method" }
+        set method [lindex $args $index]
+        if {$method eq "" || [string first "\x00" $method] >= 0} { error "ILX::call method must be non-empty and free of NUL bytes" }
+        set method_args [lrange $args [expr {$index + 1}] end]
+        set result [_ilx_mock_reply $target $method {*}$method_args]
+        lappend ilx_calls [list $handle [dict get $target plugin] [dict get $target extension] $method $timeout $method_args $result]
+        if {[llength $ilx_calls] > $ilx_max_messages} { set ilx_calls [lrange $ilx_calls end-[expr {$ilx_max_messages - 1}] end] }
+        ::itest::log_decision ilx call [list $handle $method $timeout $method_args $result]
+        return $result
+    }
+
+    proc ilx_notify_command {args} {
+        variable ilx_notifies
+        variable ilx_max_messages
+        if {[llength $args] < 2} { error "ILX::notify requires a handle and method" }
+        set handle [lindex $args 0]
+        set target [_ilx_handle $handle ILX::notify]
+        set method [lindex $args 1]
+        if {$method eq "" || [string first "\x00" $method] >= 0} { error "ILX::notify method must be non-empty and free of NUL bytes" }
+        set method_args [lrange $args 2 end]
+        lappend ilx_notifies [list $handle [dict get $target plugin] [dict get $target extension] $method $method_args]
+        if {[llength $ilx_notifies] > $ilx_max_messages} { set ilx_notifies [lrange $ilx_notifies end-[expr {$ilx_max_messages - 1}] end] }
+        ::itest::log_decision ilx notify [list $handle $method $method_args]
+        return 0
+    }
+
+    proc ilx_snapshot {} {
+        variable ilx_handles
+        variable ilx_calls
+        variable ilx_notifies
+        set handles {}
+        dict for {handle target} $ilx_handles {
+            lappend handles [list $handle [dict get $target plugin] [dict get $target extension]]
+        }
+        return [list handles $handles calls $ilx_calls notifies $ilx_notifies]
     }
 
     proc _adapt_default_record {side} {
@@ -22200,6 +22310,9 @@ foreach {name proc_name} {
     ASN1::decode ::itest::semantic::asn1_decode_command
     ASN1::element ::itest::semantic::asn1_element_command
     ASN1::encode ::itest::semantic::asn1_encode_command
+    ILX::call ::itest::semantic::ilx_call_command
+    ILX::init ::itest::semantic::ilx_init_command
+    ILX::notify ::itest::semantic::ilx_notify_command
     AES::decrypt ::itest::semantic::aes_decrypt_command
     AES::encrypt ::itest::semantic::aes_encrypt_command
     AES::key ::itest::semantic::aes_key_command

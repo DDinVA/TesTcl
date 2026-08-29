@@ -1310,6 +1310,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "ASN1::decode",
     "ASN1::element",
     "ASN1::encode",
+    "ILX::call",
+    "ILX::init",
+    "ILX::notify",
     "HSL::open",
     "HSL::send",
     "DNS::additional",
@@ -3058,6 +3061,54 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "messages": ipfix_messages,
         "sends": ipfix_sends,
     }
+    ilx_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::ilx_snapshot"))
+    if len(ilx_parts) % 2:
+        raise EmulatorInputError("invalid ILX state")
+    ilx_keys = ilx_parts[::2]
+    if len(set(ilx_keys)) != len(ilx_keys):
+        raise EmulatorInputError("invalid ILX state fields")
+    ilx_values = dict(zip(ilx_parts[::2], ilx_parts[1::2]))
+    if set(ilx_values) != {"handles", "calls", "notifies"}:
+        raise EmulatorInputError("invalid ILX state fields")
+    ilx_handles: list[dict[str, str]] = []
+    for raw_handle in _split_tcl_list(ilx_values["handles"]):
+        parts = _split_tcl_list(raw_handle)
+        if len(parts) != 3:
+            raise EmulatorInputError("invalid ILX handle state")
+        ilx_handles.append({"handle": parts[0], "plugin": parts[1], "extension": parts[2]})
+    ilx_calls: list[dict[str, Any]] = []
+    for raw_call in _split_tcl_list(ilx_values["calls"]):
+        parts = _split_tcl_list(raw_call)
+        if len(parts) != 7:
+            raise EmulatorInputError("invalid ILX call state")
+        try:
+            timeout = int(parts[4])
+        except ValueError:
+            raise EmulatorInputError("invalid ILX call timeout state") from None
+        if timeout < 0:
+            raise EmulatorInputError("invalid ILX call timeout state")
+        ilx_calls.append({
+            "handle": parts[0],
+            "plugin": parts[1],
+            "extension": parts[2],
+            "method": parts[3],
+            "timeout_ms": timeout,
+            "args": _split_tcl_list(parts[5]),
+            "result": parts[6],
+        })
+    ilx_notifies: list[dict[str, Any]] = []
+    for raw_notify in _split_tcl_list(ilx_values["notifies"]):
+        parts = _split_tcl_list(raw_notify)
+        if len(parts) != 5:
+            raise EmulatorInputError("invalid ILX notify state")
+        ilx_notifies.append({
+            "handle": parts[0],
+            "plugin": parts[1],
+            "extension": parts[2],
+            "method": parts[3],
+            "args": _split_tcl_list(parts[4]),
+        })
+    ilx = {"handles": ilx_handles, "calls": ilx_calls, "notifies": ilx_notifies}
     adapt_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::adapt_snapshot")
     )
@@ -3885,6 +3936,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "oneconnect": oneconnect,
         "bwc": bwc,
         "ipfix": ipfix,
+        "ilx": ilx,
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "lb": lb_control,
@@ -11615,6 +11667,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::html_reset_connection")
                 session.eval_tcl("::itest::semantic::compression_reset_connection")
                 session.eval_tcl("::itest::semantic::httplog_reset_connection")
+            session.eval_tcl("::itest::semantic::ilx_reset_connection")
             self._connection_open = False
             self._connection_request_number = 0
         if not self._connection_open:

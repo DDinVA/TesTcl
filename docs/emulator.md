@@ -306,6 +306,16 @@ scope, and parsed payloads are capped at 16 MiB. This portable model accepts
 constructed BER indefinite lengths but emits definite-length encodings; it
 does not attempt complete schema validation or emulate TMM scheduling.
 
+The ILX layer models `ILX::init`, `ILX::call`, and `ILX::notify` at the
+extension boundary. Handles are connection-scoped and the adapter exposes
+their plugin/extension targets, synchronous call history, and asynchronous
+notification history under `semantic.ilx`. `ILX::call` defaults to a 3000 ms
+timeout and accepts an explicit non-negative timeout; `ILX::notify` returns
+`0`. Offline calls implement deterministic `echo` and integer `sum` methods,
+with unknown methods returning an empty string. Histories are capped at 1024
+entries. This does not launch an iRulesLX Node.js worker or attempt to model
+extension process scheduling, IPC, or network failures.
+
 The ADAPT layer models the 17.5 request/response static and dynamic context
 surface. `ADAPT::context_create` returns deterministic opaque handles whose
 attributes inherit from the static context; the remaining ADAPT commands can

@@ -1855,7 +1855,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("IPFIX", "generated-stub"), queue_buckets)
         self.assertNotIn(("CRYPTO", "generated-stub"), queue_buckets)
         self.assertNotIn(("ASN1", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 119)
+        self.assertNotIn(("ILX", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 116)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -4442,6 +4443,77 @@ when HTTP_REQUEST {
         for irule, message in (
             ('when HTTP_REQUEST { ASN1::encode DER i not-an-integer }', "ASN1 integer value must be an integer"),
             ('when HTTP_REQUEST { set ::state::connection::client_payload {}; ASN1::element init DER }', "ASN1 payload must not be empty"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, message
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "request": {"uri": "/"},
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+
+    def test_ilx_init_call_notify_and_connection_scope(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    set handle [ILX::init telemetry plugin]
+    set echo [ILX::call $handle echo "hello world"]
+    set sum [ILX::call $handle -timeout 25 sum 2 3]
+    set queued [ILX::notify $handle event payload]
+    log local0. "handle=$handle echo=$echo sum=$sum queued=$queued"
+}
+""",
+                "requests": [{"uri": "/one"}, {"uri": "/two", "close_before": True}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any(
+            "handle=ilx:1 echo=hello world sum=5 queued=0" in entry
+            for entry in result["results"][0]["logs"]
+        ))
+        self.assertTrue(any(
+            "handle=ilx:1 echo=hello world sum=5 queued=0" in entry
+            for entry in result["results"][1]["logs"]
+        ))
+        first_semantic = result["results"][0]["semantic"]["ilx"]
+        second_semantic = result["results"][1]["semantic"]["ilx"]
+        self.assertEqual(first_semantic["handles"], [{
+            "handle": "ilx:1", "plugin": "telemetry", "extension": "plugin",
+        }])
+        self.assertEqual(first_semantic["calls"][1]["timeout_ms"], 25)
+        self.assertEqual(first_semantic["calls"][1]["args"], ["2", "3"])
+        self.assertEqual(first_semantic["notifies"][0]["args"], ["payload"])
+        self.assertEqual(second_semantic["handles"], [{
+            "handle": "ilx:1", "plugin": "telemetry", "extension": "plugin",
+        }])
+
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in ("ILX::call", "ILX::init", "ILX::notify"):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+        for irule, message in (
+            (
+                "when RULE_INIT { set h [ILX::init plugin extension] }",
+                "ILX::init is not valid during RULE_INIT",
+            ),
+            (
+                "when HTTP_REQUEST { set h [ILX::init plugin extension]; ILX::call $h -timeout -1 echo x }",
+                "ILX::call timeout must be a non-negative integer",
+            ),
+            (
+                "when HTTP_REQUEST { ILX::call ilx:missing echo x }",
+                "ILX::call received an invalid ILX handle",
+            ),
+            (
+                "when HTTP_REQUEST { set h [ILX::init plugin extension]; ILX::call $h sum one }",
+                "ILX mock sum requires integer arguments",
+            ),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(
                 self.adapter.EmulatorInputError, message

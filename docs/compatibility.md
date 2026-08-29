@@ -235,6 +235,16 @@ definite-length, while BER decoding also accepts constructed indefinite
 lengths. This is a portable rule-behavior model, not a claim of complete
 ASN.1 schema validation or full TMM payload scheduling.
 
+The TMOS 17.5 ILX surface is modeled by `ILX::init`, `ILX::call`, and
+`ILX::notify`. Initialization rejects `RULE_INIT`, creates connection-scoped
+opaque handles, and records the plugin/extension target. Calls honor the
+documented optional timeout (default 3000 ms), and notifies return `0` while
+recording the queued message. The offline boundary provides deterministic
+`echo` and integer `sum` methods; unknown methods return an empty result.
+Handles, calls, and notifications are exposed under `semantic.ilx` with
+bounded 1024-entry histories. No Node.js extension worker or networked ILX
+runtime is started by the emulator.
+
 The complete TMOS 17.5 `BWC::` family is represented by deterministic
 connection-scoped flow state. Policy attachment, category assignment, rate and
 PPS overrides, TOS/QoS marks, priority weights, debug state, and measurement
