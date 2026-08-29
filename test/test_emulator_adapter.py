@@ -657,8 +657,10 @@ when HTTP_REQUEST {
         self.assertNotIn(("FLOWTABLE", "generated-stub"), queue_buckets)
         self.assertNotIn(("L7CHECK", "generated-stub"), queue_buckets)
         self.assertNotIn(("LINK", "generated-stub"), queue_buckets)
+        self.assertNotIn(("NAME", "generated-stub"), queue_buckets)
+        self.assertNotIn(("RESOLV", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 225)
+        self.assertEqual(queue["command_count"], 222)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -7615,6 +7617,143 @@ when CLIENT_ACCEPTED {
             session.close()
         self.assertTrue(result["fired"])
         self.assertIn("1 0 www.example.com. A 192.0.2.20 1", result["logs"][0])
+
+    def test_legacy_name_and_resolv_lookups_use_deterministic_records(self) -> None:
+        session = self.adapter.EmulatorSession(
+            Path(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "NAME"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    set inline [RESOLV::lookup @/Common/r1 -a www.example.com]
+    NAME::lookup @/Common/r1 www.example.com
+    log local0. "inline=$inline"
+}
+when NAME_RESOLVED {
+    log local0. "addresses=[NAME::response] first=[NAME::response address 0]"
+}
+""",
+                "resolvers": {
+                    "/Common/r1": [
+                        {
+                            "name": "www.example.com.",
+                            "type": "A",
+                            "class": "IN",
+                            "ttl": 120,
+                            "rdata": "192.0.2.20",
+                        },
+                        {
+                            "name": "www.example.com.",
+                            "type": "A",
+                            "class": "IN",
+                            "ttl": 120,
+                            "rdata": "192.0.2.21",
+                        },
+                    ]
+                },
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event("CLIENT_ACCEPTED")
+        finally:
+            session.close()
+        self.assertTrue(result["fired"])
+        self.assertTrue(any("inline=192.0.2.20 192.0.2.21" in entry for entry in result["logs"]))
+        self.assertTrue(any(
+            "addresses=192.0.2.20 192.0.2.21 first=192.0.2.20" in entry
+            for entry in result["logs"]
+        ))
+        inline_index = next(
+            index for index, entry in enumerate(result["logs"])
+            if "inline=192.0.2.20 192.0.2.21" in entry
+        )
+        response_index = next(
+            index for index, entry in enumerate(result["logs"])
+            if "addresses=192.0.2.20 192.0.2.21 first=192.0.2.20" in entry
+        )
+        self.assertLess(inline_index, response_index)
+
+        reverse = self.adapter.EmulatorSession(
+            Path(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "NAME"],
+                "irule": """
+when CLIENT_ACCEPTED { NAME::lookup @/Common/r1 192.0.2.20 }
+when NAME_RESOLVED {
+    log local0. "ptr=[NAME::response] name=[NAME::response name]"
+}
+""",
+                "resolvers": {
+                    "/Common/r1": [
+                        {
+                            "name": "20.2.0.192.in-addr.arpa.",
+                            "type": "PTR",
+                            "class": "IN",
+                            "ttl": 120,
+                            "rdata": "host.example.com.",
+                        }
+                    ]
+                },
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            reverse_result = reverse.fire_event("CLIENT_ACCEPTED")
+        finally:
+            reverse.close()
+        self.assertTrue(any(
+            "ptr=host.example.com. name=host.example.com." in entry
+            for entry in reverse_result["logs"]
+        ))
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "received unknown record type option -bogus",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when CLIENT_ACCEPTED { RESOLV::lookup -bogus example.com }",
+                    "resolvers": {"/Common/r1": []},
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_name_resolution_callback_loop_is_bounded(self) -> None:
+        session = self.adapter.EmulatorSession(
+            Path(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "NAME"],
+                "irule": """
+when CLIENT_ACCEPTED { NAME::lookup @/Common/r1 www.example.com }
+when NAME_RESOLVED { NAME::lookup @/Common/r1 www.example.com }
+""",
+                "resolvers": {
+                    "/Common/r1": [
+                        {
+                            "name": "www.example.com.",
+                            "type": "A",
+                            "class": "IN",
+                            "ttl": 60,
+                            "rdata": "192.0.2.20",
+                        }
+                    ]
+                },
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "exceeded the 32-event NAME_RESOLVED dispatch limit",
+            ):
+                session.fire_event("CLIENT_ACCEPTED")
+        finally:
+            session.close()
 
     def test_route_metrics_lookup_domain_and_clear(self) -> None:
         destination = "192.0.2.10"

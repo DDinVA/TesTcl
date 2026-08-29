@@ -353,6 +353,14 @@ disable actions. Structured records are deterministic test data; the emulator
 does not run DNS-Express, recursive resolution, DNSSEC signing, or a live
 nameserver. `RESOLVER::name_lookup` and the `DNSMSG::*` commands can consume
 scenario-supplied resolver records without making network requests.
+The deprecated `RESOLV::lookup` command performs a deterministic inline query
+against the same configured records, returning matching `rdata` values for
+`-a`, `-aaaa`, `-ptr`, `-txt`, `-mx`, `-naptr`, and `-srv` lookups. The
+deprecated `NAME::lookup` command stores an asynchronous-style result and
+queues `NAME_RESOLVED` after the current event returns when that event is
+registered; `NAME::response` exposes the address list or reverse-lookup name
+there. These legacy commands do not contact a nameserver, model retry timers,
+or implement a real asynchronous event loop.
 `DNS::tsig exists` and `DNS::tsig remove` expose and clear deterministic TSIG
 presence state; the adapter does not calculate or validate TSIG signatures.
 TLS packet state supports common SNI, cipher, session, certificate, X509

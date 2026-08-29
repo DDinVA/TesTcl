@@ -1088,6 +1088,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "LINK::nexthop",
     "LINK::qos",
     "LINK::vlan_id",
+    "NAME::lookup",
+    "NAME::response",
+    "RESOLV::lookup",
     "ICAP::header",
     "ICAP::method",
     "ICAP::status",
@@ -10301,6 +10304,7 @@ class EmulatorSession:
         self._startup_error: BaseException | None = None
         self._call_lock = threading.RLock()
         self._closed = False
+        self._name_resolution_dispatching = False
         self._thread = threading.Thread(
             target=self._worker_main,
             name="testcl-irule-session",
@@ -10375,6 +10379,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::sctp_reset_connection")
                 session.eval_tcl("::itest::semantic::l7check_reset_connection")
                 session.eval_tcl("::itest::semantic::link_reset_connection")
+                session.eval_tcl("::itest::semantic::name_reset_connection")
                 session.eval_tcl("::itest::semantic::dhcp_reset_connection")
                 session.eval_tcl("::itest::semantic::ftp_reset_connection")
                 session.eval_tcl("::itest::semantic::imap_reset_connection")
@@ -10725,6 +10730,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::sctp_reset_connection")
             session.eval_tcl("::itest::semantic::l7check_reset_connection")
             session.eval_tcl("::itest::semantic::link_reset_connection")
+            session.eval_tcl("::itest::semantic::name_reset_connection")
             self._connection_open = False
             self._server_connection_open = False
             self._server_connection_detached = False
@@ -10888,6 +10894,21 @@ class EmulatorSession:
         event_errors_before = len(_event_error_snapshot(session))
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
         event_result = session.fire_event(event_name)
+        if not self._name_resolution_dispatching:
+            self._name_resolution_dispatching = True
+            try:
+                name_resolution_dispatches = 0
+                while session.eval_tcl("::itest::semantic::name_resolution_pending") == "1":
+                    if name_resolution_dispatches >= 32:
+                        raise EmulatorInputError(
+                            "NAME::lookup exceeded the 32-event NAME_RESOLVED dispatch limit"
+                        )
+                    session.eval_tcl("::itest::semantic::name_resolution_clear_pending")
+                    name_resolution_dispatches += 1
+                    if "NAME_RESOLVED" in self._registered_events:
+                        session.fire_event("NAME_RESOLVED")
+            finally:
+                self._name_resolution_dispatching = False
         event_errors = _event_error_snapshot(session)
         if len(event_errors) > event_errors_before:
             first_error = event_errors[event_errors_before]
@@ -12078,6 +12099,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::sctp_reset_connection")
         session.eval_tcl("::itest::semantic::l7check_reset_connection")
         session.eval_tcl("::itest::semantic::link_reset_connection")
+        session.eval_tcl("::itest::semantic::name_reset_connection")
         session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::ftp_reset_connection")
         session.eval_tcl("::itest::semantic::imap_reset_connection")
@@ -12132,6 +12154,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::sctp_reset_connection")
         session.eval_tcl("::itest::semantic::l7check_reset_connection")
         session.eval_tcl("::itest::semantic::link_reset_connection")
+        session.eval_tcl("::itest::semantic::name_reset_connection")
         session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::ftp_reset_connection")
         session.eval_tcl("::itest::semantic::icap_reset_connection")

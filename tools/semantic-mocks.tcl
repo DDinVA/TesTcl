@@ -143,6 +143,10 @@ namespace eval ::itest::semantic {
     variable dns_message_counter 0
     variable dns_message_objects [dict create]
     variable resolver_records [dict create]
+    variable name_response_mode ""
+    variable name_response_addresses {}
+    variable name_response_name ""
+    variable name_resolution_pending 0
     variable ssl_cert_counter 0
     variable ssl_cert_objects [dict create]
     variable http2_push_counter 0
@@ -15655,6 +15659,28 @@ namespace eval ::itest::semantic {
         set resolver_records [dict create]
         set dns_message_counter 0
         set dns_message_objects [dict create]
+        name_reset_connection
+    }
+
+    proc name_reset_connection {} {
+        variable name_response_mode
+        variable name_response_addresses
+        variable name_response_name
+        variable name_resolution_pending
+        set name_response_mode ""
+        set name_response_addresses {}
+        set name_response_name ""
+        set name_resolution_pending 0
+    }
+
+    proc name_resolution_pending {} {
+        variable name_resolution_pending
+        return $name_resolution_pending
+    }
+
+    proc name_resolution_clear_pending {} {
+        variable name_resolution_pending
+        set name_resolution_pending 0
     }
 
     proc resolver_set {name records} {
@@ -15729,6 +15755,185 @@ namespace eval ::itest::semantic {
             error "unsupported DNSMSG::record field $field"
         }
         return [_dns_rr_get [lindex $args 0] $field]
+    }
+
+    proc _resolver_default_name {} {
+        variable resolver_records
+        if {[dict exists $resolver_records default]} {
+            return default
+        }
+        set names [dict keys $resolver_records]
+        if {[llength $names] == 1} {
+            return [lindex $names 0]
+        }
+        return ""
+    }
+
+    proc _resolver_parse_query {command args} {
+        set resolver ""
+        set family ""
+        set wanted_type ""
+        set name ""
+        set type_options [dict create \
+            -a A -aaaa AAAA -ptr PTR -txt TXT -mx MX -naptr NAPTR -srv SRV]
+        set seen_resolver 0
+        set seen_family 0
+        set seen_type 0
+        foreach token $args {
+            if {[string match {@*} $token]} {
+                if {$seen_resolver || [string length $token] == 1} {
+                    error "$command accepts one resolver selector"
+                }
+                set seen_resolver 1
+                set resolver [string range $token 1 end]
+            } elseif {$token in {inet inet6}} {
+                if {$seen_family} {
+                    error "$command accepts one address family"
+                }
+                set seen_family 1
+                set family $token
+            } elseif {[string match {-*} $token]} {
+                if {$seen_type} {
+                    error "$command accepts one record type option"
+                }
+                if {![dict exists $type_options $token]} {
+                    error "$command received unknown record type option $token"
+                }
+                set seen_type 1
+                set wanted_type [dict get $type_options $token]
+            } elseif {$name eq ""} {
+                set name $token
+            } else {
+                error "$command accepts one query name"
+            }
+        }
+        if {$name eq ""} {
+            error "$command requires a query name"
+        }
+        set is_ipv4 [regexp {^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$} $name]
+        set is_ipv6 [expr {[string first : $name] >= 0}]
+        if {$wanted_type eq ""} {
+            if {$is_ipv4 || $is_ipv6} {
+                set wanted_type PTR
+            } elseif {$family eq "inet6"} {
+                set wanted_type AAAA
+            } else {
+                set wanted_type A
+            }
+        }
+        if {$family eq "inet" && $wanted_type eq "AAAA"} {
+            error "$command inet cannot be combined with -aaaa"
+        }
+        if {$family eq "inet6" && $wanted_type eq "A"} {
+            error "$command inet6 cannot be combined with -a"
+        }
+        if {!$seen_resolver} {
+            set resolver [_resolver_default_name]
+        }
+        return [list $resolver $name $wanted_type]
+    }
+
+    proc _resolver_owner_name {name} {
+        if {[regexp {^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$} $name -> a b c d]} {
+            return "$d.$c.$b.$a.in-addr.arpa"
+        }
+        return [string trimright $name .]
+    }
+
+    proc _resolver_query_values {resolver name wanted_type} {
+        variable resolver_records
+        if {$resolver eq "" || ![dict exists $resolver_records $resolver]} {
+            return {}
+        }
+        set query_name [string tolower [_resolver_owner_name $name]]
+        set values {}
+        foreach record [dict get $resolver_records $resolver] {
+            # Resolver records are normalized Tcl lists owned by the
+            # scenario. Read them directly so repeated lookups do not leak
+            # transient DNSMSG record handles into the session object table.
+            set rr_name [string tolower [string trimright [lindex $record 0] .]]
+            set rr_type [string toupper [lindex $record 1]]
+            if {$rr_name eq $query_name &&
+                ($rr_type eq $wanted_type || $wanted_type eq "ANY")} {
+                lappend values [lindex $record 4]
+            }
+        }
+        return $values
+    }
+
+    proc resolv_lookup_command {args} {
+        lassign [_resolver_parse_query RESOLV::lookup {*}$args] resolver name wanted_type
+        set values [_resolver_query_values $resolver $name $wanted_type]
+        ::itest::log_decision dns resolv_lookup [list $resolver $name $wanted_type $values]
+        return $values
+    }
+
+    proc name_lookup_command {args} {
+        variable name_response_mode
+        variable name_response_addresses
+        variable name_response_name
+        variable name_resolution_pending
+        lassign [_resolver_parse_query NAME::lookup {*}$args] resolver name wanted_type
+        set values [_resolver_query_values $resolver $name $wanted_type]
+        set is_reverse [expr {$wanted_type eq "PTR"}]
+        if {$is_reverse} {
+            set name_response_mode name
+            set name_response_name [lindex $values 0]
+            set name_response_addresses {}
+        } else {
+            set name_response_mode address
+            set name_response_addresses [lrange $values 0 15]
+            set name_response_name ""
+        }
+        ::itest::log_decision dns name_lookup [list $resolver $name $wanted_type $values]
+        # NAME::lookup is asynchronous on BIG-IP. Queue one deterministic
+        # NAME_RESOLVED delivery for the adapter to drain after the current
+        # event returns, so statements following NAME::lookup keep executing
+        # before the callback runs.
+        set name_resolution_pending 1
+        return ""
+    }
+
+    proc name_response_command {args} {
+        variable name_response_mode
+        variable name_response_addresses
+        variable name_response_name
+        if {$::itest::current_event ne "NAME_RESOLVED"} {
+            error "NAME::response is not valid in $::itest::current_event"
+        }
+        if {![_profile_enabled NAME]} {
+            error "NAME::response requires the NAME profile"
+        }
+        if {[llength $args] == 0} {
+            if {$name_response_mode eq "name"} {
+                return $name_response_name
+            }
+            return $name_response_addresses
+        }
+        set selector [lindex $args 0]
+        if {$selector eq "name"} {
+            if {[llength $args] != 1} {
+                error "NAME::response name takes no index"
+            }
+            return $name_response_name
+        }
+        if {$selector ne "address"} {
+            error "NAME::response expects address or name"
+        }
+        if {[llength $args] == 1} {
+            return $name_response_addresses
+        }
+        if {[llength $args] != 2} {
+            error "NAME::response address accepts one optional index"
+        }
+        set index [lindex $args 1]
+        if {![string is integer -strict $index] || $index < 0 || $index > 15} {
+            error "NAME::response address index must be an integer from 0 to 15"
+        }
+        if {$index >= [llength $name_response_addresses]} {
+            return ""
+        }
+        return [lindex $name_response_addresses $index]
     }
 
     proc resolver_name_lookup {args} {
@@ -17821,6 +18026,9 @@ foreach {name proc_name} {
     DNSMSG::header ::itest::semantic::dnsmsg_header_command
     DNSMSG::record ::itest::semantic::dnsmsg_record_command
     DNSMSG::section ::itest::semantic::dnsmsg_section_command
+    NAME::lookup ::itest::semantic::name_lookup_command
+    NAME::response ::itest::semantic::name_response_command
+    RESOLV::lookup ::itest::semantic::resolv_lookup_command
     RESOLVER::name_lookup ::itest::semantic::resolver_name_lookup
     RESOLVER::summarize ::itest::semantic::resolver_summarize
     SSL::cert ::itest::semantic::ssl_cert_command

@@ -1132,6 +1132,18 @@ network and return only records whose owner name and type match the query.
 }
 ```
 
+The deprecated `RESOLV::lookup` command uses the same records for inline
+address, reverse, TXT, MX, NAPTR, and SRV queries. It accepts the documented
+resolver selector (`@/Common/r1`), address-family selector (`inet` or
+`inet6`), and record-type flags (`-a`, `-aaaa`, `-ptr`, `-txt`, `-mx`,
+`-naptr`, and `-srv`), returning a Tcl list of matching `rdata` values.
+`NAME::lookup` provides the older asynchronous-style interface: it stores the
+bounded result and queues `NAME_RESOLVED` after the current event returns when
+that event is registered. `NAME::response`, `NAME::response address [INDEX]`, and
+`NAME::response name` expose the corresponding result to that handler. This
+keeps legacy rules testable without contacting DNS or pretending to provide a
+wall-clock asynchronous resolver.
+
 ```json
 {
   "profiles": ["UDP", "DNS"],
