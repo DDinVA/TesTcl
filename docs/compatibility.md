@@ -271,6 +271,10 @@ does not perform URL demangling, iSession deduplication, or plugin processing;
 it records the rule-visible toggles and validates their documented argument
 forms.
 
+`REST::send` is also a semantic mock. It validates the documented
+`-method METHOD URI ?BODY?` form and records bounded local-request state under
+`semantic.rest`; it never performs outbound network I/O or exposes a response.
+
 The six catalogued TMOS 17.5 `NSH::*` commands are modeled as connection-
 scoped rule state. `NSH::chain` records a direction-specific chain name;
 `NSH::context`, `NSH::path_id`, and `NSH::service_index` validate and retain

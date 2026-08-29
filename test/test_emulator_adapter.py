@@ -1858,7 +1858,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("ILX", "generated-stub"), queue_buckets)
         self.assertNotIn(("NSH", "generated-stub"), queue_buckets)
         self.assertNotIn(("SIPALG", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 85)
+        self.assertNotIn(("REST", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 84)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -8573,6 +8574,69 @@ when IVS_ENTRY_REQUEST {
             (
                 "when HTTP_REQUEST { IVS_ENTRY::result noop }",
                 "IVS_ENTRY::result is not valid during HTTP_REQUEST",
+            ),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, message
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "request": {"uri": "/"},
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+
+    def test_rest_send_records_bounded_local_request_without_network_io(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/send"} {
+        set rest_body {{"operation":"QUERY"}}
+        REST::send -method post /shared/rpm-tasks $rest_body
+    }
+}
+""",
+                "requests": [
+                    {"uri": "/send"},
+                    {"uri": "/other"},
+                    {"uri": "/send", "close_before": True},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first = result["results"][0]["semantic"]["rest"]
+        second = result["results"][1]["semantic"]["rest"]
+        third = result["results"][2]["semantic"]["rest"]
+        expected_request = {
+            "method": "POST",
+            "uri": "/shared/rpm-tasks",
+            "body": '{"operation":"QUERY"}',
+        }
+        self.assertEqual(first["request_count"], 1)
+        self.assertEqual(first["last"], expected_request)
+        self.assertEqual(first["requests"], [expected_request])
+        self.assertEqual(second, first)
+        self.assertEqual(third["request_count"], 1)
+        self.assertEqual(third["last"], expected_request)
+        self.assertTrue(
+            any(entry.startswith("rest send ") for entry in result["results"][0]["decisions"])
+        )
+
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        self.assertEqual(usage["REST::send"]["runtime_status"], "semantic-mock")
+
+        for irule, message in (
+            (
+                "when HTTP_REQUEST { REST::send GET /shared/rpm-tasks }",
+                "REST::send syntax is",
+            ),
+            (
+                'when HTTP_REQUEST { REST::send -method "BAD METHOD" /shared/rpm-tasks }',
+                "REST::send method must be a valid HTTP token",
             ),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(

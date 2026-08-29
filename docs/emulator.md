@@ -1489,6 +1489,13 @@ The command contracts are documented by F5 for
 [`IVS_ENTRY::result`](https://clouddocs.f5.com/api/irules/IVS_ENTRY__result.html),
 [`PLUGIN::enable`](https://clouddocs.f5.com/api/irules/PLUGIN__enable.html), and
 [`PLUGIN::disable`](https://clouddocs.f5.com/api/irules/PLUGIN__disable.html).
+
+`REST::send -method METHOD URI ?BODY?` is modeled as a bounded local-request
+ledger. The emulator records the normalized method, URI, body, and request
+history under `semantic.rest`; it does not contact a BIG-IP REST endpoint or
+make outbound network calls. This matches the iRule contract that the request
+is sent to the local REST framework and its response is not available to the
+rule. See the F5 [`REST::send` reference](https://clouddocs.f5.com/api/irules/REST__send.html).
 Diameter support is pinned to the 17.5 catalog. Structured
 `protocol: "diameter"` packets and raw Diameter-over-TCP packets drive
 `DIAMETER_INGRESS` or `DIAMETER_EGRESS`; a packet with the retransmit flag also

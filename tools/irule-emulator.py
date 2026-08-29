@@ -1235,6 +1235,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "DHCPv6::peer_address",
     "DHCPv6::reject",
     "DHCPv6::transaction_id",
+    "REST::send",
     "FTP::allow_active_mode",
     "FTP::disable",
     "FTP::enable",
@@ -3345,6 +3346,57 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "plugin_all_disabled": parse_feature_bool("plugin_all_disabled"),
         "plugin_states": plugin_states,
     }
+    rest_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::rest_snapshot"))
+    if len(rest_parts) % 2:
+        raise EmulatorInputError("invalid REST state")
+    rest_keys = rest_parts[::2]
+    if len(set(rest_keys)) != len(rest_keys):
+        raise EmulatorInputError("duplicate REST state field")
+    rest_values = dict(zip(rest_parts[::2], rest_parts[1::2]))
+    if set(rest_values) != {
+        "request_count", "last_method", "last_uri", "last_body", "requests"
+    }:
+        raise EmulatorInputError("invalid REST state fields")
+    try:
+        rest_request_count = int(rest_values["request_count"])
+    except (KeyError, TypeError, ValueError):
+        raise EmulatorInputError("invalid REST request count") from None
+    if rest_request_count < 0:
+        raise EmulatorInputError("invalid REST request count")
+    rest_requests: list[dict[str, str]] = []
+    for raw_request in _split_tcl_list(rest_values["requests"]):
+        request_parts = _split_tcl_list(raw_request)
+        if len(request_parts) != 3:
+            raise EmulatorInputError("invalid REST request history")
+        rest_requests.append(
+            {
+                "method": request_parts[0],
+                "uri": request_parts[1],
+                "body": request_parts[2],
+            }
+        )
+    if len(rest_requests) > 1024 or rest_request_count < len(rest_requests):
+        raise EmulatorInputError("invalid REST request history length")
+    if rest_request_count == 0 and any(
+        rest_values[name] for name in ("last_method", "last_uri", "last_body")
+    ):
+        raise EmulatorInputError("invalid REST last request state")
+    if rest_request_count > 0:
+        if not rest_requests or rest_requests[-1] != {
+            "method": rest_values["last_method"],
+            "uri": rest_values["last_uri"],
+            "body": rest_values["last_body"],
+        }:
+            raise EmulatorInputError("invalid REST last request state")
+    rest = {
+        "request_count": rest_request_count,
+        "last": {
+            "method": rest_values["last_method"],
+            "uri": rest_values["last_uri"],
+            "body": rest_values["last_body"],
+        },
+        "requests": rest_requests,
+    }
     adapt_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::adapt_snapshot")
     )
@@ -4176,6 +4228,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "nsh": nsh,
         "sipalg": sipalg,
         "feature_controls": feature_controls,
+        "rest": rest,
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "lb": lb_control,
@@ -12441,6 +12494,7 @@ class EmulatorSession:
                 "nsh": semantic_snapshot["nsh"],
                 "sipalg": semantic_snapshot["sipalg"],
                 "feature_controls": semantic_snapshot["feature_controls"],
+                "rest": semantic_snapshot["rest"],
             },
         }
         if mqtt_forwarded is not None:

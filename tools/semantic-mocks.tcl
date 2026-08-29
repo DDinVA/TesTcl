@@ -600,6 +600,14 @@ namespace eval ::itest::semantic {
         variable payload_length 0
     }
 
+    namespace eval ::state::rest {
+        variable request_count 0
+        variable last_method ""
+        variable last_uri ""
+        variable last_body ""
+        variable requests {}
+    }
+
     namespace eval ::state::ftp {
         variable allow_active_mode disable
         variable command ""
@@ -3499,6 +3507,65 @@ namespace eval ::itest::semantic {
             nonregister_subscriber_listener $sipalg_nonregister_subscriber_listener]
     }
 
+    proc rest_reset_connection {} {
+        set ::state::rest::request_count 0
+        set ::state::rest::last_method ""
+        set ::state::rest::last_uri ""
+        set ::state::rest::last_body ""
+        set ::state::rest::requests {}
+    }
+
+    proc rest_send_command {args} {
+        if {[llength $args] < 3 || [llength $args] > 4 ||
+            [lindex $args 0] ne "-method"} {
+            error "REST::send syntax is: REST::send -method METHOD URI ?BODY?"
+        }
+        set method [lindex $args 1]
+        set uri [lindex $args 2]
+        set body ""
+        if {[llength $args] == 4} {
+            set body [lindex $args 3]
+        }
+        set nul [binary format c 0]
+        if {[string first $nul $method] >= 0 ||
+            [string first $nul $uri] >= 0 ||
+            [string first $nul $body] >= 0} {
+            error "REST::send arguments must not contain NUL"
+        }
+        if {![regexp {^[A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]{0,31}$} $method]} {
+            error "REST::send method must be a valid HTTP token"
+        }
+        if {$uri eq ""} {
+            error "REST::send URI must not be empty"
+        }
+        if {[string bytelength $uri] > 8192} {
+            error "REST::send URI exceeds 8192 bytes"
+        }
+        if {[string bytelength $body] > 1048576} {
+            error "REST::send body exceeds 1048576 bytes"
+        }
+        set method [string toupper $method]
+        incr ::state::rest::request_count
+        set ::state::rest::last_method $method
+        set ::state::rest::last_uri $uri
+        set ::state::rest::last_body $body
+        lappend ::state::rest::requests [list $method $uri $body]
+        if {[llength $::state::rest::requests] > 1024} {
+            set ::state::rest::requests [lrange $::state::rest::requests end-1023 end]
+        }
+        ::itest::log_decision rest send [list $method $uri [string bytelength $body]]
+        return ""
+    }
+
+    proc rest_snapshot {} {
+        return [list \
+            request_count $::state::rest::request_count \
+            last_method $::state::rest::last_method \
+            last_uri $::state::rest::last_uri \
+            last_body $::state::rest::last_body \
+            requests $::state::rest::requests]
+    }
+
     proc feature_controls_reset_connection {} {
         variable demangle_enabled
         variable isession_deduplication_enabled
@@ -3512,6 +3579,7 @@ namespace eval ::itest::semantic {
         set ivs_entry_results {}
         set plugin_all_disabled 0
         set plugin_states [dict create]
+        rest_reset_connection
     }
 
     proc _feature_toggle_command {command_name variable_name enabled args} {
@@ -22532,6 +22600,7 @@ foreach {name proc_name} {
     DHCPv6::peer_address ::itest::semantic::dhcpv6_peer_address_command
     DHCPv6::reject ::itest::semantic::dhcpv6_reject_command
     DHCPv6::transaction_id ::itest::semantic::dhcpv6_transaction_id_command
+    REST::send ::itest::semantic::rest_send_command
     FTP::allow_active_mode ::itest::semantic::ftp_allow_active_mode_command
     FTP::disable ::itest::semantic::ftp_disable_command
     FTP::enable ::itest::semantic::ftp_enable_command
