@@ -1645,6 +1645,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "SIP::to",
     "SIP::uri",
     "SIP::via",
+    "SIPALG::hairpin",
+    "SIPALG::hairpin_default",
+    "SIPALG::nonregister_subscriber_listener",
     "SDP::field",
     "SDP::media",
     "SDP::session_id",
@@ -3246,8 +3249,35 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "md1": nsh_md1,
         "mocksf": nsh_values["mocksf"] == "1",
         "path_ids": parse_nsh_direction_values(nsh_values["path_ids"], "path ID", 0xFFFFFF),
-        "service_indices": parse_nsh_direction_values(
-            nsh_values["service_indices"], "service index", 0xFF
+            "service_indices": parse_nsh_direction_values(
+                nsh_values["service_indices"], "service index", 0xFF
+        ),
+    }
+    sipalg_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::sipalg_snapshot")
+    )
+    if len(sipalg_parts) % 2:
+        raise EmulatorInputError("invalid SIPALG state")
+    sipalg_keys = sipalg_parts[::2]
+    if len(set(sipalg_keys)) != len(sipalg_keys):
+        raise EmulatorInputError("duplicate SIPALG state field")
+    sipalg_values = dict(zip(sipalg_keys, sipalg_parts[1::2]))
+    if set(sipalg_values) != {
+        "hairpin", "hairpin_default", "nonregister_subscriber_listener"
+    }:
+        raise EmulatorInputError("invalid SIPALG state fields")
+    if any(
+        sipalg_values[name] not in {"detect", "disable", "enable"}
+        for name in ("hairpin", "hairpin_default")
+    ):
+        raise EmulatorInputError("invalid SIPALG hairpin state")
+    if sipalg_values["nonregister_subscriber_listener"] not in {"0", "1"}:
+        raise EmulatorInputError("invalid SIPALG listener state")
+    sipalg = {
+        "hairpin": sipalg_values["hairpin"],
+        "hairpin_default": sipalg_values["hairpin_default"],
+        "nonregister_subscriber_listener": (
+            sipalg_values["nonregister_subscriber_listener"] == "1"
         ),
     }
     adapt_parts = _split_tcl_list(
@@ -4079,6 +4109,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "ipfix": ipfix,
         "ilx": ilx,
         "nsh": nsh,
+        "sipalg": sipalg,
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "lb": lb_control,
@@ -12333,6 +12364,8 @@ class EmulatorSession:
                 "http_proxy": semantic_snapshot["http_proxy"],
                 "rewrite": semantic_snapshot["rewrite"],
                 "html": semantic_snapshot["html"],
+                "nsh": semantic_snapshot["nsh"],
+                "sipalg": semantic_snapshot["sipalg"],
             },
         }
         if mqtt_forwarded is not None:
@@ -13466,6 +13499,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::name_reset_connection")
         session.eval_tcl("::itest::semantic::socks_reset_connection")
         session.eval_tcl("::itest::semantic::sdp_reset_connection")
+        session.eval_tcl("::itest::semantic::sip_reset_connection")
         session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::ftp_reset_connection")
         session.eval_tcl("::itest::semantic::imap_reset_connection")

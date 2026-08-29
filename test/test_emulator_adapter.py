@@ -1857,7 +1857,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("ASN1", "generated-stub"), queue_buckets)
         self.assertNotIn(("ILX", "generated-stub"), queue_buckets)
         self.assertNotIn(("NSH", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 95)
+        self.assertNotIn(("SIPALG", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 92)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -8323,6 +8324,82 @@ when SIP_RESPONSE_DONE { log local0. response-done }
         )
         self.assertTrue(any("via=UDP" in log for log in response_events[0]["logs"]))
         self.assertEqual(response_events[-1]["state"]["sip"]["status"], "202")
+
+    def test_sipalg_connection_and_message_controls(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["SIP"],
+                "irule": """
+when SIP_REQUEST {
+    log local0. "before=[SIPALG::hairpin]/[SIPALG::hairpin_default]/[SIPALG::nonregister_subscriber_listener]"
+    SIPALG::hairpin enable
+    SIPALG::hairpin_default disable
+    SIPALG::nonregister_subscriber_listener 1
+    log local0. "after=[SIPALG::hairpin]/[SIPALG::hairpin_default]/[SIPALG::nonregister_subscriber_listener]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "direction": "client_to_server",
+                        "type": "request",
+                        "method": "INVITE",
+                        "uri": "sip:bob@example.com",
+                    },
+                    {
+                        "protocol": "sip",
+                        "direction": "client_to_server",
+                        "type": "request",
+                        "method": "BYE",
+                        "uri": "sip:bob@example.com",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first_event = next(
+            event for event in result["trace"][0]["events"]
+            if event["event"] == "SIP_REQUEST"
+        )
+        second_event = next(
+            event for event in result["trace"][1]["events"]
+            if event["event"] == "SIP_REQUEST"
+        )
+        self.assertTrue(any("before=detect/detect/0" in log for log in first_event["logs"]))
+        self.assertTrue(any("after=enable/disable/1" in log for log in first_event["logs"]))
+        self.assertTrue(any("before=disable/disable/1" in log for log in second_event["logs"]))
+        self.assertTrue(any("after=enable/disable/1" in log for log in second_event["logs"]))
+        self.assertEqual(first_event["semantic"]["sipalg"], {
+            "hairpin": "enable",
+            "hairpin_default": "disable",
+            "nonregister_subscriber_listener": True,
+        })
+        usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
+        for command in (
+            "SIPALG::hairpin",
+            "SIPALG::hairpin_default",
+            "SIPALG::nonregister_subscriber_listener",
+        ):
+            self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "SIPALG::hairpin accepts detect, disable, or enable",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["SIP"],
+                    "irule": "when SIP_REQUEST { SIPALG::hairpin invalid }",
+                    "packets": [{
+                        "protocol": "sip",
+                        "direction": "client_to_server",
+                        "type": "request",
+                        "method": "OPTIONS",
+                        "uri": "sip:example.com",
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_sdp_commands_model_fields_media_and_session_id(self) -> None:
         session = self.adapter.EmulatorSession(

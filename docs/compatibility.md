@@ -256,6 +256,14 @@ Handles, calls, and notifications are exposed under `semantic.ilx` with
 bounded 1024-entry histories. No Node.js extension worker or networked ILX
 runtime is started by the emulator.
 
+The SIPALG controls `SIPALG::hairpin`, `SIPALG::hairpin_default`, and
+`SIPALG::nonregister_subscriber_listener` are modeled on structured SIP
+messages. Hairpin mode is message-scoped; its default mode and the
+nonregistered-subscriber listener flag are connection-scoped. The values are
+exposed under `semantic.sipalg`. This records the iRule controls without
+implementing SIP ALG address translation, hairpin routing, or ephemeral
+listener creation.
+
 The six catalogued TMOS 17.5 `NSH::*` commands are modeled as connection-
 scoped rule state. `NSH::chain` records a direction-specific chain name;
 `NSH::context`, `NSH::path_id`, and `NSH::service_index` validate and retain

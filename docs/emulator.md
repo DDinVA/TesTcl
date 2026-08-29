@@ -1459,6 +1459,18 @@ F5 [`SIP`](https://clouddocs.f5.com/api/irules/SIP.html),
 [`SIP::respond`](https://clouddocs.f5.com/api/irules/SIP__respond.html), and
 [`SIP::persist`](https://clouddocs.f5.com/api/irules/SIP__persist.html)
 references for the production command/event contract.
+The SIPALG controls `SIPALG::hairpin`, `SIPALG::hairpin_default`, and
+`SIPALG::nonregister_subscriber_listener` are modeled on the same structured
+SIP lifecycle. Hairpin mode is message-scoped and supports `detect`, `enable`,
+and `disable`; the default hairpin mode and nonregistered-subscriber listener
+flag are connection-scoped. Their current values are included in each packet
+event's semantic state under `semantic.sipalg`. The emulator records these
+rule-visible controls but does not implement SIP ALG address translation,
+hairpin routing, or ephemeral listener creation. See the F5
+[`SIPALG::hairpin`](https://clouddocs.f5.com/api/irules/SIPALG__hairpin.html),
+[`SIPALG::hairpin_default`](https://clouddocs.f5.com/api/irules/SIPALG__hairpin_default.html),
+and [`SIPALG::nonregister_subscriber_listener`](https://clouddocs.f5.com/api/irules/SIPALG__nonregister_subscriber_listener.html)
+references for the command contract.
 Diameter support is pinned to the 17.5 catalog. Structured
 `protocol: "diameter"` packets and raw Diameter-over-TCP packets drive
 `DIAMETER_INGRESS` or `DIAMETER_EGRESS`; a packet with the retransmit flag also

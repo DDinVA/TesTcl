@@ -453,6 +453,9 @@ namespace eval ::itest::semantic {
     variable sip_persist_timeout 0
     variable sip_persist_bidirectional 0
     variable sip_persist_direction "detect"
+    variable sipalg_hairpin "detect"
+    variable sipalg_hairpin_default "detect"
+    variable sipalg_nonregister_subscriber_listener 0
 
     namespace eval ::state::websocket {
         variable request_headers {}
@@ -3370,6 +3373,9 @@ namespace eval ::itest::semantic {
         variable sip_persist_timeout
         variable sip_persist_bidirectional
         variable sip_persist_direction
+        variable sipalg_hairpin
+        variable sipalg_hairpin_default
+        variable sipalg_nonregister_subscriber_listener
         set sip_discarded 0
         set sip_response_requested 0
         set sip_response_code ""
@@ -3380,6 +3386,9 @@ namespace eval ::itest::semantic {
         set sip_persist_timeout 0
         set sip_persist_bidirectional 0
         set sip_persist_direction detect
+        set sipalg_hairpin detect
+        set sipalg_hairpin_default detect
+        set sipalg_nonregister_subscriber_listener 0
         _sip_clear_message_state
     }
 
@@ -3421,6 +3430,8 @@ namespace eval ::itest::semantic {
         variable sip_persist_timeout
         variable sip_persist_bidirectional
         variable sip_persist_direction
+        variable sipalg_hairpin
+        variable sipalg_hairpin_default
         set sip_discarded 0
         set sip_response_requested 0
         set sip_response_code ""
@@ -3431,7 +3442,54 @@ namespace eval ::itest::semantic {
         set sip_persist_timeout 0
         set sip_persist_bidirectional 0
         set sip_persist_direction detect
+        set sipalg_hairpin $sipalg_hairpin_default
         _sip_clear_message_state
+    }
+
+    proc sipalg_hairpin_command {args} {
+        variable sipalg_hairpin
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_SEND MR_INGRESS MR_EGRESS MR_FAILED} SIPALG::hairpin
+        if {[llength $args] == 0} { return $sipalg_hairpin }
+        if {[llength $args] != 1 || [lindex $args 0] ni {detect disable enable}} {
+            error "SIPALG::hairpin accepts detect, disable, or enable"
+        }
+        set sipalg_hairpin [lindex $args 0]
+        ::itest::log_decision sipalg hairpin $sipalg_hairpin
+        return $sipalg_hairpin
+    }
+
+    proc sipalg_hairpin_default_command {args} {
+        variable sipalg_hairpin_default
+        _sip_require_event {CLIENT_ACCEPTED SERVER_CONNECTED SIP_REQUEST SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_SEND} SIPALG::hairpin_default
+        if {[llength $args] == 0} { return $sipalg_hairpin_default }
+        if {[llength $args] != 1 || [lindex $args 0] ni {detect disable enable}} {
+            error "SIPALG::hairpin_default accepts detect, disable, or enable"
+        }
+        set sipalg_hairpin_default [lindex $args 0]
+        ::itest::log_decision sipalg hairpin_default $sipalg_hairpin_default
+        return $sipalg_hairpin_default
+    }
+
+    proc sipalg_nonregister_subscriber_listener_command {args} {
+        variable sipalg_nonregister_subscriber_listener
+        _sip_require_event {CLIENT_ACCEPTED SERVER_CONNECTED SIP_REQUEST SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_SEND} SIPALG::nonregister_subscriber_listener
+        if {[llength $args] == 0} { return $sipalg_nonregister_subscriber_listener }
+        if {[llength $args] != 1 || [lindex $args 0] ni {0 1 true false}} {
+            error "SIPALG::nonregister_subscriber_listener accepts 0, 1, true, or false"
+        }
+        set sipalg_nonregister_subscriber_listener [expr {[lindex $args 0] in {1 true}}]
+        ::itest::log_decision sipalg nonregister_subscriber_listener $sipalg_nonregister_subscriber_listener
+        return $sipalg_nonregister_subscriber_listener
+    }
+
+    proc sipalg_snapshot {} {
+        variable sipalg_hairpin
+        variable sipalg_hairpin_default
+        variable sipalg_nonregister_subscriber_listener
+        return [list \
+            hairpin $sipalg_hairpin \
+            hairpin_default $sipalg_hairpin_default \
+            nonregister_subscriber_listener $sipalg_nonregister_subscriber_listener]
     }
 
     proc sip_flags_snapshot {} {
@@ -22829,6 +22887,9 @@ foreach {name proc_name} {
     SIP::to ::itest::semantic::sip_to_command
     SIP::uri ::itest::semantic::sip_uri_command
     SIP::via ::itest::semantic::sip_via_command
+    SIPALG::hairpin ::itest::semantic::sipalg_hairpin_command
+    SIPALG::hairpin_default ::itest::semantic::sipalg_hairpin_default_command
+    SIPALG::nonregister_subscriber_listener ::itest::semantic::sipalg_nonregister_subscriber_listener_command
     SDP::field ::itest::semantic::sdp_field_command
     SDP::media ::itest::semantic::sdp_media_command
     SDP::session_id ::itest::semantic::sdp_session_id_command
