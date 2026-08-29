@@ -1330,6 +1330,8 @@ SEMANTIC_MOCK_COMMANDS = {
     "http_method",
     "http_uri",
     "http_version",
+    "lasthop",
+    "nexthop",
     "redirect",
     "forward",
     "link_qos",
@@ -3217,6 +3219,47 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "select": oneconnect_parts[2],
         "label": oneconnect_parts[3],
     }
+    link_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::link_snapshot")
+    )
+    if len(link_parts) != 20 or link_parts[::2] != [
+        "qos",
+        "vlan_id",
+        "lasthop_mac",
+        "lasthop_id",
+        "lasthop_type",
+        "lasthop_name",
+        "nexthop_mac",
+        "nexthop_id",
+        "nexthop_type",
+        "nexthop_name",
+    ]:
+        raise EmulatorInputError("invalid link state")
+    link_values = dict(zip(link_parts[::2], link_parts[1::2]))
+    try:
+        link_qos = int(link_values["qos"])
+        link_vlan_id = int(link_values["vlan_id"])
+    except (KeyError, TypeError, ValueError):
+        raise EmulatorInputError("invalid link numeric state") from None
+    if not 0 <= link_qos <= 7 or link_vlan_id < 0:
+        raise EmulatorInputError("invalid link numeric state")
+    for hop in ("lasthop", "nexthop"):
+        for field in (f"{hop}_mac", f"{hop}_id", f"{hop}_type", f"{hop}_name"):
+            value = link_values[field]
+            if "\x00" in value or len(value.encode("utf-8")) > 4096:
+                raise EmulatorInputError(f"invalid link {hop} {field} state")
+    link = {
+        "qos": link_qos,
+        "vlan_id": link_vlan_id,
+        "lasthop_mac": link_values["lasthop_mac"],
+        "lasthop_id": link_values["lasthop_id"],
+        "lasthop_type": link_values["lasthop_type"],
+        "lasthop_name": link_values["lasthop_name"],
+        "nexthop_mac": link_values["nexthop_mac"],
+        "nexthop_id": link_values["nexthop_id"],
+        "nexthop_type": link_values["nexthop_type"],
+        "nexthop_name": link_values["nexthop_name"],
+    }
     legacy_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::legacy_connection_snapshot")
     )
@@ -4852,6 +4895,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "values": istats,
         },
         "oneconnect": oneconnect,
+        "link": link,
         "legacy": legacy,
         "sideband": sideband,
         "bwc": bwc,
@@ -13417,6 +13461,7 @@ class EmulatorSession:
                 for entry in session.get_logs()
             ],
             "semantic": {
+                "link": semantic_snapshot["link"],
                 "legacy": semantic_snapshot["legacy"],
                 "sideband": semantic_snapshot["sideband"],
                 "adapt": semantic_snapshot["adapt"],

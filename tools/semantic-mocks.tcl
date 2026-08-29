@@ -1403,6 +1403,20 @@ namespace eval ::itest::semantic {
             $oneconnect_select_mode $oneconnect_label]
     }
 
+    proc link_snapshot {} {
+        return [list \
+            qos $::state::link::qos \
+            vlan_id $::state::link::vlan_id \
+            lasthop_mac $::state::link::lasthop_mac \
+            lasthop_id $::state::link::lasthop_id \
+            lasthop_type $::state::link::lasthop_type \
+            lasthop_name $::state::link::lasthop_name \
+            nexthop_mac $::state::link::nexthop_mac \
+            nexthop_id $::state::link::nexthop_id \
+            nexthop_type $::state::link::nexthop_type \
+            nexthop_name $::state::link::nexthop_name]
+    }
+
     proc legacy_connection_snapshot {} {
         return [list \
             forwarded $::state::connection::forwarded \
@@ -9264,6 +9278,78 @@ namespace eval ::itest::semantic {
 
     proc link_nexthop_command {args} {
         return [link_hop_command nexthop {*}$args]
+    }
+
+    proc _legacy_hop_value_kind {command value} {
+        if {$value eq "" || [string first "\x00" $value] >= 0 || [string bytelength $value] > 256} {
+            error "$command hop value must be non-empty, NUL-free, and at most 256 bytes"
+        }
+        if {[regexp -nocase {^([0-9a-f]{2}:){5}[0-9a-f]{2}$} $value]} {
+            return mac
+        }
+        if {$value eq "transparent"} {
+            return transparent
+        }
+        if {![catch {ip_address_key $value}]} {
+            return ip
+        }
+        error "$command hop value must be an IP address, MAC address, or transparent"
+    }
+
+    proc legacy_hop_command {hop args} {
+        set command $hop
+        if {$hop ni {lasthop nexthop}} {
+            error "unsupported legacy hop command $hop"
+        }
+        if {[llength $args] < 1 || [llength $args] > 2} {
+            error "$command requires a hop, with an optional VLAN"
+        }
+        set vlan ""
+        set value [lindex $args end]
+        if {[llength $args] == 2} {
+            set vlan [lindex $args 0]
+            if {$vlan eq "" || [string first "\x00" $vlan] >= 0 || [string bytelength $vlan] > 256} {
+                error "$command VLAN must be non-empty, NUL-free, and at most 256 bytes"
+            }
+        } elseif {$hop eq "nexthop"} {
+            # The documented nexthop form permits a VLAN with no explicit
+            # address, so a non-address single argument is treated as VLAN.
+            if {[catch {_legacy_hop_value_kind $command $value}]} {
+                set vlan $value
+                set value ""
+                if {$vlan eq "" || [string first "\x00" $vlan] >= 0 || [string bytelength $vlan] > 256} {
+                    error "$command VLAN must be non-empty, NUL-free, and at most 256 bytes"
+                }
+            }
+        }
+        set kind ""
+        if {$value ne ""} {
+            set kind [_legacy_hop_value_kind $command $value]
+            if {$hop eq "lasthop" && $kind eq "transparent"} {
+                error "lasthop requires an IP or MAC address"
+            }
+        }
+        set ::state::link::${hop}_mac ""
+        set ::state::link::${hop}_id ""
+        set ::state::link::${hop}_type $kind
+        set ::state::link::${hop}_name $vlan
+        if {$kind eq "mac"} {
+            set ::state::link::${hop}_mac [string tolower $value]
+        } elseif {$kind eq "ip"} {
+            # The offline model records an unresolved IP target in the id
+            # field; it does not claim to perform ARP or route resolution.
+            set ::state::link::${hop}_id $value
+        }
+        ::itest::log_decision legacy $command [list $vlan $value $kind]
+        return ""
+    }
+
+    proc legacy_lasthop_command {args} {
+        return [legacy_hop_command lasthop {*}$args]
+    }
+
+    proc legacy_nexthop_command {args} {
+        return [legacy_hop_command nexthop {*}$args]
     }
 
     proc link_qos_command {args} {
@@ -23305,12 +23391,14 @@ foreach {original replacement} {
     findclass findclass_command
     findstr findstr_command
     getfield getfield_command
+    lasthop legacy_lasthop_command
     llookup llookup_command
     link_qos legacy_link_qos_command
     matchclass matchclass_command
     md4 md4_command
     md5 md5_command
     members members_command
+    nexthop legacy_nexthop_command
     nodes nodes_command
     peer peer_command
     clientside clientside_command

@@ -1730,6 +1730,60 @@ when CLIENT_ACCEPTED {
         finally:
             invalid.close()
 
+    def test_legacy_hop_commands_update_shared_link_state(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    lasthop external AA:BB:CC:DD:EE:FF
+    nexthop external 2001:db8::10
+    log local0. "last=[LINK::lasthop]/[LINK::lasthop type]/[LINK::lasthop name] next=[LINK::nexthop id]/[LINK::nexthop type]/[LINK::nexthop name]"
+}
+""",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            result = session.fire_event("CLIENT_ACCEPTED")
+            link = result["semantic"]["link"]
+            self.assertEqual(link["lasthop_mac"], "aa:bb:cc:dd:ee:ff")
+            self.assertEqual(link["lasthop_type"], "mac")
+            self.assertEqual(link["lasthop_name"], "external")
+            self.assertEqual(link["nexthop_id"], "2001:db8::10")
+            self.assertEqual(link["nexthop_type"], "ip")
+            self.assertEqual(link["nexthop_name"], "external")
+            self.assertTrue(any(
+                "last=aa:bb:cc:dd:ee:ff/mac/external next=2001:db8::10/ip/external" in entry
+                for entry in result["logs"]
+            ))
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            self.assertEqual(usage["lasthop"]["runtime_status"], "semantic-mock")
+            self.assertEqual(usage["nexthop"]["runtime_status"], "semantic-mock")
+        finally:
+            session.close()
+
+        invalid = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP"],
+                "irule": "when CLIENT_ACCEPTED { lasthop transparent }",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, "lasthop requires an IP or MAC address"
+            ):
+                invalid.fire_event("CLIENT_ACCEPTED")
+        finally:
+            invalid.close()
+
     def test_socks_commands_model_request_decision_and_destination(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1907,7 +1961,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 26)
+        self.assertEqual(queue["command_count"], 24)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)

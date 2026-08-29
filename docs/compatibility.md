@@ -528,6 +528,9 @@ is connection-scoped and can be supplied or inspected through the structured
 event-state API. The four `LINK::*` commands (`lasthop`, `nexthop`, `qos`, and
 `vlan_id`) read deterministic link metadata from that same API; a next-hop MAC
 defaults to the documented broadcast value until the caller supplies one.
+The legacy `lasthop` and `nexthop` setters update that shared metadata and
+retain unresolved IP targets as intent rather than performing ARP or route
+resolution.
 This models iRule-visible state and command validation, not live Ethernet,
 ARP, VLAN, route, QoS, or TMM forwarding behavior.
 The TMOS 17.5 `SOCKS::allowed`, `SOCKS::destination`, and `SOCKS::version`

@@ -1232,7 +1232,10 @@ The link commands read a caller-supplied `link` event-state layer:
 `LINK::vlan_id` return the corresponding values. If no link state is supplied,
 QoS and VLAN return `0`, last-hop fields are empty, and next-hop MAC returns
 `ff:ff:ff:ff:ff:ff`, matching the documented pre-server-connection behavior.
-This is structured metadata, not a live NIC, ARP, VLAN, routing, or QoS model.
+The legacy `lasthop` and `nexthop` setters update the same link state. MAC
+targets populate the MAC field; IP targets are retained as unresolved intent in
+the `id` field, and an optional VLAN is retained in the `name` field. This is
+structured metadata, not a live NIC, ARP, VLAN, routing, or QoS model.
 
 ### SOCKS request state
 
