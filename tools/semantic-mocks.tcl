@@ -988,6 +988,25 @@ namespace eval ::itest::semantic {
         variable reservations {}
     }
 
+    namespace eval ::state::pcp {
+        variable version 2
+        variable opcode map
+        variable lifetime 0
+        variable protocol tcp
+        variable internal_port 0
+        variable prefer_failure 0
+        variable client_addr 0.0.0.0
+        variable third_party 0
+        variable third_party_int_addr 0.0.0.0
+        variable suggested_ext_port 0
+        variable suggested_ext_addr 0.0.0.0
+        variable result 0
+        variable assigned_ext_port 0
+        variable assigned_ext_addr 0.0.0.0
+        variable rejected 0
+        variable reject_result 0
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -4566,6 +4585,130 @@ namespace eval ::itest::semantic {
         set ::state::xlat::reservations $remaining
         ::itest::log_decision xlat reservation_create $reservation
         return [list $translation_addr $translation_port]
+    }
+
+    proc pcp_reset_connection {} {
+        foreach {name value} {
+            version 2
+            opcode map
+            lifetime 0
+            protocol tcp
+            internal_port 0
+            prefer_failure 0
+            client_addr 0.0.0.0
+            third_party 0
+            third_party_int_addr 0.0.0.0
+            suggested_ext_port 0
+            suggested_ext_addr 0.0.0.0
+            result 0
+            assigned_ext_port 0
+            assigned_ext_addr 0.0.0.0
+            rejected 0
+            reject_result 0
+        } {
+            set ::state::pcp::$name $value
+        }
+    }
+
+    proc _pcp_require_event {command_name expected_event} {
+        if {$::itest::current_event ne $expected_event} {
+            error "$command_name is not valid in $::itest::current_event"
+        }
+    }
+
+    proc _pcp_int {value field_name minimum maximum} {
+        if {![string is integer -strict $value] || $value < $minimum || $value > $maximum} {
+            error "$field_name must be an integer from $minimum to $maximum"
+        }
+        return $value
+    }
+
+    proc _pcp_opcode {} {
+        set value $::state::pcp::opcode
+        if {[string is integer -strict $value]} { return $value }
+        set value [string tolower $value]
+        if {$value ni {announce peer map}} {
+            error "PCP opcode must be announce, peer, map, or an integer"
+        }
+        return $value
+    }
+
+    proc _pcp_is_map {} {
+        set opcode [_pcp_opcode]
+        return [expr {$opcode eq "map"}]
+    }
+
+    proc _pcp_protocol {} {
+        set value $::state::pcp::protocol
+        if {[string is integer -strict $value]} { return $value }
+        set value [string tolower $value]
+        if {$value ni {tcp udp}} {
+            error "PCP protocol must be tcp, udp, or an integer"
+        }
+        return $value
+    }
+
+    proc _pcp_boolean {value field_name} {
+        if {$value ni {0 1 true false}} { error "$field_name must be boolean" }
+        return [expr {$value in {1 true}}]
+    }
+
+    proc _pcp_request_field {field} {
+        if {$field ni {version opcode lifetime protocol internal-port prefer-failure client-addr third-party third-party-int-addr suggested-ext-port suggested-ext-addr}} {
+            error "PCP::request field is invalid"
+        }
+        switch -exact -- $field {
+            version { return [_pcp_int $::state::pcp::version "PCP version" 0 255] }
+            opcode { return [_pcp_opcode] }
+            lifetime { return [_pcp_int $::state::pcp::lifetime "PCP lifetime" 0 0xffffffff] }
+            client-addr { return $::state::pcp::client_addr }
+            protocol { if {![_pcp_is_map]} { return NA }; return [_pcp_protocol] }
+            internal-port { if {![_pcp_is_map]} { return NA }; return [_pcp_int $::state::pcp::internal_port "PCP internal port" 0 65535] }
+            prefer-failure { if {![_pcp_is_map]} { return NA }; return [expr {[_pcp_boolean $::state::pcp::prefer_failure "PCP prefer-failure"] ? 2 : 0}] }
+            third-party { if {![_pcp_is_map]} { return NA }; return [expr {[_pcp_boolean $::state::pcp::third_party "PCP third-party"] ? 1 : 0}] }
+            third-party-int-addr { if {![_pcp_is_map] || ![_pcp_boolean $::state::pcp::third_party "PCP third-party"]} { return NA }; return $::state::pcp::third_party_int_addr }
+            suggested-ext-port { if {![_pcp_is_map]} { return NA }; return [_pcp_int $::state::pcp::suggested_ext_port "PCP suggested external port" 0 65535] }
+            suggested-ext-addr { if {![_pcp_is_map]} { return NA }; return $::state::pcp::suggested_ext_addr }
+        }
+    }
+
+    proc pcp_request_command {args} {
+        _pcp_require_event PCP::request PCP_REQUEST
+        if {[llength $args] != 1} { error "PCP::request requires a field" }
+        return [_pcp_request_field [lindex $args 0]]
+    }
+
+    proc _pcp_response_field {field} {
+        if {$field ni {version opcode lifetime protocol internal-port client-addr result assigned-ext-port assigned-ext-addr}} {
+            error "PCP::response field is invalid"
+        }
+        switch -exact -- $field {
+            version { return [_pcp_int $::state::pcp::version "PCP version" 0 255] }
+            opcode { return [_pcp_opcode] }
+            lifetime { return [_pcp_int $::state::pcp::lifetime "PCP lifetime" 0 0xffffffff] }
+            client-addr { return $::state::pcp::client_addr }
+            protocol { if {![_pcp_is_map]} { return NA }; return [_pcp_protocol] }
+            internal-port { if {![_pcp_is_map]} { return NA }; return [_pcp_int $::state::pcp::internal_port "PCP internal port" 0 65535] }
+            result { return [_pcp_int $::state::pcp::result "PCP result" 0 255] }
+            assigned-ext-port { if {![_pcp_is_map]} { return NA }; return [_pcp_int $::state::pcp::assigned_ext_port "PCP assigned external port" 0 65535] }
+            assigned-ext-addr { if {![_pcp_is_map]} { return NA }; return $::state::pcp::assigned_ext_addr }
+        }
+    }
+
+    proc pcp_response_command {args} {
+        _pcp_require_event PCP::response PCP_RESPONSE
+        if {[llength $args] != 1} { error "PCP::response requires a field" }
+        return [_pcp_response_field [lindex $args 0]]
+    }
+
+    proc pcp_reject_command {args} {
+        _pcp_require_event PCP::reject PCP_REQUEST
+        if {[llength $args] != 1} { error "PCP::reject requires a result code" }
+        set result [_pcp_int [lindex $args 0] "PCP reject result" 0 255]
+        set ::state::pcp::rejected 1
+        set ::state::pcp::reject_result $result
+        ::itest::log_decision pcp reject $result
+        return ""
     }
 
     proc diameter_reset_connection {} {
@@ -18647,6 +18790,9 @@ foreach {original replacement} {
     xlat_src_endpoint_reservation xlat_src_endpoint_reservation_command
     xlat_src_nat_valid_range xlat_src_nat_valid_range_command
     xlat_src_port xlat_src_port_command
+    pcp_reject pcp_reject_command
+    pcp_request pcp_request_command
+    pcp_response pcp_response_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
         ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
@@ -19271,6 +19417,9 @@ foreach {name proc_name} {
     XLAT::src_endpoint_reservation ::itest::semantic::xlat_src_endpoint_reservation_command
     XLAT::src_nat_valid_range ::itest::semantic::xlat_src_nat_valid_range_command
     XLAT::src_port ::itest::semantic::xlat_src_port_command
+    PCP::reject ::itest::semantic::pcp_reject_command
+    PCP::request ::itest::semantic::pcp_request_command
+    PCP::response ::itest::semantic::pcp_response_command
     DIAMETER::avp ::itest::semantic::diameter_avp_command
     DIAMETER::command ::itest::semantic::diameter_command_command
     DIAMETER::disconnect ::itest::semantic::diameter_disconnect_command

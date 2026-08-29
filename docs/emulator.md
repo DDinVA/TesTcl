@@ -668,6 +668,36 @@ reservation. The source-NAT range value is a Tcl list of `{address start-port
 end-port}` entries. These records do not open sockets, reserve real ports,
 translate packets, or reproduce live LSN/CGNAT allocation and expiry.
 
+### PCP request/response state
+
+With the `PCP` profile attached, the event API accepts a bounded `pcp` state
+layer for `PCP_REQUEST` and `PCP_RESPONSE`. The overlay implements the
+documented read-only field accessors and `PCP::reject`:
+
+```json
+{
+  "event": "PCP_REQUEST",
+  "state": {
+    "pcp": {
+      "version": 2,
+      "opcode": "map",
+      "lifetime": 3600,
+      "protocol": "tcp",
+      "internal_port": 443,
+      "client_addr": "192.0.2.10",
+      "suggested_ext_port": 40000,
+      "suggested_ext_addr": "198.51.100.10"
+    }
+  }
+}
+```
+
+Map-only fields return `NA` on announce or peer operations, matching the
+documented command behavior. `PCP::reject RESULT_CODE` records a deterministic
+rejection for a request and validates the result code from 0 through 255. This
+slice does not parse PCP wire payloads, perform proxying, allocate mappings, or
+emit a packet-level PCP adapter; those remain separate emulator work.
+
 ### FLOWTABLE query inputs
 
 The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,

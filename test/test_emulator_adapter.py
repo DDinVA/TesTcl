@@ -357,6 +357,78 @@ when SERVER_CONNECTED {
         finally:
             session.close()
 
+    def test_pcp_request_response_fields_and_rejection(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["PCP"],
+                "irule": """
+when PCP_REQUEST {
+    PCP::reject 7
+    log local0. "request=[PCP::request version]/[PCP::request opcode]/[PCP::request lifetime] proto=[PCP::request protocol] port=[PCP::request internal-port] prefer=[PCP::request prefer-failure] client=[PCP::request client-addr] third=[PCP::request third-party]/[PCP::request third-party-int-addr] suggested=[PCP::request suggested-ext-port]/[PCP::request suggested-ext-addr]"
+}
+when PCP_RESPONSE {
+    log local0. "response=[PCP::response version]/[PCP::response opcode]/[PCP::response lifetime] proto=[PCP::response protocol] port=[PCP::response internal-port] result=[PCP::response result] assigned=[PCP::response assigned-ext-port]/[PCP::response assigned-ext-addr]"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            request = session.fire_event(
+                "PCP_REQUEST",
+                {
+                    "pcp": {
+                        "version": 2,
+                        "opcode": "map",
+                        "lifetime": 3600,
+                        "protocol": "tcp",
+                        "internal_port": 22,
+                        "prefer_failure": True,
+                        "client_addr": "192.0.2.10",
+                        "third_party": True,
+                        "third_party_int_addr": "192.0.2.11",
+                        "suggested_ext_port": 40000,
+                        "suggested_ext_addr": "198.51.100.10",
+                    }
+                },
+            )
+            self.assertTrue(request["fired"])
+            self.assertEqual(request["state"]["pcp"]["rejected"], "1")
+            self.assertEqual(request["state"]["pcp"]["reject_result"], "7")
+            self.assertTrue(any(
+                "request=2/map/3600 proto=tcp port=22 prefer=2 client=192.0.2.10"
+                " third=1/192.0.2.11 suggested=40000/198.51.100.10" in entry
+                for entry in request["logs"]
+            ))
+
+            response = session.fire_event(
+                "PCP_RESPONSE",
+                {
+                    "pcp": {
+                        "version": 2,
+                        "opcode": "map",
+                        "lifetime": 1800,
+                        "protocol": "udp",
+                        "internal_port": 5353,
+                        "client_addr": "192.0.2.10",
+                        "result": 2,
+                        "assigned_ext_port": 45000,
+                        "assigned_ext_addr": "198.51.100.20",
+                    }
+                },
+            )
+            self.assertTrue(response["fired"])
+            self.assertEqual(response["state"]["pcp"]["result"], "2")
+            self.assertEqual(response["state"]["pcp"]["assigned_ext_port"], "45000")
+            self.assertTrue(any(
+                "response=2/map/1800 proto=udp port=5353 result=2 assigned=45000/198.51.100.20" in entry
+                for entry in response["logs"]
+            ))
+        finally:
+            session.close()
+
     def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -960,8 +1032,9 @@ when HTTP_REQUEST {
         self.assertNotIn(("SDP", "generated-stub"), queue_buckets)
         self.assertNotIn(("LSN", "generated-stub"), queue_buckets)
         self.assertNotIn(("XLAT", "generated-stub"), queue_buckets)
+        self.assertNotIn(("PCP", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 199)
+        self.assertEqual(queue["command_count"], 196)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
