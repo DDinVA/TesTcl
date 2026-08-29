@@ -417,6 +417,27 @@ EVENT_STATE_FIELDS = {
         "response",
         "response_length",
     },
+    "tcp": {
+        "nagle",
+        "naglemode",
+        "naglestate",
+        "keepalive",
+        "idletime",
+        "sendbuf",
+        "recvwnd",
+        "rcv_size",
+        "snd_wnd",
+        "snd_cwnd",
+        "rto",
+        "rttvar",
+        "rexmt_thresh",
+        "rt_metrics_timeout",
+        "pacing",
+        "proxybuffer_high",
+        "proxybuffer_low",
+        "push_flag",
+        "congestion",
+    },
 }
 EVENT_STATE_NAMESPACES = {
     "connection": "::state::connection",
@@ -433,6 +454,7 @@ EVENT_STATE_NAMESPACES = {
     "mr": "::state::mr",
     "gtp": "::state::gtp",
     "udp": "::state::udp",
+    "tcp": "::state::tcp",
 }
 
 
@@ -801,6 +823,25 @@ SEMANTIC_MOCK_COMMANDS = {
     "UDP::sendbuffer",
     "UDP::server_port",
     "UDP::unused_port",
+    "TCP::congestion",
+    "TCP::idletime",
+    "TCP::keepalive",
+    "TCP::nagle",
+    "TCP::naglemode",
+    "TCP::naglestate",
+    "TCP::pacing",
+    "TCP::proxybuffer",
+    "TCP::proxybufferhigh",
+    "TCP::proxybufferlow",
+    "TCP::push_flag",
+    "TCP::rcv_size",
+    "TCP::recvwnd",
+    "TCP::rto",
+    "TCP::rttvar",
+    "TCP::sendbuf",
+    "TCP::setmss",
+    "TCP::snd_cwnd",
+    "TCP::snd_wnd",
 }
 SEMANTIC_MOCK_PROC_NAMES = {_mock_proc_name(name) for name in SEMANTIC_MOCK_COMMANDS}
 
@@ -6552,6 +6593,11 @@ class EmulatorSession:
             mr_state["payload"] = bytes(payload)
             mr_state["payload_length"] = str(len(payload))
             state["mr"] = mr_state
+        if (
+            protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr"}
+            or (protocol == "sip" and packet.get("transport", "tcp") == "tcp")
+        ):
+            state["tcp"] = {}
         return state
 
     def _current_sip_event_state(
@@ -6915,10 +6961,15 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::psm_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
+        session.eval_tcl("::itest::semantic::tcp_reset_transport")
         events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
+        packet_has_tcp_layer = (
+            packet["protocol"] in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr"}
+            or (packet["protocol"] == "sip" and packet.get("transport", "tcp") == "tcp")
+        )
         accepted_state = (
             self._packet_event_state(packet)
-            if packet["protocol"] == "udp"
+            if packet["protocol"] == "udp" or packet_has_tcp_layer
             else {"connection": self._packet_connection_state(packet)}
         )
         events.append(
@@ -6938,6 +6989,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::psm_reset_connection")
         session.eval_tcl("::itest::semantic::ssl_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
+        session.eval_tcl("::itest::semantic::tcp_reset_transport")
         self._packet_streams.clear()
         self._http2_decoder = None
         self._http2_streams.clear()

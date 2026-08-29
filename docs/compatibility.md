@@ -46,6 +46,12 @@ ports, and the `CLIENT_DATA`/`SERVER_DATA` path. The UDP semantic layer models
 payload replacement, drop, hold/release, response emission, and bounded buffer,
 rate, send-buffer, debug-queue, MSS, and unused-port controls. It does not run
 TMM queue scheduling, NAT, connection tracking, or a live upstream UDP socket.
+The TCP semantic layer additionally models documented connection tuning
+controls including Nagle mode/state, keepalive, idle timeout, send and receive
+buffers, MSS changes, pacing, PUSH mode, congestion label, and proxy-buffer
+thresholds. These are deterministic state and inspection values; the adapter
+does not implement a kernel TCP stack, congestion-control algorithm,
+retransmission timers, or wire-level pacing.
 RADIUS packet handling validates standard and Vendor-Specific attributes and
 exposes the four TMOS 17.5 AAA request/response events. It intentionally does
 not implement shared-secret cryptography, password obfuscation, live AAA

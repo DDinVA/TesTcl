@@ -5463,6 +5463,85 @@ when CLIENT_DATA { log local0. "must-not-fire" }
         self.assertEqual(result["trace"][0]["drop_reason"], "udp")
         self.assertFalse(any("must-not-fire" in log for event in events for log in event["logs"]))
 
+    def test_tcp_transport_controls_persist_into_later_data_events(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    TCP::nagle disable
+    TCP::keepalive 60
+    TCP::idletime 120
+    TCP::sendbuf 100000
+    TCP::recvwnd 200000
+    TCP::setmss 1200
+    TCP::pacing enable
+    TCP::push_flag auto
+    TCP::proxybuffer 10000 2000
+    TCP::congestion cubic
+    TCP::collect 1
+}
+when CLIENT_DATA {
+    log local0. "mss=[TCP::mss] nagle=[TCP::naglemode]/[TCP::naglestate] keepalive=[TCP::keepalive] sendbuf=[TCP::sendbuf] recvwnd=[TCP::recvwnd] pacing=[TCP::pacing] push=[TCP::push_flag] high=[TCP::proxybufferhigh] low=[TCP::proxybufferlow] congestion=[TCP::congestion]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 9999},
+                        "flags": ["SYN"],
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 9999},
+                        "flags": ["ACK"],
+                        "payload": "x",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        accepted = result["trace"][0]["events"][-1]
+        data = result["trace"][1]["events"][-1]
+        self.assertEqual(accepted["state"]["connection"]["mss"], "1200")
+        self.assertEqual(accepted["state"]["tcp"]["idletime"], "120")
+        self.assertEqual(accepted["state"]["tcp"]["proxybuffer_high"], "10000")
+        self.assertEqual(accepted["state"]["tcp"]["proxybuffer_low"], "2000")
+        self.assertEqual(data["state"]["connection"]["mss"], "1200")
+        self.assertEqual(data["state"]["tcp"]["sendbuf"], "100000")
+        self.assertEqual(data["state"]["tcp"]["recvwnd"], "200000")
+        self.assertTrue(any("mss=1200" in log and "nagle=disable/disabled" in log for log in data["logs"]))
+        self.assertTrue(any("pacing=1" in log and "push=auto" in log for log in data["logs"]))
+        self.assertTrue(any("high=10000" in log and "low=2000" in log for log in data["logs"]))
+        self.assertTrue(any("congestion=cubic" in log for log in data["logs"]))
+        expected = {
+            "TCP::congestion",
+            "TCP::idletime",
+            "TCP::keepalive",
+            "TCP::nagle",
+            "TCP::naglemode",
+            "TCP::naglestate",
+            "TCP::pacing",
+            "TCP::proxybuffer",
+            "TCP::proxybufferhigh",
+            "TCP::proxybufferlow",
+            "TCP::push_flag",
+            "TCP::recvwnd",
+            "TCP::sendbuf",
+            "TCP::setmss",
+        }
+        tcp_statuses = {
+            entry["name"]: entry["runtime_status"]
+            for entry in result["fidelity"]["commands"]
+            if entry["name"].startswith("TCP::")
+        }
+        self.assertTrue(expected.issubset(tcp_statuses))
+        self.assertTrue(all(tcp_statuses[name] == "semantic-mock" for name in expected))
+
 
 if __name__ == "__main__":
     unittest.main()

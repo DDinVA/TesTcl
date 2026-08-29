@@ -64,6 +64,10 @@ by wire-byte offset, and the adapter records UDP drop, hold/release, respond,
 port, buffer, rate, and debug-queue controls in the event trace. This is a
 bounded datagram model: it does not implement TMM queue scheduling, NAT, or a
 real upstream UDP socket.
+TCP packet traces also expose a bounded transport-control state layer. Rules
+can inspect or set Nagle mode, keepalive, idle timeout, send/receive buffers,
+MSS, pacing, PUSH mode, congestion label, and proxy-buffer thresholds; those
+values persist across packet events in the emulated connection.
 
 ## HTTP API
 

@@ -100,6 +100,28 @@ namespace eval ::itest::semantic {
         variable response_length 0
     }
 
+    namespace eval ::state::tcp {
+        variable nagle auto
+        variable naglemode auto
+        variable naglestate enabled
+        variable keepalive 0
+        variable idletime 300
+        variable sendbuf 0
+        variable recvwnd 0
+        variable rcv_size 65535
+        variable snd_wnd 65535
+        variable snd_cwnd 14600
+        variable rto 1000
+        variable rttvar 0
+        variable rexmt_thresh 3
+        variable rt_metrics_timeout 0
+        variable pacing 0
+        variable proxybuffer_high 0
+        variable proxybuffer_low 0
+        variable push_flag default
+        variable congestion ""
+    }
+
     foreach tls_side {client server} {
         namespace eval ::state::tls::$tls_side {
             variable sni ""
@@ -4102,6 +4124,162 @@ namespace eval ::itest::semantic {
         return $result
     }
 
+    proc tcp_reset_transport {} {
+        namespace eval ::state::tcp {
+            variable nagle auto
+            variable naglemode auto
+            variable naglestate enabled
+            variable keepalive 0
+            variable idletime 300
+            variable sendbuf 0
+            variable recvwnd 0
+            variable rcv_size 65535
+            variable snd_wnd 65535
+            variable snd_cwnd 14600
+            variable rto 1000
+            variable rttvar 0
+            variable rexmt_thresh 3
+            variable rt_metrics_timeout 0
+            variable pacing 0
+            variable proxybuffer_high 0
+            variable proxybuffer_low 0
+            variable push_flag default
+            variable congestion ""
+        }
+    }
+
+    proc tcp_nagle_command {args} {
+        if {[llength $args] > 1 ||
+            ([llength $args] == 1 && [lindex $args 0] ni {enable disable auto})} {
+            error "TCP::nagle accepts enable, disable, or auto"
+        }
+        if {[llength $args] == 1} {
+            set mode [lindex $args 0]
+            set ::state::tcp::nagle $mode
+            set ::state::tcp::naglemode $mode
+            set ::state::tcp::naglestate [expr {$mode eq "disable" ? "disabled" : "enabled"}]
+            ::itest::log_decision tcp nagle $mode
+        }
+        return $::state::tcp::nagle
+    }
+
+    proc tcp_naglemode_command {args} {
+        if {[llength $args] != 0} { error "TCP::naglemode takes no arguments" }
+        return $::state::tcp::naglemode
+    }
+
+    proc tcp_naglestate_command {args} {
+        if {[llength $args] != 0} { error "TCP::naglestate takes no arguments" }
+        return $::state::tcp::naglestate
+    }
+
+    proc tcp_numeric_setting {name args} {
+        if {[llength $args] > 1} { error "TCP::$name accepts an optional non-negative integer" }
+        if {[llength $args] == 1} {
+            set value [lindex $args 0]
+            if {![string is integer -strict $value] || $value < 0} {
+                error "TCP::$name requires a non-negative integer"
+            }
+            set ::state::tcp::$name $value
+            ::itest::log_decision tcp $name $value
+        }
+        return [set ::state::tcp::$name]
+    }
+
+    proc tcp_keepalive_command {args} { return [tcp_numeric_setting keepalive {*}$args] }
+    proc tcp_sendbuf_command {args} { return [tcp_numeric_setting sendbuf {*}$args] }
+    proc tcp_recvwnd_command {args} { return [tcp_numeric_setting recvwnd {*}$args] }
+
+    proc tcp_idletime_command {args} {
+        if {[llength $args] != 1} { error "TCP::idletime requires a non-negative integer" }
+        tcp_numeric_setting idletime {*}$args
+        return ""
+    }
+
+    proc tcp_readonly_numeric {name args} {
+        if {[llength $args] != 0} { error "TCP::$name takes no arguments" }
+        return [set ::state::tcp::$name]
+    }
+
+    proc tcp_rcv_size_command {args} { return [tcp_readonly_numeric rcv_size {*}$args] }
+    proc tcp_snd_wnd_command {args} { return [tcp_readonly_numeric snd_wnd {*}$args] }
+    proc tcp_snd_cwnd_command {args} { return [tcp_readonly_numeric snd_cwnd {*}$args] }
+    proc tcp_rto_command {args} { return [tcp_readonly_numeric rto {*}$args] }
+    proc tcp_rttvar_command {args} { return [tcp_readonly_numeric rttvar {*}$args] }
+
+    proc tcp_setmss_command {args} {
+        if {[llength $args] != 1 ||
+            ![string is integer -strict [lindex $args 0]] ||
+            [lindex $args 0] < 1 || [lindex $args 0] > 65535} {
+            error "TCP::setmss requires an integer from 1 to 65535"
+        }
+        set ::state::connection::mss [lindex $args 0]
+        ::itest::log_decision tcp setmss $::state::connection::mss
+        return ""
+    }
+
+    proc tcp_pacing_command {args} {
+        if {[llength $args] > 1} { error "TCP::pacing accepts an optional boolean" }
+        if {[llength $args] == 1} {
+            set value [string tolower [lindex $args 0]]
+            if {$value ni {enable disable 1 0 true false}} {
+                error "TCP::pacing requires enable or disable"
+            }
+            set ::state::tcp::pacing [expr {$value in {enable 1 true}}]
+            ::itest::log_decision tcp pacing $::state::tcp::pacing
+        }
+        return $::state::tcp::pacing
+    }
+
+    proc tcp_push_flag_command {args} {
+        if {[llength $args] > 1 ||
+            ([llength $args] == 1 && [lindex $args 0] ni {default none one auto})} {
+            error "TCP::push_flag accepts default, none, one, or auto"
+        }
+        if {[llength $args] == 1} {
+            set ::state::tcp::push_flag [lindex $args 0]
+            ::itest::log_decision tcp push_flag $::state::tcp::push_flag
+        }
+        return $::state::tcp::push_flag
+    }
+
+    proc tcp_proxybuffer_command {args} {
+        if {[llength $args] != 2} { error "TCP::proxybuffer requires high and low thresholds" }
+        foreach value $args {
+            if {![string is integer -strict $value] || $value < 0} {
+                error "TCP::proxybuffer thresholds must be non-negative integers"
+            }
+        }
+        set ::state::tcp::proxybuffer_high [lindex $args 0]
+        set ::state::tcp::proxybuffer_low [lindex $args 1]
+        ::itest::log_decision tcp proxybuffer $args
+        return ""
+    }
+
+    proc tcp_proxybuffer_threshold_command {name args} {
+        if {[llength $args] != 0} { error "TCP::$name takes no arguments" }
+        return [set ::state::tcp::$name]
+    }
+
+    proc tcp_proxybufferhigh_command {args} {
+        return [tcp_proxybuffer_threshold_command proxybuffer_high {*}$args]
+    }
+
+    proc tcp_proxybufferlow_command {args} {
+        return [tcp_proxybuffer_threshold_command proxybuffer_low {*}$args]
+    }
+
+    proc tcp_congestion_command {args} {
+        if {[llength $args] > 1} { error "TCP::congestion accepts an optional algorithm" }
+        if {[llength $args] == 1} {
+            set value [lindex $args 0]
+            if {$value eq ""} { error "TCP::congestion algorithm must not be empty" }
+            set ::state::tcp::congestion $value
+            ::itest::log_decision tcp congestion $value
+        }
+        return $::state::tcp::congestion
+    }
+
     proc _cookie_in_response {} {
         return [expr {$::itest::current_event in {
             HTTP_RESPONSE HTTP_RESPONSE_DATA HTTP_RESPONSE_RELEASE
@@ -7173,10 +7351,29 @@ foreach {name proc_name} {
     HTTP::username ::itest::semantic::http_username
     HTTP::cookie ::itest::cmd::http_cookie
     TCP::collect ::itest::cmd::tcp_collect
+    TCP::congestion ::itest::semantic::tcp_congestion_command
+    TCP::idletime ::itest::semantic::tcp_idletime_command
+    TCP::keepalive ::itest::semantic::tcp_keepalive_command
+    TCP::nagle ::itest::semantic::tcp_nagle_command
+    TCP::naglemode ::itest::semantic::tcp_naglemode_command
+    TCP::naglestate ::itest::semantic::tcp_naglestate_command
     TCP::offset ::itest::semantic::tcp_offset_command
     TCP::payload ::itest::cmd::tcp_payload
+    TCP::pacing ::itest::semantic::tcp_pacing_command
+    TCP::proxybuffer ::itest::semantic::tcp_proxybuffer_command
+    TCP::proxybufferhigh ::itest::semantic::tcp_proxybufferhigh_command
+    TCP::proxybufferlow ::itest::semantic::tcp_proxybufferlow_command
+    TCP::push_flag ::itest::semantic::tcp_push_flag_command
+    TCP::rcv_size ::itest::semantic::tcp_rcv_size_command
+    TCP::recvwnd ::itest::semantic::tcp_recvwnd_command
     TCP::release ::itest::cmd::tcp_release
     TCP::respond ::itest::cmd::tcp_respond
+    TCP::rto ::itest::semantic::tcp_rto_command
+    TCP::rttvar ::itest::semantic::tcp_rttvar_command
+    TCP::sendbuf ::itest::semantic::tcp_sendbuf_command
+    TCP::setmss ::itest::semantic::tcp_setmss_command
+    TCP::snd_cwnd ::itest::semantic::tcp_snd_cwnd_command
+    TCP::snd_wnd ::itest::semantic::tcp_snd_wnd_command
     UDP::client_port ::itest::semantic::udp_client_port_command
     UDP::debug_queue ::itest::semantic::udp_debug_queue_command
     UDP::drop ::itest::semantic::udp_drop_command
