@@ -1055,6 +1055,14 @@ namespace eval ::itest::semantic {
         variable remaps {}
     }
 
+    namespace eval ::state::tmm {
+        variable cmp_count 1
+        variable cmp_group 0
+        variable cmp_groups {0}
+        variable cmp_primary_group 0
+        variable cmp_unit 0
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -5586,6 +5594,56 @@ namespace eval ::itest::semantic {
         set ::state::connector::remaps $remaps
         ::itest::log_decision connector remap [list $target $value]
         return ""
+    }
+
+    proc _tmm_nonnegative_integer {value field_name} {
+        if {![string is integer -strict $value] || $value < 0} {
+            error "$field_name must be a non-negative integer"
+        }
+        return $value
+    }
+
+    proc _tmm_positive_integer {value field_name} {
+        if {![string is integer -strict $value] || $value < 1} {
+            error "$field_name must be a positive integer"
+        }
+        return $value
+    }
+
+    proc _tmm_groups {value} {
+        if {[catch {llength $value} count] || $count == 0} {
+            error "TMM::cmp_groups must contain at least one group"
+        }
+        set groups {}
+        foreach group $value {
+            lappend groups [_tmm_nonnegative_integer $group "TMM CMP group"]
+        }
+        return $groups
+    }
+
+    proc tmm_cmp_count_command {args} {
+        if {[llength $args] != 0} { error "TMM::cmp_count takes no arguments" }
+        return [_tmm_positive_integer $::state::tmm::cmp_count "TMM::cmp_count"]
+    }
+
+    proc tmm_cmp_group_command {args} {
+        if {[llength $args] != 0} { error "TMM::cmp_group takes no arguments" }
+        return [_tmm_nonnegative_integer $::state::tmm::cmp_group "TMM::cmp_group"]
+    }
+
+    proc tmm_cmp_groups_command {args} {
+        if {[llength $args] != 0} { error "TMM::cmp_groups takes no arguments" }
+        return [_tmm_groups $::state::tmm::cmp_groups]
+    }
+
+    proc tmm_cmp_primary_group_command {args} {
+        if {[llength $args] != 0} { error "TMM::cmp_primary_group takes no arguments" }
+        return [_tmm_nonnegative_integer $::state::tmm::cmp_primary_group "TMM::cmp_primary_group"]
+    }
+
+    proc tmm_cmp_unit_command {args} {
+        if {[llength $args] != 0} { error "TMM::cmp_unit takes no arguments" }
+        return [_tmm_nonnegative_integer $::state::tmm::cmp_unit "TMM::cmp_unit"]
     }
 
     proc diameter_reset_connection {} {
@@ -19679,6 +19737,11 @@ foreach {original replacement} {
     connector_enable connector_enable_command
     connector_profile connector_profile_command
     connector_remap connector_remap_command
+    tmm_cmp_count tmm_cmp_count_command
+    tmm_cmp_group tmm_cmp_group_command
+    tmm_cmp_groups tmm_cmp_groups_command
+    tmm_cmp_primary_group tmm_cmp_primary_group_command
+    tmm_cmp_unit tmm_cmp_unit_command
     psc_aaa_reporting_interval psc_aaa_reporting_interval_command
     psc_attr psc_attr_command
     psc_calling_id psc_calling_id_command
@@ -20326,6 +20389,11 @@ foreach {name proc_name} {
     CONNECTOR::enable ::itest::semantic::connector_enable_command
     CONNECTOR::profile ::itest::semantic::connector_profile_command
     CONNECTOR::remap ::itest::semantic::connector_remap_command
+    TMM::cmp_count ::itest::semantic::tmm_cmp_count_command
+    TMM::cmp_group ::itest::semantic::tmm_cmp_group_command
+    TMM::cmp_groups ::itest::semantic::tmm_cmp_groups_command
+    TMM::cmp_primary_group ::itest::semantic::tmm_cmp_primary_group_command
+    TMM::cmp_unit ::itest::semantic::tmm_cmp_unit_command
     PSC::aaa_reporting_interval ::itest::semantic::psc_aaa_reporting_interval_command
     PSC::attr ::itest::semantic::psc_attr_command
     PSC::calling_id ::itest::semantic::psc_calling_id_command

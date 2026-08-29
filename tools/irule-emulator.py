@@ -625,6 +625,13 @@ EVENT_STATE_FIELDS = {
         "server_port",
         "remaps",
     },
+    "tmm": {
+        "cmp_count",
+        "cmp_group",
+        "cmp_groups",
+        "cmp_primary_group",
+        "cmp_unit",
+    },
     "diameter": {
         "type",
         "version",
@@ -1000,6 +1007,7 @@ EVENT_STATE_NAMESPACES = {
     "psc": "::state::psc",
     "pem": "::state::pem",
     "connector": "::state::connector",
+    "tmm": "::state::tmm",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
     "message": "::state::message",
@@ -1562,6 +1570,11 @@ SEMANTIC_MOCK_COMMANDS = {
     "CONNECTOR::enable",
     "CONNECTOR::profile",
     "CONNECTOR::remap",
+    "TMM::cmp_count",
+    "TMM::cmp_group",
+    "TMM::cmp_groups",
+    "TMM::cmp_primary_group",
+    "TMM::cmp_unit",
     "DIAMETER::avp",
     "DIAMETER::command",
     "DIAMETER::disconnect",
@@ -5364,7 +5377,18 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
         for field, value in values.items():
             if field not in EVENT_STATE_FIELDS[layer]:
                 raise EmulatorInputError(f"unsupported {layer} state field: {field}")
-            if isinstance(value, bool):
+            if layer == "tmm" and field == "cmp_groups" and isinstance(value, list):
+                if not value or any(
+                    isinstance(item, bool)
+                    or not isinstance(item, int)
+                    or item < 0
+                    for item in value
+                ):
+                    raise EmulatorInputError(
+                        "event state tmm.cmp_groups must be a non-empty array of non-negative integers"
+                    )
+                layer_values[field] = " ".join(str(item) for item in value)
+            elif isinstance(value, bool):
                 layer_values[field] = "1" if value else "0"
             elif isinstance(value, (str, int, float)):
                 layer_values[field] = str(value)

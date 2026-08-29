@@ -757,6 +757,18 @@ fields. Connector state is reset at connection teardown. This models the
 rule-visible control and remap state; it does not create connector sockets,
 resolve DNS, establish an upstream chain, or perform live traffic remapping.
 
+### TMM CMP topology
+
+The emulator exposes deterministic, scenario-supplied values for all five
+TMOS 17.5 `TMM::cmp_*` commands: active TMM count, current group, group list,
+primary group, and current unit. All five commands take no arguments. The
+defaults model a single non-chassis TMM (`cmp_count=1`, group/unit/primary
+group `0`, and `cmp_groups={0}`); callers can override them with a `tmm` event
+state layer. `cmp_groups` accepts either a Tcl list string such as `0 1` or a
+JSON array of non-negative integers. This is topology metadata for deterministic
+rule testing, not a scheduler or multi-TMM execution model. See the F5
+[TMM command family](https://clouddocs.f5.com/api/irules/TMM.html) reference.
+
 ### FLOWTABLE query inputs
 
 The TMOS 17.5 `FLOWTABLE::count` and `FLOWTABLE::limit` commands use bounded,

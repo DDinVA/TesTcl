@@ -616,6 +616,53 @@ when CONNECTOR_OPEN {
         finally:
             session.close()
 
+    def test_tmm_cmp_state_is_configurable(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "irule": """
+when CLIENT_ACCEPTED {
+    set cmp_values "[TMM::cmp_count]|[TMM::cmp_group]|[join [TMM::cmp_groups] ,]|[TMM::cmp_primary_group]|[TMM::cmp_unit]"
+    log local0. "cmp=$cmp_values"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event(
+                "CLIENT_ACCEPTED",
+                {
+                    "tmm": {
+                        "cmp_count": 8,
+                        "cmp_group": 2,
+                        "cmp_groups": [0, 2],
+                        "cmp_primary_group": 0,
+                        "cmp_unit": 3,
+                    }
+                },
+            )
+            self.assertTrue(result["fired"])
+            self.assertEqual(
+                result["state"]["tmm"],
+                {
+                    "cmp_count": "8",
+                    "cmp_group": "2",
+                    "cmp_groups": "0 2",
+                    "cmp_primary_group": "0",
+                    "cmp_unit": "3",
+                },
+            )
+            self.assertTrue(any("cmp=8|2|0,2|0|3" in entry for entry in result["logs"]))
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "tmm.cmp_groups must be a non-empty array",
+            ):
+                session.fire_event("CLIENT_ACCEPTED", {"tmm": {"cmp_groups": []}})
+        finally:
+            session.close()
+
     def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -1223,7 +1270,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("PSC", "generated-stub"), queue_buckets)
         self.assertNotIn(("PEM", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 176)
+        self.assertEqual(queue["command_count"], 171)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
