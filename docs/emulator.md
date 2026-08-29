@@ -683,6 +683,36 @@ the combined `HOST:PORT`, or reads/updates `host` and `port` independently;
 IPv6 hosts use `[HOST]:PORT`. The model records the decision and destination
 but does not implement a SOCKS handshake, proxy socket, or live connection.
 
+### SDP state
+
+`SDP::field`, `SDP::media`, and `SDP::session_id` are available during SIP
+message events when the `SIP` profile is attached. Supply a bounded structured
+SDP overlay through the event API. `fields` is a Tcl list of repeated
+field/value pairs; `media` is a Tcl list whose entries are dictionaries with
+`type`, `port`, `transport`, `conn`, and `attrs` keys:
+
+```json
+{
+  "event": "SIP_REQUEST",
+  "state": {
+    "sdp": {
+      "session_id": "2890844526",
+      "fields": "version 0 origin {alice 2890844526 2890842807 IN IP4 host.example} connection {IN IP4 203.0.113.1} attribute sendrecv",
+      "media": "{type audio port 49170/2 transport RTP/AVP conn {IN IP4 203.0.113.1} attrs {rtpmap:0\\ PCMU/8000 sendrecv}}"
+    }
+  }
+}
+```
+
+`SDP::field name` reads the first matching field and
+`SDP::field name index value` rewrites an existing occurrence. `SDP::media`
+supports `count`, indexed media dictionaries, `attr`, `type`, `port`,
+`transport`, and `conn`; media ports accept `PORT` or `PORT/COUNT` and are
+bounded to the 0–65535 port range. `SDP::session_id` returns the supplied
+session identifier. This overlay is intentionally separate from the SIP
+payload: it does not yet parse raw SDP bodies or rewrite the serialized SIP
+message.
+
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the
 user key, host, URI, accepted encoding, and user agent; cache hits expose

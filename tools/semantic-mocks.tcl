@@ -945,6 +945,16 @@ namespace eval ::itest::semantic {
         variable via {}
     }
 
+    namespace eval ::state::sdp {
+        variable session_id ""
+        # A flat Tcl list of field-name/value pairs.  Repeated fields are
+        # represented by repeated pairs in their original order.
+        variable fields {}
+        # Each media entry is a Tcl dict with type, port, transport, conn,
+        # and attrs keys.  attrs is a Tcl list of attribute values.
+        variable media {}
+    }
+
     namespace eval ::state::diameter {
         variable type request
         variable version 1
@@ -3629,6 +3639,186 @@ namespace eval ::itest::semantic {
             if {[string equal -nocase $parameter_name $field]} { return $parameter_value }
         }
         return ""
+    }
+
+    proc sdp_reset_connection {} {
+        set ::state::sdp::session_id ""
+        set ::state::sdp::fields {}
+        set ::state::sdp::media {}
+    }
+
+    proc _sdp_require_event {command_name} {
+        _sip_require_event {SIP_REQUEST SIP_REQUEST_DONE SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_DONE SIP_RESPONSE_SEND} $command_name
+    }
+
+    proc _sdp_validate_index {value field_name} {
+        if {![string is integer -strict $value] || $value < 0} {
+            error "$field_name index must be a non-negative integer"
+        }
+        return $value
+    }
+
+    proc _sdp_validate_text {value field_name} {
+        if {[string first "\x00" $value] >= 0 || [string first "\r" $value] >= 0 || [string first "\n" $value] >= 0} {
+            error "$field_name must not contain NUL bytes or newlines"
+        }
+        return $value
+    }
+
+    proc _sdp_field_name {value} {
+        if {$value eq "" || [string first "\x00" $value] >= 0} {
+            error "SDP::field requires a non-empty field name"
+        }
+        switch -nocase -exact -- $value {
+            v { return version }
+            o { return origin }
+            s { return session_name }
+            i { return session_info }
+            u { return uri }
+            e { return email }
+            p { return phone }
+            c { return connection }
+            b { return bandwidth }
+            t { return time }
+            r { return repeat }
+            z { return timezone }
+            k { return key }
+            a { return attribute }
+            default { return $value }
+        }
+    }
+
+    proc _sdp_field_at {field_name index} {
+        if {[llength $::state::sdp::fields] % 2 != 0} {
+            error "SDP field state must contain name/value pairs"
+        }
+        set wanted [_sdp_field_name $field_name]
+        set match_index 0
+        foreach {name value} $::state::sdp::fields {
+            if {[string equal -nocase [_sdp_field_name $name] $wanted]} {
+                if {$match_index == $index} { return [list $name $value] }
+                incr match_index
+            }
+        }
+        return {}
+    }
+
+    proc sdp_field_command {args} {
+        _sdp_require_event SDP::field
+        if {[llength $args] < 1 || [llength $args] > 3} {
+            error "SDP::field requires a field name, optional index, and optional value"
+        }
+        set field_name [lindex $args 0]
+        set index 0
+        if {[llength $args] >= 2} {
+            if {![string is integer -strict [lindex $args 1]]} {
+                error "SDP::field index must be a non-negative integer"
+            }
+            set index [_sdp_validate_index [lindex $args 1] "SDP::field"]
+        }
+        set pair [_sdp_field_at $field_name $index]
+        if {[llength $args] < 3} {
+            if {$pair eq ""} { return "" }
+            return [lindex $pair 1]
+        }
+        set value [_sdp_validate_text [lindex $args 2] "SDP::field value"]
+        if {$pair eq ""} {
+            error "SDP::field $field_name index $index does not exist"
+        }
+        set pair_index 0
+        set wanted [_sdp_field_name $field_name]
+        set match_index 0
+        foreach {name ignored} $::state::sdp::fields {
+            if {[string equal -nocase [_sdp_field_name $name] $wanted]} {
+                if {$match_index == $index} {
+                    set value_index [expr {$pair_index * 2 + 1}]
+                    set ::state::sdp::fields [lreplace $::state::sdp::fields $value_index $value_index $value]
+                    ::itest::log_decision sdp field [list $name $index $value]
+                    return ""
+                }
+                incr match_index
+            }
+            incr pair_index
+        }
+        error "SDP::field $field_name index $index does not exist"
+    }
+
+    proc _sdp_media_at {index} {
+        set index [_sdp_validate_index $index "SDP::media"]
+        if {$index >= [llength $::state::sdp::media]} {
+            error "SDP::media index is outside the media list"
+        }
+        set media [lindex $::state::sdp::media $index]
+        if {[catch {dict size $media}]} {
+            error "SDP media state must contain dictionaries"
+        }
+        foreach {key default} {type "" port "" transport "" conn "" attrs {}} {
+            if {![dict exists $media $key]} { dict set media $key $default }
+        }
+        return $media
+    }
+
+    proc _sdp_media_port {value} {
+        if {![regexp {^[0-9]+(/[0-9]+)?$} $value]} {
+            error "SDP::media port must be PORT or PORT/COUNT"
+        }
+        set parts [split $value /]
+        set port [lindex $parts 0]
+        if {$port > 65535} {
+            error "SDP::media port must be between 0 and 65535"
+        }
+        if {[llength $parts] == 2 &&
+            ([lindex $parts 1] < 1 || [lindex $parts 1] > 65535)} {
+            error "SDP::media port count must be between 1 and 65535"
+        }
+        return $value
+    }
+
+    proc sdp_media_command {args} {
+        _sdp_require_event SDP::media
+        if {[llength $args] == 1 && [lindex $args 0] eq "count"} {
+            return [llength $::state::sdp::media]
+        }
+        if {[llength $args] == 1 && [string is integer -strict [lindex $args 0]]} {
+            return [_sdp_media_at [lindex $args 0]]
+        }
+        if {[llength $args] < 2 || [llength $args] > 3} {
+            error "SDP::media requires count, an index, or a media selector"
+        }
+        set selector [lindex $args 0]
+        if {$selector eq "attr"} {
+            if {[llength $args] != 3} { error "SDP::media attr requires media and attribute indices" }
+            set media [_sdp_media_at [lindex $args 1]]
+            set attr_index [_sdp_validate_index [lindex $args 2] "SDP::media attribute"]
+            set attrs [dict get $media attrs]
+            if {$attr_index >= [llength $attrs]} { return "" }
+            return [lindex $attrs $attr_index]
+        }
+        if {$selector ni {type port transport conn}} {
+            error "SDP::media selector must be attr, type, port, transport, or conn"
+        }
+        set index [_sdp_validate_index [lindex $args 1] "SDP::media"]
+        set media [_sdp_media_at $index]
+        if {[llength $args] == 2} { return [dict get $media $selector] }
+        if {$selector ni {port conn}} {
+            error "SDP::media $selector is read-only"
+        }
+        set value [lindex $args 2]
+        if {$selector eq "port"} {
+            set value [_sdp_media_port $value]
+        } else {
+            set value [_sdp_validate_text $value "SDP::media conn"]
+        }
+        dict set media $selector $value
+        lset ::state::sdp::media $index $media
+        ::itest::log_decision sdp media [list $selector $index $value]
+        return ""
+    }
+
+    proc sdp_session_id_command {args} {
+        _sdp_require_event SDP::session_id
+        if {[llength $args] != 0} { error "SDP::session_id takes no arguments" }
+        return $::state::sdp::session_id
     }
 
     proc diameter_reset_connection {} {
@@ -17690,6 +17880,9 @@ foreach {original replacement} {
     sip_to sip_to_command
     sip_uri sip_uri_command
     sip_via sip_via_command
+    sdp_field sdp_field_command
+    sdp_media sdp_media_command
+    sdp_session_id sdp_session_id_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::$original] ne ""} {
         ::tmm::_orig_rename ::itest::cmd::$original ::itest::cmd::_testcl_${original}_orig
@@ -18294,6 +18487,9 @@ foreach {name proc_name} {
     SIP::to ::itest::semantic::sip_to_command
     SIP::uri ::itest::semantic::sip_uri_command
     SIP::via ::itest::semantic::sip_via_command
+    SDP::field ::itest::semantic::sdp_field_command
+    SDP::media ::itest::semantic::sdp_media_command
+    SDP::session_id ::itest::semantic::sdp_session_id_command
     DIAMETER::avp ::itest::semantic::diameter_avp_command
     DIAMETER::command ::itest::semantic::diameter_command_command
     DIAMETER::disconnect ::itest::semantic::diameter_disconnect_command

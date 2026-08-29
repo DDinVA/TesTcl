@@ -533,6 +533,11 @@ EVENT_STATE_FIELDS = {
         "route",
         "via",
     },
+    "sdp": {
+        "session_id",
+        "fields",
+        "media",
+    },
     "diameter": {
         "type",
         "version",
@@ -900,6 +905,7 @@ EVENT_STATE_NAMESPACES = {
     "websocket": "::state::websocket",
     "mqtt": "::state::mqtt",
     "sip": "::state::sip",
+    "sdp": "::state::sdp",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
     "message": "::state::message",
@@ -1419,6 +1425,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "SIP::to",
     "SIP::uri",
     "SIP::via",
+    "SDP::field",
+    "SDP::media",
+    "SDP::session_id",
     "DIAMETER::avp",
     "DIAMETER::command",
     "DIAMETER::disconnect",
@@ -5235,6 +5244,12 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
                 and "\x00" in layer_values[field]
             ):
                 raise EmulatorInputError("TLS payload must not contain NUL bytes")
+        if layer == "sdp":
+            state_bytes = sum(len(value.encode("utf-8")) for value in layer_values.values())
+            if state_bytes > SDP_MAX_STATE_BYTES:
+                raise EmulatorInputError(
+                    f"event SDP state exceeds {SDP_MAX_STATE_BYTES} bytes"
+                )
         normalised[layer] = layer_values
     supplied_version = normalised.get("dhcp", {}).get("version")
     if supplied_version is not None and supplied_version not in {"4", "6"}:
@@ -5257,6 +5272,7 @@ STREAM_MAX_BYTES = 2 * 1024 * 1024
 WEBSOCKET_MAX_FRAME_BYTES = STREAM_MAX_BYTES
 MQTT_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 SIP_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
+SDP_MAX_STATE_BYTES = 64 * 1024
 DIAMETER_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 RADIUS_MAX_MESSAGE_BYTES = 4096
 RADIUS_AUTHENTICATOR_BYTES = 16
@@ -10391,6 +10407,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::link_reset_connection")
                 session.eval_tcl("::itest::semantic::name_reset_connection")
                 session.eval_tcl("::itest::semantic::socks_reset_connection")
+                session.eval_tcl("::itest::semantic::sdp_reset_connection")
                 session.eval_tcl("::itest::semantic::dhcp_reset_connection")
                 session.eval_tcl("::itest::semantic::ftp_reset_connection")
                 session.eval_tcl("::itest::semantic::imap_reset_connection")
@@ -10743,6 +10760,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::link_reset_connection")
             session.eval_tcl("::itest::semantic::name_reset_connection")
             session.eval_tcl("::itest::semantic::socks_reset_connection")
+            session.eval_tcl("::itest::semantic::sdp_reset_connection")
             self._connection_open = False
             self._server_connection_open = False
             self._server_connection_detached = False
@@ -12113,6 +12131,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::link_reset_connection")
         session.eval_tcl("::itest::semantic::name_reset_connection")
         session.eval_tcl("::itest::semantic::socks_reset_connection")
+        session.eval_tcl("::itest::semantic::sdp_reset_connection")
         session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::ftp_reset_connection")
         session.eval_tcl("::itest::semantic::imap_reset_connection")
@@ -12169,6 +12188,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::link_reset_connection")
         session.eval_tcl("::itest::semantic::name_reset_connection")
         session.eval_tcl("::itest::semantic::socks_reset_connection")
+        session.eval_tcl("::itest::semantic::sdp_reset_connection")
         session.eval_tcl("::itest::semantic::dhcp_reset_connection")
         session.eval_tcl("::itest::semantic::ftp_reset_connection")
         session.eval_tcl("::itest::semantic::icap_reset_connection")

@@ -738,8 +738,9 @@ when HTTP_REQUEST {
         self.assertNotIn(("NAME", "generated-stub"), queue_buckets)
         self.assertNotIn(("RESOLV", "generated-stub"), queue_buckets)
         self.assertNotIn(("SOCKS", "generated-stub"), queue_buckets)
+        self.assertNotIn(("SDP", "generated-stub"), queue_buckets)
         self.assertNotIn(("VALIDATE", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 219)
+        self.assertEqual(queue["command_count"], 216)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -6555,6 +6556,74 @@ when SIP_RESPONSE_DONE { log local0. response-done }
         )
         self.assertTrue(any("via=UDP" in log for log in response_events[0]["logs"]))
         self.assertEqual(response_events[-1]["state"]["sip"]["status"], "202")
+
+    def test_sdp_commands_model_fields_media_and_session_id(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["SIP"],
+                "irule": """
+when SIP_REQUEST {
+    log local0. "sid=[SDP::session_id] version=[SDP::field v] origin=[SDP::field origin] count=[SDP::media count] type=[SDP::media type 0] port=[SDP::media port 0] transport=[SDP::media transport 0] attr=[SDP::media attr 0 1]"
+    SDP::field connection 0 "IN IP4 198.51.100.10"
+    SDP::media port 0 5004/2
+    SDP::media conn 0 "IN IP4 198.51.100.20"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event(
+                "SIP_REQUEST",
+                {
+                    "sdp": {
+                        "session_id": "2890844526",
+                        "fields": (
+                            "version 0 "
+                            "origin {alice 2890844526 2890842807 IN IP4 host.example} "
+                            "connection {IN IP4 203.0.113.1} "
+                            "attribute sendrecv attribute tool:demo"
+                        ),
+                        "media": (
+                            "{type audio port 49170/2 transport RTP/AVP "
+                            "conn {IN IP4 203.0.113.1} "
+                            "attrs {rtpmap:0\\ PCMU/8000 sendrecv}}"
+                        ),
+                    }
+                },
+            )
+            self.assertTrue(result["fired"])
+            self.assertEqual(result["state"]["sdp"]["session_id"], "2890844526")
+            self.assertIn("198.51.100.10", result["state"]["sdp"]["fields"])
+            self.assertIn("5004/2", result["state"]["sdp"]["media"])
+            self.assertIn("198.51.100.20", result["state"]["sdp"]["media"])
+            self.assertTrue(any(
+                "sid=2890844526 version=0 origin=alice 2890844526 2890842807 IN IP4 host.example"
+                in entry
+                and "count=1 type=audio port=49170/2 transport=RTP/AVP attr=sendrecv" in entry
+                for entry in result["logs"]
+            ))
+        finally:
+            session.close()
+
+        invalid = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["SIP"],
+                "irule": "when SIP_REQUEST { SDP::media type 1 }",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, "index is outside the media list"
+            ):
+                invalid.fire_event("SIP_REQUEST")
+        finally:
+            invalid.close()
 
     def test_sip_raw_tcp_and_udp_messages_drive_request_events(self) -> None:
         raw_message = (
