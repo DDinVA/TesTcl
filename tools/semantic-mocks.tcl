@@ -576,6 +576,17 @@ namespace eval ::itest::semantic {
         variable type command
     }
 
+    namespace eval ::state::smtps {
+        variable activation_mode none
+        variable command ""
+        variable disabled 0
+        variable enabled 1
+        variable payload ""
+        variable payload_length 0
+        variable tls_active 0
+        variable type command
+    }
+
     namespace eval ::state::icap {
         variable headers {Host icap.example.net}
         variable method REQMOD
@@ -11904,6 +11915,21 @@ namespace eval ::itest::semantic {
         return [starttls_toggle_command ldap LDAP::disable {SERVER_CONNECTED CLIENT_ACCEPTED} 0 {*}$args]
     }
 
+    proc smtps_reset_connection {} { starttls_reset_connection smtps }
+    proc smtps_prepare_event {} { starttls_prepare_event smtps }
+
+    proc smtps_activation_mode_command {args} {
+        return [starttls_activation_mode_command smtps SMTPS::activation_mode {SERVER_CONNECTED CLIENT_ACCEPTED} {*}$args]
+    }
+
+    proc smtps_enable_command {args} {
+        return [starttls_toggle_command smtps SMTPS::enable {ANY_EVENT} 1 {*}$args]
+    }
+
+    proc smtps_disable_command {args} {
+        return [starttls_toggle_command smtps SMTPS::disable {ANY_EVENT} 0 {*}$args]
+    }
+
     proc icap_reset_connection {} {
         set ::state::icap::headers [list Host icap.example.net]
         set ::state::icap::method REQMOD
@@ -16674,6 +16700,9 @@ foreach {name proc_name} {
     LDAP::activation_mode ::itest::semantic::ldap_activation_mode_command
     LDAP::disable ::itest::semantic::ldap_disable_command
     LDAP::enable ::itest::semantic::ldap_enable_command
+    SMTPS::activation_mode ::itest::semantic::smtps_activation_mode_command
+    SMTPS::disable ::itest::semantic::smtps_disable_command
+    SMTPS::enable ::itest::semantic::smtps_enable_command
     ICAP::header ::itest::semantic::icap_header_command
     ICAP::method ::itest::semantic::icap_method_command
     ICAP::status ::itest::semantic::icap_status_command

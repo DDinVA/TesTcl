@@ -115,8 +115,8 @@ expose their TMOS 17.5 STARTTLS controls. `IMAP::activation_mode`,
 `require`; each namespace also models its `enable` and `disable` command.
 Protocol-control state persists for the emulated connection, while packet
 inputs can seed the message type, command text, TLS-active flag, and payload.
-The adapter does not parse IMAP, POP3, or LDAP wire messages, negotiate TLS,
-or enforce STARTTLS policy against a live peer.
+The adapter does not parse IMAP, POP3, LDAP, or SMTPS wire messages, negotiate
+TLS, or enforce STARTTLS policy against a live peer.
 Structured ICAP packet traces dispatch `ICAP_REQUEST` and `ICAP_RESPONSE` when
 the `ICAP` profile is attached. The four TMOS 17.5 `ICAP::*` commands expose
 request method and URI, response status, and case-insensitive ICAP header

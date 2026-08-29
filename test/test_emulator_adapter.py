@@ -490,7 +490,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("IMAP", "generated-stub"), queue_buckets)
         self.assertNotIn(("POP3", "generated-stub"), queue_buckets)
         self.assertNotIn(("LDAP", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 260)
+        self.assertNotIn(("SMTPS", "generated-stub"), queue_buckets)
+        self.assertEqual(queue["command_count"], 257)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -1191,7 +1192,12 @@ when ICAP_RESPONSE {
         self.assertIn("ICAP_RESPONSE", result["registered_events"])
 
     def test_starttls_protocol_controls_and_packet_state(self) -> None:
-        for protocol, namespace in (("imap", "IMAP"), ("pop3", "POP3"), ("ldap", "LDAP")):
+        for protocol, namespace, port in (
+            ("imap", "IMAP", 143),
+            ("pop3", "POP3", 110),
+            ("ldap", "LDAP", 389),
+            ("smtps", "SMTPS", 587),
+        ):
             result = self.adapter.run_scenario(
                 {
                     "profiles": ["TCP"],
@@ -1205,7 +1211,7 @@ when CLIENT_ACCEPTED {{
                         {
                             "protocol": protocol,
                             "source": {"address": "192.0.2.10", "port": 40000},
-                            "destination": {"address": "198.51.100.20", "port": 143},
+                            "destination": {"address": "198.51.100.20", "port": port},
                             "type": "command",
                             "command": "STARTTLS",
                             "tls_active": False,
@@ -1214,7 +1220,7 @@ when CLIENT_ACCEPTED {{
                         {
                             "protocol": protocol,
                             "direction": "server_to_client",
-                            "source": {"address": "198.51.100.20", "port": 143},
+                            "source": {"address": "198.51.100.20", "port": port},
                             "destination": {"address": "192.0.2.10", "port": 40000},
                             "type": "response",
                             "command": "OK Begin TLS negotiation now",
@@ -1316,6 +1322,22 @@ when CLIENT_ACCEPTED {{
                     "packets": [{
                         "protocol": "ldap",
                         "command": "x" * 65537,
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "SMTPS payload exceeds 2097152 bytes",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP"],
+                    "irule": "when CLIENT_DATA { log local0. ok }",
+                    "packets": [{
+                        "protocol": "smtps",
+                        "payload": "x" * (2 * 1024 * 1024 + 1),
                     }],
                 },
                 tcl_lsp_root=self.tcl_lsp_root,

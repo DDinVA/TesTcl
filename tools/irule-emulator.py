@@ -718,6 +718,16 @@ EVENT_STATE_FIELDS = {
         "tls_active",
         "type",
     },
+    "smtps": {
+        "activation_mode",
+        "command",
+        "disabled",
+        "enabled",
+        "payload",
+        "payload_length",
+        "tls_active",
+        "type",
+    },
     "icap": {
         "headers",
         "method",
@@ -827,6 +837,7 @@ EVENT_STATE_NAMESPACES = {
     "imap": "::state::imap",
     "pop3": "::state::pop3",
     "ldap": "::state::ldap",
+    "smtps": "::state::smtps",
     "icap": "::state::icap",
     "tcp": "::state::tcp",
     "rtsp": "::state::rtsp",
@@ -969,6 +980,9 @@ SEMANTIC_MOCK_COMMANDS = {
     "LDAP::activation_mode",
     "LDAP::disable",
     "LDAP::enable",
+    "SMTPS::activation_mode",
+    "SMTPS::disable",
+    "SMTPS::enable",
     "ICAP::header",
     "ICAP::method",
     "ICAP::status",
@@ -5117,9 +5131,10 @@ TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
 PCAP_MAX_PACKET_BYTES = 2 * 1024 * 1024
-STARTTLS_PROTOCOLS = frozenset({"imap", "pop3", "ldap"})
+STARTTLS_PROTOCOLS = frozenset({"imap", "pop3", "ldap", "smtps"})
 STARTTLS_PACKET_TYPES = frozenset({"command", "response", "data"})
 STARTTLS_COMMAND_MAX_BYTES = 64 * 1024
+STARTTLS_PAYLOAD_MAX_BYTES = 2 * 1024 * 1024
 PACKET_PROTOCOLS = {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
@@ -5212,6 +5227,12 @@ PACKET_PROTOCOL_FIELDS = {
         "tls_active",
     },
     "ldap": {
+        "payload_hex",
+        "type",
+        "command",
+        "tls_active",
+    },
+    "smtps": {
         "payload_hex",
         "type",
         "command",
@@ -8703,6 +8724,14 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             normalised["flags"] = [flag.upper() for flag in flags]
         if "payload" in packet:
             normalised["payload"] = _require_string(packet["payload"], f"packet {index} payload")
+            if (
+                protocol in STARTTLS_PROTOCOLS
+                and len(normalised["payload"].encode("utf-8")) > STARTTLS_PAYLOAD_MAX_BYTES
+            ):
+                raise EmulatorInputError(
+                    f"packet {index} {protocol.upper()} payload exceeds "
+                    f"{STARTTLS_PAYLOAD_MAX_BYTES} bytes"
+                )
             if protocol == "tls" and "\x00" in normalised["payload"]:
                 raise EmulatorInputError(
                     f"packet {index} TLS payload cannot contain NUL bytes"
@@ -9941,6 +9970,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::imap_reset_connection")
                 session.eval_tcl("::itest::semantic::pop3_reset_connection")
                 session.eval_tcl("::itest::semantic::ldap_reset_connection")
+                session.eval_tcl("::itest::semantic::smtps_reset_connection")
                 session.eval_tcl("::itest::semantic::icap_reset_connection")
                 session.eval_tcl("::itest::semantic::profile_settings_clear")
                 for profile_name, attributes in self._profile_settings.items():
@@ -11540,6 +11570,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::imap_reset_connection")
         session.eval_tcl("::itest::semantic::pop3_reset_connection")
         session.eval_tcl("::itest::semantic::ldap_reset_connection")
+        session.eval_tcl("::itest::semantic::smtps_reset_connection")
         session.eval_tcl("::itest::semantic::icap_reset_connection")
         session.eval_tcl("::itest::semantic::udp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
@@ -11588,6 +11619,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::imap_reset_connection")
         session.eval_tcl("::itest::semantic::pop3_reset_connection")
         session.eval_tcl("::itest::semantic::ldap_reset_connection")
+        session.eval_tcl("::itest::semantic::smtps_reset_connection")
         session.eval_tcl("::itest::semantic::rtsp_reset_connection")
         session.eval_tcl("::itest::semantic::tcp_reset_transport")
         session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
