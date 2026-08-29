@@ -5752,6 +5752,45 @@ when HTTP_REQUEST {
         self.assertEqual(request_result["http2"]["pseudo_headers"][":authority"], "h2.example.com")
         self.assertTrue(any("header_replace" in entry for entry in request_result["decisions"]))
 
+    def test_http2_push_records_promise_and_inline_response_metadata(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    HTTP2::push /static/app.js -priority 16 -content "console.log('pushed');" -noserver host example.com -- :status 200 content-type application/javascript
+}
+""",
+                "request": {
+                    "uri": "/index.html",
+                    "http2": {"active": True, "version": 2, "stream_id": 1},
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        request_result = result["results"][0]
+        self.assertEqual(request_result["http2"]["push_count"], 1)
+        self.assertEqual(
+            request_result["http2"]["pushes"],
+            [{
+                "id": 1,
+                "uri": "/static/app.js",
+                "priority": 16,
+                "content": "console.log('pushed');",
+                "ifile": "",
+                "noserver": True,
+                "nohost": False,
+                "request_headers": {"host": "example.com"},
+                "response_headers": {":status": "200", "content-type": "application/javascript"},
+            }],
+        )
+        self.assertTrue(any("push" in entry for entry in request_result["decisions"]))
+        self.assertEqual(
+            {entry["name"]: entry["runtime_status"] for entry in result["fidelity"]["commands"]},
+            {"HTTP2::push": "semantic-mock"},
+        )
+
     def test_http2_metadata_rejects_invalid_shape_and_bounds(self) -> None:
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "pseudo_headers"):
             self.adapter._normalise_packets(

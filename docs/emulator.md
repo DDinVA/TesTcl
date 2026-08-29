@@ -891,11 +891,13 @@ HTTP/2 metadata can be attached to a structured HTTP transaction with an
 `http2` object. This drives the reusable `tcl-lsp` pseudo-header and stream
 handlers plus semantic `HTTP2::active`, `HTTP2::version`,
 `HTTP2::requests`, `HTTP2::concurrency`, `HTTP2::enable`, `HTTP2::disable`,
-and `HTTP2::disconnect` behavior. Header names are validated as lowercase
-HTTP/2 pseudo-headers, stream IDs are bounded to 31 bits, and priorities to
-8 bits. The current slice models decoded transaction state; it does not parse
-HTTP/2 frames, implement HPACK, multiplex live streams, or emit
-`HTTP2::push` responses.
+and `HTTP2::disconnect` behavior. `HTTP2::push` records a bounded
+PUSH_PROMISE intent with its URI, priority, request/response headers, inline
+content or iFile reference, and `-noserver`/`-nohost` flags. Header names are
+validated as lowercase HTTP/2 pseudo-headers, stream IDs are bounded to 31
+bits, and priorities to 8 bits. The current slice models decoded transaction
+state and push decisions; it does not parse HTTP/2 frames, implement HPACK,
+multiplex live streams, contact an origin, or emit pushed frames.
 
 ```json
 {

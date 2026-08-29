@@ -359,6 +359,8 @@ EVENT_STATE_FIELDS = {
         "serverside_enabled",
         "disconnected",
         "discarded",
+        "push_count",
+        "pushes",
         "pseudo_headers",
     },
     "dns": {
@@ -806,6 +808,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "HTTP2::enable",
     "HTTP2::header",
     "HTTP2::requests",
+    "HTTP2::push",
     "HTTP2::stream",
     "HTTP2::version",
     "event",
@@ -8324,6 +8327,25 @@ def _http2_snapshot(session: Any) -> dict[str, Any]:
         raw_headers[index]: raw_headers[index + 1]
         for index in range(0, len(raw_headers) - 1, 2)
     }
+    snapshot["push_count"] = int(
+        session.eval_tcl("set ::state::http2::push_count") or 0
+    )
+    pushes: list[dict[str, Any]] = []
+    for raw_push in _split_tcl_list(session.eval_tcl("set ::state::http2::pushes")):
+        parts = _split_tcl_list(raw_push)
+        if len(parts) % 2:
+            raise EmulatorInputError("invalid HTTP/2 push state")
+        record = dict(zip(parts[::2], parts[1::2]))
+        for header_field in ("request_headers", "response_headers"):
+            record[header_field] = _header_dict(record.get(header_field, ""))
+        for numeric_field in ("id", "priority"):
+            if numeric_field in record:
+                record[numeric_field] = int(record[numeric_field])
+        for boolean_field in ("noserver", "nohost"):
+            if boolean_field in record:
+                record[boolean_field] = record[boolean_field] == "1"
+        pushes.append(record)
+    snapshot["pushes"] = pushes
     return snapshot
 
 
@@ -8620,6 +8642,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::prepare_http_close")
                 session.eval_tcl("set ::itest::semantic::automatic_http_flow 1")
                 try:
+                    session.eval_tcl("::itest::semantic::http2_reset_pushes")
                     _configure_http2_state(session, kwargs.get("http2"), kwargs)
                     try:
                         use_existing_connection = self._connection_open and (

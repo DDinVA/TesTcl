@@ -69,6 +69,7 @@ namespace eval ::itest::semantic {
     variable resolver_records [dict create]
     variable ssl_cert_counter 0
     variable ssl_cert_objects [dict create]
+    variable http2_push_counter 0
     variable http2_pending [dict create]
     variable udp_unused_port_next 40000
     variable tcp_unused_port_next 49152
@@ -530,9 +531,11 @@ namespace eval ::itest::semantic {
         variable enabled 1
         variable clientside_enabled 1
         variable serverside_enabled 1
-        variable disconnected 0
-        variable discarded 0
-        variable pseudo_headers {}
+            variable disconnected 0
+            variable discarded 0
+            variable push_count 0
+            variable pushes {}
+            variable pseudo_headers {}
     }
 
     namespace eval ::state::mqtt {
@@ -10508,6 +10511,11 @@ namespace eval ::itest::semantic {
         set http2_pending [dict create]
     }
 
+    proc http2_reset_pushes {} {
+        set ::state::http2::push_count 0
+        set ::state::http2::pushes {}
+    }
+
     proc http2_apply_pending {} {
         variable http2_pending
         if {[dict size $http2_pending] == 0} { return }
@@ -10633,6 +10641,108 @@ namespace eval ::itest::semantic {
         set ::state::http2::stream_priority $value
         ::itest::log_decision http2 stream_priority_set $value
         return 0
+    }
+
+    proc http2_push_command {args} {
+        if {![http2_active_command]} {
+            error "HTTP2::push requires an active HTTP/2 transaction"
+        }
+        if {[llength $args] < 1} {
+            error "HTTP2::push requires a URI"
+        }
+        set uri [lindex $args 0]
+        if {$uri eq "" || [string first "\x00" $uri] >= 0} {
+            error "HTTP2::push URI must be non-empty and contain no NUL bytes"
+        }
+        set priority 0
+        set content ""
+        set content_set 0
+        set ifile ""
+        set noserver 0
+        set nohost 0
+        set request_headers {}
+        set response_headers {}
+        set response_mode 0
+        set index 1
+        while {$index < [llength $args]} {
+            set arg [lindex $args $index]
+            if {$arg eq "--"} {
+                set response_mode 1
+                incr index
+                break
+            }
+            if {$arg eq "-priority"} {
+                incr index
+                if {$index >= [llength $args]} { error "HTTP2::push -priority requires a value" }
+                set priority [lindex $args $index]
+                if {![string is integer -strict $priority] || $priority < 0 || $priority > 255} {
+                    error "HTTP2::push priority must be between 0 and 255"
+                }
+            } elseif {$arg eq "-content"} {
+                incr index
+                if {$index >= [llength $args]} { error "HTTP2::push -content requires data" }
+                if {$content_set || $ifile ne ""} { error "HTTP2::push accepts only one content source" }
+                set content [lindex $args $index]
+                if {[string first "\x00" $content] >= 0} { error "HTTP2::push content cannot contain NUL bytes" }
+                set content_set 1
+            } elseif {$arg eq "-ifile"} {
+                incr index
+                if {$index >= [llength $args]} { error "HTTP2::push -ifile requires an object" }
+                if {$content_set || $ifile ne ""} { error "HTTP2::push accepts only one content source" }
+                set ifile [lindex $args $index]
+                if {$ifile eq "" || [string first "\x00" $ifile] >= 0} { error "HTTP2::push iFile must be non-empty and contain no NUL bytes" }
+            } elseif {$arg eq "-noserver"} {
+                set noserver 1
+            } elseif {$arg eq "-nohost"} {
+                set nohost 1
+            } elseif {[string match -* $arg]} {
+                error "HTTP2::push received unsupported option $arg"
+            } else {
+                lappend request_headers $arg
+            }
+            incr index
+        }
+        while {$index < [llength $args]} {
+            set arg [lindex $args $index]
+            if {[string match -* $arg]} { error "HTTP2::push response headers cannot contain options" }
+            lappend response_headers $arg
+            incr index
+        }
+        if {[llength $request_headers] % 2 != 0} {
+            error "HTTP2::push request headers require name/value pairs"
+        }
+        if {[llength $response_headers] % 2 != 0} {
+            error "HTTP2::push response headers require name/value pairs"
+        }
+        foreach header_value [concat $request_headers $response_headers] {
+            if {[string first "\x00" $header_value] >= 0} {
+                error "HTTP2::push headers cannot contain NUL bytes"
+            }
+        }
+        if {[string bytelength $content] > 2097152} {
+            error "HTTP2::push content exceeds 2 MiB"
+        }
+        if {!$nohost} {
+            set has_host 0
+            foreach {header_name header_value} $request_headers {
+                if {[string tolower $header_name] in {host :authority}} {
+                    set has_host 1
+                    break
+                }
+            }
+            if {!$has_host} {
+                error "HTTP2::push requires a Host or :authority request header unless -nohost is used"
+            }
+        }
+        incr ::itest::semantic::http2_push_counter
+        set record [dict create \
+            id $::itest::semantic::http2_push_counter uri $uri priority $priority \
+            content $content ifile $ifile noserver $noserver nohost $nohost \
+            request_headers $request_headers response_headers $response_headers]
+        lappend ::state::http2::pushes $record
+        set ::state::http2::push_count [llength $::state::http2::pushes]
+        ::itest::log_decision http2 push $record
+        return ""
     }
 
     # ── TLS/SSL inspection and control semantics ─────────────────────
@@ -13385,6 +13495,7 @@ foreach {name proc_name} {
     HTTP2::enable ::itest::semantic::http2_enable_command
     HTTP2::header ::itest::semantic::http2_header_command
     HTTP2::requests ::itest::semantic::http2_requests_command
+    HTTP2::push ::itest::semantic::http2_push_command
     HTTP2::stream ::itest::semantic::http2_stream_command
     HTTP2::version ::itest::semantic::http2_version_command
     class ::itest::cmd::cmd_class

@@ -201,9 +201,11 @@ invalidation, and unclean-shutdown policy as deterministic connection state.
 It does not emit cryptographic renegotiation or switch a live TLS profile.
 HTTP/2 structured transaction metadata supports pseudo-header lookup and
 mutation, stream ID and priority state, active/version/request/concurrency
-queries, enable/disable, and disconnect decisions through the `HTTP2::*`
-surface. It does not parse HTTP/2 frames, implement HPACK or live stream
-multiplexing, or model `HTTP2::push` response emission.
+queries, enable/disable, disconnect decisions, and deterministic
+`HTTP2::push` PUSH_PROMISE records through the `HTTP2::*` surface. Push records
+retain URI, priority, headers, inline content/iFile references, and suppression
+flags; they do not contact an origin or emit live HTTP/2 frames. The adapter
+does not parse HTTP/2 frames, implement HPACK, or multiplex live streams.
 The packet adapter now also accepts explicit `protocol: "http2"` payloads and
 binary TCP `payload_hex` captures. It recognizes a split HTTP/2 prior-knowledge
 client preface, decodes bounded frames and HPACK blocks across packet
