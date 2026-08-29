@@ -477,7 +477,8 @@ when HTTP_REQUEST {
             for bucket in queue["buckets"]
         }
         self.assertNotIn(("AUTH", "generated-stub"), queue_buckets)
-        self.assertGreater(queue["command_count"], 400)
+        self.assertNotIn(("X509", "generated-stub"), queue_buckets)
+        self.assertGreater(queue["command_count"], 380)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -2902,6 +2903,78 @@ when SERVER_CONNECTED {
         self.assertEqual(result["state"]["tls_server"]["alpn"], "h2")
         self.assertEqual(result["state"]["tls_server"]["session_invalidated"], "1")
         self.assertEqual(result["state"]["tls_server"]["session_drop"], "0")
+
+    def test_x509_certificate_inspection_uses_packet_fixture_metadata(self) -> None:
+        pem = "-----BEGIN CERTIFICATE-----\nSGVsbG8=\n-----END CERTIFICATE-----"
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "CLIENTSSL"],
+                "irule": """
+when CLIENTSSL_CLIENTCERT {
+    set cert [SSL::cert 0]
+    set fields [X509::cert_fields $cert 10 hash issuer serial sigalg subject subpubkey validity versionnum whole]
+    log local0. "fields=$fields"
+    log local0. "ext=[X509::extensions $cert] hash=[X509::hash $cert] issuer=[X509::issuer $cert] serial=[X509::serial_number $cert] sigalg=[X509::signature_algorithm $cert] type=[X509::subject_public_key_type $cert] bits=[X509::subject_public_key_RSA_bits $cert] key=[X509::subject_public_key $cert] curve=[X509::subject_public_key curve_name $cert] version=[X509::version $cert] before=[X509::not_valid_before $cert] after=[X509::not_valid_after $cert] err=[X509::verify_cert_error_string 10] der=[binary encode hex [X509::pem2der [X509::whole $cert]]]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tls",
+                        "direction": "client_to_server",
+                        "type": "client_cert",
+                        "cert_count": 1,
+                        "cert_subject": "CN=client.example.com,O=Example",
+                        "cert_issuer": "CN=Example Root",
+                        "cert_serial": "01:02:03",
+                        "cert_hash": "AA:BB:CC",
+                        "cert_extensions": "X509v3 extensions:\n    X509v3 Extended Key Usage: clientAuth",
+                        "cert_not_valid_before": "Jan  1 00:00:00 2026 GMT",
+                        "cert_not_valid_after": "Jan  1 00:00:00 2027 GMT",
+                        "cert_signature_algorithm": "sha256WithRSAEncryption",
+                        "cert_public_key": "public-key",
+                        "cert_public_key_type": "RSA",
+                        "cert_public_key_bits": 2048,
+                        "cert_public_key_curve": "",
+                        "cert_version": 3,
+                        "cert_pem": pem,
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        event = next(
+            event for packet in result["trace"] for event in packet["events"]
+            if event["event"] == "CLIENTSSL_CLIENTCERT"
+        )
+        self.assertTrue(any("SSL_CLIENT_CERT_HASH AA:BB:CC" in entry for entry in event["logs"]))
+        self.assertTrue(any("SSL_CLIENT_I_DN {CN=Example Root}" in entry for entry in event["logs"]))
+        self.assertTrue(any("ext=X509v3 extensions:" in entry for entry in event["logs"]))
+        self.assertTrue(any("serial=01:02:03" in entry and "type=RSA" in entry and "bits=2048" in entry for entry in event["logs"]))
+        self.assertTrue(any("version=3" in entry and "err=certificate has expired" in entry and "der=48656c6c6f" in entry for entry in event["logs"]))
+
+        x509_statuses = {
+            entry["name"]: entry["runtime_status"]
+            for entry in result["fidelity"]["commands"]
+            if entry["name"].startswith("X509::")
+        }
+        for command in {
+            "X509::cert_fields",
+            "X509::extensions",
+            "X509::hash",
+            "X509::not_valid_after",
+            "X509::not_valid_before",
+            "X509::pem2der",
+            "X509::serial_number",
+            "X509::signature_algorithm",
+            "X509::subject_public_key",
+            "X509::subject_public_key_RSA_bits",
+            "X509::subject_public_key_type",
+            "X509::verify_cert_error_string",
+            "X509::version",
+            "X509::whole",
+        }:
+            self.assertEqual(x509_statuses[command], "semantic-mock")
 
     def test_packet_trace_exposes_directional_tcp_payload_and_mutations(self) -> None:
         result = self.adapter.run_scenario(

@@ -876,6 +876,17 @@ exercise those inspection paths, for example `initial_session_id`,
 `forward_proxy_cert`, and `forward_proxy_cert_status`. Values are test
 fixtures, not material extracted from a live TLS connection.
 
+Certificate inspection uses the same deterministic fixture model. A TLS
+packet can provide `cert_subject`, `cert_issuer`, `cert_serial`,
+`cert_hash`, `cert_extensions`, validity dates, signature algorithm, public
+key metadata, `cert_version`, and `cert_pem`/`cert_der`. `SSL::cert 0` then
+returns a stable certificate handle for the current side, which can be passed
+to the complete X.509 inspection surface, including `X509::cert_fields`,
+`X509::extensions`, `X509::hash`, `X509::pem2der`, public-key queries,
+`X509::verify_cert_error_string`, and `X509::whole`. The adapter validates
+handles and PEM structure but does not validate certificate chains or perform
+cryptographic verification.
+
 HTTP/2 metadata can be attached to a structured HTTP transaction with an
 `http2` object. This drives the reusable `tcl-lsp` pseudo-header and stream
 handlers plus semantic `HTTP2::active`, `HTTP2::version`,

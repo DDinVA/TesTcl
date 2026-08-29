@@ -459,6 +459,17 @@ namespace eval ::itest::semantic {
             variable cert_issuer ""
             variable cert_serial ""
             variable cert_hash ""
+            variable cert_extensions ""
+            variable cert_not_valid_after ""
+            variable cert_not_valid_before ""
+            variable cert_signature_algorithm ""
+            variable cert_public_key ""
+            variable cert_public_key_type "unknown"
+            variable cert_public_key_bits 0
+            variable cert_public_key_curve ""
+            variable cert_version 3
+            variable cert_pem ""
+            variable cert_der ""
             variable cert_count 0
             variable cert_mode "ignore"
             variable verify_result 0
@@ -10858,6 +10869,21 @@ namespace eval ::itest::semantic {
             set ${ns}::unclean_shutdown 0
             set ${ns}::authenticate_frequency ""
             set ${ns}::authenticate_depth 0
+            set ${ns}::cert_subject ""
+            set ${ns}::cert_issuer ""
+            set ${ns}::cert_serial ""
+            set ${ns}::cert_hash ""
+            set ${ns}::cert_extensions ""
+            set ${ns}::cert_not_valid_after ""
+            set ${ns}::cert_not_valid_before ""
+            set ${ns}::cert_signature_algorithm ""
+            set ${ns}::cert_public_key ""
+            set ${ns}::cert_public_key_type "unknown"
+            set ${ns}::cert_public_key_bits 0
+            set ${ns}::cert_public_key_curve ""
+            set ${ns}::cert_version 3
+            set ${ns}::cert_pem ""
+            set ${ns}::cert_der ""
             set ${ns}::initial_session_id ""
             set ${ns}::nextproto ""
             set ${ns}::session_secret ""
@@ -10911,19 +10937,38 @@ namespace eval ::itest::semantic {
         if {![string is integer -strict $index] || $index < 0 || $index >= $count} {
             error "SSL::cert index is outside the peer certificate chain"
         }
-        set handle "cert${ssl_cert_counter}_${index}"
         if {[dict exists $ssl_cert_objects $ns $index]} {
-            return [dict get $ssl_cert_objects $ns $index]
+            set handle [dict get $ssl_cert_objects $ns $index]
+        } else {
+            incr ssl_cert_counter
+            set handle "cert$ssl_cert_counter"
+            dict set ssl_cert_objects $ns $index $handle
         }
-        incr ssl_cert_counter
-        set handle "cert$ssl_cert_counter"
         set subject [_ssl_value cert_subject]
         set issuer [_ssl_value cert_issuer]
         set serial [_ssl_value cert_serial]
         set hash [_ssl_value cert_hash]
-        dict set ssl_cert_objects $ns $index $handle
+        set extensions [_ssl_value cert_extensions]
+        set not_valid_after [_ssl_value cert_not_valid_after]
+        set not_valid_before [_ssl_value cert_not_valid_before]
+        set signature_algorithm [_ssl_value cert_signature_algorithm]
+        set public_key [_ssl_value cert_public_key]
+        set public_key_type [_ssl_value cert_public_key_type unknown]
+        set public_key_bits [_ssl_value cert_public_key_bits 0]
+        set public_key_curve [_ssl_value cert_public_key_curve]
+        set version [_ssl_value cert_version 3]
+        set pem [_ssl_value cert_pem]
+        set der [_ssl_value cert_der]
+        if {$pem eq ""} {
+            set pem "-----BEGIN CERTIFICATE-----\n$handle\n-----END CERTIFICATE-----"
+        }
         dict set ssl_cert_objects objects $handle [dict create \
-            subject $subject issuer $issuer serial $serial hash $hash]
+            subject $subject issuer $issuer serial $serial hash $hash \
+            extensions $extensions not_valid_after $not_valid_after \
+            not_valid_before $not_valid_before signature_algorithm $signature_algorithm \
+            public_key $public_key public_key_type $public_key_type \
+            public_key_bits $public_key_bits public_key_curve $public_key_curve \
+            version $version pem $pem der $der]
         return $handle
     }
 
@@ -11270,6 +11315,168 @@ namespace eval ::itest::semantic {
     proc x509_issuer_command {args} {
         if {[llength $args] != 1} { error "X509::issuer requires a certificate" }
         return [_ssl_cert_get [lindex $args 0] issuer]
+    }
+
+    proc _x509_certificate_arg {args command} {
+        if {[llength $args] != 1} { error "$command requires a certificate" }
+        return [lindex $args 0]
+    }
+
+    proc x509_extensions_command {args} {
+        set certificate [_x509_certificate_arg $args X509::extensions]
+        set value [_ssl_cert_get $certificate extensions]
+        if {$value eq ""} { return "(no extensions)" }
+        return $value
+    }
+
+    proc x509_hash_command {args} {
+        return [_ssl_cert_get [_x509_certificate_arg $args X509::hash] hash]
+    }
+
+    proc x509_not_valid_after_command {args} {
+        return [_ssl_cert_get [_x509_certificate_arg $args X509::not_valid_after] not_valid_after]
+    }
+
+    proc x509_not_valid_before_command {args} {
+        return [_ssl_cert_get [_x509_certificate_arg $args X509::not_valid_before] not_valid_before]
+    }
+
+    proc x509_serial_number_command {args} {
+        return [_ssl_cert_get [_x509_certificate_arg $args X509::serial_number] serial]
+    }
+
+    proc x509_signature_algorithm_command {args} {
+        return [_ssl_cert_get [_x509_certificate_arg $args X509::signature_algorithm] signature_algorithm]
+    }
+
+    proc x509_subject_public_key_type_command {args} {
+        return [_ssl_cert_get [_x509_certificate_arg $args X509::subject_public_key_type] public_key_type]
+    }
+
+    proc x509_subject_public_key_RSA_bits_command {args} {
+        set certificate [_x509_certificate_arg $args X509::subject_public_key_RSA_bits]
+        set key_type [_ssl_cert_get $certificate public_key_type]
+        if {[string toupper $key_type] ne "RSA"} {
+            error "X509::subject_public_key_RSA_bits requires an RSA certificate"
+        }
+        return [_ssl_cert_get $certificate public_key_bits]
+    }
+
+    proc x509_subject_public_key_command {args} {
+        if {[llength $args] == 1} {
+            return [_ssl_cert_get [lindex $args 0] public_key]
+        }
+        if {[llength $args] != 2 || [lindex $args 0] ni {type bits curve_name}} {
+            error "X509::subject_public_key accepts an optional type, bits, or curve_name"
+        }
+        set selector [lindex $args 0]
+        set certificate [lindex $args 1]
+        switch -exact -- $selector {
+            type { return [_ssl_cert_get $certificate public_key_type] }
+            bits { return [_ssl_cert_get $certificate public_key_bits] }
+            curve_name { return [_ssl_cert_get $certificate public_key_curve] }
+        }
+    }
+
+    proc x509_version_command {args} {
+        return [_ssl_cert_get [_x509_certificate_arg $args X509::version] version]
+    }
+
+    proc x509_whole_command {args} {
+        return [_ssl_cert_get [_x509_certificate_arg $args X509::whole] pem]
+    }
+
+    proc _x509_known_certificate {value} {
+        variable ssl_cert_objects
+        if {[dict exists $ssl_cert_objects objects $value]} { return $value }
+        if {![dict exists $ssl_cert_objects objects]} { return "" }
+        dict for {handle fields} [dict get $ssl_cert_objects objects] {
+            if {[dict get $fields pem] eq $value} { return $handle }
+        }
+        return ""
+    }
+
+    proc x509_pem2der_command {args} {
+        if {[llength $args] != 1} { error "X509::pem2der requires a PEM certificate" }
+        set value [lindex $args 0]
+        set handle [_x509_known_certificate $value]
+        if {$handle ne ""} {
+            set der [_ssl_cert_get $handle der]
+            if {$der ne ""} { return $der }
+            set value [_ssl_cert_get $handle pem]
+        }
+        set value [string trim $value]
+        if {![regexp -- {^-----BEGIN CERTIFICATE-----([A-Za-z0-9+/=\r\n\t ]+)-----END CERTIFICATE-----$} $value -> encoded]} {
+            error "X509::pem2der requires a PEM certificate"
+        }
+        set encoded [string map {"\n" "" "\r" "" " " "" "\t" ""} $encoded]
+        if {$encoded eq ""} { error "X509::pem2der received empty PEM data" }
+        if {[catch {binary decode base64 $encoded} der]} {
+            error "X509::pem2der received invalid PEM data"
+        }
+        return $der
+    }
+
+    proc x509_cert_fields_command {args} {
+        if {[llength $args] < 3} {
+            error "X509::cert_fields requires a certificate, error code, and options"
+        }
+        set certificate [lindex $args 0]
+        set error_code [lindex $args 1]
+        if {![string is integer -strict $error_code] || $error_code < 0} {
+            error "X509::cert_fields error code must be a non-negative integer"
+        }
+        set options [lrange $args 2 end]
+        if {[llength $options] == 1} {
+            set candidate [lindex $options 0]
+            if {![catch {llength $candidate} candidate_length] && $candidate_length > 1} {
+                set options $candidate
+            }
+        }
+        if {[llength $options] == 0} {
+            error "X509::cert_fields requires at least one option"
+        }
+        set fields [dict create \
+            hash [list SSL_CLIENT_CERT_HASH [_ssl_cert_get $certificate hash]] \
+            issuer [list SSL_CLIENT_I_DN [_ssl_cert_get $certificate issuer]] \
+            serial [list SSL_CLIENT_M_SERIAL [_ssl_cert_get $certificate serial]] \
+            sigalg [list SSL_CLIENT_A_SIG [_ssl_cert_get $certificate signature_algorithm]] \
+            subject [list SSL_CLIENT_S_DN [_ssl_cert_get $certificate subject]] \
+            subpubkey [list SSL_CLIENT_A_KEY [_ssl_cert_get $certificate public_key]] \
+            validity [list SSL_CLIENT_V_START [_ssl_cert_get $certificate not_valid_before] \
+                           SSL_CLIENT_V_END [_ssl_cert_get $certificate not_valid_after]] \
+            versionnum [list SSL_CLIENT_M_VERSION [_ssl_cert_get $certificate version]] \
+            whole [list SSL_CLIENT_CERT [_ssl_cert_get $certificate pem]]]
+        set result [list SSL_CLIENT_VERIFY $error_code]
+        foreach option $options {
+            if {![dict exists $fields $option]} {
+                error "X509::cert_fields does not support option $option"
+            }
+            foreach {name value} [dict get $fields $option] {
+                lappend result $name $value
+            }
+        }
+        return $result
+    }
+
+    proc x509_verify_cert_error_string_command {args} {
+        if {[llength $args] != 1 || ![string is integer -strict [lindex $args 0]] || [lindex $args 0] < 0} {
+            error "X509::verify_cert_error_string requires a non-negative error code"
+        }
+        set code [lindex $args 0]
+        set messages [dict create \
+            0 "ok" \
+            2 "unable to get issuer certificate" \
+            10 "certificate has expired" \
+            18 "self-signed certificate" \
+            20 "unable to get local issuer certificate" \
+            21 "unable to verify the first certificate" \
+            23 "certificate revoked" \
+            24 "invalid CA certificate" \
+            26 "unsupported certificate purpose" \
+            50 "application verification failure"]
+        if {[dict exists $messages $code]} { return [dict get $messages $code] }
+        return "unknown certificate verification error"
     }
 
     # ── DNS message and resource-record semantics ────────────────────
@@ -13155,8 +13362,22 @@ foreach {name proc_name} {
     SSL::verify_result ::itest::semantic::ssl_verify_result_command
     SSL::forward_proxy ::itest::semantic::ssl_forward_proxy_command
     SSL::unclean_shutdown ::itest::semantic::ssl_unclean_shutdown_command
+    X509::cert_fields ::itest::semantic::x509_cert_fields_command
+    X509::extensions ::itest::semantic::x509_extensions_command
+    X509::hash ::itest::semantic::x509_hash_command
     X509::issuer ::itest::semantic::x509_issuer_command
+    X509::not_valid_after ::itest::semantic::x509_not_valid_after_command
+    X509::not_valid_before ::itest::semantic::x509_not_valid_before_command
+    X509::pem2der ::itest::semantic::x509_pem2der_command
+    X509::serial_number ::itest::semantic::x509_serial_number_command
+    X509::signature_algorithm ::itest::semantic::x509_signature_algorithm_command
     X509::subject ::itest::semantic::x509_subject_command
+    X509::subject_public_key ::itest::semantic::x509_subject_public_key_command
+    X509::subject_public_key_RSA_bits ::itest::semantic::x509_subject_public_key_RSA_bits_command
+    X509::subject_public_key_type ::itest::semantic::x509_subject_public_key_type_command
+    X509::verify_cert_error_string ::itest::semantic::x509_verify_cert_error_string_command
+    X509::version ::itest::semantic::x509_version_command
+    X509::whole ::itest::semantic::x509_whole_command
     HTTP2::active ::itest::semantic::http2_active_command
     HTTP2::concurrency ::itest::semantic::http2_concurrency_command
     HTTP2::disable ::itest::semantic::http2_disable_command

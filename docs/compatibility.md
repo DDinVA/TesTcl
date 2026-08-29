@@ -188,7 +188,12 @@ session-secret/TLS 1.3 secret inspection, and bounded plaintext collection,
 payload mutation, and release. Structured TLS data is deterministic fixture
 input; the adapter does not perform a real TLS handshake, decrypt encrypted
 records, validate certificates, or expose cryptographic key material from a
-live connection.
+live connection. The complete catalogued X509 inspection surface now consumes
+packet-supplied certificate metadata and supports deterministic PEM-to-DER
+conversion, ModSSL field-list generation, extension inspection, validity and
+public-key queries, and verification-error descriptions. It validates opaque
+certificate handles and PEM structure; it does not validate certificate
+chains or perform cryptographic verification.
 The SSL control layer also models ALPN, SSL mode, handshake hold/resume,
 renegotiation and secure-renegotiation policy/inspection, non-SSL allowance,
 dynamic record sizing, maximum record size, profile selection, session
