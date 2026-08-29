@@ -512,6 +512,10 @@ namespace eval ::itest::semantic {
         variable nexthop_name ""
     }
 
+    namespace eval ::state::traffic_group {
+        variable name ""
+    }
+
     namespace eval ::state::socks {
         variable version "5"
         variable allowed 1
@@ -21283,6 +21287,13 @@ namespace eval ::itest::semantic {
         return $result
     }
 
+    proc traffic_group_command {args} {
+        if {[llength $args] != 0} { error "traffic_group takes no arguments" }
+        set result $::state::traffic_group::name
+        ::itest::log_decision toplevel traffic_group $result
+        return $result
+    }
+
     proc md5_command {args} { return [_digest_command md5 {*}$args] }
     proc md4_command {args} { return [_digest_command md4 {*}$args] }
     proc rmd160_command {args} { return [_digest_command ripemd160 {*}$args] }
@@ -22778,6 +22789,7 @@ foreach {original replacement} {
     sha384 sha384_command
     sha512 sha512_command
     substr substr_command
+    traffic_group traffic_group_command
     vlan_id vlan_id_command
 } {
     if {[::tmm::_orig_info commands ::itest::cmd::cmd_$original] ne ""} {

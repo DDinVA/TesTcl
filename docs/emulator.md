@@ -682,6 +682,14 @@ the event's `link.vlan_id` packet state. It shares the value with
 `LINK::vlan_id`, allowing older rules to be exercised without maintaining a
 separate VLAN model. See the F5 [`vlan_id` reference](https://clouddocs.f5.com/api/irules/vlan_id.html).
 
+### `traffic_group`
+
+The legacy global `traffic_group` command is modeled as a no-argument getter
+over the caller-supplied `traffic_group.name` event-state value. It returns an
+empty string when no value is provided and does not invent traffic-group
+membership or inspect live BIG-IP configuration. See the F5 [`traffic_group`
+reference](https://clouddocs.f5.com/api/irules/traffic_group.html).
+
 ### `rmd160`
 
 `rmd160` accepts exactly one value and returns the binary RIPEMD-160 digest,

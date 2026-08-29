@@ -452,6 +452,10 @@ hash values.
 The legacy global `vlan_id` command is modeled as a no-argument getter over
 the same packet VLAN state exposed by `LINK::vlan_id`; it does not parse live
 Ethernet frames.
+The legacy global `traffic_group` command is modeled as a no-argument getter
+over caller-supplied `traffic_group.name` event state. It returns an empty
+string when no value is supplied and does not model BIG-IP traffic-group
+configuration or failover behavior.
 The global `rmd160` command is modeled as a one-value binary RIPEMD-160 digest
 using the existing bounded digest bridge. It does not add BIG-IP-specific
 digest behavior beyond the documented hash operation.

@@ -248,6 +248,9 @@ EVENT_STATE_FIELDS = {
         "server_payload",
         "state",
     },
+    "traffic_group": {
+        "name",
+    },
     "datagram": {
         "ip_version",
         "ip_tos",
@@ -1131,6 +1134,7 @@ EVENT_STATE_NAMESPACES = {
     "route": "::state::route",
     "l7check": "::state::l7check",
     "link": "::state::link",
+    "traffic_group": "::state::traffic_group",
     "socks": "::state::socks",
     "tls_client": "::state::tls::client",
     "tls_server": "::state::tls::server",
@@ -1745,6 +1749,7 @@ SEMANTIC_MOCK_COMMANDS = {
     "sha384",
     "sha512",
     "rmd160",
+    "traffic_group",
     "vlan_id",
     "substr",
     "URI::basename",

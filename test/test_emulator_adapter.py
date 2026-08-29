@@ -1907,7 +1907,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 41)
+        self.assertEqual(queue["command_count"], 40)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -9392,6 +9392,53 @@ when HTTP_REQUEST {
         try:
             with self.assertRaisesRegex(
                 self.adapter.EmulatorInputError, "vlan_id takes no arguments"
+            ):
+                invalid.fire_event("HTTP_REQUEST")
+        finally:
+            invalid.close()
+
+    def test_traffic_group_reads_caller_supplied_connection_state(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["HTTP"],
+                "irule": "when HTTP_REQUEST { log local0. \"tg=[traffic_group]\" }",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            empty_result = session.fire_event("HTTP_REQUEST")
+            self.assertTrue(any("tg= " in entry for entry in empty_result["logs"]))
+            result = session.fire_event(
+                "HTTP_REQUEST",
+                {"traffic_group": {"name": "/Common/traffic-group-2"}},
+            )
+            self.assertTrue(
+                any("tg=/Common/traffic-group-2" in entry for entry in result["logs"])
+            )
+            self.assertTrue(
+                any(
+                    "toplevel traffic_group /Common/traffic-group-2" in entry
+                    for entry in result["decisions"]
+                )
+            )
+            usage = {entry["name"]: entry for entry in session.fidelity["commands"]}
+            self.assertEqual(usage["traffic_group"]["runtime_status"], "semantic-mock")
+        finally:
+            session.close()
+
+        invalid = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {"profiles": ["HTTP"], "irule": "when HTTP_REQUEST { traffic_group 1 }"},
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, "traffic_group takes no arguments"
             ):
                 invalid.fire_event("HTTP_REQUEST")
         finally:
