@@ -1543,7 +1543,10 @@ adapter replays the transaction on the persistent session. An empty argument
 replays the original request; a URI or well-formed raw HTTP request can replace
 the method, URI, headers, host, and body. Retries are bounded to eight replay
 attempts and are reported in the result as `retry.attempts` and
-`retry.exhausted`.
+`retry.exhausted`. With `-reset`, the replay receives a fresh deterministic
+server-side connection identity while the client-side connection, iRule
+variables, and request retry budget remain intact. This models the documented
+server-side reset boundary without opening a real upstream socket.
 The returned result includes the final request/response headers and bodies
 after the iRule runs. For
 example:
@@ -2269,8 +2272,10 @@ lengths consume one collection window. Partial buffers are preserved across
 calls on a persistent session. `peer`, `clientside`, and `serverside` execute
 nested command blocks under the corresponding connection context. The
 `HTTP::retry` overlay preserves the final request/response state while exposing
-the replay count and exhaustion status; transport-level socket reset behavior
-from `HTTP::retry -reset` is not separately simulated yet. The
+the replay count and exhaustion status. `HTTP::retry -reset` allocates a fresh
+deterministic server-side connection identity for the replay while retaining
+the client-side connection and iRule variables; it does not open a real
+upstream socket. The
 `HTTP::is_keepalive` and `HTTP::header is_keepalive` paths derive their result
 from the active side's `Connection` header and HTTP version. Redirect detection
 matches the documented 301, 302, 303, 305, and 307 responses only when a

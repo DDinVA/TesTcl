@@ -6114,6 +6114,39 @@ when HTTP_RESPONSE {
         self.assertNotIn("retry", next_result)
         self.assertEqual(next_result["request"]["uri"], "/after-retry")
 
+    def test_http_retry_reset_replaces_only_the_server_connection(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ONECONNECT"],
+                "pools": {"api_pool": ["192.0.2.10:443"]},
+                "irule": """
+when CLIENT_ACCEPTED { set ::retry_count 0 }
+when HTTP_REQUEST { pool api_pool }
+when HTTP_RESPONSE {
+    if {[HTTP::status] == 503 && $::retry_count == 0} {
+        incr ::retry_count
+        HTTP::retry -reset
+    }
+}
+""",
+                "request": {
+                    "uri": "/reset",
+                    "response_status": 503,
+                    "response_body": "temporary failure",
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        request_result = result["results"][0]
+        self.assertEqual(request_result["retry"], {"attempts": 1, "exhausted": False})
+        self.assertEqual(request_result["server_connection"]["id"], 2)
+        self.assertFalse(request_result["server_connection"]["reused"])
+        self.assertEqual(request_result["server_connection"]["reason"], "new")
+        self.assertEqual(request_result["events_fired"].count("CLIENT_ACCEPTED"), 1)
+        self.assertEqual(request_result["events_fired"].count("HTTP_REQUEST"), 2)
+        self.assertEqual(request_result["events_fired"].count("HTTP_RESPONSE"), 2)
+
     def test_http_retry_has_bounded_attempts(self) -> None:
         result = self.adapter.run_scenario(
             {

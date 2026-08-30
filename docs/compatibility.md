@@ -425,7 +425,8 @@ Each HTTP result also exposes a deterministic `server_connection` record with
 an identity, an `enabled` profile flag, reuse reason, post-response attachment
 state, selection mode, and label. The record models one emulator session's
 single idle slot; it is not a multi-client pool or real load-balancer
-connection scheduler.
+connection scheduler. `HTTP::retry -reset` replaces that server-side identity
+for the replay while preserving the client-side connection and iRule state.
 
 The IP semantic layer models the seven TMOS 17.5 commands `IP::hops`,
 `IP::idle_timeout`, `IP::ingress_drop_rate`, `IP::ingress_rate_limit`,

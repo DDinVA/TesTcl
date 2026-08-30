@@ -14145,6 +14145,18 @@ class EmulatorSession:
                     retry_exhausted = True
                     break
                 retry_count += 1
+                if retry.get("reset") is True or retry.get("reset") == "1":
+                    # HTTP::retry -reset tears down only the serverside
+                    # connection.  Keep the client-side connection and iRule
+                    # variables alive, then allocate a fresh deterministic
+                    # server connection for the replay.
+                    self._server_connection_open = False
+                    self._server_connection_detached = False
+                    (
+                        server_connection_id,
+                        server_connection_reused,
+                        server_connection_reason,
+                    ) = self._prepare_server_connection(session, oneconnect_enabled)
                 retry_kwargs = _parse_http_retry_request(retry["request"])
                 for field in (
                     "response_status",
