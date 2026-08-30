@@ -122,10 +122,10 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 The command exits non-zero when a case fails and prints every mismatch without
 discarding the passing cases. The same runner is available as
 `POST /v1/behavior-packs` and the MCP tool `irule_behavior_pack`. The checked-in
-packs cover HTTP, DNS, TCP, TLS/SSL, load-balancing, URI, and stateful
-session/table contracts for the pinned 17.5 profile. A catalog chunk plus its
-behavior pack is a portable implementation checkpoint for adding higher-
-fidelity semantic mocks.
+packs cover HTTP, DNS, TCP, TLS/SSL, UDP/datagram, load-balancing, URI, and
+stateful session/table contracts for the pinned 17.5 profile. A catalog chunk
+plus its behavior pack is a portable implementation checkpoint for adding
+higher-fidelity semantic mocks.
 
 The scenario-capable stateful pack can be run directly with:
 

@@ -2893,6 +2893,7 @@ when HTTP_RESPONSE_RELEASE {
             "uri-17.5.json": 8,
             "stateful-17.5.json": 2,
             "ssl-tls-17.5.json": 16,
+            "udp-datagram-17.5.json": 15,
         }
         for filename, case_count in expected_counts.items():
             with self.subTest(filename=filename):
@@ -18172,6 +18173,22 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
                 stateful_payload = json.loads(response.read())
             self.assertEqual(stateful_payload["status"], "passed")
             self.assertEqual(stateful_payload["summary"]["passed"], 2)
+
+            udp_pack = json.loads(
+                (ROOT / "examples" / "behavior-packs" / "udp-datagram-17.5.json")
+                .read_text(encoding="utf-8")
+            )
+            udp_request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/behavior-packs",
+                data=json.dumps(udp_pack).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(udp_request) as response:
+                self.assertEqual(response.status, 200)
+                udp_payload = json.loads(response.read())
+            self.assertEqual(udp_payload["status"], "passed")
+            self.assertEqual(udp_payload["summary"]["passed"], 15)
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -18482,6 +18499,26 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             behavior_payload = behavior_pack["result"]["structuredContent"]
             self.assertEqual(behavior_payload["status"], "passed")
             self.assertEqual(behavior_payload["summary"]["case_count"], 9)
+
+            udp_behavior_pack = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 13,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_behavior_pack",
+                        "arguments": {
+                            "pack": json.loads(
+                                (ROOT / "examples" / "behavior-packs" / "udp-datagram-17.5.json")
+                                .read_text(encoding="utf-8")
+                            )
+                        },
+                    },
+                }
+            )
+            udp_behavior_payload = udp_behavior_pack["result"]["structuredContent"]
+            self.assertEqual(udp_behavior_payload["status"], "passed")
+            self.assertEqual(udp_behavior_payload["summary"]["case_count"], 15)
 
             catalog_response = server.handle_message(
                 {

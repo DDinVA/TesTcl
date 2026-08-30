@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "udp-datagram-17.5",
+  "cases": [
+    {
+      "id": "client-port",
+      "probe": {
+        "command": "UDP::client_port",
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"],
+        "state": {"udp": {"client_port": 53000}}
+      },
+      "expect": {"status": "ok", "value": "53000"}
+    },
+    {
+      "id": "server-port",
+      "probe": {
+        "command": "UDP::server_port",
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"],
+        "state": {"udp": {"server_port": 53}}
+      },
+      "expect": {"status": "ok", "value": "53"}
+    },
+    {
+      "id": "local-port-client-side",
+      "probe": {
+        "command": "UDP::local_port",
+        "args": ["clientside"],
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"],
+        "state": {"udp": {"client_port": 53000, "local_port": 53}}
+      },
+      "expect": {"status": "ok", "value": "53000"}
+    },
+    {
+      "id": "remote-port-server-side",
+      "probe": {
+        "command": "UDP::remote_port",
+        "args": ["serverside"],
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"],
+        "state": {"udp": {"client_port": 53000, "remote_port": 53000}}
+      },
+      "expect": {"status": "ok", "value": "53000"}
+    },
+    {
+      "id": "payload",
+      "probe": {
+        "command": "UDP::payload",
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"],
+        "state": {"udp": {"payload": "hello"}}
+      },
+      "expect": {"status": "ok", "value": "hello", "value_bytes": 5}
+    },
+    {
+      "id": "payload-prefix",
+      "probe": {
+        "command": "UDP::payload",
+        "args": ["3"],
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"],
+        "state": {"udp": {"payload": "hello"}}
+      },
+      "expect": {"status": "ok", "value": "hel"}
+    },
+    {
+      "id": "payload-length",
+      "probe": {
+        "command": "UDP::payload",
+        "args": ["length"],
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"],
+        "state": {"udp": {"payload": "hello"}}
+      },
+      "expect": {"status": "ok", "value": "5"}
+    },
+    {
+      "id": "payload-byte-prefix",
+      "probe": {
+        "command": "UDP::payload",
+        "args": ["2"],
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"],
+        "state": {"udp": {"payload": "éa"}}
+      },
+      "expect": {"status": "ok", "value_base64": "w6k=", "value_bytes": 2}
+    },
+    {
+      "id": "mss",
+      "probe": {
+        "command": "UDP::mss",
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"],
+        "state": {"udp": {"mss": 1200}}
+      },
+      "expect": {"status": "ok", "value": "1200"}
+    },
+    {
+      "id": "max-buffer-packets",
+      "probe": {
+        "command": "UDP::max_buf_pkts",
+        "args": ["16"],
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"]
+      },
+      "expect": {"status": "ok", "value": "16"}
+    },
+    {
+      "id": "max-rate",
+      "probe": {
+        "command": "UDP::max_rate",
+        "args": ["1000"],
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"]
+      },
+      "expect": {"status": "ok", "value": "1000"}
+    },
+    {
+      "id": "send-buffer",
+      "probe": {
+        "command": "UDP::sendbuffer",
+        "args": ["8192"],
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"]
+      },
+      "expect": {"status": "ok", "value": "8192"}
+    },
+    {
+      "id": "unused-port",
+      "probe": {
+        "command": "UDP::unused_port",
+        "args": ["192.0.2.53", "53", "192.0.2.1"],
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"]
+      },
+      "expect": {"status": "ok", "value": "40000"}
+    },
+    {
+      "id": "payload-argument-error",
+      "probe": {
+        "command": "UDP::payload",
+        "args": ["-1"],
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"],
+        "state": {"udp": {"payload": "hello"}}
+      },
+      "expect": {"status": "error", "tcl_return_code": 1, "error_contains": "non-negative"}
+    },
+    {
+      "id": "drop-and-respond-packet-flow",
+      "scenario": {
+        "profiles": ["DATAGRAM"],
+        "irule": "when CLIENT_DATA { if {[DATAGRAM::udp payload] eq \"drop\"} { UDP::drop } else { UDP::respond pong } }",
+        "packets": [
+          {
+            "protocol": "udp",
+            "source": {"address": "192.0.2.1", "port": 53000},
+            "destination": {"address": "192.0.2.53", "port": 53},
+            "payload": "drop"
+          },
+          {
+            "protocol": "udp",
+            "source": {"address": "192.0.2.1", "port": 53000},
+            "destination": {"address": "192.0.2.53", "port": 53},
+            "payload": "reply"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "dropped"], "equals": true},
+          {"path": ["trace", 1, "responded"], "equals": true},
+          {"path": ["trace", 1, "response"], "equals": "pong"},
+          {"path": ["trace", 1, "events", 0, "emissions", 0, "direction"], "equals": "server_to_client"}
+        ]
+      }
+    }
+  ]
+}
