@@ -168,6 +168,37 @@ def _pcp_peer_request() -> bytes:
     )
 
 
+def _dhcpv4_message(
+    *,
+    opcode: int = 1,
+    xid: int = 0x12345678,
+    secs: int = 3,
+    chaddr: str = "00:11:22:33:44:55",
+    ciaddr: str = "0.0.0.0",
+    yiaddr: str = "0.0.0.0",
+    siaddr: str = "0.0.0.0",
+    giaddr: str = "0.0.0.0",
+    options: tuple[tuple[int, bytes], ...] = (
+        (53, b"\x01"),
+        (12, b"client-a"),
+    ),
+) -> bytes:
+    header = bytearray(236)
+    header[0:4] = bytes([opcode, 1, 6, 0])
+    header[4:8] = xid.to_bytes(4, "big")
+    header[8:10] = secs.to_bytes(2, "big")
+    for offset, address in ((12, ciaddr), (16, yiaddr), (20, siaddr), (24, giaddr)):
+        header[offset : offset + 4] = ipaddress.ip_address(address).packed
+    hardware = bytes.fromhex(chaddr.replace(":", ""))
+    header[28 : 28 + len(hardware)] = hardware
+    message_options = bytearray(b"\x63\x82\x53\x63")
+    for option_code, option_data in options:
+        message_options.extend(bytes([option_code, len(option_data)]))
+        message_options.extend(option_data)
+    message_options.append(255)
+    return bytes(header) + bytes(message_options)
+
+
 def _gtp_v2_hex(
     message_type: int,
     *,
@@ -3706,6 +3737,173 @@ when CLIENT_DATA {
                 },
                 tcl_lsp_root=self.tcl_lsp_root,
             )
+
+    def test_raw_dhcpv4_packets_reach_the_structured_event_adapter(self) -> None:
+        request_payload = _dhcpv4_message(
+            options=(
+                (53, b"\x01"),
+                (12, b"client-a"),
+                (3, ipaddress.ip_address("192.0.2.1").packed),
+                (55, b"\x01\x03\x06"),
+            )
+        )
+        response_payload = _dhcpv4_message(
+            opcode=2,
+            yiaddr="192.0.2.50",
+            siaddr="192.0.2.1",
+            options=(
+                (53, b"\x02"),
+                (54, ipaddress.ip_address("192.0.2.1").packed),
+                (51, (3600).to_bytes(4, "big")),
+            ),
+        )
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": """
+when CLIENT_DATA {
+    log local0. "client=[DHCP::version]/[DHCPv4::type]/[DHCPv4::xid]/[DHCPv4::chaddr]/[DHCPv4::option 12]/[DHCPv4::option 3]/[DHCPv4::option 55]"
+}
+when SERVER_DATA {
+    log local0. "server=[DHCPv4::type]/[DHCPv4::yiaddr]/[DHCPv4::option 51]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "network": "ipv4",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_udp_hex(
+                            "0.0.0.0", "255.255.255.255", 68, 67, request_payload
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "network": "ipv4",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv4_udp_hex(
+                            "192.0.2.1", "192.0.2.50", 67, 68, response_payload
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request, response = result["trace"]
+        self.assertEqual(request["protocol"], "dhcpv4")
+        self.assertEqual(response["protocol"], "dhcpv4")
+        self.assertEqual(request["payload_hex"], request_payload.hex())
+        self.assertEqual(response["payload_hex"], response_payload.hex())
+        client_event = next(event for event in request["events"] if event["event"] == "CLIENT_DATA")
+        server_event = next(event for event in response["events"] if event["event"] == "SERVER_DATA")
+        client_dhcp = client_event["state"]["dhcpv4"]
+        server_dhcp = server_event["state"]["dhcpv4"]
+        self.assertEqual(client_dhcp["type"], "DISCOVER")
+        self.assertEqual(client_dhcp["chaddr"], "00:11:22:33:44:55")
+        self.assertEqual(server_dhcp["yiaddr"], "192.0.2.50")
+        self.assertTrue(any(
+            "client=4/DISCOVER/305419896/00:11:22:33:44:55/client-a/192.0.2.1/1 3 6" in entry
+            for entry in client_event["logs"]
+        ))
+        self.assertTrue(any("server=OFFER/192.0.2.50/3600" in entry for entry in server_event["logs"]))
+
+        capture = _pcap_bytes([
+            (
+                9,
+                10,
+                _ethernet_ipv4(
+                    _raw_ipv4_udp_hex(
+                        "0.0.0.0", "255.255.255.255", 68, 67, request_payload
+                    )
+                ),
+            )
+        ])
+        replay = self.adapter.run_pcap_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": "when CLIENT_DATA { log local0. dhcp-pcap }",
+            },
+            capture,
+            tcl_lsp_root=self.tcl_lsp_root,
+            direction="client_to_server",
+        )
+        self.assertEqual(replay["trace"][0]["protocol"], "dhcpv4")
+        self.assertIn(
+            "CLIENT_DATA",
+            [event["event"] for event in replay["trace"][0]["events"]],
+        )
+
+    def test_raw_dhcpv4_rejects_malformed_bootp_and_options(self) -> None:
+        base = {
+            "profiles": ["UDP"],
+            "irule": "when CLIENT_DATA { log local0. request }",
+        }
+
+        malformed_payloads = (
+            (b"\x01" * 239, "wire packet 0 DHCPv4 message is truncated"),
+            (_dhcpv4_message()[:236] + b"\x00\x00\x00\x00", "wire packet 0 DHCPv4 magic cookie is missing"),
+            (_dhcpv4_message()[:-1] + b"\x35", "wire packet 0 DHCPv4 option 53 is missing its length"),
+            (_dhcpv4_message()[:-1] + b"\x35\x02\x01", "wire packet 0 DHCPv4 option 53 exceeds the message"),
+        )
+        for payload, message in malformed_payloads:
+            with self.subTest(message=message):
+                scenario = dict(base)
+                scenario["packets"] = [{
+                    "protocol": "wire",
+                    "network": "ipv4",
+                    "direction": "client_to_server",
+                    "raw_hex": _raw_ipv4_udp_hex(
+                        "0.0.0.0", "255.255.255.255", 68, 67, payload
+                    ),
+                }]
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+        invalid_hlen = bytearray(_dhcpv4_message())
+        invalid_hlen[2] = 17
+        scenario = dict(base)
+        scenario["packets"] = [{
+            "protocol": "wire",
+            "network": "ipv4",
+            "direction": "client_to_server",
+            "raw_hex": _raw_ipv4_udp_hex(
+                "0.0.0.0", "255.255.255.255", 68, 67, bytes(invalid_hlen)
+            ),
+        }]
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "wire packet 0 DHCPv4 hardware address length exceeds 16",
+        ):
+            self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+    def test_raw_dhcpv4_option_overload_is_decoded_after_primary_options(self) -> None:
+        payload = bytearray(
+            _dhcpv4_message(options=((53, b"\x01"), (52, b"\x01")))
+        )
+        overloaded = b"\x0c\x0foverloaded-host\xff"
+        payload[108 : 108 + len(overloaded)] = overloaded
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": 'when CLIENT_DATA { log local0. "type=[DHCPv4::option 53] host=[DHCPv4::option 12]" }',
+                "packets": [{
+                    "protocol": "wire",
+                    "network": "ipv4",
+                    "direction": "client_to_server",
+                    "raw_hex": _raw_ipv4_udp_hex(
+                        "0.0.0.0", "255.255.255.255", 68, 67, bytes(payload)
+                    ),
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        data_event = next(
+            event for event in result["trace"][0]["events"] if event["event"] == "CLIENT_DATA"
+        )
+        self.assertTrue(any(
+            "type=DISCOVER host=overloaded-host" in entry
+            for entry in data_event["logs"]
+        ))
 
     def test_dhcp_direct_event_infers_version_and_rejects_duplicate_numeric_options(self) -> None:
         session = self.adapter.EmulatorSession(

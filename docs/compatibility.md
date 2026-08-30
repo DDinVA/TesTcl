@@ -180,8 +180,10 @@ congestion-control behavior.
 The DHCP adapter models the 17.5 `DHCP::version`, `DHCPv4::*`, and `DHCPv6::*`
 surfaces for structured client/server data events, DHCP header readers
 (including `DHCPv4::htype`), option lookup/mutation, and drop/reject decisions.
-DHCPv6 option deletion is modeled explicitly. It does not parse raw DHCP
-messages, run a lease allocator, or send real ICMP rejection traffic.
+DHCPv6 option deletion is modeled explicitly. Raw IPv4/UDP DHCPv4 packets on
+ports 67/68 are decoded into that same state path, including BOOTP headers,
+message types, bounded common options, and option-overload areas. It does not
+run a lease allocator or send real ICMP rejection traffic.
 The FTP adapter models the six 17.5 `FTP::*` controls for structured TCP
 control-channel traces, including active-mode permission, FTP handler state,
 FTPS activation mode, TLS session-reuse enforcement, and passive-port range

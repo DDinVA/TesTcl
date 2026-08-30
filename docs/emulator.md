@@ -352,8 +352,12 @@ an optional `options` object. DHCPv4 exposes the hardware type through
 `DHCPv4::option` supports lookup/set while
 `DHCPv6::option` also supports delete; drop and reject actions are returned in
 the trace. The adapter fires the normal client/server data path and preserves
-option mutations as deterministic state. It does not parse raw DHCP wire
-formats, allocate leases, or emit real ICMP rejection packets.
+option mutations as deterministic state. Raw IPv4/UDP packets on ports 67/68
+are decoded into the same DHCPv4 path, including the BOOTP fixed header,
+DHCP message type, bounded common option values, and RFC option-overload areas.
+Malformed headers, cookies, option lengths, and hardware-address lengths are
+rejected. The adapter does not allocate leases, negotiate a DHCP exchange, or
+emit real ICMP rejection packets.
 Structured FTP packet traces expose the TCP control-channel path through
 `CLIENT_ACCEPTED`, `CLIENT_DATA`, `SERVER_CONNECTED`, and `SERVER_DATA`. The
 six TMOS 17.5 `FTP::*` commands model active-mode enablement, FTP handler

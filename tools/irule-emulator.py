@@ -9501,6 +9501,37 @@ PCP_COMMON_HEADER_BYTES = 24
 PCP_RESPONSE_FLAG = 0x80
 PCP_MAP_BODY_BYTES = 36
 PCP_PEER_BODY_BYTES = 56
+
+DHCPV4_PORTS = frozenset({67, 68})
+DHCPV4_FIXED_HEADER_BYTES = 236
+DHCPV4_MAGIC_COOKIE = b"\x63\x82\x53\x63"
+DHCPV4_MAX_MESSAGE_BYTES = 65535
+DHCPV4_OPTION_END = 255
+DHCPV4_OPTION_PAD = 0
+DHCPV4_MESSAGE_TYPES = {
+    1: "DISCOVER",
+    2: "OFFER",
+    3: "REQUEST",
+    4: "DECLINE",
+    5: "ACK",
+    6: "NAK",
+    7: "RELEASE",
+    8: "INFORM",
+    9: "FORCERENEW",
+    10: "LEASEQUERY",
+    11: "LEASEUNASSIGNED",
+    12: "LEASEUNKNOWN",
+    13: "LEASEACTIVE",
+    14: "BULKLEASEQUERY",
+    15: "LEASEQUERYDONE",
+    16: "ACTIVELEASEQUERY",
+    17: "LEASEQUERYSTATUS",
+    18: "TLS",
+}
+DHCPV4_IP_OPTIONS = frozenset({1, 3, 6, 9, 28, 50, 54})
+DHCPV4_TEXT_OPTIONS = frozenset({12, 14, 15, 40, 60, 62, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76})
+DHCPV4_OPTION_OVERLOAD = 52
+DHCPV4_OPTION_MESSAGE_TYPE = 53
 MAX_PACKET_STREAMS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
@@ -10948,6 +10979,158 @@ def _decode_pcp_payload(
         "pcp": pcp,
         "payload_hex": payload.hex(),
         "message_hex": payload.hex(),
+        "_wire_payload": payload,
+    }
+
+
+def _dhcpv4_option_value(option_code: int, option_data: bytes, index: int) -> str:
+    """Convert bounded DHCPv4 option bytes to the scalar form used by the adapter."""
+    if option_code == DHCPV4_OPTION_MESSAGE_TYPE:
+        if len(option_data) != 1:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv4 message-type option must be one byte"
+            )
+        return DHCPV4_MESSAGE_TYPES.get(option_data[0], str(option_data[0]))
+    if option_code in DHCPV4_IP_OPTIONS:
+        if not option_data or len(option_data) % 4:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv4 option {option_code} must contain IPv4 addresses"
+            )
+        return " ".join(
+            str(ipaddress.ip_address(option_data[offset : offset + 4]))
+            for offset in range(0, len(option_data), 4)
+        )
+    if option_code in DHCPV4_TEXT_OPTIONS:
+        return _decode_wire_text(option_data).rstrip("\x00")
+    if option_code in {51, 58, 59}:
+        if len(option_data) != 4:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv4 option {option_code} must be four bytes"
+            )
+        return str(int.from_bytes(option_data, "big"))
+    if option_code == 57:
+        if len(option_data) != 2:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv4 maximum-message-size option must be two bytes"
+            )
+        return str(int.from_bytes(option_data, "big"))
+    if option_code == DHCPV4_OPTION_OVERLOAD:
+        if len(option_data) != 1 or option_data[0] & ~0x03:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv4 option-overload value is invalid"
+            )
+        return str(option_data[0])
+    if option_code == 55:
+        return " ".join(str(value) for value in option_data)
+    return option_data.hex()
+
+
+def _decode_dhcpv4_options(
+    payload: bytes,
+    start: int,
+    end: int,
+    index: int,
+    options: dict[str, str],
+) -> int:
+    """Decode one DHCPv4 option area, returning its overload bit mask."""
+    cursor = start
+    overload = 0
+    terminated = False
+    while cursor < end:
+        option_code = payload[cursor]
+        cursor += 1
+        if option_code == DHCPV4_OPTION_PAD:
+            continue
+        if option_code == DHCPV4_OPTION_END:
+            terminated = True
+            break
+        if cursor >= end:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv4 option {option_code} is missing its length"
+            )
+        option_length = payload[cursor]
+        cursor += 1
+        data_end = cursor + option_length
+        if data_end > end:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv4 option {option_code} exceeds the message"
+            )
+        value = _dhcpv4_option_value(option_code, payload[cursor:data_end], index)
+        options[str(option_code)] = value
+        if option_code == DHCPV4_OPTION_OVERLOAD:
+            overload = payload[cursor] if option_length == 1 else 0
+        cursor = data_end
+    if not terminated:
+        raise EmulatorInputError(
+            f"wire packet {index} DHCPv4 options are not terminated"
+        )
+    return overload
+
+
+def _decode_dhcpv4_payload(
+    payload: bytes,
+    direction: str,
+    source: dict[str, Any],
+    destination: dict[str, Any],
+    index: int,
+) -> dict[str, Any]:
+    """Decode one bounded BOOTP/DHCPv4 payload into the structured adapter shape."""
+    if len(payload) < DHCPV4_FIXED_HEADER_BYTES + len(DHCPV4_MAGIC_COOKIE):
+        raise EmulatorInputError(f"wire packet {index} DHCPv4 message is truncated")
+    if len(payload) > DHCPV4_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"wire packet {index} DHCPv4 message exceeds the {DHCPV4_MAX_MESSAGE_BYTES}-byte limit"
+        )
+    if payload[236:240] != DHCPV4_MAGIC_COOKIE:
+        raise EmulatorInputError(f"wire packet {index} DHCPv4 magic cookie is missing")
+    opcode = payload[0]
+    if opcode not in {1, 2}:
+        raise EmulatorInputError(
+            f"wire packet {index} DHCPv4 opcode must be BOOTREQUEST or BOOTREPLY"
+        )
+    htype = payload[1]
+    hlen = payload[2]
+    if hlen > 16:
+        raise EmulatorInputError(
+            f"wire packet {index} DHCPv4 hardware address length exceeds 16"
+        )
+    options: dict[str, str] = {}
+    overload = _decode_dhcpv4_options(payload, 240, len(payload), index, options)
+    if overload & 1:
+        overloaded_options: dict[str, str] = {}
+        _decode_dhcpv4_options(payload, 108, 236, index, overloaded_options)
+        for option_code, option_value in overloaded_options.items():
+            options.setdefault(option_code, option_value)
+    if overload & 2:
+        overloaded_options = {}
+        _decode_dhcpv4_options(payload, 44, 108, index, overloaded_options)
+        for option_code, option_value in overloaded_options.items():
+            options.setdefault(option_code, option_value)
+    message_type = options.get(str(DHCPV4_OPTION_MESSAGE_TYPE), "UNKNOWN")
+    addresses = {
+        "ciaddr": str(ipaddress.ip_address(payload[12:16])),
+        "yiaddr": str(ipaddress.ip_address(payload[16:20])),
+        "siaddr": str(ipaddress.ip_address(payload[20:24])),
+        "giaddr": str(ipaddress.ip_address(payload[24:28])),
+    }
+    chaddr = ":".join(f"{value:02x}" for value in payload[28 : 28 + hlen])
+    return {
+        "protocol": "dhcpv4",
+        "direction": direction,
+        "source": source,
+        "destination": destination,
+        "chaddr": chaddr,
+        **addresses,
+        "hlen": hlen,
+        "hops": payload[3],
+        "htype": htype,
+        "len": len(payload),
+        "opcode": opcode,
+        "options": options,
+        "secs": int.from_bytes(payload[8:10], "big"),
+        "type": message_type,
+        "xid": int.from_bytes(payload[4:8], "big"),
+        "payload_hex": payload.hex(),
         "_wire_payload": payload,
     }
 
@@ -15766,6 +15949,10 @@ class EmulatorSession:
         )
         self._gtp_raw_active = any(str(profile).upper() == "GTP" for profile in self._profiles)
         self._pcp_raw_active = any(str(profile).upper() == "PCP" for profile in self._profiles)
+        self._dhcpv4_raw_active = any(
+            str(profile).upper() in {"UDP", "DHCP", "DHCPV4"}
+            for profile in self._profiles
+        )
         self._thread.start()
         self._started.wait()
         if self._startup_error is not None:
@@ -18539,6 +18726,24 @@ class EmulatorSession:
                     raw_payload = b""
                 if raw_payload is not None:
                     merged = _decode_pcp_payload(
+                        raw_payload,
+                        packet["direction"],
+                        packet["source"],
+                        packet["destination"],
+                        packet_index,
+                    )
+                    if "timestamp" in packet:
+                        merged["timestamp"] = packet["timestamp"]
+                    return merged, 0
+        if packet["protocol"] == "udp" and self._dhcpv4_raw_active:
+            source_port = packet.get("source", {}).get("port")
+            destination_port = packet.get("destination", {}).get("port")
+            if DHCPV4_PORTS.intersection({source_port, destination_port}):
+                raw_payload = packet.get("_wire_payload")
+                if raw_payload is None and "_wire_length" in packet:
+                    raw_payload = b""
+                if raw_payload is not None:
+                    merged = _decode_dhcpv4_payload(
                         raw_payload,
                         packet["direction"],
                         packet["source"],
