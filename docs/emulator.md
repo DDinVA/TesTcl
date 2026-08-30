@@ -413,6 +413,13 @@ fires `HTML_COMMENT_MATCHED` or `HTML_TAG_MATCHED`. `HTML::comment` and
 `<!-- ... -->` comments and simple `< ... >` tags only; it is not a browser,
 DOM parser, JavaScript engine, or compression-aware HTML filter.
 
+`HTTP::disable` is modeled as a request-level transition to HTTP passthrough.
+The adapter fires `HTTP_DISABLED` after the request handler, preserves the
+optional `discard` flag, and exposes deterministic `HTTP::passthrough_reason`
+values (`iRule` and numeric value `1`). The state is reset before each
+keep-alive request; this does not emulate the full HTTP filter or malformed
+wire-request recovery path.
+
 The HTTP compression slice models `COMPRESS::buffer_size`,
 `COMPRESS::disable`, `COMPRESS::enable`, `COMPRESS::gzip`,
 `COMPRESS::method`, `COMPRESS::nodelay`, `DECOMPRESS::disable`, and

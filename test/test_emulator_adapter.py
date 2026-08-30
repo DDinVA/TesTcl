@@ -228,6 +228,51 @@ class EmulatorAdapterTests(unittest.TestCase):
         self.assertEqual(usage["HTTP::payload"]["runtime_status"], "semantic-mock")
         self.assertEqual(result["fidelity"]["warnings"], [])
 
+    def test_http_disable_emits_http_disabled_with_passthrough_reason(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/disabled"} { HTTP::disable discard }
+}
+when HTTP_DISABLED {
+    log local0. "reason=[HTTP::passthrough_reason] num=[HTTP::passthrough_reason as_num]"
+}
+""",
+                "requests": [
+                    {"uri": "/disabled"},
+                    {"uri": "/normal"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        disabled, normal = result["results"]
+        self.assertIn("HTTP_DISABLED", disabled["events_fired"])
+        self.assertTrue(disabled["http_disabled"])
+        self.assertTrue(disabled["http_disable_discard"])
+        self.assertTrue(any("reason=iRule num=1" in entry for entry in disabled["logs"]))
+        self.assertNotIn("HTTP_DISABLED", normal["events_fired"])
+        self.assertNotIn("http_disabled", normal)
+
+        packet_result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST { HTTP::disable }
+when HTTP_DISABLED { log local0. packet-disabled }
+""",
+                "packets": [
+                    {"protocol": "http", "uri": "/disabled", "method": "GET"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        packet_http_result = packet_result["trace"][0]["http_result"]
+        self.assertIn("HTTP_DISABLED", packet_http_result["events_fired"])
+        self.assertTrue(packet_http_result["http_disabled"])
+        self.assertTrue(any("packet-disabled" in entry for entry in packet_http_result["logs"]))
+
     def test_acl_action_and_eval_model_l4_and_l7_decisions(self) -> None:
         action_session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -2004,6 +2049,10 @@ when HTTP_REQUEST {
         self.assertEqual(
             packet_adapters["HTTP_RESPONSE_RELEASE"],
             "HTTP response transaction release phase",
+        )
+        self.assertEqual(
+            packet_adapters["HTTP_DISABLED"],
+            "HTTP::disable control outcome",
         )
         for event_name in (
             "FLOW_INIT",

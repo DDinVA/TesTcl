@@ -251,6 +251,11 @@ the high-level HTTP lifecycle exposes `REWRITE_REQUEST_DONE` and conditionally
 `REWRITE_RESPONSE_DONE`; payload reads and replacements use byte offsets and
 update an existing `Content-Length` header. It does not implement the full
 REWRITE profile/plugin, APM policy processing, or URL/file rewrite tables.
+The HTTP control path also captures `HTTP::disable` and fires `HTTP_DISABLED`
+after a request handler, including a bounded `discard` flag and deterministic
+`HTTP::passthrough_reason` values. The control state is reset between
+keep-alive requests and does not model malformed-wire recovery or the full HTTP
+filter.
 The TMOS 17.5 HTML surface models `HTML::comment`, `HTML::disable`,
 `HTML::enable`, `HTML::encode`, and `HTML::tag`. With the HTML profile and
 `HTML::enable` in `HTTP_RESPONSE`, the adapter scans the uncompressed response

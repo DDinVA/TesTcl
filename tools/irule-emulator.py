@@ -5866,6 +5866,46 @@ def _install_runtime_shims(session: Any) -> None:
                 return $result
             }
         }
+        if {[::tmm::_orig_info commands ::itest::cmd::_testcl_http_disable_orig] eq ""} {
+            ::tmm::_orig_rename ::itest::cmd::http_disable ::itest::cmd::_testcl_http_disable_orig
+            proc ::itest::cmd::http_disable {args} {
+                set rc [catch {
+                    eval [linsert $args 0 ::itest::cmd::_testcl_http_disable_orig]
+                } result options]
+                if {$rc} {
+                    return -options $options $result
+                }
+                set ::state::http::disabled 1
+                set ::state::http::disable_discard [expr {
+                    [llength $args] == 1 && [lindex $args 0] eq "discard"
+                }]
+                set ::state::http::passthrough_reason "iRule"
+                set ::state::http::passthrough_reason_num 1
+                return $result
+            }
+        }
+        if {[::tmm::_orig_info commands ::itest::cmd::_testcl_http_enable_orig] eq ""} {
+            ::tmm::_orig_rename ::itest::cmd::http_enable ::itest::cmd::_testcl_http_enable_orig
+            proc ::itest::cmd::http_enable {args} {
+                set rc [catch {
+                    eval [linsert $args 0 ::itest::cmd::_testcl_http_enable_orig]
+                } result options]
+                if {$rc} {
+                    return -options $options $result
+                }
+                set ::state::http::disabled 0
+                set ::state::http::disable_discard 0
+                return $result
+            }
+        }
+        namespace eval ::itest::semantic {}
+        proc ::itest::semantic::http_control_reset {} {
+            set ::state::http::disabled 0
+            set ::state::http::disable_discard 0
+            set ::state::http::passthrough_reason ""
+            set ::state::http::passthrough_reason_num 0
+        }
+        ::itest::semantic::http_control_reset
         """
     )
     _install_python_digest_helper(session)
@@ -9128,6 +9168,7 @@ PACKET_EVENT_ADAPTERS = {
     "SERVERSSL_DATA": "TLS server data",
     "FLOW_INIT": "FLOW profile connection initialization",
     "HTTP_REQUEST": "HTTP request transaction",
+    "HTTP_DISABLED": "HTTP::disable control outcome",
     "HTTP_REQUEST_DATA": "collected HTTP request body",
     "HTTP_REQUEST_SEND": "HTTP request serverside send",
     "HTTP_REQUEST_RELEASE": "HTTP request transaction release phase",
@@ -14340,6 +14381,7 @@ class EmulatorSession:
         result: dict[str, Any]
         try:
             while True:
+                session.eval_tcl("::itest::semantic::http_control_reset")
                 session.eval_tcl("::itest::semantic::http_proxy_prepare_request")
                 session.eval_tcl("::itest::semantic::rewrite_prepare_request")
                 session.eval_tcl("::itest::semantic::html_prepare_request")
@@ -14435,6 +14477,29 @@ class EmulatorSession:
                         "unset -nocomplain ::itest::semantic::automatic_http_flow"
                     )
 
+                if session.eval_tcl("set ::state::http::disabled") == "1":
+                    decisions_before_disabled = len(session.get_decisions())
+                    logs_before_disabled = len(session.get_logs())
+                    disabled_event = self._fire_event_on_worker(
+                        session, "HTTP_DISABLED", {}
+                    )
+                    result["events_fired"].extend(
+                        disabled_event.get("events_fired", [])
+                    )
+                    result["decisions"].extend(
+                        session.get_decisions()[decisions_before_disabled:]
+                    )
+                    result["logs"].extend(
+                        session.get_logs()[logs_before_disabled:]
+                    )
+                    result["http_disabled"] = True
+                    result["http_disable_discard"] = (
+                        session.eval_tcl(
+                            "set ::state::http::disable_discard"
+                        )
+                        == "1"
+                    )
+
                 if result.get("errors"):
                     first_error = result["errors"][0]
                     self._close_packet_connection(session)
@@ -14512,6 +14577,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::prepare_http_retry")
             session.eval_tcl("::itest::semantic::prepare_http_release")
             session.eval_tcl("::itest::semantic::prepare_http_close")
+            session.eval_tcl("::itest::semantic::http_control_reset")
         if http_close_requested:
             events_before_close = _split_tcl_list(
                 session.eval_tcl("::itest::get_fired_events")
@@ -14603,6 +14669,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::html_reset_connection")
             session.eval_tcl("::itest::semantic::compression_reset_connection")
             session.eval_tcl("::itest::semantic::httplog_reset_connection")
+            session.eval_tcl("::itest::semantic::http_control_reset")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::crypto_reset_connection")
             session.eval_tcl("::itest::semantic::bwc_reset_connection")
