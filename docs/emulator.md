@@ -3003,6 +3003,13 @@ remains available through the event API for lower-level tests. The
 respective data events, and body commands such as `HTTP::payload` and
 `HTTP::collect` are rejected in those release contexts.
 
+Raw HTTP/1.x replay applies request-aware response framing. Responses to
+`HEAD` requests and successful `CONNECT` responses are treated as header-only
+messages even when they advertise a `Content-Length`; their following bytes
+remain available to the stream decoder rather than being consumed as an HTTP
+body. This keeps persistent `HEAD` traffic and CONNECT tunnel handshakes from
+being mistaken for incomplete or oversized response bodies.
+
 Raw packet replay also preserves interim HTTP responses: a `100 Continue`
 frame fires `HTTP_RESPONSE_CONTINUE` without completing the pending request,
 so a later final response supplies the transaction result. Other non-final

@@ -16529,6 +16529,88 @@ when WS_SERVER_DATA { log local0. "raw-server=[WS::payload]" }
         self.assertEqual(message["response_body"], "")
         self.assertEqual(consumed, len(b"HTTP/1.1 204 No Content\r\nContent-Length: 999\r\n\r\n"))
 
+    def test_http_stream_decoder_honors_head_and_connect_response_framing(self) -> None:
+        head_response = (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 999\r\n"
+            b"X-Mode: head\r\n\r\n"
+        )
+        decoded_head = self.adapter._decode_http_payload(
+            head_response,
+            "server_to_client",
+            request_method=" head ",
+        )
+        self.assertIsNotNone(decoded_head)
+        assert decoded_head is not None
+        head_message, head_consumed = decoded_head
+        self.assertEqual(head_message["response_body"], "")
+        self.assertEqual(head_consumed, len(head_response))
+
+        connect_response = (
+            b"HTTP/1.1 200 Connection Established\r\n"
+            b"Content-Length: 999\r\n\r\n"
+        )
+        decoded_connect = self.adapter._decode_http_payload(
+            connect_response,
+            "server_to_client",
+            request_method="CONNECT",
+        )
+        self.assertIsNotNone(decoded_connect)
+        assert decoded_connect is not None
+        connect_message, connect_consumed = decoded_connect
+        self.assertEqual(connect_message["response_body"], "")
+        self.assertEqual(connect_consumed, len(connect_response))
+
+        incomplete_get_response = (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nno"
+        )
+        self.assertIsNone(
+            self.adapter._decode_http_payload(
+                incomplete_get_response,
+                "server_to_client",
+                request_method="GET",
+            )
+        )
+
+    def test_raw_http_response_framing_uses_pending_head_request(self) -> None:
+        request = b"HEAD /health HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+        response = b"HTTP/1.1 200 OK\r\nContent-Length: 999\r\n\r\n"
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": 'when HTTP_RESPONSE { log local0. "status=[HTTP::status]" }',
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x02, sequence=1000
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                            request, sequence=1001
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "192.0.2.10", "10.0.0.5", 443, 51000, 0x18,
+                            response, sequence=5000
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["request"]["method"], "HEAD")
+        self.assertEqual(result["results"][0]["response"]["status"], 200)
+        self.assertEqual(result["results"][0]["response"]["body"], "")
+
     def test_http_stream_decoder_emits_coalesced_messages(self) -> None:
         request = b"GET /health HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
         responses = (

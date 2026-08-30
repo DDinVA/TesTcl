@@ -11507,8 +11507,19 @@ def _decode_chunked_body(payload: bytes, body_start: int) -> tuple[bytes, int] |
 
 
 def _decode_http_payload(
-    payload: bytes, direction: str
+    payload: bytes,
+    direction: str,
+    *,
+    request_method: str | None = None,
 ) -> tuple[dict[str, Any], int] | None:
+    """Decode one HTTP/1.x message and return its consumed wire length.
+
+    Response framing is partly determined by the request that elicited it:
+    ``HEAD`` responses carry metadata but no body, and a successful
+    ``CONNECT`` response switches the connection into tunnel mode.  The
+    caller supplies that method when it has a pending request; standalone
+    decoder callers retain the conservative, method-independent behavior.
+    """
     separator = payload.find(b"\r\n\r\n")
     separator_length = 4
     if separator < 0:
@@ -11533,7 +11544,19 @@ def _decode_http_payload(
         if response_match is None:
             return None
         response_status = int(response_match.group(1))
-        if response_status < 200 or response_status in {204, 304}:
+        normalized_request_method = (
+            request_method.strip().upper() if isinstance(request_method, str) else ""
+        )
+        response_has_no_body = (
+            response_status < 200
+            or response_status in {204, 304}
+            or normalized_request_method == "HEAD"
+            or (
+                normalized_request_method == "CONNECT"
+                and 200 <= response_status < 300
+            )
+        )
+        if response_has_no_body:
             return {
                 "protocol": "http",
                 "direction": direction,
@@ -21161,7 +21184,11 @@ class EmulatorSession:
         return bool(payload) and ((payload[0] >> 5) & 0x07) in {GTP_VERSION_1, GTP_VERSION_2}
 
     def _reassemble_packet(
-        self, packet: dict[str, Any], packet_index: int
+        self,
+        packet: dict[str, Any],
+        packet_index: int,
+        *,
+        request_method: str | None = None,
     ) -> tuple[dict[str, Any] | None, int]:
         """Join application payloads until a complete HTTP/TLS message is visible.
 
@@ -21528,8 +21555,13 @@ class EmulatorSession:
             decoded_packets: list[dict[str, Any]] = []
             remaining = combined
             consumed_total = 0
+            remaining_request_method = request_method
             while self._looks_like_http_prefix(remaining):
-                decoded_result = _decode_http_payload(remaining, packet["direction"])
+                decoded_result = _decode_http_payload(
+                    remaining,
+                    packet["direction"],
+                    request_method=remaining_request_method,
+                )
                 if decoded_result is None:
                     break
                 decoded, consumed = decoded_result
@@ -21541,6 +21573,14 @@ class EmulatorSession:
                 decoded_packets.append(merged)
                 remaining = remaining[consumed:]
                 consumed_total += consumed
+                if packet["direction"] == "server_to_client":
+                    status = decoded.get("status")
+                    if isinstance(status, int) and (status >= 200 or status == 101):
+                        # The pending request method describes one final
+                        # response. Preserve it across interim 1xx frames,
+                        # but do not incorrectly apply HEAD/CONNECT framing to
+                        # a later pipelined response.
+                        remaining_request_method = None
             if decoded_packets:
                 stream.buffer = remaining
                 first = decoded_packets[0]
@@ -21652,7 +21692,14 @@ class EmulatorSession:
             else:
                 self._record_ip_packet(session, original_packet)
                 packet = original_packet
-                packet, buffered_bytes = self._reassemble_packet(packet, index)
+                pending_request_method = None
+                if pending_http is not None:
+                    pending_request_method = pending_http[0].get("method")
+                packet, buffered_bytes = self._reassemble_packet(
+                    packet,
+                    index,
+                    request_method=pending_request_method,
+                )
             if packet is not None:
                 coalesced_packets = packet.pop("_coalesced_packets", [])
                 if coalesced_packets:
