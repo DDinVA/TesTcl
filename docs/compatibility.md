@@ -640,8 +640,11 @@ ARP, VLAN, route, QoS, or TMM forwarding behavior.
 The TMOS 17.5 `SOCKS::allowed`, `SOCKS::destination`, and `SOCKS::version`
 commands are modeled on a structured `SOCKS_REQUEST` state. They support
 version inspection, allow/reject decisions, host and port getters/setters,
-and bounded `HOST:PORT` parsing; they do not implement a SOCKS handshake,
-proxy socket, or live destination connection.
+and bounded `HOST:PORT` parsing. Structured `socks` packet records can also
+decode one SOCKS4, SOCKS4a, or SOCKS5 request and dispatch `SOCKS_REQUEST`,
+including IPv4, IPv6, and domain destinations. The adapter records the
+resulting allow/reject outcome but does not implement a SOCKS handshake, proxy
+socket, response encoder, or live destination connection.
 The TMOS 17.5 `SDP::field`, `SDP::media`, and `SDP::session_id` commands are
 modeled on structured SDP state attached to SIP message events. They support
 indexed session-field access, media count/type/port/transport/connection and

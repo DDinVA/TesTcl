@@ -8976,6 +8976,7 @@ SIP_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 SDP_MAX_STATE_BYTES = 64 * 1024
 SDP_MAX_LINE_BYTES = 4096
 SDP_MAX_MEDIA = 128
+SOCKS_MAX_MESSAGE_BYTES = 64 * 1024
 PSC_MAX_STATE_BYTES = 64 * 1024
 DIAMETER_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 RADIUS_MAX_MESSAGE_BYTES = 4096
@@ -9071,7 +9072,7 @@ STREAM_EXPRESSION_MAX_BYTES = 64 * 1024
 STREAM_MAX_EXPRESSION_PAIRS = 128
 CATEGORY_RESULT_MAX_ITEMS = 128
 CATEGORY_RESULT_MAX_BYTES = 64 * 1024
-PACKET_PROTOCOLS = {"event", "tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "tds", "wire"}
+PACKET_PROTOCOLS = {"event", "tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "socks", "diameter", "radius", "mr", "gtp", "rtsp", "tds", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -9342,6 +9343,13 @@ PACKET_PROTOCOL_FIELDS = {
         "route",
         "via",
     },
+    "socks": {
+        "payload_hex",
+        "version",
+        "allowed",
+        "destination_host",
+        "destination_port",
+    },
     "diameter": {
         "type",
         "version",
@@ -9484,6 +9492,7 @@ PACKET_EVENT_ADAPTERS = {
     "SIP_RESPONSE": "SIP server response ingress",
     "SIP_RESPONSE_DONE": "SIP response routing completion",
     "SIP_RESPONSE_SEND": "SIP response client-side send",
+    "SOCKS_REQUEST": "SOCKS4/SOCKS5 request packet",
     "RTSP_REQUEST": "RTSP request ingress",
     "RTSP_REQUEST_DATA": "collected RTSP request payload",
     "RTSP_RESPONSE": "RTSP response ingress",
@@ -9546,6 +9555,102 @@ def _decode_wire_text(payload: bytes) -> str:
     # Tcl strings cannot contain embedded NUL bytes. Preserve human-readable
     # captures while replacing binary NULs at the wire-to-Tcl boundary.
     return payload.decode("utf-8", errors="replace").replace("\x00", "\ufffd")
+
+
+def _socks_host_from_bytes(value: bytes) -> str:
+    try:
+        host = value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EmulatorInputError("SOCKS domain name must be valid UTF-8") from exc
+    if not host or any(char in host for char in "\x00\r\n"):
+        raise EmulatorInputError("SOCKS domain name is invalid")
+    return host
+
+
+def _parse_socks_request(payload: bytes) -> dict[str, Any]:
+    """Decode one bounded SOCKS4/SOCKS5 request message."""
+    if not payload:
+        raise EmulatorInputError("SOCKS request payload must not be empty")
+    if len(payload) > SOCKS_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"SOCKS request exceeds {SOCKS_MAX_MESSAGE_BYTES} bytes"
+        )
+    version = payload[0]
+    if version == 5:
+        if len(payload) < 4 or payload[2] != 0:
+            raise EmulatorInputError("SOCKS5 request header is invalid")
+        command = {1: "CONNECT", 2: "BIND", 3: "UDP_ASSOCIATE"}.get(
+            payload[1], f"0x{payload[1]:02x}"
+        )
+        address_type = payload[3]
+        cursor = 4
+        if address_type == 1:
+            end = cursor + 4
+            if len(payload) < end:
+                raise EmulatorInputError("SOCKS5 IPv4 destination is incomplete")
+            host = str(ipaddress.ip_address(payload[cursor:end]))
+            cursor = end
+        elif address_type == 3:
+            if len(payload) <= cursor:
+                raise EmulatorInputError("SOCKS5 domain destination is incomplete")
+            domain_length = payload[cursor]
+            cursor += 1
+            end = cursor + domain_length
+            if domain_length == 0 or len(payload) < end:
+                raise EmulatorInputError("SOCKS5 domain destination is incomplete")
+            host = _socks_host_from_bytes(payload[cursor:end])
+            cursor = end
+        elif address_type == 4:
+            end = cursor + 16
+            if len(payload) < end:
+                raise EmulatorInputError("SOCKS5 IPv6 destination is incomplete")
+            host = str(ipaddress.ip_address(payload[cursor:end]))
+            cursor = end
+        else:
+            raise EmulatorInputError(
+                f"unsupported SOCKS5 address type {address_type}"
+            )
+        if len(payload) < cursor + 2:
+            raise EmulatorInputError("SOCKS5 destination port is incomplete")
+        port = int.from_bytes(payload[cursor : cursor + 2], "big")
+        return {
+            "version": "5",
+            "destination_host": host,
+            "destination_port": port,
+            "_socks_command": command,
+            "_socks_address_type": address_type,
+        }
+
+    if version == 4:
+        if len(payload) < 9:
+            raise EmulatorInputError("SOCKS4 request header is incomplete")
+        command = {1: "CONNECT", 2: "BIND"}.get(
+            payload[1], f"0x{payload[1]:02x}"
+        )
+        port = int.from_bytes(payload[2:4], "big")
+        address = payload[4:8]
+        user_end = payload.find(b"\x00", 8)
+        if user_end < 0:
+            raise EmulatorInputError("SOCKS4 user ID is not terminated")
+        if address[:3] == b"\x00\x00\x00" and address[3] != 0:
+            domain_start = user_end + 1
+            domain_end = payload.find(b"\x00", domain_start)
+            if domain_end < 0:
+                raise EmulatorInputError("SOCKS4a domain name is not terminated")
+            host = _socks_host_from_bytes(payload[domain_start:domain_end])
+            address_type = 3
+        else:
+            host = str(ipaddress.ip_address(address))
+            address_type = 1
+        return {
+            "version": "4",
+            "destination_host": host,
+            "destination_port": port,
+            "_socks_command": command,
+            "_socks_address_type": address_type,
+        }
+
+    raise EmulatorInputError(f"unsupported SOCKS version {version}")
 
 
 def _stream_expression_pairs(expression: str) -> list[tuple[str, str]]:
@@ -13049,7 +13154,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             raise EmulatorInputError(
                 f"unsupported packet {index} field(s): {', '.join(unknown)}"
             )
-        if protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and "payload" in packet and "payload_hex" in packet:
+        if protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", "socks", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and "payload" in packet and "payload_hex" in packet:
             raise EmulatorInputError(
                 f"packet {index} {protocol.upper()} packets must use payload or payload_hex, not both"
             )
@@ -13279,7 +13384,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     else:
                         options[canonical_id] = _packet_scalar(option_value, "options")
                 normalised[field] = options
-            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
+            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", "socks", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
                 value = _require_string(packet[field], f"packet {index} payload_hex")
                 if len(value) % 2:
                     raise EmulatorInputError(
@@ -13297,6 +13402,28 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     )
                 normalised[field] = payload_bytes.hex()
                 normalised["_wire_payload"] = payload_bytes
+            elif protocol == "socks" and field == "version":
+                value = _packet_scalar(packet[field], f"packet {index} SOCKS version")
+                if value not in {"4", "5"}:
+                    raise EmulatorInputError(
+                        f"packet {index} SOCKS version must be 4 or 5"
+                    )
+                normalised[field] = value
+            elif protocol == "socks" and field == "allowed":
+                normalised[field] = _packet_bool(
+                    packet[field], f"packet {index} SOCKS allowed"
+                )
+            elif protocol == "socks" and field == "destination_host":
+                normalised[field] = _require_string(
+                    packet[field], f"packet {index} SOCKS destination_host"
+                )
+            elif protocol == "socks" and field == "destination_port":
+                value = packet[field]
+                if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 65535:
+                    raise EmulatorInputError(
+                        f"packet {index} SOCKS destination_port must be an integer from 0 to 65535"
+                    )
+                normalised[field] = value
             elif protocol == "sctp" and field in {
                 "ppi",
                 "mss",
@@ -14083,6 +14210,36 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             )
             if sdp_template is not None:
                 normalised["_sdp_template"] = sdp_template
+        if protocol == "socks":
+            if direction != "client_to_server":
+                raise EmulatorInputError(
+                    f"packet {index} SOCKS requests must be client_to_server"
+                )
+            if "payload" in normalised and "_wire_payload" not in normalised:
+                normalised["_wire_payload"] = normalised["payload"].encode("utf-8")
+            raw_socks = normalised.get("_wire_payload")
+            has_wire_input = "payload" in packet or "payload_hex" in packet
+            if has_wire_input:
+                if not isinstance(raw_socks, (bytes, bytearray)) or not raw_socks:
+                    raise EmulatorInputError(
+                        f"packet {index} SOCKS request payload must not be empty"
+                    )
+                parsed_socks = _parse_socks_request(bytes(raw_socks))
+                for field in ("version", "destination_host", "destination_port"):
+                    if field in normalised and str(normalised[field]) != str(parsed_socks[field]):
+                        raise EmulatorInputError(
+                            f"packet {index} SOCKS {field} conflicts with payload"
+                        )
+                normalised.update(parsed_socks)
+            else:
+                normalised.setdefault("version", "5")
+                normalised.setdefault("allowed", "1")
+                normalised.setdefault("destination_host", "")
+                normalised.setdefault("destination_port", 0)
+                if normalised["version"] not in {"4", "5"}:
+                    raise EmulatorInputError(
+                        f"packet {index} SOCKS version must be 4 or 5"
+                    )
         if protocol == "rtsp":
             if "body" in packet and "payload" in packet:
                 raise EmulatorInputError(
@@ -15829,7 +15986,7 @@ class EmulatorSession:
         protocol = packet["protocol"]
         if protocol == "sip" and packet.get("transport", "tcp") == "udp":
             connection.update({"protocol": "17", "transport": "udp"})
-        elif protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "rtsp", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}:
+        elif protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "rtsp", "ftp", "icap", "socks", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol == "sctp":
             connection.update({"protocol": "132", "transport": "sctp"})
@@ -15878,6 +16035,7 @@ class EmulatorSession:
                 "diameter",
                 "mr",
                 "rtsp",
+                "socks",
                 "classification",
                 "category",
             }
@@ -16319,6 +16477,14 @@ class EmulatorSession:
             sdp_template = packet.get("_sdp_template")
             if isinstance(sdp_template, dict):
                 state["sdp"] = _sdp_event_layer(sdp_template["state"])
+        elif protocol == "socks":
+            socks_state: dict[str, Any] = {
+                "version": str(packet.get("version", "5")),
+                "allowed": str(packet.get("allowed", "1")),
+                "destination_host": str(packet.get("destination_host", "")),
+                "destination_port": str(packet.get("destination_port", 0)),
+            }
+            state["socks"] = socks_state
         elif protocol == "diameter":
             diameter_state: dict[str, str] = {}
             for field in EVENT_STATE_FIELDS["diameter"]:
@@ -16425,7 +16591,7 @@ class EmulatorSession:
             mr_state["payload_length"] = str(len(payload))
             state["mr"] = mr_state
         if (
-            protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp", "ftp", "icap", "tds"}
+            protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp", "ftp", "icap", "socks", "tds"}
             or (protocol == "sip" and packet.get("transport", "tcp") == "tcp")
         ):
             state["tcp"] = {}
@@ -16793,7 +16959,7 @@ class EmulatorSession:
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
-        if packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}:
+        if packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp", "ftp", "icap", "socks", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}:
             return
         source = packet["source"]
         destination = packet["destination"]
@@ -16893,7 +17059,7 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "socks", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
@@ -16970,7 +17136,7 @@ class EmulatorSession:
             events.append(self._fire_event_on_worker(session, "RULE_INIT", {}))
             session.eval_tcl("set ::orch::_init_done 1")
         packet_has_tcp_layer = (
-            packet["protocol"] in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp", "ftp", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}
+            packet["protocol"] in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp", "ftp", "socks", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}
             or (packet["protocol"] == "sip" and packet.get("transport", "tcp") == "tcp")
         )
         accepted_state = (
@@ -18210,6 +18376,33 @@ class EmulatorSession:
                                 )
                             )
                 entry.update(self._sip_output_from_tcl(session))
+                continue
+
+            if protocol == "socks":
+                self._activate_packet_connection(session, packet, entry["events"])
+                event_result = self._fire_event_on_worker(
+                    session,
+                    "SOCKS_REQUEST",
+                    self._packet_event_state(packet),
+                )
+                entry["events"].append(event_result)
+                socks_state = event_result.get("state", {}).get("socks", {})
+                entry["socks"] = {
+                    "version": socks_state.get("version", packet.get("version", "5")),
+                    "command": packet.get("_socks_command", "STRUCTURED"),
+                    "destination_host": socks_state.get(
+                        "destination_host", packet.get("destination_host", "")
+                    ),
+                    "destination_port": socks_state.get(
+                        "destination_port", str(packet.get("destination_port", 0))
+                    ),
+                    "allowed": socks_state.get(
+                        "allowed", str(packet.get("allowed", "1"))
+                    ),
+                }
+                if entry["socks"]["allowed"] == "0":
+                    entry["discarded"] = True
+                    entry["drop_reason"] = "socks"
                 continue
 
             if protocol == "diameter":

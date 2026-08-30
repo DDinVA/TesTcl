@@ -1486,6 +1486,23 @@ event API:
 the combined `HOST:PORT`, or reads/updates `host` and `port` independently;
 IPv6 hosts use `[HOST]:PORT`. The model records the decision and destination
 but does not implement a SOCKS handshake, proxy socket, or live connection.
+Packet traces may use `protocol: "socks"` with a `payload_hex` request body.
+The adapter decodes one SOCKS4/SOCKS4a or SOCKS5 request and supplies its
+version and destination to the same event:
+
+```json
+{
+  "protocol": "socks",
+  "direction": "client_to_server",
+  "payload_hex": "050100030f626c6f636b65642e6578616d706c6501bb"
+}
+```
+
+SOCKS5 IPv4, IPv6, and domain destinations are supported; SOCKS4a domain
+requests are supported as well. Malformed or unsupported request bytes are
+rejected as packet input, and the emulator does not synthesize a SOCKS reply
+or open a proxy connection. The packet result includes the decoded command,
+destination, and final `allowed` decision.
 
 ### SDP state
 

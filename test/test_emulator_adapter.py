@@ -2378,6 +2378,159 @@ when SOCKS_REQUEST {
         finally:
             malformed.close()
 
+    def test_socks_packet_adapter_decodes_socks5_domain_and_applies_decision(self) -> None:
+        domain = b"blocked.example"
+        payload = bytes([5, 1, 0, 3, len(domain)]) + domain + (443).to_bytes(2, "big")
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "SOCKS"],
+                "irule": """
+when SOCKS_REQUEST {
+    log local0. "version=[SOCKS::version] destination=[SOCKS::destination]"
+    if {[SOCKS::destination host] eq "blocked.example"} { SOCKS::allowed 0 }
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "socks",
+                        "direction": "client_to_server",
+                        "payload_hex": payload.hex(),
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        entry = result["trace"][0]
+        event = next(item for item in entry["events"] if item["event"] == "SOCKS_REQUEST")
+        accepted = next(item for item in entry["events"] if item["event"] == "CLIENT_ACCEPTED")
+        self.assertTrue(event["fired"])
+        self.assertEqual(accepted["state"]["datagram"]["protocol"], "6")
+        self.assertIn("tcp", accepted["state"])
+        self.assertEqual(event["state"]["socks"]["version"], "5")
+        self.assertEqual(event["state"]["socks"]["destination_host"], "blocked.example")
+        self.assertEqual(event["state"]["socks"]["destination_port"], "443")
+        self.assertEqual(event["state"]["socks"]["allowed"], "0")
+        self.assertTrue(any("version=5 destination=blocked.example:443" in log for log in event["logs"]))
+        self.assertEqual(entry["socks"]["command"], "CONNECT")
+        self.assertTrue(entry["discarded"])
+        self.assertEqual(entry["drop_reason"], "socks")
+
+        no_handler = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "SOCKS"],
+                "irule": "when CLIENT_ACCEPTED { log local0. \"accepted\" }",
+                "packets": [
+                    {
+                        "protocol": "socks",
+                        "direction": "client_to_server",
+                        "payload_hex": payload.hex(),
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(no_handler["trace"][0]["socks"]["command"], "CONNECT")
+        self.assertEqual(
+            no_handler["trace"][0]["socks"]["destination_host"], "blocked.example"
+        )
+        self.assertEqual(no_handler["trace"][0]["socks"]["allowed"], "1")
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "SOCKS5 domain destination is incomplete"
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "SOCKS"],
+                    "irule": "when SOCKS_REQUEST { SOCKS::version }",
+                    "packets": [
+                        {
+                            "protocol": "socks",
+                            "direction": "client_to_server",
+                            "payload_hex": "0501000304",
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "SOCKS request payload must not be empty"
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "SOCKS"],
+                    "irule": "when SOCKS_REQUEST { SOCKS::version }",
+                    "packets": [
+                        {
+                            "protocol": "socks",
+                            "direction": "client_to_server",
+                            "payload_hex": "",
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "SOCKS requests must be client_to_server"
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "SOCKS"],
+                    "irule": "when SOCKS_REQUEST { SOCKS::version }",
+                    "packets": [
+                        {
+                            "protocol": "socks",
+                            "direction": "server_to_client",
+                            "payload_hex": payload.hex(),
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_socks_packet_adapter_decodes_socks4_and_socks5_address_variants(self) -> None:
+        def run_request(payload: bytes) -> dict[str, object]:
+            result = self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "SOCKS"],
+                    "irule": "when SOCKS_REQUEST { log local0. \"[SOCKS::version] [SOCKS::destination]\" }",
+                    "packets": [
+                        {
+                            "protocol": "socks",
+                            "direction": "client_to_server",
+                            "payload_hex": payload.hex(),
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+            entry = result["trace"][0]
+            return next(
+                item for item in entry["events"] if item["event"] == "SOCKS_REQUEST"
+            )
+
+        socks4 = bytes([4, 1]) + (80).to_bytes(2, "big") + bytes([192, 0, 2, 10]) + b"user\x00"
+        socks4_event = run_request(socks4)
+        self.assertEqual(socks4_event["state"]["socks"]["version"], "4")
+        self.assertEqual(socks4_event["state"]["socks"]["destination_host"], "192.0.2.10")
+        self.assertEqual(socks4_event["state"]["socks"]["destination_port"], "80")
+        self.assertTrue(any("4 192.0.2.10:80" in log for log in socks4_event["logs"]))
+
+        socks4a = (
+            bytes([4, 1])
+            + (443).to_bytes(2, "big")
+            + bytes([0, 0, 0, 1])
+            + b"user\x00socks4a.example\x00"
+        )
+        socks4a_event = run_request(socks4a)
+        self.assertEqual(socks4a_event["state"]["socks"]["destination_host"], "socks4a.example")
+        self.assertEqual(socks4a_event["state"]["socks"]["destination_port"], "443")
+
+        ipv6 = ipaddress.ip_address("2001:db8::42").packed
+        socks5_event = run_request(bytes([5, 1, 0, 4]) + ipv6 + (8443).to_bytes(2, "big"))
+        self.assertEqual(socks5_event["state"]["socks"]["version"], "5")
+        self.assertEqual(socks5_event["state"]["socks"]["destination_host"], "2001:db8::42")
+        self.assertEqual(socks5_event["state"]["socks"]["destination_port"], "8443")
+
     def test_server_endpoint_aliases_clear_stale_member_after_pool_failure(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -2520,6 +2673,10 @@ when HTTP_REQUEST {
         self.assertEqual(
             packet_adapters["HTTP_RESPONSE_RELEASE"],
             "HTTP response transaction release phase",
+        )
+        self.assertEqual(
+            packet_adapters["SOCKS_REQUEST"],
+            "SOCKS4/SOCKS5 request packet",
         )
         self.assertEqual(
             packet_adapters["HTTP_DISABLED"],
