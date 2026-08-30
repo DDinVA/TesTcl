@@ -646,6 +646,15 @@ profile-match callback, not XML parsing, profile expression evaluation, or
 wire-triggered XML event discovery. See the F5
 [`XML_CONTENT_BASED_ROUTING`](https://clouddocs.f5.com/api/irules/XML_CONTENT_BASED_ROUTING.html)
 reference.
+The IVS event pair is available through synthetic event injection when the
+`IVS_ENTRY` profile is attached. `IVS_ENTRY::result` is modeled for the
+documented `noop`, `modified`, and `response` outcomes with bounded history;
+the emulator does not instantiate a second virtual server or execute a real
+internal handoff. See the F5
+[`IVS_ENTRY_REQUEST`](https://clouddocs.f5.com/api/irules/IVS_ENTRY_REQUEST.html)
+and
+[`IVS_ENTRY_RESPONSE`](https://clouddocs.f5.com/api/irules/IVS_ENTRY_RESPONSE.html)
+references.
 The global `call` command is modeled for top-level iRule `proc` declarations,
 including optional `-debug`, list-safe argument dispatch, and propagation of
 Tcl procedure return/error codes. It does not evaluate arbitrary top-level

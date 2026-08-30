@@ -10405,6 +10405,8 @@ PACKET_EVENT_ADAPTERS = {
     "EPI_NA_CHECK_HTTP_REQUEST": "Endpoint Inspector special status request",
     "AVR_CSPM_INJECTION": "AVR CSPM response injection opportunity",
     "XML_CONTENT_BASED_ROUTING": "synthetic XML profile match event",
+    "IVS_ENTRY_REQUEST": "synthetic internal virtual server request entry",
+    "IVS_ENTRY_RESPONSE": "synthetic internal virtual server response entry",
     "PING_REQUEST_READY": "PingAccess policy request ready before release",
     "PING_RESPONSE_READY": "PingAccess policy response ready for mutation",
     "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",

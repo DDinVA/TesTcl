@@ -1617,6 +1617,20 @@ implement the deprecated XML parser event family. See the F5
 [`XML_CONTENT_BASED_ROUTING`](https://clouddocs.f5.com/api/irules/XML_CONTENT_BASED_ROUTING.html)
 reference.
 
+### Internal virtual server entry events
+
+`IVS_ENTRY_REQUEST` and `IVS_ENTRY_RESPONSE` can be injected as synchronous
+events when the `IVS_ENTRY` profile is attached. `IVS_ENTRY::result` supports
+the bounded `noop`, `modified`, and `response` outcomes and records the
+request/response entry history under `semantic.feature_controls`. This is a
+deterministic internal-virtual-server handoff fixture; it does not create a
+second virtual server, open an internal connection, or run an adaptation
+service. See the F5
+[`IVS_ENTRY_REQUEST`](https://clouddocs.f5.com/api/irules/IVS_ENTRY_REQUEST.html)
+and
+[`IVS_ENTRY_RESPONSE`](https://clouddocs.f5.com/api/irules/IVS_ENTRY_RESPONSE.html)
+references.
+
 ### BWC flow controls
 
 The BWC overlay models the complete TMOS 17.5 command family as deterministic
