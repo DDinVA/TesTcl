@@ -6160,6 +6160,256 @@ when LB_FAILED {
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+    def test_http_lb_causal_events_preserve_persistence_and_queue_order(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {
+                    "primary_pool": ["192.0.2.10:443"],
+                    "fallback_pool": ["192.0.2.20:443"],
+                },
+                "irule": """
+when HTTP_REQUEST { pool primary_pool }
+when PERSIST_DOWN {
+    log local0. "persist=[LB::server]"
+    pool fallback_pool
+}
+when LB_SELECTED { log local0. "selected=[LB::server]" }
+when LB_QUEUED {
+    log local0. "queued=[LB::queue queued] depth=[LB::queue depth one fallback_pool] limit=[LB::queue limit depth fallback_pool]"
+}
+""",
+                "requests": [
+                    {
+                        "uri": "/first",
+                        "persist_down": {
+                            "pool": "primary_pool",
+                            "member": "192.0.2.10:443",
+                        },
+                        "lb_queue": {
+                            "queued": True,
+                            "depth": 2,
+                            "limit_depth": 5,
+                            "limit_time": 30,
+                            "age_head": 4,
+                        },
+                    },
+                    {"uri": "/second"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        first, second = result["results"]
+        self.assertEqual(
+            first["events_fired"],
+            ["HTTP_REQUEST", "PERSIST_DOWN", "LB_SELECTED", "LB_QUEUED"],
+        )
+        self.assertEqual(first["pool"], "fallback_pool")
+        self.assertEqual(first["node"], "192.0.2.20")
+        self.assertEqual(
+            first["semantic"]["lb_events"],
+            {
+                "persist_down_pending": "0",
+                "persist_down_fired": "1",
+                "persist_down_pool": "primary_pool",
+                "persist_down_member": "192.0.2.10:443",
+                "queue_event_pending": "0",
+                "queue_event_fired": "1",
+            },
+        )
+        self.assertTrue(any("queued=1 depth=2 limit=5" in log for log in first["logs"]))
+        self.assertNotIn("PERSIST_DOWN", second["events_fired"])
+        self.assertNotIn("LB_QUEUED", second["events_fired"])
+        self.assertEqual(second["semantic"]["lb_events"]["persist_down_fired"], "0")
+        self.assertEqual(second["semantic"]["lb_events"]["queue_event_fired"], "0")
+
+    def test_http_packet_lb_causal_inputs_and_response_validation(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["192.0.2.10:443"]},
+                "irule": """
+when HTTP_REQUEST { pool api_pool }
+when PERSIST_DOWN { log local0. persist-event }
+when LB_SELECTED { log local0. selected-event }
+when LB_QUEUED { log local0. queue-event }
+""",
+                "packets": [
+                    {
+                        "protocol": "http",
+                        "direction": "client_to_server",
+                        "uri": "/health",
+                        "persist_down": {
+                            "pool": "api_pool",
+                            "member": "192.0.2.10:443",
+                        },
+                        "lb_queue": {"queued": True, "depth": 1},
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        entry = result["trace"][0]["http_result"]
+        self.assertEqual(
+            entry["events_fired"],
+            ["HTTP_REQUEST", "PERSIST_DOWN", "LB_SELECTED", "LB_QUEUED"],
+        )
+        self.assertEqual(entry["semantic"]["lb"]["queue_depth"], "1")
+
+        for field in ("persist_down", "lb_queue"):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    self.adapter.EmulatorInputError,
+                    f"HTTP responses cannot specify {field}",
+                ):
+                    self.adapter.run_scenario(
+                        {
+                            "profiles": ["TCP", "HTTP"],
+                            "irule": "when HTTP_RESPONSE { }",
+                            "packets": [
+                                {
+                                    "protocol": "http",
+                                    "direction": "server_to_client",
+                                    field: (
+                                        {"member": "192.0.2.10:443"}
+                                        if field == "persist_down"
+                                        else {"queued": True, "depth": 1}
+                                    ),
+                                }
+                            ],
+                        },
+                        tcl_lsp_root=self.tcl_lsp_root,
+                    )
+
+    def test_lb_causal_inputs_reject_ambiguous_failure_combinations(self) -> None:
+        base = {
+            "profiles": ["TCP", "HTTP"],
+            "pools": {"api_pool": ["192.0.2.10:443"]},
+            "irule": "when HTTP_REQUEST { pool api_pool }",
+        }
+        with self.subTest("request persistence and explicit failure"):
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "cannot be combined with persist_down",
+            ):
+                self.adapter.run_scenario(
+                    {
+                        **base,
+                        "request": {
+                            "lb_failure": "connection_timeout",
+                            "persist_down": {"member": "192.0.2.10:443"},
+                        },
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+        with self.subTest("packet queue and explicit failure"):
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "cannot be combined with.*queued lb_queue",
+            ):
+                self.adapter.run_scenario(
+                    {
+                        **base,
+                        "packets": [
+                            {
+                                "protocol": "http",
+                                "direction": "client_to_server",
+                                "lb_failure": "connection_timeout",
+                                "lb_queue": {"queued": True, "depth": 1},
+                            }
+                        ],
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+        with self.subTest("queue requires connection limit"):
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "on_connlimit must be true",
+            ):
+                self.adapter.run_scenario(
+                    {
+                        **base,
+                        "request": {
+                            "lb_queue": {
+                                "queued": True,
+                                "on_connlimit": False,
+                                "depth": 1,
+                            }
+                        },
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+
+    def test_http_causal_events_advance_state_without_registered_handlers(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"api_pool": ["192.0.2.10:443"]},
+                "irule": """
+when HTTP_REQUEST { pool api_pool }
+when LB_SELECTED { log local0. selected }
+""",
+                "request": {
+                    "persist_down": {
+                        "pool": "api_pool",
+                        "member": "192.0.2.10:443",
+                    },
+                    "lb_queue": {"queued": True, "depth": 1},
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_result = result["results"][0]
+        self.assertEqual(
+            request_result["events_fired"],
+            ["HTTP_REQUEST", "PERSIST_DOWN", "LB_SELECTED", "LB_QUEUED"],
+        )
+        self.assertEqual(request_result["semantic"]["lb_events"]["persist_down_fired"], "1")
+        self.assertEqual(request_result["semantic"]["lb_events"]["queue_event_fired"], "1")
+
+    def test_lb_queue_limit_exceeded_fires_lb_failed_after_queue_event(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {
+                    "primary_pool": ["192.0.2.10:443"],
+                    "fallback_pool": ["192.0.2.20:443"],
+                },
+                "irule": """
+when HTTP_REQUEST { pool primary_pool }
+when LB_QUEUED { log local0. "queue-limit=[LB::queue depth one fallback_pool]" }
+when LB_FAILED {
+    log local0. "queue-failure=[event info]"
+    pool fallback_pool
+    LB::reselect
+}
+""",
+                "request": {
+                    "uri": "/health",
+                    "lb_queue": {
+                        "queued": True,
+                        "depth": 6,
+                        "limit_depth": 5,
+                    },
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_result = result["results"][0]
+        self.assertEqual(
+            request_result["events_fired"],
+            ["HTTP_REQUEST", "LB_SELECTED", "LB_QUEUED", "LB_FAILED"],
+        )
+        self.assertEqual(request_result["pool"], "fallback_pool")
+        self.assertEqual(request_result["node"], "192.0.2.20")
+        self.assertEqual(
+            request_result["lb_failure"],
+            {"cause": "queue_limit", "fired": True, "selected": True},
+        )
+        self.assertTrue(any("queue-limit=6" in log for log in request_result["logs"]))
+        self.assertTrue(any("queue-failure=queue_limit" in log for log in request_result["logs"]))
+
     def test_http_retry_replays_request_and_reselects_next_member(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -13919,6 +14169,44 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             thread.join(timeout=5)
             server.server_close()
 
+    def test_http_api_accepts_lb_causal_request_inputs(self) -> None:
+        server = self.adapter.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self.adapter._http_handler(Path(self.tcl_lsp_root))
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/simulations",
+                data=json.dumps(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "pools": {"api_pool": ["192.0.2.10:443"]},
+                        "irule": "when HTTP_REQUEST { pool api_pool } when PERSIST_DOWN { log local0. persist } when LB_QUEUED { log local0. queued }",
+                        "request": {
+                            "persist_down": {
+                                "pool": "api_pool",
+                                "member": "192.0.2.10:443",
+                            },
+                            "lb_queue": {"queued": True, "depth": 1},
+                        },
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(response.status, 200)
+                payload = json.loads(response.read())
+                self.assertEqual(
+                    payload["results"][0]["events_fired"],
+                    ["HTTP_REQUEST", "PERSIST_DOWN", "LB_SELECTED", "LB_QUEUED"],
+                )
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_mcp_stdio_handshake_tools_and_protocol_errors(self) -> None:
         messages = "\n".join(
             [
@@ -13997,6 +14285,30 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             )
             self.assertEqual(initialized["result"]["capabilities"], {"tools": {}})
             server.handle_message({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            causal = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_simulate",
+                        "arguments": {
+                            "scenario": {
+                                "profiles": ["TCP", "HTTP"],
+                                "pools": {"api_pool": ["192.0.2.10:443"]},
+                                "irule": "when HTTP_REQUEST { pool api_pool } when LB_QUEUED { log local0. queued }",
+                                "request": {
+                                    "lb_queue": {"queued": True, "depth": 1}
+                                },
+                            }
+                        },
+                    },
+                }
+            )
+            self.assertEqual(
+                causal["result"]["structuredContent"]["results"][0]["events_fired"],
+                ["HTTP_REQUEST", "LB_SELECTED", "LB_QUEUED"],
+            )
             filtered = server.handle_message(
                 {
                     "jsonrpc": "2.0",

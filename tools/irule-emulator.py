@@ -235,6 +235,7 @@ DEFAULT_PROFILES = ["TCP", "HTTP"]
 LB_FAILURE_CAUSES = frozenset(
     {"no_member", "unreachable", "queue_limit", "connection_timeout"}
 )
+LB_QUEUE_MAX_VALUE = 2**31 - 1
 HTTP_REASON_PHRASES = {
     100: "Continue",
     101: "Switching Protocols",
@@ -4785,6 +4786,15 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         name: value
         for name, value in zip(lb_control_parts[::2], lb_control_parts[1::2])
     }
+    lb_event_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::lb_event_snapshot")
+    )
+    if len(lb_event_parts) % 2:
+        raise EmulatorInputError("invalid LB event state")
+    lb_events = {
+        name: value
+        for name, value in zip(lb_event_parts[::2], lb_event_parts[1::2])
+    }
     table_entries: list[dict[str, str]] = []
     for raw_entry in _split_tcl_list(session.eval_tcl("::itest::semantic::table_snapshot")):
         parts = _split_tcl_list(raw_entry)
@@ -5589,6 +5599,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "hsl_messages": hsl_messages,
         "lb_status": lb_status,
         "lb": lb_control,
+        "lb_events": lb_events,
         "table": table_entries,
         "psm": psm,
         "http_proxy": {
@@ -5868,6 +5879,7 @@ def _install_runtime_shims(session: Any) -> None:
     if not semantic_path.exists():
         raise EmulatorInputError(f"missing adapter semantic mock file: {semantic_path}")
     session.eval_tcl(f"::tmm::_orig_source {_tcl_quote(str(semantic_path))}")
+    session.eval_tcl("::itest::semantic::install_lb_causal_chain_steps")
 
 
 def _install_python_digest_helper(session: Any) -> None:
@@ -7998,6 +8010,8 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
         "response_body",
         "http2",
         "lb_failure",
+        "persist_down",
+        "lb_queue",
         "dosl7",
         "antifraud",
     }
@@ -8041,11 +8055,110 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
             causes = ", ".join(sorted(LB_FAILURE_CAUSES))
             raise EmulatorInputError(f"lb_failure must be one of: {causes}")
         kwargs["lb_failure"] = failure
+    if "persist_down" in request:
+        kwargs["persist_down"] = _normalise_persist_down(
+            request["persist_down"], "persist_down"
+        )
+    if "lb_queue" in request:
+        kwargs["lb_queue"] = _normalise_lb_queue(request["lb_queue"], "lb_queue")
+    causal_queue = kwargs.get("lb_queue")
+    if "lb_failure" in kwargs and (
+        "persist_down" in kwargs
+        or (causal_queue is not None and causal_queue["queued"])
+    ):
+        raise EmulatorInputError(
+            "lb_failure cannot be combined with persist_down or a queued lb_queue"
+        )
     if "dosl7" in request:
         kwargs["dosl7"] = _normalise_dosl7_request(request["dosl7"])
     if "antifraud" in request:
         kwargs["antifraud"] = _normalise_antifraud_request(request["antifraud"])
     return kwargs
+
+
+def _normalise_persist_down(raw: Any, field: str) -> dict[str, str]:
+    """Validate a deterministic persistence target for ``PERSIST_DOWN``."""
+    if not isinstance(raw, dict):
+        raise EmulatorInputError(f"{field} must be an object")
+    unknown = sorted(set(raw) - {"pool", "member"})
+    if unknown:
+        raise EmulatorInputError(
+            f"{field} unsupported field(s): {', '.join(unknown)}"
+        )
+    member = _require_string(raw.get("member"), f"{field}.member")
+    if not member or "\x00" in member or len(member.encode("utf-8")) > 512:
+        raise EmulatorInputError(
+            f"{field}.member must be a non-empty string of at most 512 UTF-8 bytes"
+        )
+    pool = raw.get("pool", "")
+    if not isinstance(pool, str) or "\x00" in pool or len(pool.encode("utf-8")) > 256:
+        raise EmulatorInputError(
+            f"{field}.pool must be a string of at most 256 UTF-8 bytes"
+        )
+    return {"pool": pool, "member": member}
+
+
+def _normalise_lb_queue(raw: Any, field: str) -> dict[str, Any]:
+    """Validate bounded queue observations and the optional queue trigger."""
+    if not isinstance(raw, dict):
+        raise EmulatorInputError(f"{field} must be an object")
+    allowed = {
+        "queued",
+        "on_connlimit",
+        "depth",
+        "limit_depth",
+        "limit_time",
+        "age_head",
+        "age_max",
+        "age_edm",
+        "age_ema",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            f"{field} unsupported field(s): {', '.join(unknown)}"
+        )
+
+    def boolean(name: str, default: bool) -> bool:
+        value = raw.get(name, default)
+        if not isinstance(value, bool):
+            raise EmulatorInputError(f"{field}.{name} must be a boolean")
+        return value
+
+    def integer(name: str) -> int:
+        value = raw.get(name, 0)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= LB_QUEUE_MAX_VALUE
+        ):
+            raise EmulatorInputError(
+                f"{field}.{name} must be an integer from 0 to {LB_QUEUE_MAX_VALUE}"
+            )
+        return value
+
+    queued = boolean("queued", False)
+    on_connlimit = boolean("on_connlimit", queued)
+    if queued and not on_connlimit:
+        raise EmulatorInputError(
+            f"{field}.on_connlimit must be true when {field}.queued is true"
+        )
+    depth = integer("depth")
+    if queued and depth < 1:
+        raise EmulatorInputError(
+            f"{field}.depth must be at least 1 when {field}.queued is true"
+        )
+    return {
+        "queued": queued,
+        "on_connlimit": on_connlimit,
+        "depth": depth,
+        "limit_depth": integer("limit_depth"),
+        "limit_time": integer("limit_time"),
+        "age_head": integer("age_head"),
+        "age_max": integer("age_max"),
+        "age_edm": integer("age_edm"),
+        "age_ema": integer("age_ema"),
+    }
 
 
 def _normalise_http2_state(raw: Any, field: str) -> dict[str, Any]:
@@ -8823,6 +8936,8 @@ PACKET_PROTOCOL_FIELDS = {
         "headers",
         "body",
         "lb_failure",
+        "persist_down",
+        "lb_queue",
         "status",
         "response_headers",
         "response_body",
@@ -9013,6 +9128,10 @@ PACKET_EVENT_ADAPTERS = {
     "HTTP_RESPONSE": "HTTP response transaction",
     "HTTP_RESPONSE_CONTINUE": "raw HTTP 100 Continue response",
     "HTTP_RESPONSE_RELEASE": "HTTP response transaction release phase",
+    "PERSIST_DOWN": "scenario-supplied persisted member marked down",
+    "LB_SELECTED": "HTTP pool-member selection",
+    "LB_QUEUED": "scenario-supplied connection-limit queue",
+    "LB_FAILED": "scenario-supplied load-balancer failure",
     "CATEGORY_MATCHED": "supplied URL categorization match",
     "CLASSIFICATION_DETECTED": "supplied flow classification result",
     "DNS_REQUEST": "DNS request packet",
@@ -12397,6 +12516,14 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                         f"packet {index} lb_failure must be one of: {causes}"
                     )
                 normalised[field] = failure
+            elif protocol == "http" and field == "persist_down":
+                normalised[field] = _normalise_persist_down(
+                    packet[field], f"packet {index} persist_down"
+                )
+            elif protocol == "http" and field == "lb_queue":
+                normalised[field] = _normalise_lb_queue(
+                    packet[field], f"packet {index} lb_queue"
+                )
             elif field in {"body", "response_body", "method", "uri", "host"}:
                 normalised[field] = _require_string(packet[field], f"packet {index} {field}")
             elif field == "http2":
@@ -13037,6 +13164,25 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
         if protocol == "http" and direction == "server_to_client" and "lb_failure" in normalised:
             raise EmulatorInputError(
                 f"packet {index} HTTP responses cannot specify lb_failure"
+            )
+        if protocol == "http" and direction == "server_to_client" and "persist_down" in normalised:
+            raise EmulatorInputError(
+                f"packet {index} HTTP responses cannot specify persist_down"
+            )
+        if protocol == "http" and direction == "server_to_client" and "lb_queue" in normalised:
+            raise EmulatorInputError(
+                f"packet {index} HTTP responses cannot specify lb_queue"
+            )
+        if protocol == "http" and "lb_failure" in normalised and (
+            "persist_down" in normalised
+            or (
+                "lb_queue" in normalised
+                and normalised["lb_queue"]["queued"]
+            )
+        ):
+            raise EmulatorInputError(
+                f"packet {index} lb_failure cannot be combined with "
+                "persist_down or a queued lb_queue"
             )
         if protocol == "http" and direction == "server_to_client" and "method" in normalised:
             raise EmulatorInputError(f"packet {index} HTTP responses cannot specify method")
@@ -14114,6 +14260,8 @@ class EmulatorSession:
         )
         kwargs = _request_kwargs(request)
         lb_failure = kwargs.pop("lb_failure", "")
+        persist_down = kwargs.pop("persist_down", None)
+        lb_queue = kwargs.pop("lb_queue", None)
         dosl7_request = kwargs.pop("dosl7", None)
         antifraud_request = kwargs.pop("antifraud", None)
         antifraud_login = self._antifraud["login"]
@@ -14167,6 +14315,45 @@ class EmulatorSession:
                 session.eval_tcl(
                     f"::itest::semantic::prepare_lb_failure {_tcl_quote(attempt_failure)}"
                 )
+                attempt_persist_down = persist_down if retry_count == 0 else None
+                persist_pool = "" if attempt_persist_down is None else attempt_persist_down["pool"]
+                persist_member = "" if attempt_persist_down is None else attempt_persist_down["member"]
+                session.eval_tcl(
+                    "::itest::semantic::prepare_persist_down "
+                    f"{_tcl_quote(persist_pool)} {_tcl_quote(persist_member)}"
+                )
+                attempt_queue = lb_queue if retry_count == 0 else None
+                queue_values = attempt_queue or {
+                    "queued": False,
+                    "on_connlimit": False,
+                    "depth": 0,
+                    "limit_depth": 0,
+                    "limit_time": 0,
+                    "age_head": 0,
+                    "age_max": 0,
+                    "age_edm": 0,
+                    "age_ema": 0,
+                }
+                queue_fields = (
+                    "queued",
+                    "on_connlimit",
+                    "depth",
+                    "limit_depth",
+                    "limit_time",
+                    "age_head",
+                    "age_max",
+                    "age_edm",
+                    "age_ema",
+                )
+                queue_args = " ".join(
+                    _tcl_quote(
+                        ("1" if queue_values[field] else "0")
+                        if isinstance(queue_values[field], bool)
+                        else str(queue_values[field])
+                    )
+                    for field in queue_fields
+                )
+                session.eval_tcl(f"::itest::semantic::prepare_lb_queue {queue_args}")
                 session.eval_tcl("::itest::semantic::prepare_http_retry")
                 session.eval_tcl("::itest::semantic::prepare_http_release")
                 session.eval_tcl("::itest::semantic::prepare_http_close")
@@ -14265,6 +14452,8 @@ class EmulatorSession:
                 "unset -nocomplain ::itest::semantic::automatic_http_flow"
             )
             session.eval_tcl("::itest::semantic::clear_lb_failure")
+            session.eval_tcl("::itest::semantic::prepare_persist_down {} {}")
+            session.eval_tcl("::itest::semantic::prepare_lb_queue 0 0 0 0 0 0 0 0 0")
             session.eval_tcl("::itest::semantic::prepare_http_retry")
             session.eval_tcl("::itest::semantic::prepare_http_release")
             session.eval_tcl("::itest::semantic::prepare_http_close")
@@ -16638,6 +16827,8 @@ class EmulatorSession:
                 "is_read",
                 "request_type",
                 "lb_failure",
+                "persist_down",
+                "lb_queue",
                 "username",
                 "dbname",
                 "loginoption",
@@ -16737,6 +16928,9 @@ class EmulatorSession:
                             request[field] = packet[field]
                     if "lb_failure" in packet:
                         request["lb_failure"] = packet["lb_failure"]
+                    for field in ("persist_down", "lb_queue"):
+                        if field in packet:
+                            request[field] = packet[field]
                     if "http2" in packet:
                         request["http2"] = packet["http2"]
                     if "payload" in packet and "body" not in request:

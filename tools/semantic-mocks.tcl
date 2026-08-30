@@ -253,6 +253,13 @@ namespace eval ::itest::semantic {
     variable lb_queue_age_max 0
     variable lb_queue_age_edm 0
     variable lb_queue_age_ema 0
+    variable lb_persist_down_pending 0
+    variable lb_persist_down_fired 0
+    variable lb_persist_down_pool ""
+    variable lb_persist_down_member ""
+    variable lb_queue_event_pending 0
+    variable lb_queue_event_fired 0
+    variable lb_queue_limit_failure_pending 0
     set lb_connlimits [dict create]
     variable profile_settings
     set profile_settings [dict create]
@@ -1486,7 +1493,7 @@ namespace eval ::itest::semantic {
             CLIENT_DATA CLIENT_LINE CLIENTSSL_CLIENTCERT CLIENTSSL_HANDSHAKE
             HTTP_CLASS_FAILED HTTP_CLASS_SELECTED HTTP_REQUEST HTTP_REQUEST_DATA
             HTTP_REQUEST_SEND HTTP_RESPONSE HTTP_RESPONSE_CONTINUE HTTP_RESPONSE_DATA
-            LB_FAILED LB_SELECTED NAME_RESOLVED PERSIST_DOWN RTSP_REQUEST
+            LB_FAILED LB_QUEUED LB_SELECTED NAME_RESOLVED PERSIST_DOWN RTSP_REQUEST
             RTSP_REQUEST_DATA RTSP_RESPONSE RTSP_RESPONSE_DATA SERVER_CLOSED
             SERVER_CONNECTED SERVER_DATA SERVER_LINE SERVERSSL_HANDSHAKE SIP_REQUEST
             SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_SEND STREAM_MATCHED
@@ -9803,6 +9810,13 @@ namespace eval ::itest::semantic {
         variable lb_queue_age_max
         variable lb_queue_age_edm
         variable lb_queue_age_ema
+        variable lb_persist_down_pending
+        variable lb_persist_down_fired
+        variable lb_persist_down_pool
+        variable lb_persist_down_member
+        variable lb_queue_event_pending
+        variable lb_queue_event_fired
+        variable lb_queue_limit_failure_pending
         set lb_bias 0
         set lb_class ""
         set lb_command ""
@@ -9822,6 +9836,153 @@ namespace eval ::itest::semantic {
         set lb_queue_age_max 0
         set lb_queue_age_edm 0
         set lb_queue_age_ema 0
+        set lb_persist_down_pending 0
+        set lb_persist_down_fired 0
+        set lb_persist_down_pool ""
+        set lb_persist_down_member ""
+        set lb_queue_event_pending 0
+        set lb_queue_event_fired 0
+        set lb_queue_limit_failure_pending 0
+    }
+
+    proc prepare_persist_down {pool member} {
+        variable lb_persist_down_pending
+        variable lb_persist_down_fired
+        variable lb_persist_down_pool
+        variable lb_persist_down_member
+        set lb_persist_down_pending [expr {$member ne ""}]
+        set lb_persist_down_fired 0
+        set lb_persist_down_pool $pool
+        set lb_persist_down_member $member
+    }
+
+    proc prepare_lb_queue {queued on_connlimit depth limit_depth limit_time age_head age_max age_edm age_ema} {
+        variable lb_queue_on
+        variable lb_queue_queued
+        variable lb_queue_depth
+        variable lb_queue_limit_depth
+        variable lb_queue_limit_time
+        variable lb_queue_age_head
+        variable lb_queue_age_max
+        variable lb_queue_age_edm
+        variable lb_queue_age_ema
+        variable lb_queue_event_pending
+        variable lb_queue_event_fired
+        variable lb_queue_limit_failure_pending
+        foreach value [list $queued $on_connlimit] {
+            if {$value ni {0 1}} { error "LB queue boolean state must be 0 or 1" }
+        }
+        foreach value [list $depth $limit_depth $limit_time $age_head $age_max $age_edm $age_ema] {
+            if {![string is integer -strict $value] || $value < 0 || $value > 2147483647} {
+                error "LB queue numeric state must be an integer from 0 to 2147483647"
+            }
+        }
+        set lb_queue_on $on_connlimit
+        set lb_queue_queued $queued
+        set lb_queue_depth $depth
+        set lb_queue_limit_depth $limit_depth
+        set lb_queue_limit_time $limit_time
+        set lb_queue_age_head $age_head
+        set lb_queue_age_max $age_max
+        set lb_queue_age_edm $age_edm
+        set lb_queue_age_ema $age_ema
+        set lb_queue_event_pending $queued
+        set lb_queue_event_fired 0
+        set lb_queue_limit_failure_pending [expr {
+            $queued && $limit_depth > 0 && $depth > $limit_depth
+        }]
+    }
+
+    proc _apply_persist_down_event {} {
+        variable lb_persist_down_pending
+        variable lb_persist_down_fired
+        variable lb_persist_down_pool
+        variable lb_persist_down_member
+        if {!$lb_persist_down_pending} { return 0 }
+        if {$lb_persist_down_pool ne ""} {
+            set ::state::lb::pool $lb_persist_down_pool
+        }
+        set ::state::lb::pool_member $lb_persist_down_member
+        set separator [string last ":" $lb_persist_down_member]
+        if {$separator < 0} {
+            set ::state::lb::node_addr $lb_persist_down_member
+            set ::state::lb::node_port 0
+        } else {
+            set ::state::lb::node_addr [string range $lb_persist_down_member 0 [expr {$separator - 1}]]
+            set ::state::lb::node_port [string range $lb_persist_down_member [expr {$separator + 1}] end]
+        }
+        # The persistence target is known even though it is unavailable. Keep
+        # it visible to LB::server during PERSIST_DOWN without making it an
+        # eligible member for a later pool selection.
+        set ::state::lb::selected 1
+        set lb_persist_down_pending 0
+        set lb_persist_down_fired 1
+        return 1
+    }
+
+    proc _apply_lb_queued_event {} {
+        variable lb_queue_event_pending
+        variable lb_queue_event_fired
+        if {!$lb_queue_event_pending} { return 0 }
+        set lb_queue_event_pending 0
+        set lb_queue_event_fired 1
+        return 1
+    }
+
+    proc lb_event_snapshot {} {
+        variable lb_persist_down_pending
+        variable lb_persist_down_fired
+        variable lb_persist_down_pool
+        variable lb_persist_down_member
+        variable lb_queue_event_pending
+        variable lb_queue_event_fired
+        return [list \
+            persist_down_pending $lb_persist_down_pending \
+            persist_down_fired $lb_persist_down_fired \
+            persist_down_pool $lb_persist_down_pool \
+            persist_down_member $lb_persist_down_member \
+            queue_event_pending $lb_queue_event_pending \
+            queue_event_fired $lb_queue_event_fired]
+    }
+
+    proc install_lb_causal_chain_steps {} {
+        variable lb_causal_chain_steps_installed 0
+        if {$lb_causal_chain_steps_installed} { return }
+        foreach chain_name [array names ::orch::FLOW_CHAINS] {
+            set chain_data $::orch::FLOW_CHAINS($chain_name)
+            set has_http 0
+            set has_lb_selected 0
+            set steps [list]
+            foreach {key value} $chain_data {
+                if {$key eq "steps"} {
+                    set steps $value
+                    foreach step $value {
+                        if {[lindex $step 0] eq "HTTP_REQUEST"} { set has_http 1 }
+                        if {[lindex $step 0] eq "LB_SELECTED"} { set has_lb_selected 1 }
+                    }
+                }
+            }
+            if {!$has_http || !$has_lb_selected} { continue }
+            set rewritten [list]
+            foreach step $steps {
+                set event [lindex $step 0]
+                set phase [lindex $step 1]
+                if {$event eq "LB_SELECTED"} {
+                    lappend rewritten [list PERSIST_DOWN lb]
+                }
+                lappend rewritten [list $event $phase]
+                if {$event eq "LB_SELECTED"} {
+                    lappend rewritten [list LB_QUEUED lb]
+                }
+            }
+            set rewritten_chain [list]
+            foreach {key value} $chain_data {
+                if {$key eq "steps"} { set value $rewritten }
+                lappend rewritten_chain $key $value
+            }
+            set ::orch::FLOW_CHAINS($chain_name) $rewritten_chain
+        }
+        set lb_causal_chain_steps_installed 1
     }
 
     proc lb_control_snapshot {} {
@@ -16185,12 +16346,34 @@ namespace eval ::itest::semantic {
         uplevel 1 [list ::itest::_testcl_fire_event_orig LB_FAILED]
     }
 
+    proc _maybe_fire_lb_failed_for_queue {} {
+        variable lb_queue_limit_failure_pending
+        variable lb_failure_pending
+        variable lb_failure_cause
+        variable lb_failure_fired
+        if {!$lb_queue_limit_failure_pending} { return }
+        set lb_queue_limit_failure_pending 0
+        if {$lb_failure_fired || $::itest::current_event eq "LB_FAILED"} {
+            return
+        }
+        if {[info exists ::state::http::response_committed] &&
+            $::state::http::response_committed} {
+            return
+        }
+        set lb_failure_pending 1
+        set lb_failure_cause queue_limit
+        set lb_failure_fired 1
+        set ::state::lb::failure_cause queue_limit
+        uplevel 1 [list ::itest::_testcl_fire_event_orig LB_FAILED]
+    }
+
     proc _tcp_side {} {
         if {[info exists ::itest::semantic::peer_side]} {
             return $::itest::semantic::peer_side
         }
         if {$::itest::current_event in {
             SERVER_DATA SERVER_CONNECTED SERVER_CLOSED SERVER_INIT
+            LB_QUEUED PERSIST_DOWN
             SERVERSSL_DATA SERVERSSL_HANDSHAKE SERVERSSL_SERVERCERT
             SERVERSSL_SERVERHELLO HTTP_RESPONSE HTTP_RESPONSE_CONTINUE HTTP_RESPONSE_DATA
             HTTP_RESPONSE_RELEASE
@@ -24435,10 +24618,51 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_payload] ne ""} {
 }
 if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
     [::tmm::_orig_info commands ::itest::_testcl_fire_event_orig] eq ""} {
+    if {[::tmm::_orig_info commands ::itest::registered_events] ne "" &&
+        [::tmm::_orig_info commands ::itest::_testcl_registered_events_orig] eq ""} {
+        ::tmm::_orig_rename ::itest::registered_events ::itest::_testcl_registered_events_orig
+        proc ::itest::registered_events {} {
+            set events [::itest::_testcl_registered_events_orig]
+            if {[info exists ::itest::semantic::automatic_http_flow]} {
+                if {$::itest::semantic::lb_persist_down_pending &&
+                    [lsearch -exact $events PERSIST_DOWN] < 0} {
+                    lappend events PERSIST_DOWN
+                }
+                if {$::itest::semantic::lb_queue_event_pending &&
+                    [lsearch -exact $events LB_QUEUED] < 0} {
+                    lappend events LB_QUEUED
+                }
+                # A supplied load-balancer condition makes the selection
+                # transition observable even when the iRule has no
+                # LB_SELECTED handler.  This keeps the causal trace ordered
+                # as PERSIST_DOWN -> LB_SELECTED -> LB_QUEUED.
+                if {($::itest::semantic::lb_persist_down_pending ||
+                     $::itest::semantic::lb_queue_event_pending) &&
+                    [lsearch -exact $events LB_SELECTED] < 0} {
+                    lappend events LB_SELECTED
+                }
+            }
+            return $events
+        }
+    }
     ::tmm::_orig_rename ::itest::fire_event ::itest::_testcl_fire_event_orig
     proc ::itest::fire_event {event_name} {
         ::itest::semantic::diagnostics_prepare_event
         set gated [info exists ::itest::semantic::automatic_http_flow]
+        if {$gated && $event_name eq "PERSIST_DOWN"} {
+            if {[::state::event_ctl::is_disabled $event_name]} {
+                set ::itest::semantic::lb_persist_down_pending 0
+            } elseif {![::itest::semantic::_apply_persist_down_event]} {
+                return [list fired 0 reason "persistence_target_available"]
+            }
+        }
+        if {$gated && $event_name eq "LB_QUEUED"} {
+            if {[::state::event_ctl::is_disabled $event_name]} {
+                set ::itest::semantic::lb_queue_event_pending 0
+            } elseif {![::itest::semantic::_apply_lb_queued_event]} {
+                return [list fired 0 reason "connection_limit_not_hit"]
+            }
+        }
         set is_request_data [expr {$event_name eq "HTTP_REQUEST_DATA"}]
         set is_response_data [expr {$event_name eq "HTTP_RESPONSE_DATA"}]
         if {$gated && ($is_request_data || $is_response_data)} {
@@ -24488,6 +24712,9 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
         }
         ::itest::semantic::bwc_prepare_event $event_name
         set result [uplevel 1 [list ::itest::_testcl_fire_event_orig $event_name]]
+        if {$gated && $event_name eq "LB_QUEUED"} {
+            ::itest::semantic::_maybe_fire_lb_failed_for_queue
+        }
         if {$gated && $event_name eq "HTTP_REQUEST"} {
             if {$rewrite_auto &&
                 [lsearch -exact [::itest::registered_events] REWRITE_REQUEST_DONE] >= 0} {

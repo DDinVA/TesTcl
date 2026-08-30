@@ -44,6 +44,41 @@ and any events reported by the upstream framework. It also includes a
 `fidelity` report showing statically detected command/event usage and warnings
 when a recognized command is backed by a generated stub, has no runtime
 handler, or is gated by the attached profiles.
+
+HTTP requests can model load-balancer causality with bounded per-request inputs.
+`persist_down` supplies the persistence target (`member` is required and `pool`
+is optional); it causes `PERSIST_DOWN` before `LB_SELECTED`. `lb_queue` supplies
+the queue observation fields `queued`, `on_connlimit`, `depth`, `limit_depth`,
+`limit_time`, `age_head`, `age_max`, `age_edm`, and `age_ema`; when `queued` is
+true, `LB_QUEUED` fires after `LB_SELECTED` and before server initialization.
+When `queued` is true and a positive `limit_depth` is exceeded, the emulator
+then fires `LB_FAILED` with the bounded cause `queue_limit`, allowing a rule to
+exercise fallback selection. This is a deterministic causal transition, not a
+real connection-limit queue.
+The two inputs are accepted on client-side structured HTTP packets as well as
+JSON requests, and are rejected on server-side response packets. They model a
+bounded condition supplied by the test scenario; they do not create a real
+connection-limit queue or persistence database. An explicit `lb_failure` input
+cannot be combined with `persist_down` or a queued `lb_queue` condition.
+
+```json
+{
+  "requests": [{
+    "uri": "/health",
+    "persist_down": {
+      "pool": "primary_pool",
+      "member": "10.0.0.10:443"
+    },
+    "lb_queue": {
+      "queued": true,
+      "depth": 2,
+      "limit_depth": 5,
+      "limit_time": 30,
+      "age_head": 4
+    }
+  }]
+}
+```
 Rule declarations honor the TMOS 17.5 [`priority`](https://clouddocs.f5.com/api/irules/priority.html)
 and [`timing`](https://clouddocs.f5.com/api/irules/timing.html) controls. Outer-scope
 directives apply to subsequent `when` blocks; per-event attributes override
