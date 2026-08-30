@@ -2303,6 +2303,57 @@ when CLIENT_DATA {
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+    def test_event_packets_inject_catalogued_events_with_validated_state(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_PROXY_REQUEST {
+    log local0. proxy-event
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "event",
+                        "event": "HTTP_PROXY_REQUEST",
+                        "state": {
+                            "connection": {
+                                "client_addr": "192.0.2.10",
+                            }
+                        },
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        entry = result["trace"][0]
+        event = entry["events"][0]
+        self.assertEqual(entry["protocol"], "event")
+        self.assertEqual(entry["event"], "HTTP_PROXY_REQUEST")
+        self.assertEqual(event["event"], "HTTP_PROXY_REQUEST")
+        self.assertEqual(event["state"]["connection"]["client_addr"], "192.0.2.10")
+        self.assertTrue(any("proxy-event" in log for log in event["logs"]))
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "uppercase iRule event"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when HTTP_PROXY_REQUEST { log local0. ok }",
+                    "packets": [{"protocol": "event", "event": "http_proxy_request"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "unknown iRule event"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when HTTP_PROXY_REQUEST { log local0. ok }",
+                    "packets": [{"protocol": "event", "event": "NOT_A_REAL_EVENT"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_sctp_packet_collection_payload_and_response_controls(self) -> None:
         result = self.adapter.run_scenario(
             {

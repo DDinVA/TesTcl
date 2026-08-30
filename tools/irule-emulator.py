@@ -8657,7 +8657,7 @@ PROTOCOL_INSPECTION_ID_MAX_BYTES = 4 * 1024
 PROTOCOL_INSPECTION_IDS_MAX_BYTES = 64 * 1024
 CATEGORY_RESULT_MAX_ITEMS = 128
 CATEGORY_RESULT_MAX_BYTES = 64 * 1024
-PACKET_PROTOCOLS = {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "wire"}
+PACKET_PROTOCOLS = {"event", "tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -8679,6 +8679,10 @@ PACKET_COMMON_FIELDS = {
     "datagram",
 }
 PACKET_PROTOCOL_FIELDS = {
+    "event": {
+        "event",
+        "state",
+    },
     "tcp": {
         "payload_hex",
     },
@@ -12240,6 +12244,14 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             "source": _packet_endpoint(packet.get("source"), "source", index),
             "destination": _packet_endpoint(packet.get("destination"), "destination", index),
         }
+        if protocol == "event":
+            event_name, event_state = _normalise_event(
+                packet.get("event"), packet.get("state")
+            )
+            normalised["event"] = event_name
+            normalised["state"] = event_state
+            packets.append(normalised)
+            continue
         if "datagram" in packet:
             normalised["datagram"] = _normalise_datagram_metadata(
                 packet["datagram"], f"packet {index} datagram"
@@ -16315,9 +16327,13 @@ class EmulatorSession:
         while queue_index < len(packet_queue):
             index, original_packet = packet_queue[queue_index]
             queue_index += 1
-            self._record_ip_packet(session, original_packet)
-            packet = original_packet
-            packet, buffered_bytes = self._reassemble_packet(packet, index)
+            if original_packet["protocol"] == "event":
+                packet = original_packet
+                buffered_bytes = 0
+            else:
+                self._record_ip_packet(session, original_packet)
+                packet = original_packet
+                packet, buffered_bytes = self._reassemble_packet(packet, index)
             if packet is not None:
                 coalesced_packets = packet.pop("_coalesced_packets", [])
                 if coalesced_packets:
@@ -16375,6 +16391,8 @@ class EmulatorSession:
             for field in (
                 "source",
                 "destination",
+                "event",
+                "state",
                 "flags",
                 "type",
                 "message_type",
@@ -16523,6 +16541,19 @@ class EmulatorSession:
                     else:
                         entry[field] = packet[field]
             trace.append(entry)
+            if packet["protocol"] == "event":
+                if packet["event"] not in self._event_profiles:
+                    raise EmulatorInputError(
+                        f"unknown iRule event: {packet['event']}"
+                    )
+                event_result = self._fire_event_on_worker(
+                    session, packet["event"], packet["state"]
+                )
+                entry["events"].append(event_result)
+                if event_result.get("suspended"):
+                    entry["suspended"] = True
+                    entry["suspension"] = event_result["suspension"]
+                continue
             retransmission = bool(packet.pop("_retransmission", False))
             if retransmission:
                 entry["ignored"] = "tcp retransmission"

@@ -197,6 +197,14 @@ by wire-byte offset, and the adapter records UDP drop, hold/release, respond,
 port, buffer, rate, and debug-queue controls in the event trace. This is a
 bounded datagram model: it does not implement TMM queue scheduling, NAT, or a
 real upstream UDP socket.
+Structured packet traces may also contain a synthetic `{"protocol":"event"}`
+record with an uppercase catalogued `event` and validated `state` object. This
+is useful for replaying profile- or subsystem-specific event sequences that do
+not have a wire decoder yet; it invokes the same Tcl event runner and returns
+the same logs, decisions, state, and fidelity data. Synthetic event records do
+not create sockets, advance packet metrics, or implicitly open or close a
+connection; use the TCP/UDP/protocol packet forms when those lifecycle effects
+matter.
 The six TMOS 17.5 `DATAGRAM::*` readers are semantic as well. `DATAGRAM::ip`,
 `DATAGRAM::ip6`, `DATAGRAM::tcp`, `DATAGRAM::udp`, `DATAGRAM::dns`, and
 `DATAGRAM::l2` expose validated IPv4/IPv6, TCP/UDP, DNS, and Layer-2 metadata

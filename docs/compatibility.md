@@ -118,6 +118,11 @@ Diameter ingress, egress, and retransmission events. Its routing, retry,
 retransmission, persistence, and capability-exchange commands are modeled as
 deterministic test state rather than a complete Diameter peer or TMM
 route/persistence implementation.
+Structured traces also accept a synthetic `event` record containing a
+catalogued event name and the same validated state layers accepted by the
+session-event API. This provides deterministic coverage for event sequences
+without a wire decoder, but intentionally has no implicit connection, socket,
+or packet-metric side effects.
 The TMOS 17.5 `PSM::FTP::*`, `PSM::HTTP::*`, and `PSM::SMTP::*` enable/disable
 commands are modeled as connection-scoped protocol controls and appear in
 semantic state and decision output; they do not run a real Protocol Security
