@@ -392,14 +392,39 @@ If `iptuple` is omitted for a resolved proxy, the adapter returns the
 deterministic Tcl list `{address port route-domain}`. If `resolved` is false,
 `HTTP::proxy exists` returns `0` and the destination getters return empty
 values. `HTTP::proxy chain retry` records intent in semantic state; the
-adapter does not perform DNS, proxy CONNECT negotiation, URI rewriting on
-forwarded bytes, or live downstream proxy chaining.
+adapter does not perform DNS, URI rewriting on forwarded bytes, or live
+downstream sockets. A bounded chained-proxy response can be supplied under
+`http_proxy.chain.response`:
+
+```json
+{
+  "http_proxy": {
+    "chain": {
+      "enabled": true,
+      "host": "proxy.internal",
+      "port": 8080,
+      "response": {
+        "status": 407,
+        "headers": {"Proxy-Authenticate": "Basic realm=proxy"},
+        "body": "authentication required"
+      }
+    }
+  }
+}
+```
+
+When the `HTTP_PROXY_CONNECT` profile is attached, the proxy remains enabled,
+and the chain remains enabled after `HTTP_PROXY_REQUEST`, the adapter fires a
+registered `HTTP_PROXY_CONNECT` handler followed by a registered
+`HTTP_PROXY_RESPONSE` handler when that fixture is present. The response
+handler can inspect `HTTP::status`, `HTTP::response`, `HTTP::header`, and
+`HTTP::payload`; `HTTP::proxy chain retry` records the documented retry intent
+but does not open a socket or replay the downstream negotiation.
 When the `HTTP_PROXY_CONNECT` profile is attached and the proxy remains
-enabled, the high-level HTTP lifecycle fires `HTTP_PROXY_REQUEST` before
-`HTTP_REQUEST`; URI and proxy-control mutations made by the proxy handler are
-visible to the normal request handler. `HTTP_PROXY_CONNECT` and
-`HTTP_PROXY_RESPONSE` remain explicitly injectable events because the adapter
-does not synthesize a downstream proxy connection.
+enabled, the high-level HTTP lifecycle fires `HTTP_PROXY_REQUEST` before the
+chain events and `HTTP_REQUEST`; URI and proxy-control mutations made by the
+proxy handler are visible to the normal request handler. Disabling the proxy
+or chain suppresses the downstream events.
 
 The REWRITE layer is available when the `REWRITE` profile is attached. The
 high-level HTTP flow fires `REWRITE_REQUEST_DONE` after request processing. A

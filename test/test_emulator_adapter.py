@@ -501,6 +501,116 @@ when HTTP_REQUEST {
         self.assertIn("HTTP_PROXY_REQUEST", packet_http_result["events_fired"])
         self.assertTrue(any("packet-proxy" in entry for entry in packet_http_result["logs"]))
 
+    def test_http_proxy_chain_models_connect_and_response_fixture(self) -> None:
+        scenario = {
+            "profiles": ["TCP", "HTTP", "HTTP_PROXY_CONNECT"],
+            "http_proxy": {
+                "chain": {
+                    "enabled": True,
+                    "host": "proxy.internal",
+                    "port": 8080,
+                    "response": {
+                        "status": 407,
+                        "headers": {
+                            "Proxy-Authenticate": 'Basic realm="edge"',
+                            "X-Proxy": "chain-1",
+                        },
+                        "body": "proxy-auth-required",
+                    },
+                }
+            },
+            "irule": """
+when HTTP_PROXY_REQUEST {
+    log local0. "proxy-request=[HTTP::uri]"
+}
+when HTTP_PROXY_CONNECT {
+    HTTP::header insert Proxy-Request-Tag connected
+    log local0. "proxy-connect=[HTTP::proxy chain host]:[HTTP::proxy chain port]"
+}
+when HTTP_PROXY_RESPONSE {
+    log local0. "proxy-response=[HTTP::status] auth=[HTTP::header value Proxy-Authenticate] body=[HTTP::payload]"
+    HTTP::proxy chain retry
+}
+when HTTP_REQUEST {
+    log local0. "request=[HTTP::uri]"
+}
+""",
+            "requests": [
+                {"uri": "http://origin.example/private"},
+                {"uri": "http://origin.example/second"},
+            ],
+        }
+        result = self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+        request = result["results"][0]
+        events = request["events_fired"]
+        self.assertLess(events.index("HTTP_PROXY_REQUEST"), events.index("HTTP_PROXY_CONNECT"))
+        self.assertLess(events.index("HTTP_PROXY_CONNECT"), events.index("HTTP_PROXY_RESPONSE"))
+        self.assertLess(events.index("HTTP_PROXY_RESPONSE"), events.index("HTTP_REQUEST"))
+        self.assertTrue(any("proxy-connect=proxy.internal:8080" in entry for entry in request["logs"]))
+        self.assertTrue(any("proxy-response=407" in entry for entry in request["logs"]))
+        self.assertTrue(any('auth=Basic realm="edge"' in entry for entry in request["logs"]))
+        self.assertTrue(any("body=proxy-auth-required" in entry for entry in request["logs"]))
+        self.assertTrue(request["semantic"]["http_proxy"]["chain_retry_requested"])
+        self.assertEqual(request["response"]["status"], 200)
+        self.assertEqual(request["response"]["body"], "")
+        self.assertEqual(
+            request["semantic"]["http_proxy"]["chain_response"],
+            {
+                "status": 407,
+                "reason": "Proxy Authentication Required",
+                "headers": {
+                    "proxy-authenticate": 'Basic realm="edge"',
+                    "x-proxy": "chain-1",
+                },
+                "body": "proxy-auth-required",
+            },
+        )
+        second_request = result["results"][1]
+        self.assertIn("HTTP_PROXY_CONNECT", second_request["events_fired"])
+        self.assertIn("HTTP_PROXY_RESPONSE", second_request["events_fired"])
+        self.assertTrue(second_request["semantic"]["http_proxy"]["chain_retry_requested"])
+
+        packet_result = self.adapter.run_scenario(
+            {
+                **{key: value for key, value in scenario.items() if key != "requests"},
+                "packets": [
+                    {"protocol": "http", "uri": "http://origin.example/packet"},
+                    {"protocol": "http", "direction": "server_to_client", "status": 200},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        packet_http_result = packet_result["trace"][0]["http_result"]
+        self.assertIn("HTTP_PROXY_CONNECT", packet_http_result["events_fired"])
+        self.assertIn("HTTP_PROXY_RESPONSE", packet_http_result["events_fired"])
+
+        no_chain_response = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "HTTP_PROXY_CONNECT"],
+                "http_proxy": {"chain": {"enabled": False, "response": {"status": 407}}},
+                "irule": "when HTTP_PROXY_CONNECT { log local0. should-not-fire } when HTTP_PROXY_RESPONSE { log local0. should-not-fire }",
+                "requests": [{"uri": "http://origin.example/no-chain"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertNotIn("HTTP_PROXY_CONNECT", no_chain_response["results"][0]["events_fired"])
+        self.assertNotIn("HTTP_PROXY_RESPONSE", no_chain_response["results"][0]["events_fired"])
+
+        for invalid_proxy in (
+            {"chain": {"response": {"status": 99}}},
+            {"chain": {"response": {"unsupported": True}}},
+        ):
+            with self.assertRaises(self.adapter.EmulatorInputError):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP", "HTTP_PROXY_CONNECT"],
+                        "http_proxy": invalid_proxy,
+                        "irule": "when HTTP_REQUEST { log local0. request }",
+                        "requests": [{"uri": "/invalid-proxy-fixture"}],
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+
     def test_acl_action_and_eval_model_l4_and_l7_decisions(self) -> None:
         action_session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -2297,6 +2407,14 @@ when HTTP_REQUEST {
         self.assertEqual(
             packet_adapters["HTTP_PROXY_REQUEST"],
             "explicit HTTP proxy request ingress",
+        )
+        self.assertEqual(
+            packet_adapters["HTTP_PROXY_CONNECT"],
+            "proxy chaining CONNECT request",
+        )
+        self.assertEqual(
+            packet_adapters["HTTP_PROXY_RESPONSE"],
+            "proxy chaining CONNECT response",
         )
         for event_name in (
             "FLOW_INIT",
@@ -13146,6 +13264,7 @@ when HTTP_REQUEST {
                 "chain_host": "next-proxy.internal",
                 "chain_port": 8081,
                 "chain_retry_requested": True,
+                "chain_response": None,
             },
         )
         self.assertEqual(second["semantic"]["http_proxy"]["enabled"], True)

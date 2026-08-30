@@ -268,9 +268,14 @@ intentionally bounded to the reason accessor; malformed-wire and other
 filter-generated reject causes are not simulated.
 With the `HTTP_PROXY_CONNECT` profile, an enabled proxy request fires
 `HTTP_PROXY_REQUEST` before `HTTP_REQUEST`, and mutations to `HTTP::uri` or
-`HTTP::proxy` carry into the normal request handler. Downstream
-`HTTP_PROXY_CONNECT` and `HTTP_PROXY_RESPONSE` exchanges remain explicit event
-inputs rather than live proxy negotiation.
+`HTTP::proxy` carry into the normal request handler. An optional
+`http_proxy.chain.response` fixture supplies a deterministic status, headers,
+and body for the downstream chain response. When the proxy and chain remain
+enabled, registered `HTTP_PROXY_CONNECT` and `HTTP_PROXY_RESPONSE` handlers
+fire between `HTTP_PROXY_REQUEST` and `HTTP_REQUEST`; the response handler can
+inspect the response state and `HTTP::proxy chain retry` records intent without
+opening a downstream socket or replaying negotiation. Disabling either layer
+suppresses the downstream events.
 The TMOS 17.5 HTML surface models `HTML::comment`, `HTML::disable`,
 `HTML::enable`, `HTML::encode`, and `HTML::tag`. With the HTML profile and
 `HTML::enable` in `HTTP_RESPONSE`, the adapter scans the uncompressed response

@@ -115,6 +115,11 @@ namespace eval ::itest::semantic {
     variable http_proxy_default_chain_enabled 1
     variable http_proxy_default_chain_host ""
     variable http_proxy_default_chain_port 0
+    variable http_proxy_default_chain_response_enabled 0
+    variable http_proxy_default_chain_response_status 200
+    variable http_proxy_default_chain_response_reason ""
+    variable http_proxy_default_chain_response_headers {}
+    variable http_proxy_default_chain_response_body ""
     variable http_proxy_enabled 1
     variable http_proxy_uri_rewrite 1
     variable http_proxy_resolved 0
@@ -126,6 +131,11 @@ namespace eval ::itest::semantic {
     variable http_proxy_chain_host ""
     variable http_proxy_chain_port 0
     variable http_proxy_chain_retry_requested 0
+    variable http_proxy_chain_response_enabled 0
+    variable http_proxy_chain_response_status 200
+    variable http_proxy_chain_response_reason ""
+    variable http_proxy_chain_response_headers {}
+    variable http_proxy_chain_response_body ""
     variable rewrite_default_enabled 1
     variable rewrite_enabled 1
     variable rewrite_post_process 0
@@ -2395,6 +2405,11 @@ namespace eval ::itest::semantic {
         variable http_proxy_default_chain_enabled
         variable http_proxy_default_chain_host
         variable http_proxy_default_chain_port
+        variable http_proxy_default_chain_response_enabled
+        variable http_proxy_default_chain_response_status
+        variable http_proxy_default_chain_response_reason
+        variable http_proxy_default_chain_response_headers
+        variable http_proxy_default_chain_response_body
         variable http_proxy_enabled
         variable http_proxy_uri_rewrite
         variable http_proxy_resolved
@@ -2406,6 +2421,11 @@ namespace eval ::itest::semantic {
         variable http_proxy_chain_host
         variable http_proxy_chain_port
         variable http_proxy_chain_retry_requested
+        variable http_proxy_chain_response_enabled
+        variable http_proxy_chain_response_status
+        variable http_proxy_chain_response_reason
+        variable http_proxy_chain_response_headers
+        variable http_proxy_chain_response_body
         set http_proxy_enabled $http_proxy_default_enabled
         set http_proxy_uri_rewrite $http_proxy_default_uri_rewrite
         set http_proxy_resolved $http_proxy_default_resolved
@@ -2425,6 +2445,11 @@ namespace eval ::itest::semantic {
         set http_proxy_chain_host $http_proxy_default_chain_host
         set http_proxy_chain_port $http_proxy_default_chain_port
         set http_proxy_chain_retry_requested 0
+        set http_proxy_chain_response_enabled $http_proxy_default_chain_response_enabled
+        set http_proxy_chain_response_status $http_proxy_default_chain_response_status
+        set http_proxy_chain_response_reason $http_proxy_default_chain_response_reason
+        set http_proxy_chain_response_headers $http_proxy_default_chain_response_headers
+        set http_proxy_chain_response_body $http_proxy_default_chain_response_body
     }
 
     proc http_proxy_reset_connection {} {
@@ -2481,6 +2506,43 @@ namespace eval ::itest::semantic {
         http_proxy_prepare_request
     }
 
+    proc http_proxy_chain_response_configure {args} {
+        if {[llength $args] != 5} {
+            error "HTTP proxy chain response configuration requires five values"
+        }
+        foreach {enabled status reason headers body} $args break
+        if {$enabled ni {0 1}} {
+            error "HTTP proxy chain response enabled must be boolean"
+        }
+        if {![string is integer -strict $status] || $status < 100 || $status > 999} {
+            error "HTTP proxy chain response status must be between 100 and 999"
+        }
+        if {[string first "\x00" $reason] >= 0 || [string first "\x00" $body] >= 0} {
+            error "HTTP proxy chain response text must not contain NUL"
+        }
+        if {[llength $headers] % 2 != 0} {
+            error "HTTP proxy chain response headers must be key/value pairs"
+        }
+        set header_dict [dict create]
+        foreach {name value} $headers {
+            if {[string first "\x00" $name] >= 0 || [string first "\x00" $value] >= 0} {
+                error "HTTP proxy chain response headers must not contain NUL"
+            }
+            dict lappend header_dict [string tolower $name] $value
+        }
+        variable http_proxy_default_chain_response_enabled
+        variable http_proxy_default_chain_response_status
+        variable http_proxy_default_chain_response_reason
+        variable http_proxy_default_chain_response_headers
+        variable http_proxy_default_chain_response_body
+        set http_proxy_default_chain_response_enabled $enabled
+        set http_proxy_default_chain_response_status $status
+        set http_proxy_default_chain_response_reason $reason
+        set http_proxy_default_chain_response_headers $header_dict
+        set http_proxy_default_chain_response_body $body
+        http_proxy_prepare_request
+    }
+
     proc http_proxy_snapshot {} {
         variable http_proxy_enabled
         variable http_proxy_uri_rewrite
@@ -2493,6 +2555,11 @@ namespace eval ::itest::semantic {
         variable http_proxy_chain_host
         variable http_proxy_chain_port
         variable http_proxy_chain_retry_requested
+        variable http_proxy_chain_response_enabled
+        variable http_proxy_chain_response_status
+        variable http_proxy_chain_response_reason
+        variable http_proxy_chain_response_headers
+        variable http_proxy_chain_response_body
         return [list \
             enabled $http_proxy_enabled \
             uri_rewrite $http_proxy_uri_rewrite \
@@ -2504,7 +2571,12 @@ namespace eval ::itest::semantic {
             chain_enabled $http_proxy_chain_enabled \
             chain_host $http_proxy_chain_host \
             chain_port $http_proxy_chain_port \
-            chain_retry_requested $http_proxy_chain_retry_requested]
+            chain_retry_requested $http_proxy_chain_retry_requested \
+            chain_response_enabled $http_proxy_chain_response_enabled \
+            chain_response_status $http_proxy_chain_response_status \
+            chain_response_reason $http_proxy_chain_response_reason \
+            chain_response_headers $http_proxy_chain_response_headers \
+            chain_response_body $http_proxy_chain_response_body]
     }
 
     proc _http_proxy_require_event {} {
@@ -19458,7 +19530,7 @@ namespace eval ::itest::semantic {
 
     proc _cookie_in_response {} {
         return [expr {$::itest::current_event in {
-            HTTP_RESPONSE HTTP_RESPONSE_DATA HTTP_RESPONSE_RELEASE
+            HTTP_RESPONSE HTTP_RESPONSE_DATA HTTP_RESPONSE_RELEASE HTTP_PROXY_RESPONSE
         }}]
     }
 
@@ -22955,6 +23027,7 @@ namespace eval ::itest::semantic {
     proc _http_response_context {} {
         return [expr {$::itest::current_event in {
             HTTP_RESPONSE HTTP_RESPONSE_CONTINUE HTTP_RESPONSE_DATA HTTP_RESPONSE_RELEASE
+            HTTP_PROXY_RESPONSE
         }}]
     }
 
@@ -23123,7 +23196,21 @@ namespace eval ::itest::semantic {
         }} {
             error "HTTP::collect is not valid in $::itest::current_event"
         }
-        return [eval [linsert $args 0 ::itest::cmd::_testcl_http_collect_orig]]
+        set proxy_response [expr {$::itest::current_event eq "HTTP_PROXY_RESPONSE"}]
+        if {$proxy_response} {
+            set previous_event $::itest::current_event
+            set ::itest::current_event HTTP_RESPONSE
+        }
+        set rc [catch {
+            eval [linsert $args 0 ::itest::cmd::_testcl_http_collect_orig]
+        } result options]
+        if {$proxy_response} {
+            set ::itest::current_event $previous_event
+        }
+        if {$rc} {
+            return -options $options $result
+        }
+        return $result
     }
 
     proc http_payload_command {args} {
@@ -23132,7 +23219,21 @@ namespace eval ::itest::semantic {
         }} {
             error "HTTP::payload is not valid in $::itest::current_event"
         }
-        return [eval [linsert $args 0 ::itest::cmd::_testcl_http_payload_semantic_orig]]
+        set proxy_response [expr {$::itest::current_event eq "HTTP_PROXY_RESPONSE"}]
+        if {$proxy_response} {
+            set previous_event $::itest::current_event
+            set ::itest::current_event HTTP_RESPONSE
+        }
+        set rc [catch {
+            eval [linsert $args 0 ::itest::cmd::_testcl_http_payload_semantic_orig]
+        } result options]
+        if {$proxy_response} {
+            set ::itest::current_event $previous_event
+        }
+        if {$rc} {
+            return -options $options $result
+        }
+        return $result
     }
 
     proc crc32_command {args} {
@@ -24596,7 +24697,7 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_header] ne ""} {
         if {[llength $args] == 1 && [lindex $args 0] eq "is_redirect"} {
             return [::itest::semantic::http_is_redirect_command]
         }
-        if {$::itest::current_event eq "HTTP_RESPONSE_CONTINUE"} {
+        if {$::itest::current_event in {HTTP_RESPONSE_CONTINUE HTTP_PROXY_RESPONSE}} {
             set previous_event $::itest::current_event
             set ::itest::current_event HTTP_RESPONSE
             set rc [catch {
@@ -24664,7 +24765,9 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                 # HTTP_PROXY_REQUEST, but the proxy event is part of the
                 # HTTP_REQUEST lifecycle and must still be reached.
                 if {[::itest::semantic::_profile_enabled HTTP_PROXY_CONNECT] &&
-                    [lsearch -exact $events HTTP_PROXY_REQUEST] >= 0 &&
+                    ([lsearch -exact $events HTTP_PROXY_REQUEST] >= 0 ||
+                     [lsearch -exact $events HTTP_PROXY_CONNECT] >= 0 ||
+                     [lsearch -exact $events HTTP_PROXY_RESPONSE] >= 0) &&
                     [lsearch -exact $events HTTP_REQUEST] < 0} {
                     lappend events HTTP_REQUEST
                 }
@@ -24721,10 +24824,51 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
         # remain visible to the following HTTP_REQUEST event.
         if {$gated && $event_name eq "HTTP_REQUEST" &&
             [::itest::semantic::_profile_enabled HTTP_PROXY_CONNECT] &&
-            $::itest::semantic::http_proxy_enabled &&
-            [lsearch -exact [::itest::registered_events] HTTP_PROXY_REQUEST] >= 0} {
-            set proxy_result [::itest::_testcl_fire_event_orig HTTP_PROXY_REQUEST]
-            ::itest::semantic::event_errors_record HTTP_PROXY_REQUEST $proxy_result
+            $::itest::semantic::http_proxy_enabled} {
+            set proxy_events [::itest::registered_events]
+            if {[lsearch -exact $proxy_events HTTP_PROXY_REQUEST] >= 0} {
+                set proxy_result [::itest::_testcl_fire_event_orig HTTP_PROXY_REQUEST]
+                ::itest::semantic::event_errors_record HTTP_PROXY_REQUEST $proxy_result
+            }
+            if {$::itest::semantic::http_proxy_enabled &&
+                $::itest::semantic::http_proxy_chain_enabled &&
+                [lsearch -exact $proxy_events HTTP_PROXY_CONNECT] >= 0} {
+                set proxy_connect_result [::itest::_testcl_fire_event_orig HTTP_PROXY_CONNECT]
+                ::itest::semantic::event_errors_record HTTP_PROXY_CONNECT $proxy_connect_result
+            }
+            if {$::itest::semantic::http_proxy_enabled &&
+                $::itest::semantic::http_proxy_chain_enabled &&
+                $::itest::semantic::http_proxy_chain_response_enabled &&
+                [lsearch -exact $proxy_events HTTP_PROXY_RESPONSE] >= 0} {
+                set origin_response_state [list \
+                    status $::state::http::response::status \
+                    reason $::state::http::response::reason \
+                    version $::state::http::response::version \
+                    headers $::state::http::response::headers \
+                    payload $::state::http::response::payload \
+                    payload_length $::state::http::response::payload_length \
+                    content_type $::state::http::response::content_type \
+                    is_redirect $::state::http::response::is_redirect]
+                set origin_response_committed $::state::http::response_committed
+                ::state::http::response::reset
+                ::state::http::response::configure \
+                    -status $::itest::semantic::http_proxy_chain_response_status \
+                    -reason $::itest::semantic::http_proxy_chain_response_reason \
+                    -headers $::itest::semantic::http_proxy_chain_response_headers \
+                    -payload $::itest::semantic::http_proxy_chain_response_body \
+                    -payload_length [string bytelength $::itest::semantic::http_proxy_chain_response_body]
+                set proxy_response_rc [catch {
+                    set proxy_response_result [::itest::_testcl_fire_event_orig HTTP_PROXY_RESPONSE]
+                } proxy_response_error proxy_response_options]
+                foreach {field value} $origin_response_state {
+                    set ::state::http::response::$field $value
+                }
+                set ::state::http::response_committed $origin_response_committed
+                if {$proxy_response_rc} {
+                    return -options $proxy_response_options $proxy_response_error
+                }
+                ::itest::semantic::event_errors_record HTTP_PROXY_RESPONSE $proxy_response_result
+            }
         }
         if {$event_name eq "CLIENT_ACCEPTED"} {
             ::itest::semantic::lb_reset_connection
