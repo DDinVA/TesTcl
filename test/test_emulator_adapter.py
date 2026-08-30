@@ -3705,6 +3705,57 @@ when HTTP_RESPONSE_RELEASE {
             ["OFFBOX::request"],
         )
 
+    def test_capture_campaign_is_chunked_and_defaults_to_tmos_17_5_commands(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        campaign = self.adapter._build_capture_campaign(root, 0, 5)
+        self.assertEqual(campaign["status"], "ok")
+        self.assertEqual(campaign["profile"], "tmos-17.5")
+        self.assertEqual(campaign["campaign"]["chunk"]["count"], 5)
+        self.assertTrue(campaign["campaign"]["chunk"]["has_more"])
+        self.assertEqual(
+            [case["id"] for case in campaign["campaign"]["cases"]],
+            [
+                "command_probe:AAA::acct_result",
+                "command_probe:AAA::acct_send",
+                "command_probe:AAA::auth_result",
+                "command_probe:AAA::auth_send",
+                "command_probe:ACCESS2::access2_proc",
+            ],
+        )
+        self.assertTrue(all(
+            case["target_status"] == "available-in-tmos-17.5"
+            for case in campaign["campaign"]["cases"]
+        ))
+        self.assertEqual(
+            campaign["campaign"]["cases"][0]["operation"], "command_probe"
+        )
+        self.assertIn(
+            "profiles", campaign["campaign"]["cases"][0]["event_requirements"]
+        )
+
+        auth = self.adapter._build_capture_campaign(
+            root, 0, 100, namespace="AUTH", runtime_status="semantic-mock"
+        )
+        self.assertEqual(auth["campaign"]["chunk"]["total"], 18)
+        self.assertTrue(all(
+            case["namespace"] == "AUTH" and case["runtime_status"] == "semantic-mock"
+            for case in auth["campaign"]["cases"]
+        ))
+
+        newer = self.adapter._build_capture_campaign(
+            root, 0, 100, target_status="introduced-after-tmos-17.5"
+        )
+        self.assertEqual(newer["campaign"]["chunk"]["total"], 10)
+        self.assertTrue(all(
+            case["target_status"] == "introduced-after-tmos-17.5"
+            for case in newer["campaign"]["cases"]
+        ))
+        self.assertTrue(all(
+            case["operation"] == "catalog_observation"
+            and "not a runnable TMOS 17.5" in case["collector_action"]
+            for case in newer["campaign"]["cases"]
+        ))
+
     def test_capability_filters_produce_bounded_implementation_slices(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         auth = self.adapter._build_capabilities(
@@ -20502,6 +20553,25 @@ when HTTP_RESPONSE {
             self.assertEqual(filtered_payload["chunk"]["total"], 18)
             self.assertEqual(filtered_payload["commands"][0]["name"], "AUTH::abort")
 
+            campaign = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 17,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_capture_campaign",
+                        "arguments": {"namespace": "AUTH", "limit": 2},
+                    },
+                }
+            )
+            campaign_payload = campaign["result"]["structuredContent"]
+            self.assertEqual(campaign_payload["campaign"]["chunk"]["total"], 18)
+            self.assertEqual(campaign_payload["campaign"]["chunk"]["count"], 2)
+            self.assertTrue(all(
+                case["target_status"] == "available-in-tmos-17.5"
+                for case in campaign_payload["campaign"]["cases"]
+            ))
+
             probed = server.handle_message(
                 {
                     "jsonrpc": "2.0",
@@ -21104,6 +21174,20 @@ when HTTP_RESPONSE {
             self.assertEqual(
                 [chunk["offset"] for chunk in catalog["chunks"]], [0, 1000]
             )
+
+            status, campaign = request_json("/v1/capture-campaign?limit=3")
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                campaign["campaign"]["chunk"]["total"],
+                campaign["campaign"]["summary"]["filtered_command_count"],
+            )
+            self.assertGreaterEqual(campaign["campaign"]["chunk"]["total"], 1400)
+            self.assertEqual(campaign["campaign"]["chunk"]["count"], 3)
+            self.assertTrue(campaign["campaign"]["chunk"]["has_more"])
+            self.assertTrue(all(
+                case["target_status"] == "available-in-tmos-17.5"
+                for case in campaign["campaign"]["cases"]
+            ))
 
             status, created = request_json("/v1/sessions", "POST", config)
             session_id = created["session_id"]

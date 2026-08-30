@@ -2329,6 +2329,8 @@ clients can discover these tools with `tools/list`:
 - `irule_pcap_replay` replays a base64-encoded classic PCAP or pcapng capture through the same
   packet and Tcl event adapters.
 - `irule_capabilities` returns a chunk of the complete 17.5 catalog.
+- `irule_capture_campaign` returns a chunk of catalog-derived external
+  reference work units, defaulting to commands available in TMOS 17.5.
 - `irule_probe` verifies live command registration for a bounded catalog chunk
   without executing catalog commands.
 - `irule_conformance` reports static catalog/runtime and packet-adapter coverage.
@@ -2464,6 +2466,27 @@ entry, use its offsets as stable work checkpoints, and dispatch only commands
 whose `target_status` is available and whose `runtime_status` is not yet
 semantic. This makes catalog ingestion a repeatable input to the semantic-mock
 implementation queue rather than a manually copied list.
+
+For independent TMOS 17.5 behavior collection, generate a catalog-derived
+reference campaign instead of copying command names by hand:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --capture-campaign --offset 0 --limit 100 > campaign-000.json
+```
+
+The default campaign includes only entries marked
+`available-in-tmos-17.5`. Each case carries its catalog namespace, runtime and
+target status, safety/purity flags, documentation, and event requirements. A
+collector uses those fields to choose valid event/profile/argument fixtures,
+then emits `{ "id": "...", "output": {...} }` records for the matching
+capture plan. Advance by `campaign.chunk.count` while `has_more` is true; use
+`--namespace`, `--runtime-status`, or `--target-status` to split work among
+collectors. The campaign is a work queue, not reference evidence, and does not
+pretend that a generated probe is valid for every command.
+
+The same view is available from `GET /v1/capture-campaign` and the
+`irule_capture_campaign` MCP tool.
 
 ## Structured packet traces
 

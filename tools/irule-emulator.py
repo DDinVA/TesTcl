@@ -2662,6 +2662,74 @@ def _build_catalog(
     }
 
 
+def _build_capture_campaign(
+    root: Path,
+    offset: int,
+    limit: int,
+    *,
+    namespace: str | None = None,
+    runtime_status: str | None = None,
+    target_status: str | None = "available-in-tmos-17.5",
+) -> dict[str, Any]:
+    """Build chunked external-reference work units from the 17.5 catalog."""
+    capabilities = _build_capabilities(
+        root,
+        offset,
+        limit,
+        namespace=namespace,
+        runtime_status=runtime_status,
+        target_status=target_status,
+    )
+    cases: list[dict[str, Any]] = []
+    for command in capabilities["commands"]:
+        kind = command["catalog_kind"]
+        runnable_target = command["target_status"] == "available-in-tmos-17.5"
+        if kind == "f5-irule" and runnable_target:
+            collector_action = (
+                "execute this command on TMOS 17.5 with a valid event, profile, "
+                "argument, and fixture state; emit the observed JSON result"
+            )
+            operation = "command_probe"
+        else:
+            collector_action = (
+                "record a syntax/catalog observation; this entry is not a "
+                "runnable TMOS 17.5 command probe"
+            )
+            operation = "catalog_observation"
+        cases.append(
+            {
+                "id": f"{operation}:{command['name']}",
+                "operation": operation,
+                "name": command["name"],
+                "namespace": command["namespace"],
+                "catalog_kind": kind,
+                "target_status": command["target_status"],
+                "runtime_status": command["runtime_status"],
+                "pure": command["pure"],
+                "unsafe": command["unsafe"],
+                "subcommands": command["subcommands"],
+                "event_requirements": command["event_requirements"],
+                "documentation": command["documentation"],
+                "collector_action": collector_action,
+            }
+        )
+    return {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "campaign": {
+            "name": "tmos-17.5-command-reference",
+            "schema_version": 1,
+            "source": capabilities["source"],
+            "filter": capabilities["filter"],
+            "summary": capabilities["summary"],
+            "chunk": capabilities["chunk"],
+            "cases": cases,
+        },
+    }
+
+
 def _build_runtime_probe(
     root: Path,
     offset: int,
@@ -25765,6 +25833,27 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_capture_campaign",
+                "title": "Build a TMOS 17.5 reference campaign",
+                "description": "Return a bounded chunk of catalog-derived external-reference work units for a BIG-IP or vLab collector.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "offset": {"type": "integer", "minimum": 0, "default": 0},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100},
+                        "namespace": {"type": "string", "minLength": 1},
+                        "runtime_status": {
+                            "type": "string",
+                            "enum": sorted(RUNTIME_STATUS_VALUES),
+                        },
+                        "target_status": {
+                            "type": "string",
+                            "enum": sorted(TARGET_STATUS_VALUES),
+                            "default": "available-in-tmos-17.5",
+                        },
+                    }
+                ),
+            },
+            {
                 "name": "irule_probe",
                 "title": "Probe runtime registrations",
                 "description": "Verify a bounded catalog chunk against the live Tcl iRule dispatcher without executing catalog commands.",
@@ -26048,6 +26137,31 @@ class McpProtocolServer:
                 if field in args
             }
             return self._tool_success(_build_catalog(self._root, chunk_size, **filters))
+
+        if name == "irule_capture_campaign":
+            unknown = sorted(
+                set(args)
+                - {"offset", "limit", "namespace", "runtime_status", "target_status"}
+            )
+            if unknown:
+                raise McpProtocolError(
+                    -32602,
+                    f"unsupported irule_capture_campaign field(s): {', '.join(unknown)}",
+                )
+            offset = args.get("offset", 0)
+            limit = args.get("limit", 100)
+            if isinstance(offset, bool) or not isinstance(offset, int):
+                raise McpProtocolError(-32602, "campaign offset must be an integer")
+            if isinstance(limit, bool) or not isinstance(limit, int):
+                raise McpProtocolError(-32602, "campaign limit must be an integer")
+            filters = {
+                field: args[field]
+                for field in ("namespace", "runtime_status", "target_status")
+                if field in args
+            }
+            return self._tool_success(
+                _build_capture_campaign(self._root, offset, limit, **filters)
+            )
 
         if name == "irule_probe":
             unknown = sorted(
@@ -28393,6 +28507,24 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                     return
                 _json_response(self, 200, payload)
                 return
+            if parsed.path == "/v1/capture-campaign":
+                query = parse_qs(parsed.query, strict_parsing=False)
+                try:
+                    offset = int(query.get("offset", ["0"])[0])
+                    limit = int(query.get("limit", ["100"])[0])
+                    filters = {
+                        field: query[field][0]
+                        for field in (
+                            "namespace", "runtime_status", "target_status"
+                        )
+                        if field in query
+                    }
+                    payload = _build_capture_campaign(root, offset, limit, **filters)
+                except (TypeError, ValueError, EmulatorInputError, OSError) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
             if parsed.path == "/v1/capabilities":
                 query = parse_qs(parsed.query, strict_parsing=False)
                 try:
@@ -28853,6 +28985,11 @@ def main(argv: list[str] | None = None) -> int:
         help="emit the complete catalog as a bounded-chunk manifest",
     )
     mode.add_argument(
+        "--capture-campaign",
+        action="store_true",
+        help="emit a bounded catalog-derived TMOS 17.5 reference campaign chunk",
+    )
+    mode.add_argument(
         "--conformance",
         action="store_true",
         help="report static catalog-to-runtime and packet-event adapter coverage",
@@ -28979,6 +29116,7 @@ def main(argv: list[str] | None = None) -> int:
             or direct_golden_path is not None
             or direct_observation_path is not None
             or args.assemble_observations
+            or args.capture_campaign
         ):
             raise EmulatorInputError(
                 "use either --scenario PATH or a direct pack path, not both"
@@ -28986,7 +29124,7 @@ def main(argv: list[str] | None = None) -> int:
         root = _find_tcl_lsp_root(args.tcl_lsp_root)
         if args.pcap and (
             args.serve or args.data_plane or args.mcp or args.capabilities or args.catalog or args.probe
-            or args.command_probe or args.behavior_pack or args.golden_vectors
+            or args.capture_campaign or args.command_probe or args.behavior_pack or args.golden_vectors
             or args.import_observations or args.assemble_observations or args.conformance
         ):
             raise EmulatorInputError(
@@ -29034,6 +29172,15 @@ def main(argv: list[str] | None = None) -> int:
                 namespace=args.namespace,
                 runtime_status=args.runtime_status,
                 target_status=args.target_status,
+            )
+        elif args.capture_campaign:
+            campaign_filters = {
+                field: getattr(args, field)
+                for field in ("namespace", "runtime_status", "target_status")
+                if getattr(args, field) is not None
+            }
+            response = _build_capture_campaign(
+                root, args.offset, args.limit, **campaign_filters
             )
         elif args.capabilities:
             response = _build_capabilities(
