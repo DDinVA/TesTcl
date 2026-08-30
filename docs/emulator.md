@@ -2475,10 +2475,11 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --capture-campaign --offset 0 --limit 100 > campaign-000.json
 ```
 
-The default campaign includes only entries marked
-`available-in-tmos-17.5`. Each case carries its catalog namespace, runtime and
-target status, safety/purity flags, documentation, and event requirements. A
-collector uses those fields to choose valid event/profile/argument fixtures,
+The default campaign includes only F5 iRule entries marked
+`available-in-tmos-17.5` (currently the target F5 command surface, not the
+broader Tcl core/tcllib catalog). Each case carries its catalog namespace,
+runtime and target status, safety/purity flags, documentation, and event
+requirements. A collector uses those fields to choose valid event/profile/argument fixtures,
 then emits `{ "id": "...", "output": {...} }` records for the matching
 capture plan. Advance by `campaign.chunk.count` while `has_more` is true; use
 `--namespace`, `--runtime-status`, or `--target-status` to split work among

@@ -2672,16 +2672,33 @@ def _build_capture_campaign(
     target_status: str | None = "available-in-tmos-17.5",
 ) -> dict[str, Any]:
     """Build chunked external-reference work units from the 17.5 catalog."""
-    capabilities = _build_capabilities(
+    if offset < 0:
+        raise EmulatorInputError("capture campaign offset must be non-negative")
+    if not 1 <= limit <= 1000:
+        raise EmulatorInputError("capture campaign limit must be between 1 and 1000")
+    catalog = _build_catalog(
         root,
-        offset,
-        limit,
+        1000,
         namespace=namespace,
         runtime_status=runtime_status,
         target_status=target_status,
     )
+    candidate_commands = [
+        command
+        for chunk in catalog["chunks"]
+        for command in chunk["commands"]
+        if command["catalog_kind"] == "f5-irule"
+    ]
+    runtime_status_counts = {status: 0 for status in sorted(RUNTIME_STATUS_VALUES)}
+    target_status_counts = {status: 0 for status in sorted(TARGET_STATUS_VALUES)}
+    for command in candidate_commands:
+        runtime_status_counts[command["runtime_status"]] += 1
+        target_status_counts[command["target_status"]] += 1
+
+    start = min(offset, len(candidate_commands))
+    end = min(start + limit, len(candidate_commands))
     cases: list[dict[str, Any]] = []
-    for command in capabilities["commands"]:
+    for command in candidate_commands[start:end]:
         kind = command["catalog_kind"]
         runnable_target = command["target_status"] == "available-in-tmos-17.5"
         if kind == "f5-irule" and runnable_target:
@@ -2721,10 +2738,23 @@ def _build_capture_campaign(
         "campaign": {
             "name": "tmos-17.5-command-reference",
             "schema_version": 1,
-            "source": capabilities["source"],
-            "filter": capabilities["filter"],
-            "summary": capabilities["summary"],
-            "chunk": capabilities["chunk"],
+            "source": catalog["source"],
+            "catalog_kind": "f5-irule",
+            "filter": catalog["filter"],
+            "summary": {
+                "candidate_count": len(candidate_commands),
+                "catalog_command_count": catalog["summary"]["command_count"],
+                "catalog_filtered_command_count": catalog["summary"]["filtered_command_count"],
+                "runtime_status_counts": runtime_status_counts,
+                "target_status_counts": target_status_counts,
+            },
+            "chunk": {
+                "offset": offset,
+                "limit": limit,
+                "count": end - start,
+                "total": len(candidate_commands),
+                "has_more": end < len(candidate_commands),
+            },
             "cases": cases,
         },
     }

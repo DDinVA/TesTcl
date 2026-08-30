@@ -21179,9 +21179,9 @@ when HTTP_RESPONSE {
             self.assertEqual(status, 200)
             self.assertEqual(
                 campaign["campaign"]["chunk"]["total"],
-                campaign["campaign"]["summary"]["filtered_command_count"],
+                campaign["campaign"]["summary"]["candidate_count"],
             )
-            self.assertGreaterEqual(campaign["campaign"]["chunk"]["total"], 1400)
+            self.assertGreaterEqual(campaign["campaign"]["chunk"]["total"], 900)
             self.assertEqual(campaign["campaign"]["chunk"]["count"], 3)
             self.assertTrue(campaign["campaign"]["chunk"]["has_more"])
             self.assertTrue(all(
