@@ -364,6 +364,81 @@ when HTTP_REQUEST { log local0. "request=[HTTP::class]" }
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+    def test_http_reject_emits_http_reject_and_closes_connection(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/reject"} { reject }
+}
+when HTTP_REJECT {
+    log local0. "reason=[HTTP::reject_reason] num=[HTTP::reject_reason as_num]"
+}
+""",
+                "requests": [
+                    {"uri": "/reject"},
+                    {"uri": "/normal"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        rejected, normal = result["results"]
+        self.assertIn("HTTP_REJECT", rejected["events_fired"])
+        self.assertTrue(rejected["http_rejected"])
+        self.assertEqual(rejected["http_reject_reason"], "iRule")
+        self.assertEqual(rejected["http_reject_reason_num"], 1)
+        self.assertTrue(any("reason=iRule num=1" in entry for entry in rejected["logs"]))
+        self.assertEqual(rejected["connection_state"], "closing")
+        self.assertNotIn("HTTP_REJECT", normal["events_fired"])
+        self.assertNotIn("http_rejected", normal)
+
+        connection_reject = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when CLIENT_ACCEPTED { reject }
+when HTTP_REJECT { log local0. should-not-fire }
+""",
+                "requests": [{"uri": "/"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertNotIn("HTTP_REJECT", connection_reject["results"][0]["events_fired"])
+        self.assertNotIn("http_rejected", connection_reject["results"][0])
+
+        packet_result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST { reject }
+when HTTP_REJECT { log local0. packet-rejected }
+""",
+                "packets": [{"protocol": "http", "uri": "/reject", "method": "GET"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        packet_http_result = packet_result["trace"][0]["http_result"]
+        self.assertIn("HTTP_REJECT", packet_http_result["events_fired"])
+        self.assertTrue(packet_http_result["http_rejected"])
+        self.assertTrue(any("packet-rejected" in entry for entry in packet_http_result["logs"]))
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "HTTP::reject_reason accepts optional as_num",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": """
+when HTTP_REQUEST { reject }
+when HTTP_REJECT { log local0. [HTTP::reject_reason invalid] }
+""",
+                    "requests": [{"uri": "/reject"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_acl_action_and_eval_model_l4_and_l7_decisions(self) -> None:
         action_session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -2152,6 +2227,10 @@ when HTTP_REQUEST {
         self.assertEqual(
             packet_adapters["HTTP_CLASS_FAILED"],
             "supplied HTTP class selection failure",
+        )
+        self.assertEqual(
+            packet_adapters["HTTP_REJECT"],
+            "rule-caused HTTP abort",
         )
         for event_name in (
             "FLOW_INIT",

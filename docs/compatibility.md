@@ -261,6 +261,11 @@ High-level requests and structured HTTP packets may also carry a bounded
 the matching `HTTP_CLASS_SELECTED` or `HTTP_CLASS_FAILED` event fires before
 `HTTP_REQUEST`. This supplies event-visible selector state, not a class
 database or the deprecated classification engine.
+Rule-caused `reject` calls in `HTTP_REQUEST` fire `HTTP_REJECT`, expose the
+deterministic `HTTP::reject_reason` values `iRule` and `1`, mark the request as
+rejected, and close the emulated client connection. The post-abort model is
+intentionally bounded to the reason accessor; malformed-wire and other
+filter-generated reject causes are not simulated.
 The TMOS 17.5 HTML surface models `HTML::comment`, `HTML::disable`,
 `HTML::enable`, `HTML::encode`, and `HTML::tag`. With the HTML profile and
 `HTML::enable` in `HTTP_RESPONSE`, the adapter scans the uncompressed response

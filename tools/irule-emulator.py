@@ -5936,6 +5936,26 @@ def _install_runtime_shims(session: Any) -> None:
                 }
             }
         }
+        if {[::tmm::_orig_info commands ::itest::cmd::_testcl_cmd_reject_orig] eq ""} {
+            ::tmm::_orig_rename ::itest::cmd::cmd_reject ::itest::cmd::_testcl_cmd_reject_orig
+            proc ::itest::cmd::cmd_reject {args} {
+                if {[llength $args] != 0} {
+                    error "reject takes no arguments"
+                }
+                set rc [catch {
+                    ::itest::cmd::_testcl_cmd_reject_orig
+                } result options]
+                if {$rc} {
+                    return -options $options $result
+                }
+                if {[string match "HTTP_*" $::itest::current_event]} {
+                    set ::state::http::rejected 1
+                    set ::state::http::reject_reason "iRule"
+                    set ::state::http::reject_reason_num 1
+                }
+                return $result
+            }
+        }
         namespace eval ::itest::semantic {}
         proc ::itest::semantic::http_control_reset {} {
             set ::state::http::disabled 0
@@ -5954,8 +5974,14 @@ def _install_runtime_shims(session: Any) -> None:
             set ::state::http::class_asm $asm
             set ::state::http::class_wa $wa
         }
+        proc ::itest::semantic::http_reject_reset {} {
+            set ::state::http::rejected 0
+            set ::state::http::reject_reason ""
+            set ::state::http::reject_reason_num 0
+        }
         ::itest::semantic::http_control_reset
         ::itest::semantic::http_class_reset
+        ::itest::semantic::http_reject_reset
         """
     )
     _install_python_digest_helper(session)
@@ -9259,6 +9285,7 @@ PACKET_EVENT_ADAPTERS = {
     "HTTP_CLASS_SELECTED": "supplied HTTP class selection outcome",
     "HTTP_CLASS_FAILED": "supplied HTTP class selection failure",
     "HTTP_DISABLED": "HTTP::disable control outcome",
+    "HTTP_REJECT": "rule-caused HTTP abort",
     "HTTP_REQUEST_DATA": "collected HTTP request body",
     "HTTP_REQUEST_SEND": "HTTP request serverside send",
     "HTTP_REQUEST_RELEASE": "HTTP request transaction release phase",
@@ -14533,6 +14560,7 @@ class EmulatorSession:
             while True:
                 session.eval_tcl("::itest::semantic::http_control_reset")
                 session.eval_tcl("::itest::semantic::http_class_reset")
+                session.eval_tcl("::itest::semantic::http_reject_reset")
                 if http_class is not None:
                     _prepare_http_class_request_state(session, kwargs)
                     class_decisions_before = len(session.get_decisions())
@@ -14678,6 +14706,29 @@ class EmulatorSession:
                         == "1"
                     )
 
+                if session.eval_tcl("set ::state::http::rejected") == "1":
+                    decisions_before_reject = len(session.get_decisions())
+                    logs_before_reject = len(session.get_logs())
+                    reject_event = self._fire_event_on_worker(
+                        session, "HTTP_REJECT", {}
+                    )
+                    result["events_fired"].extend(
+                        reject_event.get("events_fired", [])
+                    )
+                    result["decisions"].extend(
+                        session.get_decisions()[decisions_before_reject:]
+                    )
+                    result["logs"].extend(
+                        session.get_logs()[logs_before_reject:]
+                    )
+                    result["http_rejected"] = True
+                    result["http_reject_reason"] = session.eval_tcl(
+                        "set ::state::http::reject_reason"
+                    )
+                    result["http_reject_reason_num"] = int(
+                        session.eval_tcl("set ::state::http::reject_reason_num")
+                    )
+
                 result["decisions"] = merge_missing_history(
                     class_decision_history, result.get("decisions", [])
                 )
@@ -14719,7 +14770,11 @@ class EmulatorSession:
                         "select": oneconnect.get("select", "none") if oneconnect_enabled else "none",
                         "label": oneconnect.get("label", "") if oneconnect_enabled else "",
                     }
-                    http_close_requested = http_close or http2_disconnected
+                    http_close_requested = (
+                        http_close
+                        or http2_disconnected
+                        or bool(result.get("http_rejected"))
+                    )
                     break
                 if retry_count >= MAX_HTTP_RETRIES:
                     retry_exhausted = True
@@ -14763,6 +14818,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::prepare_http_release")
             session.eval_tcl("::itest::semantic::prepare_http_close")
             session.eval_tcl("::itest::semantic::http_control_reset")
+            session.eval_tcl("::itest::semantic::http_reject_reset")
         if http_close_requested:
             events_before_close = _split_tcl_list(
                 session.eval_tcl("::itest::get_fired_events")
@@ -14860,6 +14916,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::compression_reset_connection")
             session.eval_tcl("::itest::semantic::httplog_reset_connection")
             session.eval_tcl("::itest::semantic::http_control_reset")
+            session.eval_tcl("::itest::semantic::http_reject_reset")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::crypto_reset_connection")
             session.eval_tcl("::itest::semantic::bwc_reset_connection")

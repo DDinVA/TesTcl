@@ -15762,6 +15762,15 @@ namespace eval ::itest::semantic {
     }
 
     proc http_reject_reason {args} {
+        if {[llength $args] > 1 || ([llength $args] == 1 && [lindex $args 0] ne "as_num")} {
+            error "HTTP::reject_reason accepts optional as_num"
+        }
+        if {[llength $args] == 1} {
+            if {[info exists ::state::http::reject_reason_num]} {
+                return $::state::http::reject_reason_num
+            }
+            return 0
+        }
         if {[info exists ::state::http::reject_reason]} {
             return $::state::http::reject_reason
         }

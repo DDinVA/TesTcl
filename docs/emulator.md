@@ -427,6 +427,13 @@ or `failed`; `name`, `asm`, and `wa` seed the values visible to
 `HTTP_CLASS_FAILED` event runs before `HTTP_REQUEST`. This is a bounded event
 input, not a class database or the deprecated HTTP classification engine.
 
+When a rule calls `reject` during `HTTP_REQUEST`, the adapter fires
+`HTTP_REJECT`, exposes deterministic `HTTP::reject_reason` values (`iRule` and
+numeric value `1`), marks the result as rejected, and closes the emulated
+client connection. The bounded post-abort state retains the reject reason for
+the `HTTP_REJECT` handler; malformed-wire and other filter-generated reject
+causes are outside this slice.
+
 The HTTP compression slice models `COMPRESS::buffer_size`,
 `COMPRESS::disable`, `COMPRESS::enable`, `COMPRESS::gzip`,
 `COMPRESS::method`, `COMPRESS::nodelay`, `DECOMPRESS::disable`, and
