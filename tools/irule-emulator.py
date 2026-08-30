@@ -9430,6 +9430,9 @@ PACKET_EVENT_ADAPTERS = {
     "CLIENTSSL_CLIENTCERT": "TLS client certificate",
     "CLIENTSSL_HANDSHAKE": "TLS client handshake",
     "CLIENTSSL_DATA": "TLS client data",
+    "CLIENTSSL_PASSTHROUGH": "TLS client plaintext passthrough",
+    "CLIENTSSL_SERVERHELLO_SEND": "TLS client-side server hello send",
+    "SERVERSSL_CLIENTHELLO_SEND": "TLS server-side client hello send",
     "SERVERSSL_SERVERHELLO": "TLS server hello",
     "SERVERSSL_SERVERCERT": "TLS server certificate",
     "SERVERSSL_HANDSHAKE": "TLS server handshake",
@@ -13546,10 +13549,13 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                         "client_cert",
                         "handshake",
                         "client_data",
+                        "passthrough",
+                        "server_hello_send",
                         "server_hello",
                         "server_cert",
                         "server_handshake",
                         "server_data",
+                        "client_hello_send",
                     }:
                         raise EmulatorInputError(f"unsupported TLS packet type: {packet_type}")
                 elif protocol == "websocket":
@@ -13863,8 +13869,21 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
         if protocol == "http2" and "_http2_payload" not in normalised:
             raise EmulatorInputError(f"packet {index} HTTP/2 packets require payload_hex")
         if protocol == "tls":
-            client_types = {"client_hello", "client_cert", "handshake", "client_data"}
-            server_types = {"server_hello", "server_cert", "server_handshake", "server_data"}
+            client_types = {
+                "client_hello",
+                "client_cert",
+                "handshake",
+                "client_data",
+                "passthrough",
+                "server_hello_send",
+            }
+            server_types = {
+                "server_hello",
+                "server_cert",
+                "server_handshake",
+                "server_data",
+                "client_hello_send",
+            }
             valid_types = client_types if direction == "client_to_server" else server_types
             if normalised["type"] not in valid_types:
                 side = "client" if direction == "client_to_server" else "server"
@@ -16663,8 +16682,11 @@ class EmulatorSession:
             "client_cert": "CLIENTSSL_CLIENTCERT",
             "handshake": "CLIENTSSL_HANDSHAKE",
             "client_data": "CLIENTSSL_DATA",
+            "passthrough": "CLIENTSSL_PASSTHROUGH",
+            "server_hello_send": "CLIENTSSL_SERVERHELLO_SEND",
         }
         server_events = {
+            "client_hello_send": "SERVERSSL_CLIENTHELLO_SEND",
             "server_hello": "SERVERSSL_SERVERHELLO",
             "server_cert": "SERVERSSL_SERVERCERT",
             "server_handshake": "SERVERSSL_HANDSHAKE",

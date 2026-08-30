@@ -8575,6 +8575,79 @@ when SERVERSSL_HANDSHAKE {
             },
         )
 
+    def test_tls_packet_adapter_covers_ssl_send_and_passthrough_events(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "CLIENTSSL", "SERVERSSL"],
+                "irule": (
+                    "when CLIENTSSL_PASSTHROUGH { log local0. passthrough }\n"
+                    "when CLIENTSSL_SERVERHELLO_SEND { log local0. client-serverhello }\n"
+                    "when SERVERSSL_CLIENTHELLO_SEND { log local0. server-clienthello }"
+                ),
+                "packets": [
+                    {
+                        "protocol": "tls",
+                        "direction": "client_to_server",
+                        "type": "passthrough",
+                    },
+                    {
+                        "protocol": "tls",
+                        "direction": "client_to_server",
+                        "type": "server_hello_send",
+                    },
+                    {
+                        "protocol": "tls",
+                        "direction": "server_to_client",
+                        "type": "client_hello_send",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        packet_events = [
+            event["event"]
+            for packet in result["trace"]
+            for event in packet["events"]
+            if event["event"] in {
+                "CLIENTSSL_PASSTHROUGH",
+                "CLIENTSSL_SERVERHELLO_SEND",
+                "SERVERSSL_CLIENTHELLO_SEND",
+            }
+        ]
+        self.assertEqual(
+            packet_events,
+            [
+                "CLIENTSSL_PASSTHROUGH",
+                "CLIENTSSL_SERVERHELLO_SEND",
+                "SERVERSSL_CLIENTHELLO_SEND",
+            ],
+        )
+        self.assertTrue(
+            any(
+                "passthrough" in log
+                for packet in result["trace"]
+                for event in packet["events"]
+                for log in event["logs"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "client-serverhello" in log
+                for packet in result["trace"]
+                for event in packet["events"]
+                for log in event["logs"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "server-clienthello" in log
+                for packet in result["trace"]
+                for event in packet["events"]
+                for log in event["logs"]
+            )
+        )
+
     def test_ssl_remaining_175_commands_and_plaintext_collection(self) -> None:
         result = self.adapter.run_scenario(
             {

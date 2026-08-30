@@ -2211,6 +2211,14 @@ to the complete X.509 inspection surface, including `X509::cert_fields`,
 handles and PEM structure but does not validate certificate chains or perform
 cryptographic verification.
 
+The packet adapter also covers the target-valid TLS lifecycle events
+`CLIENTSSL_PASSTHROUGH`, `CLIENTSSL_SERVERHELLO_SEND`, and
+`SERVERSSL_CLIENTHELLO_SEND`. Use `type: "passthrough"` on a client-side TLS
+packet for the first event, `type: "server_hello_send"` for the second, or
+`type: "client_hello_send"` on a server-side TLS packet for the third. These
+are event fixtures only: they do not negotiate TLS, synthesize handshake
+records, or change the SSL profile.
+
 HTTP/2 metadata can be attached to a structured HTTP transaction with an
 `http2` object. This drives the reusable `tcl-lsp` pseudo-header and stream
 handlers plus semantic `HTTP2::active`, `HTTP2::version`,

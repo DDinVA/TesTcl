@@ -708,6 +708,10 @@ renegotiation and secure-renegotiation policy/inspection, non-SSL allowance,
 dynamic record sizing, maximum record size, profile selection, session
 invalidation, and unclean-shutdown policy as deterministic connection state.
 It does not emit cryptographic renegotiation or switch a live TLS profile.
+Structured TLS packet traces also dispatch the target-valid
+`CLIENTSSL_PASSTHROUGH`, `CLIENTSSL_SERVERHELLO_SEND`, and
+`SERVERSSL_CLIENTHELLO_SEND` lifecycle events. They are deterministic event
+fixtures and do not implement TLS negotiation or encrypted-record processing.
 HTTP/2 structured transaction metadata supports pseudo-header lookup and
 mutation, stream ID and priority state, active/version/request/concurrency
 queries, enable/disable, disconnect decisions, and deterministic
