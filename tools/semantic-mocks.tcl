@@ -490,12 +490,14 @@ namespace eval ::itest::semantic {
     variable access_current_sid ""
     variable access_auto_sid ""
     variable access_auto_policy_agent_fired 0
+    variable access_auto_saml_sid ""
     variable access_next_sid 0
     variable access_ephemeral_auth_password temporary-password
     variable access_ephemeral [dict create]
     variable access_ephemeral_next 0
     variable access_oauth_next 0
     variable access_user_keys [dict create]
+    variable access_default_saml [dict create authn "" assertion "" slo_req "" slo_resp ""]
     variable access_saml [dict create authn "" assertion "" slo_req "" slo_resp ""]
 
     # FLOW:: is represented by deterministic synthetic handles.  The base
@@ -14138,7 +14140,7 @@ namespace eval ::itest::semantic {
         return $result
     }
 
-    proc access_configure {raw acl_lookup acl_matched session_data perflow} {
+    proc access_configure {raw acl_lookup acl_matched session_data perflow {saml {}}} {
         variable access_default_enabled
         variable access_enabled
         variable access_default_acl_result
@@ -14157,6 +14159,8 @@ namespace eval ::itest::semantic {
         variable access_flow_id
         variable access_ephemeral_auth_password
         variable access_auto_interest
+        variable access_default_saml
+        variable access_saml
         variable access_default_session_data
         variable access_session_data
         variable access_default_perflow
@@ -14171,6 +14175,12 @@ namespace eval ::itest::semantic {
         if {$auto_interest ni {0 1}} { error "ACCESS auto-interest state must be boolean" }
         if {[llength $session_data] % 2 || [llength $perflow] % 2} {
             error "ACCESS data requires key/value pairs"
+        }
+        if {[llength $saml] % 2} { error "ACCESS SAML data requires key/value pairs" }
+        foreach {field value} $saml {
+            if {$field ni {authn assertion slo_req slo_resp}} {
+                error "ACCESS SAML field $field is invalid"
+            }
         }
         set access_default_enabled $enabled
         set access_enabled $enabled
@@ -14194,6 +14204,9 @@ namespace eval ::itest::semantic {
         set access_session_data $access_default_session_data
         set access_default_perflow [dict create {*}$perflow]
         set access_perflow $access_default_perflow
+        set access_default_saml [dict create authn "" assertion "" slo_req "" slo_resp ""]
+        foreach {field value} $saml { dict set access_default_saml $field $value }
+        set access_saml $access_default_saml
     }
 
     proc access2_prepare_event {} {
@@ -14325,11 +14338,13 @@ namespace eval ::itest::semantic {
         variable access_current_sid
         variable access_auto_sid
         variable access_auto_policy_agent_fired
+        variable access_auto_saml_sid
         variable access_next_sid
         variable access_ephemeral
         variable access_ephemeral_next
         variable access_oauth_next
         variable access_user_keys
+        variable access_default_saml
         variable access_saml
         set access_enabled $access_default_enabled
         set access_acl_result $access_default_acl_result
@@ -14348,12 +14363,13 @@ namespace eval ::itest::semantic {
         set access_current_sid ""
         set access_auto_sid ""
         set access_auto_policy_agent_fired 0
+        set access_auto_saml_sid ""
         set access_next_sid 0
         set access_ephemeral [dict create]
         set access_ephemeral_next 0
         set access_oauth_next 0
         set access_user_keys [dict create]
-        set access_saml [dict create authn "" assertion "" slo_req "" slo_resp ""]
+        set access_saml $access_default_saml
     }
 
     proc access_prepare_request {args} {
@@ -14471,6 +14487,28 @@ namespace eval ::itest::semantic {
         return $access_current_sid
     }
 
+    proc access_auto_saml_events {} {
+        variable access_auto_saml_sid
+        variable access_current_sid
+        variable access_sessions
+        variable access_saml
+        if {$access_auto_saml_sid eq $access_current_sid || $access_current_sid eq "" ||
+            ![dict exists $access_sessions $access_current_sid]} {
+            return ""
+        }
+        set access_auto_saml_sid $access_current_sid
+        foreach {field event_name} {
+            authn ACCESS_SAML_AUTHN
+            assertion ACCESS_SAML_ASSERTION
+        } {
+            if {[dict get $access_saml $field] ne "" &&
+                [lsearch -exact [::itest::registered_events] $event_name] >= 0} {
+                _access_event $event_name $access_current_sid
+            }
+        }
+        return $access_current_sid
+    }
+
     proc access_auto_complete_policy {} {
         variable access_request_enabled
         variable access_current_sid
@@ -14491,6 +14529,9 @@ namespace eval ::itest::semantic {
         }
         access_policy evaluate -sid $access_current_sid -profile /Common/emulator
         set outcome $access_policy_result
+        if {$outcome eq "allow"} {
+            access_auto_saml_events
+        }
         if {$outcome eq "deny" && !$::state::http::response_committed} {
             set ::state::http::response::status 403
             set ::state::http::response::reason Forbidden

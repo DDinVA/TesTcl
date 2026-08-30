@@ -5253,6 +5253,9 @@ when HTTP_RESPONSE_DATA {
             ({"acl_lookup": "not-a-list"}, "access.acl_lookup must be an array of strings"),
             ({"session_data": ["key", "value"]}, "access.session_data must be an object"),
             ({"ephemeral_auth_password": ""}, "access.ephemeral_auth_password must not be empty"),
+            ({"saml": "not-an-object"}, "access.saml must be an object"),
+            ({"saml": {"unknown": "value"}}, r"access.saml unsupported field\(s\): unknown"),
+            ({"saml": {"authn": 7}}, "access.saml.authn must be a string without NUL"),
             ({1: "invalid-field-name"}, "access field names must be strings"),
         )
         for access, message in invalid_cases:
@@ -5393,6 +5396,98 @@ when HTTP_RESPONSE_DATA {
         self.assertEqual(sum("policy-complete" in log for log in first["logs"]), 1)
         self.assertEqual(sum("per-request" in log for log in first["logs"]), 1)
         self.assertTrue(any("per-request" in log for log in second["logs"]))
+
+    def test_http_access_saml_fixtures_emit_authentication_events(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ACCESS"],
+                "access": {
+                    "saml": {
+                        "authn": "<AuthnRequest>mock</AuthnRequest>",
+                        "assertion": "<Assertion>mock</Assertion>",
+                    }
+                },
+                "irule": (
+                    "when ACCESS_SAML_AUTHN { log local0. \"authn=[ACCESS::saml authn]\" }\n"
+                    "when ACCESS_SAML_ASSERTION { log local0. \"assertion=[ACCESS::saml assertion]\" }"
+                ),
+                "request": {"uri": "/sso"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        self.assertEqual(
+            [event for event in item["events_fired"] if event.startswith("ACCESS_SAML_")],
+            ["ACCESS_SAML_AUTHN", "ACCESS_SAML_ASSERTION"],
+        )
+        self.assertTrue(any("authn=<AuthnRequest>mock</AuthnRequest>" in log for log in item["logs"]))
+        self.assertTrue(any("assertion=<Assertion>mock</Assertion>" in log for log in item["logs"]))
+        self.assertEqual(
+            item["semantic"]["access"]["saml"],
+            {
+                "authn": "<AuthnRequest>mock</AuthnRequest>",
+                "assertion": "<Assertion>mock</Assertion>",
+                "slo_req": "",
+                "slo_resp": "",
+            },
+        )
+
+    def test_access_saml_slo_fixtures_are_available_to_direct_events(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["ACCESS"],
+                "access": {
+                    "saml": {
+                        "slo_req": "<LogoutRequest>fixture</LogoutRequest>",
+                        "slo_resp": "<LogoutResponse>fixture</LogoutResponse>",
+                    }
+                },
+                "irule": (
+                    "when ACCESS_SAML_SLO_REQ { log local0. \"req=[ACCESS::saml slo_req]\" }\n"
+                    "when ACCESS_SAML_SLO_RESP { log local0. \"resp=[ACCESS::saml slo_resp]\" }"
+                ),
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            request_event = session.fire_event("ACCESS_SAML_SLO_REQ")
+            response_event = session.fire_event("ACCESS_SAML_SLO_RESP")
+            self.assertTrue(request_event["fired"])
+            self.assertTrue(response_event["fired"])
+            self.assertTrue(any("req=<LogoutRequest>fixture</LogoutRequest>" in log for log in request_event["logs"]))
+            self.assertTrue(any("resp=<LogoutResponse>fixture</LogoutResponse>" in log for log in response_event["logs"]))
+        finally:
+            session.close()
+
+    def test_http_access_saml_events_repeat_for_a_new_session_on_one_connection(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ACCESS"],
+                "access": {"saml": {"authn": "authn-fixture"}},
+                "irule": (
+                    "when HTTP_REQUEST { "
+                    "if {![info exists ::request_count]} { set ::request_count 0 }; "
+                    "incr ::request_count; "
+                    "if {$::request_count == 2} { ACCESS::session remove; ACCESS::session create -flow }"
+                    " }\n"
+                    "when ACCESS_SAML_AUTHN { log local0. \"authn=[ACCESS::saml authn]\" }"
+                ),
+                "requests": [{"uri": "/one"}, {"uri": "/two"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(
+            sum(item["events_fired"].count("ACCESS_SAML_AUTHN") for item in result["results"]),
+            2,
+        )
+        self.assertEqual(
+            [item["semantic"]["access"]["current_sid"] for item in result["results"]],
+            ["sid-1", "sid-2"],
+        )
 
     def test_semantic_overlay_implements_profiles_auth_uri_stats_and_hsl(self) -> None:
         result = self.adapter.run_scenario(

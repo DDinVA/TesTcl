@@ -957,7 +957,11 @@ the deterministic ephemeral-auth password prefix:
     "acl_result": "Allow",
     "policy_result": "allow",
     "session_data": {"session.logon.last.username": "alice"},
-    "perflow": {"perflow.custom": "example"}
+    "perflow": {"perflow.custom": "example"},
+    "saml": {
+      "authn": "<AuthnRequest>fixture</AuthnRequest>",
+      "assertion": "<Assertion>fixture</Assertion>"
+    }
   },
   "irule": "when CLIENT_ACCEPTED { set ::sid [ACCESS::session create -flow] }\nwhen HTTP_REQUEST { ACCESS::policy evaluate -sid $::sid -profile /Common/access; log local0. [ACCESS::policy result -sid $::sid] }",
   "request": {"uri": "/protected"}
@@ -987,6 +991,10 @@ Policy `deny` and ACL `Reject` produce a deterministic 403 response unless an
 iRule handler commits a different response with `ACCESS::respond`; policy
 `redirect` produces a deterministic 302. Policy completion is once per
 session, while ACL evaluation is per request, including keep-alive requests.
+Configured `access.saml.authn` and `access.saml.assertion` payloads trigger
+their corresponding events after an allowed policy completes. The
+`slo_req`/`slo_resp` fixture values are available through explicit
+`ACCESS_SAML_SLO_REQ`/`ACCESS_SAML_SLO_RESP` event injection.
 
 `ACCESS::disable`, `ACCESS::enable`, `ACCESS::respond`, ACL evaluation,
 per-flow mutation, SAML getters/setters, OAuth signing placeholders, and

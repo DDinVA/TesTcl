@@ -3288,6 +3288,9 @@ def _configure_access(
     perflow_data: list[str] = []
     for key, value in access["perflow"].items():
         perflow_data.extend((key, value))
+    saml_data: list[str] = []
+    for key, value in access["saml"].items():
+        saml_data.extend((key, value))
     session.eval_tcl(
         "::itest::semantic::access_configure "
         + _tcl_list(scalar_values)
@@ -3299,6 +3302,8 @@ def _configure_access(
         + _tcl_list(session_data)
         + " "
         + _tcl_list(perflow_data)
+        + " "
+        + _tcl_list(saml_data)
     )
 
 
@@ -7857,7 +7862,7 @@ def _normalise_access(raw: Any) -> dict[str, Any]:
     allowed = {
         "enabled", "acl_result", "acl_lookup", "acl_matched", "policy_result",
         "policy_agent_id", "policy_uri", "flow_id", "session_data", "perflow",
-        "ephemeral_auth_password",
+        "ephemeral_auth_password", "saml",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -7907,6 +7912,12 @@ def _normalise_access(raw: Any) -> dict[str, Any]:
     ephemeral_password = string_field("ephemeral_auth_password", "temporary-password")
     if not ephemeral_password:
         raise EmulatorInputError("access.ephemeral_auth_password must not be empty")
+    saml = string_map("saml")
+    unknown_saml = sorted(set(saml) - {"authn", "assertion", "slo_req", "slo_resp"})
+    if unknown_saml:
+        raise EmulatorInputError(
+            "access.saml unsupported field(s): " + ", ".join(unknown_saml)
+        )
     return {
         "enabled": enabled,
         "acl_result": acl_result,
@@ -7919,6 +7930,10 @@ def _normalise_access(raw: Any) -> dict[str, Any]:
         "session_data": string_map("session_data"),
         "perflow": string_map("perflow"),
         "ephemeral_auth_password": ephemeral_password,
+        "saml": {
+            field: saml.get(field, "")
+            for field in ("authn", "assertion", "slo_req", "slo_resp")
+        },
     }
 
 
