@@ -2014,6 +2014,7 @@ when HTTP_REQUEST {
             "HTML_COMMENT_MATCHED",
             "REWRITE_REQUEST_DONE",
             "REWRITE_RESPONSE_DONE",
+            "STREAM_MATCHED",
             "SA_PICKED",
             "SERVER_CONNECTED",
             "WS_REQUEST",
@@ -13371,6 +13372,68 @@ when HTTP_REQUEST {
         second_logs = result["results"][1]["logs"]
         self.assertTrue(any("/first utf-8 1" in log for log in first_logs))
         self.assertTrue(any("/second ascii 0" in log for log in second_logs))
+
+    def test_stream_profile_matches_tcp_payload_and_handles_split_matches(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "STREAM"],
+                "irule": """
+when CLIENT_ACCEPTED { STREAM::expression @secret@redacted@ }
+when STREAM_MATCHED {
+    log local0. "match=[STREAM::match]"
+    STREAM::replace redacted
+}
+""",
+                "packets": [{"protocol": "tcp", "payload": "prefix secret suffix"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        entry = result["trace"][0]
+        self.assertIn("STREAM_MATCHED", [event["event"] for event in entry["events"]])
+        self.assertEqual(entry["stream_match"], "secret")
+        self.assertEqual(entry["payload_after"], "prefix redacted suffix")
+        stream_event = next(
+            event for event in entry["events"] if event["event"] == "STREAM_MATCHED"
+        )
+        self.assertEqual(stream_event["state"]["stream"]["match"], "secret")
+        self.assertEqual(stream_event["state"]["stream"]["replacement"], "redacted")
+
+        split = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "STREAM"],
+                "irule": """
+when CLIENT_ACCEPTED { STREAM::expression @secret@redacted@ }
+when STREAM_MATCHED { STREAM::replace redacted }
+""",
+                "packets": [
+                    {"protocol": "tcp", "payload": "sec"},
+                    {"protocol": "tcp", "payload": "ret"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            [event["event"] for event in split["trace"][0]["events"]],
+            ["RULE_INIT", "CLIENT_ACCEPTED"],
+        )
+        self.assertEqual(split["trace"][1]["stream_match"], "secret")
+        self.assertTrue(split["trace"][1]["stream_replacement_deferred"])
+
+        disabled = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "STREAM"],
+                "irule": """
+when CLIENT_ACCEPTED { STREAM::expression @secret@redacted@; STREAM::disable }
+when STREAM_MATCHED { log local0. should-not-run }
+""",
+                "packets": [{"protocol": "tcp", "payload": "secret"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertNotIn(
+            "STREAM_MATCHED",
+            [event["event"] for event in disabled["trace"][0]["events"]],
+        )
 
     def test_stream_max_matchsize_rejects_non_positive_values(self) -> None:
         for value in ("0", "-1"):

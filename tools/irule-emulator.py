@@ -8768,6 +8768,8 @@ STARTTLS_COMMAND_MAX_BYTES = 64 * 1024
 STARTTLS_PAYLOAD_MAX_BYTES = 2 * 1024 * 1024
 PROTOCOL_INSPECTION_ID_MAX_BYTES = 4 * 1024
 PROTOCOL_INSPECTION_IDS_MAX_BYTES = 64 * 1024
+STREAM_EXPRESSION_MAX_BYTES = 64 * 1024
+STREAM_MAX_EXPRESSION_PAIRS = 128
 CATEGORY_RESULT_MAX_ITEMS = 128
 CATEGORY_RESULT_MAX_BYTES = 64 * 1024
 PACKET_PROTOCOLS = {"event", "tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "tds", "wire"}
@@ -9137,6 +9139,7 @@ PACKET_EVENT_ADAPTERS = {
     "HTML_COMMENT_MATCHED": "HTML response comment matching",
     "REWRITE_REQUEST_DONE": "HTTP request rewrite completion",
     "REWRITE_RESPONSE_DONE": "HTTP response rewrite completion",
+    "STREAM_MATCHED": "TCP stream expression match",
     "PERSIST_DOWN": "scenario-supplied persisted member marked down",
     "LB_SELECTED": "HTTP pool-member selection",
     "LB_QUEUED": "scenario-supplied connection-limit queue",
@@ -9236,6 +9239,46 @@ def _decode_wire_text(payload: bytes) -> str:
     # Tcl strings cannot contain embedded NUL bytes. Preserve human-readable
     # captures while replacing binary NULs at the wire-to-Tcl boundary.
     return payload.decode("utf-8", errors="replace").replace("\x00", "\ufffd")
+
+
+def _stream_expression_pairs(expression: str) -> list[tuple[str, str]]:
+    """Parse the bounded ``@match@replacement@`` stream-profile form."""
+    if not expression or len(expression.encode("utf-8")) > STREAM_EXPRESSION_MAX_BYTES:
+        return []
+    delimiter = expression[0]
+    if delimiter.isalnum() or delimiter.isspace():
+        return []
+    pairs: list[tuple[str, str]] = []
+    cursor = 1
+    while cursor < len(expression):
+        match_end = expression.find(delimiter, cursor)
+        if match_end < 0:
+            return []
+        replacement_end = expression.find(delimiter, match_end + 1)
+        if replacement_end < 0:
+            return []
+        match = expression[cursor:match_end]
+        replacement = expression[match_end + 1 : replacement_end]
+        if match:
+            pairs.append((match, replacement))
+            if len(pairs) > STREAM_MAX_EXPRESSION_PAIRS:
+                return []
+        cursor = replacement_end + 1
+        while cursor < len(expression) and expression[cursor].isspace():
+            cursor += 1
+        if cursor < len(expression):
+            if expression[cursor] != delimiter:
+                return []
+            cursor += 1
+    return pairs
+
+
+def _stream_value_bytes(value: str, encoding: str) -> bytes | None:
+    codec = "ascii" if encoding == "ascii" else "utf-8"
+    try:
+        return value.encode(codec)
+    except UnicodeEncodeError:
+        return None
 
 
 def _http_header_value(headers: dict[str, str], name: str) -> str:
@@ -13977,6 +14020,7 @@ class EmulatorSession:
         self._server_connection_id = 0
         self._server_connection_detached = False
         self._tcp_buffers = {"client": "", "server": ""}
+        self._stream_buffers = {"client": b"", "server": b""}
         self._sctp_buffers = {"client": b"", "server": b""}
         self._ssl_buffers = {"client": b"", "server": b""}
         self._packet_streams: dict[tuple[Any, ...], _TcpStream] = {}
@@ -16130,6 +16174,7 @@ class EmulatorSession:
         session.eval_tcl("::itest::semantic::compression_reset_connection")
         session.eval_tcl("::itest::semantic::httplog_reset_connection")
         self._packet_streams.clear()
+        self._stream_buffers = {"client": b"", "server": b""}
         self._http2_decoder = None
         self._http2_streams.clear()
         self._http2_tcp_active = False
@@ -16156,6 +16201,85 @@ class EmulatorSession:
             destination.get("address", ""),
             destination.get("port", 0),
         )
+
+    def _maybe_fire_stream_match(
+        self, session: Any, packet: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, bytes | None, bytes | None]:
+        """Run one bounded stream-profile match against a TCP packet."""
+        if not any(str(profile).upper() == "STREAM" for profile in self._profiles):
+            return None, None, None
+        expression = session.eval_tcl("set ::state::stream::expression")
+        pairs = _stream_expression_pairs(expression)
+        if not pairs or session.eval_tcl("set ::state::stream::enabled") != "1":
+            return None, None, None
+        encoding = session.eval_tcl("set ::state::stream::encoding")
+        compiled_pairs: list[tuple[bytes, bytes]] = []
+        for match, replacement in pairs:
+            match_bytes = _stream_value_bytes(match, encoding)
+            replacement_bytes = _stream_value_bytes(replacement, encoding)
+            if not match_bytes or replacement_bytes is None:
+                continue
+            compiled_pairs.append((match_bytes, replacement_bytes))
+        if not compiled_pairs:
+            return None, None, None
+
+        side = "client" if packet["direction"] == "client_to_server" else "server"
+        wire_payload = packet.get("_wire_payload")
+        if not isinstance(wire_payload, (bytes, bytearray)):
+            wire_payload = str(packet.get("payload", "")).encode("utf-8")
+        payload = bytes(wire_payload)
+        if not payload:
+            return None, None, None
+        if len(payload) > STREAM_MAX_BYTES:
+            raise EmulatorInputError(
+                f"TCP stream payload exceeds {STREAM_MAX_BYTES // (1024 * 1024)} MiB"
+            )
+        try:
+            max_matchsize = int(session.eval_tcl("set ::state::stream::max_matchsize"))
+        except (TypeError, ValueError):
+            max_matchsize = 4096
+        max_matchsize = max(1, min(max_matchsize, STREAM_MAX_BYTES))
+        retain = max_matchsize - 1
+        prefix = self._stream_buffers[side][-retain:] if retain else b""
+        candidate = prefix + payload
+        selected: tuple[int, bytes, bytes] | None = None
+        for match_bytes, replacement_bytes in compiled_pairs:
+            if len(match_bytes) > max_matchsize:
+                continue
+            position = candidate.find(match_bytes)
+            if position >= 0 and (selected is None or position < selected[0]):
+                selected = (position, match_bytes, replacement_bytes)
+        if selected is None:
+            self._stream_buffers[side] = candidate[-retain:] if retain else b""
+            return None, None, None
+
+        position, match_bytes, _ = selected
+        self._stream_buffers[side] = candidate[
+            position + len(match_bytes) :
+        ][-retain:] if retain else b""
+        match_text = _decode_wire_text(match_bytes)
+        event_state = self._packet_event_state(packet)
+        event_state["stream"] = {
+            "line": _decode_wire_text(candidate),
+            "match": match_text,
+        }
+        event_result = self._fire_event_on_worker(
+            session, "STREAM_MATCHED", event_state
+        )
+        stream_state = event_result.get("state", {}).get("stream", {})
+        replacement_requested = stream_state.get("replacement_requested") == "1"
+        replacement = stream_state.get("replacement", "")
+        replacement_bytes = _stream_value_bytes(replacement, encoding)
+        if not replacement_requested or replacement_bytes is None:
+            return event_result, None, match_bytes
+        transformed = (
+            candidate[:position]
+            + replacement_bytes
+            + candidate[position + len(match_bytes) :]
+        )
+        if position >= len(prefix):
+            return event_result, transformed[len(prefix) :], match_bytes
+        return event_result, None, match_bytes
 
     @staticmethod
     def _unwrap_tcp_sequence(sequence: int, reference: int) -> int:
@@ -17474,6 +17598,20 @@ class EmulatorSession:
                     self._activate_packet_server_connection(
                         session, packet, entry["events"], emit_init=True
                     )
+                stream_event, stream_payload, stream_match = (
+                    self._maybe_fire_stream_match(session, packet)
+                )
+                if stream_event is not None:
+                    entry["events"].append(stream_event)
+                    entry["stream_match"] = _decode_wire_text(stream_match or b"")
+                    if stream_payload is not None:
+                        packet["_wire_payload"] = stream_payload
+                        packet["payload"] = _decode_wire_text(stream_payload)
+                        entry["payload_after"] = packet["payload"]
+                    elif stream_event.get("state", {}).get("stream", {}).get(
+                        "replacement_requested"
+                    ) == "1":
+                        entry["stream_replacement_deferred"] = True
             elif protocol == "dns":
                 event_name = "DNS_REQUEST" if direction == "client_to_server" else "DNS_RESPONSE"
                 event_result = self._fire_event_on_worker(

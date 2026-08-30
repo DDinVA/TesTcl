@@ -202,6 +202,10 @@ requires the `PROTOCOL_INSPECTION` profile, dispatches
 payload bytes, `PROTOCOL_INSPECTION::id`, and `PROTOCOL_INSPECTION::disable`.
 It does not provide a Protocol Inspection signature engine or infer matches
 from raw traffic.
+The STREAM profile also evaluates bounded `@match@replacement@` expressions
+against TCP packet payloads and dispatches `STREAM_MATCHED`; replacements that
+span packet boundaries are reported without rewriting the already-emitted
+prior packet. This does not implement the full TMM stream filter.
 The classification adapter models the eight TMOS 17.5 `CLASSIFICATION::*`
 commands on structured client-side TCP records and dispatches
 `CLASSIFICATION_DETECTED` when the `CLASSIFICATION` profile is attached.

@@ -319,6 +319,13 @@ require the `PROTOCOL_INSPECTION` profile and dispatch
 `PROTOCOL_INSPECTION::id`, and `PROTOCOL_INSPECTION::disable` are modeled with
 bounded deterministic state. The adapter does not implement the BIG-IP
 signature/inspection engine.
+With the `STREAM` profile attached, TCP packet traces also evaluate the
+connection-sticky `STREAM::expression` form `@match@replacement@` and dispatch
+`STREAM_MATCHED` for the first bounded match in each packet. `STREAM::replace`
+mutates matches contained in the current packet; a match completed across TCP
+packets is reported with deferred replacement because the earlier bytes have
+already been emitted in the trace. This is a deterministic stream filter
+model, not a full TMM stream parser.
 Structured `classification` packet traces dispatch
 `CLASSIFICATION_DETECTED` for client-side TCP traffic when the
 `CLASSIFICATION` profile is attached. The eight TMOS 17.5
