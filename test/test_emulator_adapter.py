@@ -2946,6 +2946,109 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(mismatch["field"], "value")
         self.assertEqual(mismatch["actual"], "api.example.com")
 
+    def test_golden_vectors_compare_independent_reference_observations(self) -> None:
+        pack = json.loads(
+            (ROOT / "examples" / "golden-vectors" / "http-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        result = self.adapter.run_golden_vectors(
+            pack, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(
+            result["summary"], {"vector_count": 2, "passed": 2, "failed": 0}
+        )
+        self.assertTrue(all(vector["status"] == "passed" for vector in result["vectors"]))
+
+        pack["vectors"][0]["reference"]["output"]["results"][0]["pool"] = "wrong_pool"
+        failed = self.adapter.run_golden_vectors(
+            pack, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["summary"], {"vector_count": 2, "passed": 1, "failed": 1})
+        mismatch = failed["vectors"][0]["mismatches"][0]
+        self.assertEqual(mismatch["label"], "selected pool")
+        self.assertEqual(mismatch["expected"], "wrong_pool")
+        self.assertEqual(mismatch["actual"], "api_pool")
+        self.assertEqual(
+            self.adapter._golden_report_value("x" * 65537)["truncated"], True
+        )
+
+        invalid_schema = json.loads(
+            (ROOT / "examples" / "golden-vectors" / "http-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        invalid_schema["schema_version"] = 1.0
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "schema_version"):
+            self.adapter.run_golden_vectors(
+                invalid_schema, tcl_lsp_root=self.tcl_lsp_root
+            )
+
+        strict_types = json.loads(
+            (ROOT / "examples" / "golden-vectors" / "http-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        strict_types["vectors"][1]["reference"]["output"]["execution"]["event"]["fired"] = 1
+        strict_result = self.adapter.run_golden_vectors(
+            strict_types, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(strict_result["status"], "failed")
+        self.assertEqual(strict_result["summary"]["failed"], 1)
+
+    def test_golden_vectors_replay_pcap_operation_and_validate_reference_paths(self) -> None:
+        capture = _pcap_bytes([
+            (5, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
+                "10.0.0.5", "192.0.2.10", 51000, 443, 0x02
+            )))
+        ])
+        pack = {
+            "name": "pcap-vector",
+            "vectors": [{
+                "id": "client-syn",
+                "operation": "pcap",
+                "input": {
+                    "scenario": {
+                        "profiles": ["TCP"],
+                        "irule": "when CLIENT_ACCEPTED { log local0. pcap-vector }",
+                    },
+                    "pcap_base64": base64.b64encode(capture).decode("ascii"),
+                },
+                "reference": {
+                    "source": "tmos-17.5-reference-contract",
+                    "output": {
+                        "capture": {"record_count": 1},
+                        "trace": [{"protocol": "tcp"}],
+                    },
+                },
+                "comparisons": [
+                    {
+                        "label": "capture records",
+                        "actual_path": ["capture", "record_count"],
+                        "reference_path": ["capture", "record_count"],
+                    },
+                    {
+                        "label": "decoded protocol",
+                        "actual_path": ["trace", 0, "protocol"],
+                        "reference_path": ["trace", 0, "protocol"],
+                    },
+                ],
+            }],
+        }
+        result = self.adapter.run_golden_vectors(
+            pack, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["summary"]["passed"], 1)
+
+        invalid = json.loads(json.dumps(pack))
+        invalid["vectors"][0]["comparisons"][0]["reference_path"] = [
+            "capture", "missing"
+        ]
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "reference_path"):
+            self.adapter.run_golden_vectors(
+                invalid, tcl_lsp_root=self.tcl_lsp_root
+            )
+
     def test_behavior_packs_cover_dns_tcp_lb_uri_sip_and_stateful_scenarios(self) -> None:
         expected_counts = {
             "dns-17.5.json": 7,
@@ -18423,6 +18526,33 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             thread.join(timeout=5)
             server.server_close()
 
+    def test_http_api_runs_differential_vectors(self) -> None:
+        pack = json.loads(
+            (ROOT / "examples" / "golden-vectors" / "http-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        server = self.adapter.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self.adapter._http_handler(Path(self.tcl_lsp_root))
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/differential-vectors",
+                data=json.dumps(pack).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(response.status, 200)
+                payload = json.loads(response.read())
+            self.assertEqual(payload["status"], "passed")
+            self.assertEqual(payload["summary"]["passed"], 2)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_cli_replays_classic_pcap_file(self) -> None:
         capture = _pcap_bytes([
             (5, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
@@ -18457,6 +18587,25 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["capture"]["ipv4_packet_count"], 1)
         self.assertEqual(payload["trace"][0]["timestamp"], 5.0)
+
+    def test_cli_runs_golden_vector_path_form(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(ADAPTER_PATH),
+                "--golden-vectors",
+                str(ROOT / "examples" / "golden-vectors" / "http-17.5.json"),
+                "--tcl-lsp-root",
+                self.tcl_lsp_root,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["status"], "passed")
+        self.assertEqual(payload["summary"]["vector_count"], 2)
 
     def test_input_contract_rejects_wrong_profile_and_unknown_fields(self) -> None:
         base = {"irule": "when HTTP_REQUEST { pool api_pool }"}
@@ -18611,6 +18760,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         self.assertIn("irule_probe", tool_names)
         self.assertIn("irule_command_probe", tool_names)
         self.assertIn("irule_behavior_pack", tool_names)
+        self.assertIn("irule_differential_vectors", tool_names)
         capability_payload = responses[4]["result"]["structuredContent"]
         self.assertEqual(capability_payload["chunk"]["offset"], 1498)
         self.assertLessEqual(capability_payload["chunk"]["count"], 2)
@@ -18728,6 +18878,26 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             behavior_payload = behavior_pack["result"]["structuredContent"]
             self.assertEqual(behavior_payload["status"], "passed")
             self.assertEqual(behavior_payload["summary"]["case_count"], 9)
+
+            golden_vectors = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 13,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_differential_vectors",
+                        "arguments": {
+                            "pack": json.loads(
+                                (ROOT / "examples" / "golden-vectors" / "http-17.5.json")
+                                .read_text(encoding="utf-8")
+                            )
+                        },
+                    },
+                }
+            )
+            golden_payload = golden_vectors["result"]["structuredContent"]
+            self.assertEqual(golden_payload["status"], "passed")
+            self.assertEqual(golden_payload["summary"]["vector_count"], 2)
 
             udp_behavior_pack = server.handle_message(
                 {

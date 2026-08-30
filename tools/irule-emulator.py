@@ -289,6 +289,13 @@ COMMAND_PROBE_MAX_TOTAL_ARG_BYTES = 64 * 1024
 BEHAVIOR_PACK_MAX_CASES = 256
 BEHAVIOR_PACK_MAX_NAME_BYTES = 256
 BEHAVIOR_PACK_MAX_BYTES = 2 * 1024 * 1024
+GOLDEN_VECTOR_MAX_CASES = 256
+GOLDEN_VECTOR_MAX_NAME_BYTES = 256
+GOLDEN_VECTOR_MAX_BYTES = 2 * 1024 * 1024
+GOLDEN_VECTOR_MAX_COMPARISONS = 64
+GOLDEN_VECTOR_MAX_PATH_COMPONENTS = 32
+GOLDEN_VECTOR_MAX_LABEL_BYTES = 256
+GOLDEN_VECTOR_MAX_REPORTED_VALUE_BYTES = 64 * 1024
 EVENT_STATE_FIELDS = {
     "connection": {
         "client_addr",
@@ -23395,6 +23402,14 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_differential_vectors",
+                "title": "Compare TMOS 17.5 golden vectors",
+                "description": "Run bounded emulator inputs and compare selected observations with independently captured TMOS 17.5 reference output.",
+                "inputSchema": _mcp_object_schema(
+                    {"pack": {"type": "object"}}, ["pack"]
+                ),
+            },
+            {
                 "name": "irule_conformance",
                 "title": "Report catalog conformance",
                 "description": "Report static 17.5 catalog coverage for runtime command handlers and packet-to-event adapters.",
@@ -23620,6 +23635,15 @@ class McpProtocolServer:
                 )
             return self._tool_success(
                 run_behavior_pack(args["pack"], tcl_lsp_root=str(self._root))
+            )
+
+        if name == "irule_differential_vectors":
+            if set(args) != {"pack"} or not isinstance(args["pack"], dict):
+                raise McpProtocolError(
+                    -32602, "irule_differential_vectors requires a pack object"
+                )
+            return self._tool_success(
+                run_golden_vectors(args["pack"], tcl_lsp_root=str(self._root))
             )
 
         if name == "irule_conformance":
@@ -24406,6 +24430,431 @@ def run_behavior_pack(
     }
 
 
+def _golden_path(path: Any, field: str) -> list[str | int]:
+    """Validate one bounded JSON path used by a differential vector."""
+    if not isinstance(path, list) or not path or len(path) > GOLDEN_VECTOR_MAX_PATH_COMPONENTS:
+        raise EmulatorInputError(
+            f"{field} must contain 1 to {GOLDEN_VECTOR_MAX_PATH_COMPONENTS} components"
+        )
+    normalised: list[str | int] = []
+    for index, component in enumerate(path):
+        if isinstance(component, bool) or not isinstance(component, (str, int)):
+            raise EmulatorInputError(
+                f"{field}[{index}] must be a string or non-negative integer"
+            )
+        if isinstance(component, int):
+            if component < 0:
+                raise EmulatorInputError(f"{field}[{index}] must be non-negative")
+            normalised.append(component)
+            continue
+        try:
+            component_bytes = component.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise EmulatorInputError(f"{field}[{index}] must be valid UTF-8") from exc
+        if not component or "\x00" in component or len(component_bytes) > GOLDEN_VECTOR_MAX_LABEL_BYTES:
+            raise EmulatorInputError(
+                f"{field}[{index}] must be non-empty, NUL-free, and at most "
+                f"{GOLDEN_VECTOR_MAX_LABEL_BYTES} UTF-8 bytes"
+            )
+        normalised.append(component)
+    return normalised
+
+
+def _golden_report_value(value: Any) -> Any:
+    """Keep mismatch reports bounded while comparing the complete value."""
+    encoded = json.dumps(
+        value, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    ).encode("utf-8")
+    if len(encoded) <= GOLDEN_VECTOR_MAX_REPORTED_VALUE_BYTES:
+        return value
+    return {
+        "truncated": True,
+        "utf8_bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _golden_values_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values without Python's bool/int equivalence."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    if isinstance(left, dict) and isinstance(right, dict):
+        return (
+            left.keys() == right.keys()
+            and all(_golden_values_equal(left[key], right[key]) for key in left)
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _golden_values_equal(a, b) for a, b in zip(left, right)
+        )
+    return type(left) is type(right) and left == right
+
+
+def _normalise_golden_vectors(root: Path, pack: Any) -> dict[str, Any]:
+    """Validate an external TMOS 17.5 reference-vector pack atomically."""
+    if not isinstance(pack, dict):
+        raise EmulatorInputError("golden vector pack must be a JSON object")
+    try:
+        pack_bytes = len(
+            json.dumps(pack, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            .encode("utf-8")
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise EmulatorInputError(
+            "golden vector pack must contain only JSON-compatible values"
+        ) from exc
+    if pack_bytes > GOLDEN_VECTOR_MAX_BYTES:
+        raise EmulatorInputError(
+            f"golden vector pack exceeds the {GOLDEN_VECTOR_MAX_BYTES // (1024 * 1024)} MiB limit"
+        )
+    allowed = {"schema_version", "profile", "name", "source", "vectors"}
+    unknown = sorted(set(pack) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            f"unsupported golden vector pack field(s): {', '.join(unknown)}"
+        )
+    schema_version = pack.get("schema_version", 1)
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version != 1:
+        raise EmulatorInputError("golden vector schema_version must be 1")
+    if pack.get("profile", "tmos-17.5") != "tmos-17.5":
+        raise EmulatorInputError("golden vector profile must be tmos-17.5")
+    name = pack.get("name", "anonymous")
+    if not isinstance(name, str) or not name:
+        raise EmulatorInputError("golden vector pack name must be a non-empty string")
+    try:
+        name_bytes = name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise EmulatorInputError("golden vector pack name must be valid UTF-8") from exc
+    if "\x00" in name or len(name_bytes) > GOLDEN_VECTOR_MAX_NAME_BYTES:
+        raise EmulatorInputError(
+            "golden vector pack name must be NUL-free and at most "
+            f"{GOLDEN_VECTOR_MAX_NAME_BYTES} UTF-8 bytes"
+        )
+    source = pack.get("source", "external-tmos-17.5")
+    if not isinstance(source, str) or not source or "\x00" in source:
+        raise EmulatorInputError("golden vector source must be a non-empty NUL-free string")
+    try:
+        source_bytes = source.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise EmulatorInputError("golden vector source must be valid UTF-8") from exc
+    if len(source_bytes) > GOLDEN_VECTOR_MAX_NAME_BYTES:
+        raise EmulatorInputError("golden vector source is too long")
+    vectors = pack.get("vectors")
+    if not isinstance(vectors, list) or not vectors:
+        raise EmulatorInputError("golden vector pack vectors must be a non-empty array")
+    if len(vectors) > GOLDEN_VECTOR_MAX_CASES:
+        raise EmulatorInputError(
+            f"golden vector pack accepts at most {GOLDEN_VECTOR_MAX_CASES} vectors"
+        )
+
+    normalised_vectors: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, vector in enumerate(vectors):
+        if not isinstance(vector, dict):
+            raise EmulatorInputError(f"golden vector {index} must be an object")
+        vector_allowed = {"id", "operation", "input", "reference", "comparisons"}
+        vector_unknown = sorted(set(vector) - vector_allowed)
+        if vector_unknown:
+            raise EmulatorInputError(
+                f"golden vector {index} has unsupported field(s): "
+                + ", ".join(vector_unknown)
+            )
+        vector_id = vector.get("id")
+        if not isinstance(vector_id, str) or not vector_id:
+            raise EmulatorInputError(f"golden vector {index} id must be a non-empty string")
+        try:
+            vector_id_bytes = vector_id.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise EmulatorInputError(
+                f"golden vector {index} id must be valid UTF-8"
+            ) from exc
+        if "\x00" in vector_id or len(vector_id_bytes) > GOLDEN_VECTOR_MAX_NAME_BYTES:
+            raise EmulatorInputError(f"golden vector {index} id is too long or contains NUL")
+        if vector_id in seen_ids:
+            raise EmulatorInputError(f"golden vector pack contains duplicate id {vector_id!r}")
+        seen_ids.add(vector_id)
+
+        operation = vector.get("operation")
+        if operation not in {"scenario", "command_probe", "pcap"}:
+            raise EmulatorInputError(
+                f"golden vector {vector_id!r} operation must be scenario, command_probe, or pcap"
+            )
+        vector_input = vector.get("input")
+        if not isinstance(vector_input, dict):
+            raise EmulatorInputError(f"golden vector {vector_id!r} input must be an object")
+        if operation == "scenario":
+            if "irule_file" in vector_input:
+                raise EmulatorInputError(
+                    f"golden vector {vector_id!r} scenario cannot use irule_file"
+                )
+            if "packets" in vector_input and any(
+                field in vector_input for field in ("request", "requests")
+            ):
+                raise EmulatorInputError(
+                    f"golden vector {vector_id!r} scenario cannot contain packets and requests"
+                )
+            _normalise_scenario_config(
+                vector_input,
+                allow_irule_file=False,
+                allow_requests=True,
+                allow_packets=True,
+                require_http=False,
+            )
+        elif operation == "command_probe":
+            _normalise_command_probe_request(root, vector_input)
+        else:
+            pcap_allowed = {
+                "scenario", "pcap_base64", "direction", "client_addr", "server_addr"
+            }
+            pcap_unknown = sorted(set(vector_input) - pcap_allowed)
+            if pcap_unknown or "scenario" not in vector_input or "pcap_base64" not in vector_input:
+                raise EmulatorInputError(
+                    f"golden vector {vector_id!r} pcap input requires scenario and pcap_base64"
+                )
+            pcap_scenario = vector_input["scenario"]
+            if not isinstance(pcap_scenario, dict) or "irule_file" in pcap_scenario:
+                raise EmulatorInputError(
+                    f"golden vector {vector_id!r} pcap scenario must use inline irule"
+                )
+            if any(field in pcap_scenario for field in ("request", "requests", "packets")):
+                raise EmulatorInputError(
+                    f"golden vector {vector_id!r} pcap scenario cannot contain packets or requests"
+                )
+            _normalise_scenario_config(
+                pcap_scenario,
+                allow_irule_file=False,
+                allow_requests=False,
+                allow_packets=False,
+                require_http=False,
+            )
+            _decode_pcap_base64(vector_input["pcap_base64"])
+
+        reference = vector.get("reference")
+        if not isinstance(reference, dict) or set(reference) != {"source", "output"}:
+            raise EmulatorInputError(
+                f"golden vector {vector_id!r} reference must contain source and output"
+            )
+        reference_source = reference["source"]
+        if not isinstance(reference_source, str) or not reference_source or "\x00" in reference_source:
+            raise EmulatorInputError(
+                f"golden vector {vector_id!r} reference source must be a non-empty string"
+            )
+        try:
+            reference_source_bytes = reference_source.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise EmulatorInputError(
+                f"golden vector {vector_id!r} reference source must be valid UTF-8"
+            ) from exc
+        if len(reference_source_bytes) > GOLDEN_VECTOR_MAX_NAME_BYTES:
+            raise EmulatorInputError(f"golden vector {vector_id!r} reference source is too long")
+        reference_output = reference["output"]
+        try:
+            json.dumps(
+                reference_output, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+            ).encode("utf-8")
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise EmulatorInputError(
+                f"golden vector {vector_id!r} reference output is not JSON-compatible"
+            ) from exc
+
+        comparisons = vector.get("comparisons")
+        if not isinstance(comparisons, list) or not comparisons:
+            raise EmulatorInputError(
+                f"golden vector {vector_id!r} comparisons must be a non-empty array"
+            )
+        if len(comparisons) > GOLDEN_VECTOR_MAX_COMPARISONS:
+            raise EmulatorInputError(
+                f"golden vector {vector_id!r} accepts at most "
+                f"{GOLDEN_VECTOR_MAX_COMPARISONS} comparisons"
+            )
+        normalised_comparisons: list[dict[str, Any]] = []
+        for comparison_index, comparison in enumerate(comparisons):
+            if not isinstance(comparison, dict) or set(comparison) != {
+                "label", "actual_path", "reference_path"
+            }:
+                raise EmulatorInputError(
+                    f"golden vector {vector_id!r} comparison {comparison_index} must contain "
+                    "label, actual_path, and reference_path"
+                )
+            label = comparison["label"]
+            if not isinstance(label, str) or not label or "\x00" in label:
+                raise EmulatorInputError(
+                    f"golden vector {vector_id!r} comparison {comparison_index} label must be non-empty"
+                )
+            try:
+                label_bytes = label.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise EmulatorInputError(
+                    f"golden vector {vector_id!r} comparison {comparison_index} label must be valid UTF-8"
+                ) from exc
+            if len(label_bytes) > GOLDEN_VECTOR_MAX_LABEL_BYTES:
+                raise EmulatorInputError(
+                    f"golden vector {vector_id!r} comparison {comparison_index} label is too long"
+                )
+            actual_path = _golden_path(
+                comparison["actual_path"],
+                f"golden vector {vector_id!r} comparison {comparison_index} actual_path",
+            )
+            reference_path = _golden_path(
+                comparison["reference_path"],
+                f"golden vector {vector_id!r} comparison {comparison_index} reference_path",
+            )
+            try:
+                _behavior_json_path(reference_output, reference_path)
+            except (KeyError, IndexError, TypeError) as exc:
+                raise EmulatorInputError(
+                    f"golden vector {vector_id!r} comparison {comparison_index} reference_path "
+                    f"does not exist: {exc}"
+                ) from exc
+            normalised_comparisons.append(
+                {
+                    "label": label,
+                    "actual_path": actual_path,
+                    "reference_path": reference_path,
+                }
+            )
+        normalised_vectors.append(
+            {
+                "id": vector_id,
+                "operation": operation,
+                "input": vector_input,
+                "reference": {
+                    "source": reference_source,
+                    "output": reference_output,
+                },
+                "comparisons": normalised_comparisons,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "name": name,
+        "source": source,
+        "vectors": normalised_vectors,
+    }
+
+
+def run_golden_vectors(
+    pack: Any,
+    *,
+    tcl_lsp_root: str | None = None,
+    backend: str = "inprocess",
+) -> dict[str, Any]:
+    """Run emulator inputs against independent TMOS 17.5 reference observations."""
+    if backend != "inprocess":
+        raise EmulatorInputError(
+            "golden vectors require the in-process Tcl backend; use the repo uv "
+            "environment with Tcl/Tk support"
+        )
+    root = _find_tcl_lsp_root(tcl_lsp_root)
+    prepared = _normalise_golden_vectors(root, pack)
+    rows: list[dict[str, Any]] = []
+    passed = 0
+    for vector in prepared["vectors"]:
+        vector_id = vector["id"]
+        try:
+            if vector["operation"] == "scenario":
+                actual_output = run_scenario(
+                    vector["input"], tcl_lsp_root=str(root), backend=backend
+                )
+            elif vector["operation"] == "command_probe":
+                actual_output = run_command_probe(
+                    vector["input"], tcl_lsp_root=str(root), backend=backend
+                )
+            else:
+                pcap_input = vector["input"]
+                actual_output = run_pcap_scenario(
+                    pcap_input["scenario"],
+                    _decode_pcap_base64(pcap_input["pcap_base64"]),
+                    tcl_lsp_root=str(root),
+                    backend=backend,
+                    **{
+                        field: pcap_input[field]
+                        for field in ("direction", "client_addr", "server_addr")
+                        if field in pcap_input
+                    },
+                )
+        except (EmulatorInputError, OSError, RuntimeError, ValueError) as exc:
+            rows.append(
+                {
+                    "id": vector_id,
+                    "operation": vector["operation"],
+                    "status": "failed",
+                    "error": str(exc),
+                    "comparisons": [],
+                }
+            )
+            continue
+
+        comparison_rows: list[dict[str, Any]] = []
+        mismatches: list[dict[str, Any]] = []
+        reference_output = vector["reference"]["output"]
+        for comparison in vector["comparisons"]:
+            try:
+                actual_value = _behavior_json_path(actual_output, comparison["actual_path"])
+            except (KeyError, IndexError, TypeError) as exc:
+                comparison_row = {
+                    "label": comparison["label"],
+                    "actual_path": comparison["actual_path"],
+                    "reference_path": comparison["reference_path"],
+                    "expected": None,
+                    "actual": None,
+                    "status": "failed",
+                    "error": f"actual path not found: {exc}",
+                }
+                comparison_rows.append(comparison_row)
+                mismatches.append(comparison_row)
+                continue
+            expected_value = _behavior_json_path(reference_output, comparison["reference_path"])
+            comparison_row = {
+                "label": comparison["label"],
+                "actual_path": comparison["actual_path"],
+                "reference_path": comparison["reference_path"],
+                "expected": _golden_report_value(expected_value),
+                "actual": _golden_report_value(actual_value),
+                "status": "passed"
+                if _golden_values_equal(actual_value, expected_value)
+                else "failed",
+            }
+            comparison_rows.append(comparison_row)
+            if comparison_row["status"] == "failed":
+                mismatches.append(comparison_row)
+        row_status = "passed" if not mismatches else "failed"
+        if row_status == "passed":
+            passed += 1
+        rows.append(
+            {
+                "id": vector_id,
+                "operation": vector["operation"],
+                "status": row_status,
+                "reference_source": vector["reference"]["source"],
+                "comparisons": comparison_rows,
+                "mismatches": mismatches,
+            }
+        )
+    failed = len(rows) - passed
+    return {
+        "status": "passed" if failed == 0 else "failed",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "pack": {
+            "name": prepared["name"],
+            "source": prepared["source"],
+            "schema_version": prepared["schema_version"],
+            "vector_count": len(rows),
+        },
+        "summary": {
+            "vector_count": len(rows),
+            "passed": passed,
+            "failed": failed,
+        },
+        "vectors": rows,
+    }
+
+
 def run_pcap_scenario(
     scenario: Any,
     pcap_data: bytes,
@@ -24600,6 +25049,20 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                 try:
                     pack = self._read_json()
                     payload = run_behavior_pack(pack, tcl_lsp_root=str(root))
+                except (
+                    json.JSONDecodeError,
+                    EmulatorInputError,
+                    EmulatorResourceError,
+                    OSError,
+                ) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
+            if parsed.path == "/v1/differential-vectors":
+                try:
+                    pack = self._read_json()
+                    payload = run_golden_vectors(pack, tcl_lsp_root=str(root))
                 except (
                     json.JSONDecodeError,
                     EmulatorInputError,
@@ -24872,8 +25335,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     mode.add_argument(
         "--behavior-pack",
-        action="store_true",
-        help="execute a bounded catalog behavior pack from JSON",
+        nargs="?",
+        const="-",
+        default=None,
+        metavar="PATH",
+        help="execute a bounded catalog behavior pack from PATH, or stdin when omitted",
+    )
+    mode.add_argument(
+        "--golden-vectors",
+        nargs="?",
+        const="-",
+        default=None,
+        metavar="PATH",
+        help="compare bounded emulator inputs from PATH, or stdin when omitted",
     )
     mode.add_argument("--serve", action="store_true", help="serve the HTTP API instead of reading stdin")
     mode.add_argument(
@@ -24905,10 +25379,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        direct_pack_path = args.behavior_pack if args.behavior_pack not in (None, "-") else None
+        direct_golden_path = args.golden_vectors if args.golden_vectors not in (None, "-") else None
+        if args.scenario != "-" and (direct_pack_path is not None or direct_golden_path is not None):
+            raise EmulatorInputError(
+                "use either --scenario PATH or a direct pack path, not both"
+            )
         root = _find_tcl_lsp_root(args.tcl_lsp_root)
         if args.pcap and (
             args.serve or args.mcp or args.capabilities or args.catalog or args.probe
-            or args.command_probe or args.behavior_pack or args.conformance
+            or args.command_probe or args.behavior_pack or args.golden_vectors or args.conformance
         ):
             raise EmulatorInputError(
                 "--pcap can only be used with one-shot scenario execution"
@@ -24959,12 +25439,24 @@ def main(argv: list[str] | None = None) -> int:
                 tcl_lsp_root=str(root),
                 backend=args.backend,
             )
-        elif args.behavior_pack:
-            if args.scenario == "-":
+        elif args.behavior_pack is not None:
+            pack_path = args.behavior_pack if args.behavior_pack != "-" else args.scenario
+            if pack_path == "-":
                 pack = json.load(sys.stdin)
             else:
-                pack = json.loads(Path(args.scenario).read_text(encoding="utf-8"))
+                pack = json.loads(Path(pack_path).read_text(encoding="utf-8"))
             response = run_behavior_pack(
+                pack,
+                tcl_lsp_root=str(root),
+                backend=args.backend,
+            )
+        elif args.golden_vectors is not None:
+            pack_path = args.golden_vectors if args.golden_vectors != "-" else args.scenario
+            if pack_path == "-":
+                pack = json.load(sys.stdin)
+            else:
+                pack = json.loads(Path(pack_path).read_text(encoding="utf-8"))
+            response = run_golden_vectors(
                 pack,
                 tcl_lsp_root=str(root),
                 backend=args.backend,
@@ -24992,7 +25484,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(json.dumps(response, separators=(",", ":")))
-    return 1 if args.behavior_pack and response.get("status") == "failed" else 0
+    return 1 if (
+        (args.behavior_pack is not None or args.golden_vectors is not None)
+        and response.get("status") == "failed"
+    ) else 0
 
 
 if __name__ == "__main__":

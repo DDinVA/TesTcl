@@ -129,6 +129,43 @@ accessors, and three SIPALG controls across command probes and request/response
 packet lifecycles. A catalog chunk plus its behavior pack is a portable
 implementation checkpoint for adding higher-fidelity semantic mocks.
 
+### TMOS 17.5 differential vectors
+
+Behavior packs assert values authored inside the emulator project. Differential
+vectors add an independent reference observation, so a captured result from a
+TMOS 17.5 device or vLab can be compared with the emulator without requiring
+the reference system to expose the emulator's JSON schema. A vector pack is
+bounded to 256 vectors and 2 MiB, and each vector contains:
+
+* `input`: one `scenario`, `command_probe`, or `pcap` operation;
+* `reference`: `{ "source": "...", "output": { ... } }`, copied from the
+  independent TMOS observation; and
+* `comparisons`: explicit `{ "actual_path": [...], "reference_path": [...],
+  "label": "..." }` mappings.
+
+The paths are arrays of object keys and non-negative array indexes. They are
+not expressions and are never evaluated as Tcl or JSONPath. This makes it
+possible to compare a BIG-IP field such as `status` with the corresponding
+emulator field even when the surrounding result documents differ. Missing
+paths and execution errors fail only that vector, while pack validation is
+atomic before execution begins.
+
+Run the checked-in contract fixture locally:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --golden-vectors examples/golden-vectors/http-17.5.json
+```
+
+The same operation is available as `POST /v1/differential-vectors` and the MCP
+tool `irule_differential_vectors`. The checked-in fixture demonstrates the
+schema and deterministic adapter contract; it is not presented as a capture
+from a live BIG-IP. To add a real differential vector, preserve the scenario
+input, replace `reference.output` with the captured TMOS 17.5 observation, and
+map only fields whose semantics are intended to be compared. The runner never
+connects to a device and never silently regenerates reference output from the
+emulator.
+
 The scenario-capable stateful pack can be run directly with:
 
 ```sh

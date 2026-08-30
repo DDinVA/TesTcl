@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "http-17.5-reference-contracts",
+  "source": "checked-in-reference-contract",
+  "vectors": [
+    {
+      "id": "http-request-pool-selection",
+      "operation": "scenario",
+      "input": {
+        "profiles": ["TCP", "HTTP"],
+        "pools": {"api_pool": ["10.0.0.10:80"]},
+        "irule": "when HTTP_REQUEST { pool api_pool }",
+        "requests": [
+          {"host": "api.example.com", "uri": "/health"}
+        ]
+      },
+      "reference": {
+        "source": "tmos-17.5-reference-contract",
+        "output": {
+          "status": "ok",
+          "results": [
+            {
+              "request": {"uri": "/health"},
+              "pool": "api_pool"
+            }
+          ]
+        }
+      },
+      "comparisons": [
+        {
+          "label": "request URI",
+          "actual_path": ["results", 0, "request", "uri"],
+          "reference_path": ["results", 0, "request", "uri"]
+        },
+        {
+          "label": "selected pool",
+          "actual_path": ["results", 0, "pool"],
+          "reference_path": ["results", 0, "pool"]
+        }
+      ]
+    },
+    {
+      "id": "http-host-command-probe",
+      "operation": "command_probe",
+      "input": {
+        "command": "HTTP::host",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {
+          "host": "api.example.com",
+          "uri": "/health"
+        }
+      },
+      "reference": {
+        "source": "tmos-17.5-reference-contract",
+        "output": {
+          "execution": {
+            "status": "ok",
+            "value": "api.example.com",
+            "event": {"fired": true}
+          }
+        }
+      },
+      "comparisons": [
+        {
+          "label": "command status",
+          "actual_path": ["execution", "status"],
+          "reference_path": ["execution", "status"]
+        },
+        {
+          "label": "HTTP host",
+          "actual_path": ["execution", "value"],
+          "reference_path": ["execution", "value"]
+        },
+        {
+          "label": "event fired",
+          "actual_path": ["execution", "event", "fired"],
+          "reference_path": ["execution", "event", "fired"]
+        }
+      ]
+    }
+  ]
+}
