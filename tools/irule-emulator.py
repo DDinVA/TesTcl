@@ -9455,6 +9455,8 @@ PACKET_EVENT_ADAPTERS = {
     "HTTP_RESPONSE_RELEASE": "HTTP response transaction release phase",
     "HTML_TAG_MATCHED": "HTML response tag matching",
     "HTML_COMMENT_MATCHED": "HTML response comment matching",
+    "REWRITE_REQUEST": "HTTP request rewrite phase",
+    "REWRITE_RESPONSE": "HTTP response rewrite phase",
     "REWRITE_REQUEST_DONE": "HTTP request rewrite completion",
     "REWRITE_RESPONSE_DONE": "HTTP response rewrite completion",
     "STREAM_MATCHED": "TCP stream expression match",

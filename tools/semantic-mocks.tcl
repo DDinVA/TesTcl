@@ -2919,7 +2919,9 @@ namespace eval ::itest::semantic {
 
     proc rewrite_install_flow_hooks {} {
         set rewrite_events [::itest::registered_events]
-        if {[lsearch -exact $rewrite_events REWRITE_REQUEST_DONE] < 0 &&
+        if {[lsearch -exact $rewrite_events REWRITE_REQUEST] < 0 &&
+            [lsearch -exact $rewrite_events REWRITE_REQUEST_DONE] < 0 &&
+            [lsearch -exact $rewrite_events REWRITE_RESPONSE] < 0 &&
             [lsearch -exact $rewrite_events REWRITE_RESPONSE_DONE] < 0} {
             return
         }
@@ -2949,10 +2951,10 @@ namespace eval ::itest::semantic {
     }
 
     proc _rewrite_payload_var {} {
-        if {$::itest::current_event eq "REWRITE_REQUEST_DONE"} {
+        if {$::itest::current_event in {REWRITE_REQUEST REWRITE_REQUEST_DONE}} {
             return ::state::http::request::payload
         }
-        if {$::itest::current_event eq "REWRITE_RESPONSE_DONE"} {
+        if {$::itest::current_event in {REWRITE_RESPONSE REWRITE_RESPONSE_DONE}} {
             return ::state::http::response::payload
         }
         error "REWRITE::payload is not valid during $::itest::current_event"
@@ -25078,6 +25080,20 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::compression_process_decompress response
         }
         ::itest::semantic::bwc_prepare_event $event_name
+        if {$rewrite_auto && $event_name eq "HTTP_REQUEST" &&
+            [lsearch -exact [::itest::registered_events] REWRITE_REQUEST] >= 0} {
+            set ::itest::semantic::rewrite_injecting 1
+            set rewrite_result [::itest::_testcl_fire_event_orig REWRITE_REQUEST]
+            set ::itest::semantic::rewrite_injecting 0
+            ::itest::semantic::event_errors_record REWRITE_REQUEST $rewrite_result
+        }
+        if {$rewrite_auto && $event_name eq "HTTP_RESPONSE" &&
+            [lsearch -exact [::itest::registered_events] REWRITE_RESPONSE] >= 0} {
+            set ::itest::semantic::rewrite_injecting 1
+            set rewrite_result [::itest::_testcl_fire_event_orig REWRITE_RESPONSE]
+            set ::itest::semantic::rewrite_injecting 0
+            ::itest::semantic::event_errors_record REWRITE_RESPONSE $rewrite_result
+        }
         set result [uplevel 1 [list ::itest::_testcl_fire_event_orig $event_name]]
         if {$gated && $event_name eq "LB_QUEUED"} {
             ::itest::semantic::_maybe_fire_lb_failed_for_queue

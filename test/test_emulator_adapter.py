@@ -8444,6 +8444,68 @@ when REWRITE_RESPONSE_DONE { log local0. rewrite-response }
         self.assertTrue(any("rewrite-response" in log for log in transaction["logs"]))
         self.assertTrue(any("response-data=<html><!--x--><body>ok</body></html>" in log for log in transaction["logs"]))
 
+    def test_http_lifecycle_fires_rewrite_entry_events_before_http_events(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "REWRITE"],
+                "irule": (
+                    "when REWRITE_REQUEST { REWRITE::payload replace 0 7 rewritten; log local0. rewrite-request }\n"
+                    "when HTTP_REQUEST { log local0. http-request }\n"
+                    "when REWRITE_RESPONSE { REWRITE::payload replace 0 8 returned; log local0. rewrite-response }\n"
+                    "when HTTP_RESPONSE { log local0. http-response }"
+                ),
+                "request": {
+                    "uri": "/rewrite",
+                    "body": "request-body",
+                    "response_status": 200,
+                    "response_body": "response-body",
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        events = result["results"][0]["events_fired"]
+        self.assertLess(events.index("REWRITE_REQUEST"), events.index("HTTP_REQUEST"))
+        self.assertLess(events.index("REWRITE_RESPONSE"), events.index("HTTP_RESPONSE"))
+        self.assertEqual(result["results"][0]["request"]["body"], "rewritten-body")
+        self.assertEqual(result["results"][0]["response"]["body"], "returned-body")
+        logs = result["results"][0]["logs"]
+        self.assertTrue(any("rewrite-request" in log for log in logs))
+        self.assertTrue(any("http-request" in log for log in logs))
+        self.assertTrue(any("rewrite-response" in log for log in logs))
+        self.assertTrue(any("http-response" in log for log in logs))
+
+        rewrite_only = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "REWRITE"],
+                "irule": (
+                    "when REWRITE_REQUEST { REWRITE::payload replace 0 7 rewritten }\n"
+                    "when REWRITE_RESPONSE { REWRITE::payload replace 0 8 returned }"
+                ),
+                "request": {
+                    "uri": "/rewrite-only",
+                    "body": "request-body",
+                    "response_status": 200,
+                    "response_body": "response-body",
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        rewrite_only_result = rewrite_only["results"][0]
+        rewrite_only_events = rewrite_only_result["events_fired"]
+        self.assertIn("REWRITE_REQUEST", rewrite_only_events)
+        self.assertIn("REWRITE_RESPONSE", rewrite_only_events)
+        self.assertLess(
+            rewrite_only_events.index("REWRITE_REQUEST"),
+            rewrite_only_events.index("HTTP_REQUEST"),
+        )
+        self.assertLess(
+            rewrite_only_events.index("REWRITE_RESPONSE"),
+            rewrite_only_events.index("HTTP_RESPONSE"),
+        )
+        self.assertEqual(rewrite_only_result["request"]["body"], "rewritten-body")
+        self.assertEqual(rewrite_only_result["response"]["body"], "returned-body")
+
     def test_packet_trace_fires_rule_init_once_across_connections(self) -> None:
         result = self.adapter.run_scenario(
             {
