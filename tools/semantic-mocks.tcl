@@ -325,6 +325,13 @@ namespace eval ::itest::semantic {
     variable asm_violations {}
     variable asm_default_response_violations {}
     variable asm_response_violations {}
+    variable asm_default_response_login_enabled 0
+    variable asm_response_login_enabled 0
+    variable asm_default_response_login_status logged_in
+    variable asm_response_login_status logged_in
+    variable asm_default_response_login_username ""
+    variable asm_response_login_username ""
+    variable asm_response_login_fired 0
     variable asm_response_active 0
     variable asm_default_signatures [dict create]
     variable asm_signatures [dict create]
@@ -12439,6 +12446,25 @@ namespace eval ::itest::semantic {
         set asm_response_violations $violations
     }
 
+    proc asm_set_response_login {enabled status username} {
+        variable asm_default_response_login_enabled
+        variable asm_response_login_enabled
+        variable asm_default_response_login_status
+        variable asm_response_login_status
+        variable asm_default_response_login_username
+        variable asm_response_login_username
+        if {$enabled ni {0 1}} { error "ASM response login enabled state must be boolean" }
+        if {$status ni {logged_in failed}} {
+            error "invalid ASM response login status"
+        }
+        set asm_default_response_login_enabled $enabled
+        set asm_response_login_enabled $enabled
+        set asm_default_response_login_status $status
+        set asm_response_login_status $status
+        set asm_default_response_login_username $username
+        set asm_response_login_username $username
+    }
+
     proc asm_set_signatures {field raw_values} {
         variable asm_default_signatures
         variable asm_signatures
@@ -12512,6 +12538,13 @@ namespace eval ::itest::semantic {
         variable asm_campaigns
         variable asm_default_response_violations
         variable asm_response_violations
+        variable asm_default_response_login_enabled
+        variable asm_response_login_enabled
+        variable asm_default_response_login_status
+        variable asm_response_login_status
+        variable asm_default_response_login_username
+        variable asm_response_login_username
+        variable asm_response_login_fired
         variable asm_response_active
         variable asm_captcha_sent
         variable asm_uncaptcha
@@ -12533,6 +12566,10 @@ namespace eval ::itest::semantic {
         if {$has_body} { set asm_payload $body }
         set asm_violations $asm_default_violations
         set asm_response_violations $asm_default_response_violations
+        set asm_response_login_enabled $asm_default_response_login_enabled
+        set asm_response_login_status $asm_default_response_login_status
+        set asm_response_login_username $asm_default_response_login_username
+        set asm_response_login_fired 0
         set asm_response_active 0
         set asm_signatures $asm_default_signatures
         set asm_campaigns $asm_default_campaigns
@@ -12566,6 +12603,29 @@ namespace eval ::itest::semantic {
     proc asm_response_violation_count {} {
         variable asm_response_violations
         return [llength $asm_response_violations]
+    }
+
+    proc asm_auto_response_login {} {
+        variable asm_response_login_enabled
+        variable asm_response_login_status
+        variable asm_response_login_username
+        variable asm_response_login_fired
+        variable asm_login_status
+        variable asm_username
+        variable asm_payload
+        if {![_profile_enabled ASM] || !$::itest::semantic::asm_enabled ||
+            !$asm_response_login_enabled || $asm_response_login_fired} {
+            return
+        }
+        set asm_response_login_fired 1
+        set asm_login_status $asm_response_login_status
+        set asm_username $asm_response_login_username
+        set asm_payload $::state::http::response::payload
+        if {[info exists ::itest::event_handlers(ASM_RESPONSE_LOGIN)] &&
+            [llength $::itest::event_handlers(ASM_RESPONSE_LOGIN)] > 0} {
+            set event_result [::itest::_testcl_fire_event_orig ASM_RESPONSE_LOGIN]
+            ::itest::semantic::event_errors_record ASM_RESPONSE_LOGIN $event_result
+        }
     }
 
     proc asm_auto_request_events {} {
@@ -12610,6 +12670,11 @@ namespace eval ::itest::semantic {
             set event_result [::itest::_testcl_fire_event_orig ASM_RESPONSE_VIOLATION]
             ::itest::semantic::event_errors_record ASM_RESPONSE_VIOLATION $event_result
         }
+    }
+
+    proc asm_auto_response_events {} {
+        asm_auto_response_login
+        asm_auto_response_event
     }
 
     proc asm_reset_connection {} {
@@ -12853,7 +12918,9 @@ namespace eval ::itest::semantic {
             set suffix_hex [string range $payload_hex [expr {$end * 2}] end]
             set replacement_hex [_asm_payload_hex [lindex $args 3]]
             set asm_payload [_asm_payload_from_hex "$prefix_hex$replacement_hex$suffix_hex"]
-            if {$::itest::current_event eq "ASM_RESPONSE_VIOLATION"} {
+            if {$::itest::current_event in {
+                ASM_RESPONSE_LOGIN ASM_RESPONSE_VIOLATION
+            }} {
                 set ::state::http::response::payload $asm_payload
                 set ::state::http::response::payload_length [string bytelength $asm_payload]
             }
@@ -25546,7 +25613,7 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_header] ne ""} {
         if {$::itest::current_event in {
             HTTP_RESPONSE_CONTINUE HTTP_PROXY_RESPONSE
             ADAPT_RESPONSE_HEADERS ADAPT_RESPONSE_RESULT
-            ASM_RESPONSE_VIOLATION
+            ASM_RESPONSE_LOGIN ASM_RESPONSE_VIOLATION
         }} {
             set previous_event $::itest::current_event
             set ::itest::current_event HTTP_RESPONSE
@@ -25669,6 +25736,11 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                 # still enters the HTTP response lifecycle.
                 if {[::itest::semantic::_profile_enabled ASM] &&
                     [lsearch -exact $events ASM_RESPONSE_VIOLATION] >= 0 &&
+                    [lsearch -exact $events HTTP_RESPONSE] < 0} {
+                    lappend events HTTP_RESPONSE
+                }
+                if {[::itest::semantic::_profile_enabled ASM] &&
+                    [lsearch -exact $events ASM_RESPONSE_LOGIN] >= 0 &&
                     [lsearch -exact $events HTTP_RESPONSE] < 0} {
                     lappend events HTTP_RESPONSE
                 }
@@ -25894,12 +25966,12 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             # and any collected HTTP_RESPONSE_DATA processing run, allowing
             # the response-violation handler to rewrite the buffered response.
             if {!$::state::http::collect_response} {
-                ::itest::semantic::asm_auto_response_event
+                ::itest::semantic::asm_auto_response_events
             }
         } elseif {$gated && $event_name eq "HTTP_RESPONSE_DATA"} {
             # A collected response body is complete at this point; ASM's
             # response inspection follows the data event.
-            ::itest::semantic::asm_auto_response_event
+            ::itest::semantic::asm_auto_response_events
         }
         return $result
     }

@@ -3132,6 +3132,10 @@ when HTTP_REQUEST {
             "ASM_RESPONSE_VIOLATION",
             coverage["event_lifecycle"]["target_unmapped_events"],
         )
+        self.assertNotIn(
+            "ASM_RESPONSE_LOGIN",
+            coverage["event_lifecycle"]["target_unmapped_events"],
+        )
         self.assertEqual(report["commands"]["post_target_count"], 10)
         self.assertEqual(
             report["commands"]["target_catalog_count"],
@@ -5881,6 +5885,46 @@ when HTTP_RESPONSE_DATA {
         self.assertTrue(any("length=6" in entry for entry in utf8_item["logs"]))
         self.assertEqual(utf8_item["response"]["body"], "hXllo")
 
+        for login_status in ("logged_in", "failed"):
+            with self.subTest(login_status=login_status):
+                login = self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP", "ASM"],
+                        "asm": {
+                            "username": "alice",
+                            "response_login": {
+                                "enabled": True,
+                                "status": login_status,
+                            },
+                        },
+                        "irule": (
+                            "when ASM_RESPONSE_LOGIN { "
+                            'log local0. "login=[ASM::username]/[ASM::login_status]"; '
+                            "HTTP::header insert X-Login-Status [ASM::login_status] }"
+                        ),
+                        "request": {
+                            "uri": "/login",
+                            "response_body": "login-response",
+                        },
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+                login_item = login["results"][0]
+                self.assertEqual(
+                    login_item["events_fired"],
+                    ["HTTP_RESPONSE", "ASM_RESPONSE_LOGIN"],
+                )
+                self.assertTrue(
+                    any(
+                        f"login=alice/{login_status}" in entry
+                        for entry in login_item["logs"]
+                    )
+                )
+                self.assertEqual(
+                    login_item["response"]["headers"]["x-login-status"],
+                    login_status,
+                )
+
         no_response_violation = self.adapter.run_scenario(
             {
                 "profiles": ["TCP", "HTTP", "ASM"],
@@ -5951,6 +5995,19 @@ when HTTP_RESPONSE_DATA {
             ({"client_ip": "not-an-ip"}, "not a valid IPv4 or IPv6 address"),
             ({"status": []}, "asm.status must be a string without NUL"),
             ({"login_status": {}}, "asm.login_status must be a string without NUL"),
+            ({"response_login": []}, "asm.response_login must be an object"),
+            (
+                {"response_login": {"enabled": "yes"}},
+                "asm.response_login.enabled must be a boolean",
+            ),
+            (
+                {"response_login": {"status": "pending"}},
+                "asm.response_login.status must be one of: failed, logged_in",
+            ),
+            (
+                {"response_login": {"username": "bad\x00value"}},
+                "asm.response_login.username must be a string without NUL",
+            ),
             ({"captcha_age": -2}, "asm.captcha_age must be an integer"),
             ({"violations": [{"name": "x", "details": ["bad"]}]}, "details must be an object"),
             ({"response_violations": [{"name": "x", "details": ["bad"]}]}, "details must be an object"),

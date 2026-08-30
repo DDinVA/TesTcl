@@ -546,7 +546,10 @@ action therefore suppresses the blocking hook, and the returned semantic
 snapshot reflects mutations made by those handlers. A non-empty
 `response_violations` fixture emits `ASM_RESPONSE_VIOLATION` after the response
 transaction and exposes response-side `ASM::violation` and `ASM::payload`
-state; `ASM::payload replace` updates the modeled response body. This is a
+state; `ASM::payload replace` updates the modeled response body. An enabled
+`response_login` fixture emits `ASM_RESPONSE_LOGIN` after the response
+transaction and sets response-side `ASM::login_status` and `ASM::username`.
+This is a
 deterministic request/response lifecycle for rule testing; it does not add a
 WAF inspection engine, blocking response generator, or automatic finding
 detector.

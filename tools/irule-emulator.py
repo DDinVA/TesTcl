@@ -3229,6 +3229,18 @@ def _configure_asm(session: Any, asm: dict[str, Any]) -> None:
             _tcl_quote(record) for record in response_records
         )
     session.eval_tcl(response_command)
+    response_login = asm["response_login"]
+    session.eval_tcl(
+        "::itest::semantic::asm_set_response_login "
+        + " ".join(
+            _tcl_quote(value)
+            for value in (
+                "1" if response_login["enabled"] else "0",
+                response_login["status"],
+                response_login["username"],
+            )
+        )
+    )
     for field in ASM_SIGNATURE_FIELDS:
         session.eval_tcl(
             "::itest::semantic::asm_set_signatures "
@@ -7525,6 +7537,33 @@ def _normalise_asm_violations(
     return violations
 
 
+def _normalise_asm_response_login(raw: Any, default_username: str) -> dict[str, Any]:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("asm.response_login must be an object")
+    allowed = {"enabled", "status", "username"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            "asm.response_login unsupported field(s): " + ", ".join(unknown)
+        )
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise EmulatorInputError("asm.response_login.enabled must be a boolean")
+    status = _normalise_asm_string(
+        raw.get("status", "logged_in"), "asm.response_login.status"
+    )
+    if status not in {"logged_in", "failed"}:
+        raise EmulatorInputError(
+            "asm.response_login.status must be one of: failed, logged_in"
+        )
+    username = _normalise_asm_string(
+        raw.get("username", default_username), "asm.response_login.username"
+    )
+    return {"enabled": enabled, "status": status, "username": username}
+
+
 def _normalise_asm(raw: Any) -> dict[str, Any]:
     """Normalize deterministic inputs for the bounded ASM/WAF policy model."""
     if raw is None:
@@ -7547,6 +7586,7 @@ def _normalise_asm(raw: Any) -> dict[str, Any]:
         "payload",
         "violations",
         "response_violations",
+        "response_login",
         "signatures",
         "threat_campaigns",
     }
@@ -7605,6 +7645,9 @@ def _normalise_asm(raw: Any) -> dict[str, Any]:
     ):
         raise EmulatorInputError("asm.captcha_age must be an integer from -1 to 2147483647")
     payload = _normalise_asm_string(raw.get("payload", ""), "asm.payload")
+    response_login = _normalise_asm_response_login(
+        raw.get("response_login"), username
+    )
 
     signatures_raw = raw.get("signatures", {})
     if not isinstance(signatures_raw, dict):
@@ -7654,6 +7697,7 @@ def _normalise_asm(raw: Any) -> dict[str, Any]:
         "response_violations": _normalise_asm_violations(
             raw.get("response_violations", []), "asm.response_violations"
         ),
+        "response_login": response_login,
         "signatures": signatures,
         "threat_campaigns": campaigns,
     }
@@ -10182,6 +10226,7 @@ PACKET_EVENT_ADAPTERS = {
     "ASM_REQUEST_VIOLATION": "ASM request violation inspection",
     "ASM_REQUEST_DONE": "ASM request inspection completion",
     "ASM_REQUEST_BLOCKING": "ASM blocking-response hook",
+    "ASM_RESPONSE_LOGIN": "ASM response login outcome",
     "ASM_RESPONSE_VIOLATION": "ASM response violation inspection",
     "HTTP_RESPONSE": "HTTP response transaction",
     "ADAPT_RESPONSE_HEADERS": "response adaptation headers from IVS fixture",

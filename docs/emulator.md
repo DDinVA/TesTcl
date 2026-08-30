@@ -838,6 +838,11 @@ The `ASM` policy surface can be seeded with deterministic WAF inputs:
         "details": {"response": "secret"}
       }
     ],
+    "response_login": {
+      "enabled": true,
+      "status": "logged_in",
+      "username": "alice"
+    },
     "signatures": {"ids": ["200000001"]},
     "threat_campaigns": {"names": ["campaign-a"]}
   },
@@ -858,6 +863,10 @@ engine. A non-empty `response_violations` fixture emits
 `ASM_RESPONSE_VIOLATION` after `HTTP_RESPONSE` and any collected response-data
 event; response-side `ASM::violation` and `ASM::payload` state are available
 to the handler, and `ASM::payload replace` updates the modeled response body.
+An enabled `response_login` fixture emits `ASM_RESPONSE_LOGIN` after the
+response transaction and sets the response-side `ASM::login_status` and
+`ASM::username` values for the handler. Login and response-violation fixtures
+are independent and, when both are present, login is emitted first.
 With the `ASM` profile attached, an enabled HTTP request also runs the bounded
 ASM request lifecycle: `ASM_REQUEST_VIOLATION` is emitted when seeded or
 rule-created violations exist, followed by `ASM_REQUEST_DONE`; the
