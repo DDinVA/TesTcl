@@ -2936,7 +2936,8 @@ def _normalise_command_probe_request(
     if not isinstance(base_scenario, dict):
         raise EmulatorInputError("command probe scenario must be a JSON object")
     forbidden = sorted(
-        set(base_scenario) & {"irule", "irule_file", "request", "requests", "packets"}
+        set(base_scenario)
+        & {"irule", "irule_file", "irules", "request", "requests", "packets"}
     )
     if forbidden:
         raise EmulatorInputError(

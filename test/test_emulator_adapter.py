@@ -10962,6 +10962,20 @@ when CLIENT_ACCEPTED { log local0. timing-disabled }
                     tcl_lsp_root=self.tcl_lsp_root,
                 )
 
+    def test_command_probe_rejects_multiple_attached_rule_fixture(self) -> None:
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "command probe scenario cannot provide irules",
+        ):
+            self.adapter.run_command_probe(
+                {
+                    "command": "HTTP::host",
+                    "event": "HTTP_REQUEST",
+                    "scenario": {"irules": ["when HTTP_REQUEST {}"]},
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_semantic_overlay_models_connection_table_subtables_and_mutations(self) -> None:
         result = self.adapter.run_scenario(
             {

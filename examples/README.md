@@ -6,3 +6,6 @@ The `observations/` directory contains a TMOS 17.5 external-observation
 template. Replace its placeholders with output collected independently from a
 BIG-IP or vLab, then import it with `--import-observations` before running the
 resulting golden-vector pack.
+
+The `scenarios/multi-irule-17.5.json` fixture demonstrates multiple attached
+iRules with priority ordering and a shared pool fixture.
