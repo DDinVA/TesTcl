@@ -9532,6 +9532,32 @@ DHCPV4_IP_OPTIONS = frozenset({1, 3, 6, 9, 28, 50, 54})
 DHCPV4_TEXT_OPTIONS = frozenset({12, 14, 15, 40, 60, 62, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76})
 DHCPV4_OPTION_OVERLOAD = 52
 DHCPV4_OPTION_MESSAGE_TYPE = 53
+IPV6_FIXED_HEADER_BYTES = 40
+IPV6_EXTENSION_HEADERS = frozenset({0, 43, 60})
+IPV6_FRAGMENT_HEADER = 44
+IPV6_AH_HEADER = 51
+DHCPV6_PORTS = frozenset({546, 547})
+DHCPV6_MAX_MESSAGE_BYTES = 65535
+DHCPV6_RELAY_HEADER_BYTES = 34
+DHCPV6_MESSAGE_TYPES = {
+    1: "SOLICIT",
+    2: "ADVERTISE",
+    3: "REQUEST",
+    4: "CONFIRM",
+    5: "RENEW",
+    6: "REBIND",
+    7: "REPLY",
+    8: "RELEASE",
+    9: "DECLINE",
+    10: "RECONFIGURE",
+    11: "INFORMATION-REQUEST",
+    12: "RELAY-FORW",
+    13: "RELAY-REPL",
+    14: "LEASEQUERY",
+    15: "LEASEQUERY-REPLY",
+    16: "LEASEQUERY-DONE",
+    17: "LEASEQUERY-DATA",
+}
 MAX_PACKET_STREAMS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
@@ -11135,6 +11161,124 @@ def _decode_dhcpv4_payload(
     }
 
 
+def _dhcpv6_option_value(option_code: int, option_data: bytes, index: int) -> str:
+    if option_code == 6:
+        if len(option_data) % 2:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv6 option 6 must contain 16-bit option codes"
+            )
+        return " ".join(
+            str(int.from_bytes(option_data[offset : offset + 2], "big"))
+            for offset in range(0, len(option_data), 2)
+        )
+    if option_code == 8:
+        if len(option_data) != 2:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv6 elapsed-time option must be two bytes"
+            )
+        return str(int.from_bytes(option_data, "big"))
+    if option_code == 13:
+        if len(option_data) < 2:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv6 status-code option is truncated"
+            )
+        status = int.from_bytes(option_data[:2], "big")
+        message = _decode_wire_text(option_data[2:])
+        return f"{status} {message}".rstrip()
+    if option_code == 23:
+        if not option_data or len(option_data) % 16:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv6 DNS-server option must contain IPv6 addresses"
+            )
+        return " ".join(
+            str(ipaddress.ip_address(option_data[offset : offset + 16]))
+            for offset in range(0, len(option_data), 16)
+        )
+    if option_code == 32:
+        if len(option_data) != 16:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv6 server-unicast option must be 16 bytes"
+            )
+        return str(ipaddress.ip_address(option_data))
+    return option_data.hex()
+
+
+def _decode_dhcpv6_options(
+    payload: bytes,
+    start: int,
+    index: int,
+) -> dict[str, str]:
+    options: dict[str, str] = {}
+    cursor = start
+    while cursor < len(payload):
+        if len(payload) - cursor < 4:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv6 option header is truncated"
+            )
+        option_code = int.from_bytes(payload[cursor : cursor + 2], "big")
+        option_length = int.from_bytes(payload[cursor + 2 : cursor + 4], "big")
+        data_start = cursor + 4
+        data_end = data_start + option_length
+        if data_end > len(payload):
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv6 option {option_code} exceeds the message"
+            )
+        options[str(option_code)] = _dhcpv6_option_value(
+            option_code, payload[data_start:data_end], index
+        )
+        cursor = data_end
+    return options
+
+
+def _decode_dhcpv6_payload(
+    payload: bytes,
+    direction: str,
+    source: dict[str, Any],
+    destination: dict[str, Any],
+    index: int,
+) -> dict[str, Any]:
+    """Decode one bounded DHCPv6 message into the structured adapter shape."""
+    if len(payload) < 4:
+        raise EmulatorInputError(f"wire packet {index} DHCPv6 message is truncated")
+    if len(payload) > DHCPV6_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"wire packet {index} DHCPv6 message exceeds the {DHCPV6_MAX_MESSAGE_BYTES}-byte limit"
+        )
+    message_type_number = payload[0]
+    message_type = DHCPV6_MESSAGE_TYPES.get(message_type_number, str(message_type_number))
+    if message_type_number in {12, 13}:
+        if len(payload) < DHCPV6_RELAY_HEADER_BYTES:
+            raise EmulatorInputError(
+                f"wire packet {index} DHCPv6 relay message is truncated"
+            )
+        hop_count = payload[1]
+        link_address = str(ipaddress.ip_address(payload[2:18]))
+        peer_address = str(ipaddress.ip_address(payload[18:34]))
+        transaction_id = "000000"
+        options_start = DHCPV6_RELAY_HEADER_BYTES
+    else:
+        hop_count = 0
+        link_address = "::"
+        peer_address = "::"
+        transaction_id = payload[1:4].hex()
+        options_start = 4
+    return {
+        "protocol": "dhcpv6",
+        "direction": direction,
+        "source": source,
+        "destination": destination,
+        "hop_count": hop_count,
+        "len": len(payload),
+        "link_address": link_address,
+        "msg_type": message_type,
+        "options": _decode_dhcpv6_options(payload, options_start, index),
+        "peer_address": peer_address,
+        "transaction_id": transaction_id,
+        "payload_hex": payload.hex(),
+        "_wire_payload": payload,
+    }
+
+
 def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) -> dict[str, Any]:
     unknown = sorted(
         set(raw_packet) - {"protocol", "direction", "raw_hex", "network", "timestamp"}
@@ -11144,30 +11288,87 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
             f"unsupported wire packet {index} field(s): {', '.join(unknown)}"
         )
     network = _require_string(raw_packet.get("network", "ipv4"), f"wire packet {index} network").lower()
-    if network != "ipv4":
-        raise EmulatorInputError("only raw IPv4 wire packets are currently supported")
+    if network not in {"ipv4", "ipv6"}:
+        raise EmulatorInputError("raw wire packets must use IPv4 or IPv6")
     raw_hex = _require_string(raw_packet.get("raw_hex"), f"wire packet {index} raw_hex")
     try:
         raw = bytes.fromhex(raw_hex)
     except ValueError as exc:
         raise EmulatorInputError(f"wire packet {index} raw_hex is not valid hexadecimal") from exc
-    if len(raw) < 20 or raw[0] >> 4 != 4:
-        raise EmulatorInputError(f"wire packet {index} must contain an IPv4 packet")
-    header_length = (raw[0] & 0x0F) * 4
-    if header_length < 20 or len(raw) < header_length:
-        raise EmulatorInputError(f"wire packet {index} has an invalid IPv4 header length")
-    total_length = int.from_bytes(raw[2:4], "big")
-    if total_length < header_length or total_length > len(raw):
-        raise EmulatorInputError(f"wire packet {index} has an invalid IPv4 total length")
-    fragment_field = int.from_bytes(raw[6:8], "big")
-    if fragment_field & 0x3FFF:
-        raise EmulatorInputError(
-            f"wire packet {index} is fragmented; IPv4 fragment reassembly is not supported"
-        )
-    source_address = str(ipaddress.ip_address(raw[12:16]))
-    destination_address = str(ipaddress.ip_address(raw[16:20]))
-    ip_protocol = raw[9]
-    payload = raw[header_length:total_length]
+    if network == "ipv4":
+        if len(raw) < 20 or raw[0] >> 4 != 4:
+            raise EmulatorInputError(f"wire packet {index} must contain an IPv4 packet")
+        header_length = (raw[0] & 0x0F) * 4
+        if header_length < 20 or len(raw) < header_length:
+            raise EmulatorInputError(f"wire packet {index} has an invalid IPv4 header length")
+        total_length = int.from_bytes(raw[2:4], "big")
+        if total_length < header_length or total_length > len(raw):
+            raise EmulatorInputError(f"wire packet {index} has an invalid IPv4 total length")
+        fragment_field = int.from_bytes(raw[6:8], "big")
+        if fragment_field & 0x3FFF:
+            raise EmulatorInputError(
+                f"wire packet {index} is fragmented; IPv4 fragment reassembly is not supported"
+            )
+        source_address = str(ipaddress.ip_address(raw[12:16]))
+        destination_address = str(ipaddress.ip_address(raw[16:20]))
+        ip_protocol = raw[9]
+        ip_tos = raw[1]
+        ip_ttl = raw[8]
+        payload = raw[header_length:total_length]
+    else:
+        if len(raw) < IPV6_FIXED_HEADER_BYTES or raw[0] >> 4 != 6:
+            raise EmulatorInputError(f"wire packet {index} must contain an IPv6 packet")
+        declared_payload_length = int.from_bytes(raw[4:6], "big")
+        total_length = IPV6_FIXED_HEADER_BYTES + declared_payload_length
+        if total_length > len(raw):
+            raise EmulatorInputError(f"wire packet {index} has an invalid IPv6 payload length")
+        source_address = str(ipaddress.ip_address(raw[8:24]))
+        destination_address = str(ipaddress.ip_address(raw[24:40]))
+        ip_protocol = raw[6]
+        ip_tos = ((raw[0] & 0x0F) << 4) | (raw[1] >> 4)
+        ip_ttl = raw[7]
+        payload_offset = IPV6_FIXED_HEADER_BYTES
+        extension_count = 0
+        while ip_protocol in IPV6_EXTENSION_HEADERS or ip_protocol in {
+            IPV6_FRAGMENT_HEADER,
+            IPV6_AH_HEADER,
+        }:
+            extension_count += 1
+            if extension_count > 16:
+                raise EmulatorInputError(
+                    f"wire packet {index} has too many IPv6 extension headers"
+                )
+            if ip_protocol == IPV6_FRAGMENT_HEADER:
+                if payload_offset + 8 > total_length:
+                    raise EmulatorInputError(
+                        f"wire packet {index} has an incomplete IPv6 fragment header"
+                    )
+                fragment_bits = int.from_bytes(
+                    raw[payload_offset + 2 : payload_offset + 4], "big"
+                )
+                if fragment_bits:
+                    raise EmulatorInputError(
+                        f"wire packet {index} is fragmented; IPv6 fragment reassembly is not supported"
+                    )
+                ip_protocol = raw[payload_offset]
+                payload_offset += 8
+                continue
+            if payload_offset + 2 > total_length:
+                raise EmulatorInputError(
+                    f"wire packet {index} has an incomplete IPv6 extension header"
+                )
+            extension_length = (
+                (raw[payload_offset + 1] + 1) * 8
+                if ip_protocol in IPV6_EXTENSION_HEADERS
+                else (raw[payload_offset + 1] + 2) * 4
+            )
+            if extension_length < 8 or payload_offset + extension_length > total_length:
+                raise EmulatorInputError(
+                    f"wire packet {index} has an invalid IPv6 extension header length"
+                )
+            ip_protocol = raw[payload_offset]
+            payload_offset += extension_length
+        payload = raw[payload_offset:total_length]
     if ip_protocol == 6:
         if len(payload) < 20:
             raise EmulatorInputError(f"wire packet {index} has an incomplete TCP header")
@@ -11184,8 +11385,8 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
         packet: dict[str, Any] = {
             "protocol": "tcp",
             "direction": direction,
-            "ttl": raw[8],
-            "tos": raw[1],
+            "ttl": ip_ttl,
+            "tos": ip_tos,
             "flags": flag_names,
             "seq": int.from_bytes(payload[4:8], "big"),
             "ack": int.from_bytes(payload[8:12], "big"),
@@ -11206,8 +11407,8 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
         packet = {
             "protocol": "udp",
             "direction": direction,
-            "ttl": raw[8],
-            "tos": raw[1],
+            "ttl": ip_ttl,
+            "tos": ip_tos,
             "source": {"address": source_address, "port": int.from_bytes(payload[0:2], "big")},
             "destination": {"address": destination_address, "port": int.from_bytes(payload[2:4], "big")},
             "_wire_length": total_length,
@@ -11223,21 +11424,37 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
     )
 
 
-def _wire_ipv4_endpoints(raw: bytes, index: int) -> tuple[str, str]:
-    if len(raw) < 20 or raw[0] >> 4 != 4:
-        raise EmulatorInputError(f"pcap IPv4 packet {index} is incomplete")
-    header_length = (raw[0] & 0x0F) * 4
-    if header_length < 20 or len(raw) < header_length:
-        raise EmulatorInputError(f"pcap IPv4 packet {index} has an invalid header length")
-    return str(ipaddress.ip_address(raw[12:16])), str(ipaddress.ip_address(raw[16:20]))
+def _wire_network(raw: bytes, index: int) -> str:
+    if not raw:
+        raise EmulatorInputError(f"pcap IP packet {index} is empty")
+    version = raw[0] >> 4
+    if version == 4:
+        return "ipv4"
+    if version == 6:
+        return "ipv6"
+    raise EmulatorInputError(f"pcap packet {index} is not IPv4 or IPv6")
 
 
-def _extract_pcap_ipv4(frame: bytes, linktype: int, index: int) -> bytes | None:
+def _wire_ip_endpoints(raw: bytes, index: int) -> tuple[str, str]:
+    network = _wire_network(raw, index)
+    if network == "ipv4":
+        if len(raw) < 20:
+            raise EmulatorInputError(f"pcap IPv4 packet {index} is incomplete")
+        header_length = (raw[0] & 0x0F) * 4
+        if header_length < 20 or len(raw) < header_length:
+            raise EmulatorInputError(f"pcap IPv4 packet {index} has an invalid header length")
+        return str(ipaddress.ip_address(raw[12:16])), str(ipaddress.ip_address(raw[16:20]))
+    if len(raw) < IPV6_FIXED_HEADER_BYTES:
+        raise EmulatorInputError(f"pcap IPv6 packet {index} is incomplete")
+    return str(ipaddress.ip_address(raw[8:24])), str(ipaddress.ip_address(raw[24:40]))
+
+
+def _extract_pcap_ip(frame: bytes, linktype: int, index: int) -> bytes | None:
     if linktype == 101:  # LINKTYPE_RAW
-        return frame if len(frame) >= 1 and frame[0] >> 4 == 4 else None
+        return frame if len(frame) >= 1 and frame[0] >> 4 in {4, 6} else None
     if linktype != 1:  # LINKTYPE_ETHERNET
         raise EmulatorInputError(
-            f"unsupported pcap link-layer type {linktype}; only Ethernet and raw IPv4 are supported"
+            f"unsupported pcap link-layer type {linktype}; only Ethernet and raw IP are supported"
         )
     if len(frame) < 14:
         return None
@@ -11248,9 +11465,9 @@ def _extract_pcap_ipv4(frame: bytes, linktype: int, index: int) -> bytes | None:
             return None
         ether_type = int.from_bytes(frame[cursor + 2 : cursor + 4], "big")
         cursor += 4
-    if ether_type != 0x0800:
+    if ether_type not in {0x0800, 0x86DD}:
         return None
-    if len(frame) <= cursor or frame[cursor] >> 4 != 4:
+    if len(frame) <= cursor or frame[cursor] >> 4 not in {4, 6}:
         return None
     return frame[cursor:]
 
@@ -11359,9 +11576,7 @@ def _pcapng_packets(
         try:
             parsed_address = ipaddress.ip_address(address)
         except ValueError as exc:
-            raise EmulatorInputError(f"{field} must be an IPv4 address") from exc
-        if parsed_address.version != 4:
-            raise EmulatorInputError(f"{field} must be an IPv4 address")
+            raise EmulatorInputError(f"{field} must be an IPv4 or IPv6 address") from exc
         if field.endswith("client_addr"):
             client_addr = str(parsed_address)
         else:
@@ -11494,11 +11709,11 @@ def _pcapng_packets(
         offset = next_offset
         if frame is None:
             continue
-        ipv4 = _extract_pcap_ipv4(frame, linktype, record_count - 1)
-        if ipv4 is None:
+        ip_packet = _extract_pcap_ip(frame, linktype, record_count - 1)
+        if ip_packet is None:
             skipped_non_ipv4 += 1
             continue
-        source, destination = _wire_ipv4_endpoints(ipv4, record_count - 1)
+        source, destination = _wire_ip_endpoints(ip_packet, record_count - 1)
         packet_direction = direction
         if direction == "auto":
             if source == client_addr and destination == server_addr:
@@ -11512,13 +11727,15 @@ def _pcapng_packets(
             {
                 "protocol": "wire",
                 "direction": packet_direction,
-                "network": "ipv4",
-                "raw_hex": ipv4.hex(),
+                "network": _wire_network(ip_packet, record_count - 1),
+                "raw_hex": ip_packet.hex(),
                 "timestamp": timestamp,
             }
         )
     if not packets:
-        raise EmulatorInputError("pcapng contained no usable IPv4 packets")
+        raise EmulatorInputError("pcapng contained no usable IP packets")
+    ipv4_packet_count = sum(packet["network"] == "ipv4" for packet in packets)
+    ipv6_packet_count = sum(packet["network"] == "ipv6" for packet in packets)
     resolutions = {scale for _linktype, _snaplen, scale in all_interfaces}
     if len(resolutions) == 1:
         scale = next(iter(resolutions))
@@ -11540,8 +11757,11 @@ def _pcapng_packets(
         "record_count": record_count,
         "block_count": block_count,
         "section_count": section_count,
-        "ipv4_packet_count": len(packets),
+        "ip_packet_count": len(packets),
+        "ipv4_packet_count": ipv4_packet_count,
+        "ipv6_packet_count": ipv6_packet_count,
         "skipped_non_ipv4": skipped_non_ipv4,
+        "skipped_non_ip": skipped_non_ipv4,
         "skipped_unmatched": skipped_unmatched,
         "direction": direction,
     }
@@ -11582,9 +11802,7 @@ def _pcap_packets(
         try:
             parsed_address = ipaddress.ip_address(address)
         except ValueError as exc:
-            raise EmulatorInputError(f"{field} must be an IPv4 address") from exc
-        if parsed_address.version != 4:
-            raise EmulatorInputError(f"{field} must be an IPv4 address")
+            raise EmulatorInputError(f"{field} must be an IPv4 or IPv6 address") from exc
         if field.endswith("client_addr"):
             client_addr = str(parsed_address)
         else:
@@ -11620,11 +11838,11 @@ def _pcap_packets(
             raise EmulatorInputError(f"pcap record {record_count - 1} payload is incomplete")
         frame = data[offset : offset + included_length]
         offset += included_length
-        ipv4 = _extract_pcap_ipv4(frame, linktype, record_count - 1)
-        if ipv4 is None:
+        ip_packet = _extract_pcap_ip(frame, linktype, record_count - 1)
+        if ip_packet is None:
             skipped_non_ipv4 += 1
             continue
-        source, destination = _wire_ipv4_endpoints(ipv4, record_count - 1)
+        source, destination = _wire_ip_endpoints(ip_packet, record_count - 1)
         packet_direction = direction
         if direction == "auto":
             if source == client_addr and destination == server_addr:
@@ -11638,21 +11856,26 @@ def _pcap_packets(
             {
                 "protocol": "wire",
                 "direction": packet_direction,
-                "network": "ipv4",
-                "raw_hex": ipv4.hex(),
+                "network": _wire_network(ip_packet, record_count - 1),
+                "raw_hex": ip_packet.hex(),
                 "timestamp": ts_sec + ts_fraction / timestamp_scale,
             }
         )
     if not packets:
-        raise EmulatorInputError("pcap contained no usable IPv4 packets")
+        raise EmulatorInputError("pcap contained no usable IP packets")
+    ipv4_packet_count = sum(packet["network"] == "ipv4" for packet in packets)
+    ipv6_packet_count = sum(packet["network"] == "ipv6" for packet in packets)
     return packets, {
         "format": "pcap",
         "version": f"{major}.{minor}",
         "linktype": linktype,
         "timestamp_resolution": "nanoseconds" if timestamp_scale == 1_000_000_000.0 else "microseconds",
         "record_count": record_count,
-        "ipv4_packet_count": len(packets),
+        "ip_packet_count": len(packets),
+        "ipv4_packet_count": ipv4_packet_count,
+        "ipv6_packet_count": ipv6_packet_count,
         "skipped_non_ipv4": skipped_non_ipv4,
+        "skipped_non_ip": skipped_non_ipv4,
         "skipped_unmatched": skipped_unmatched,
         "direction": direction,
     }
@@ -15953,6 +16176,10 @@ class EmulatorSession:
             str(profile).upper() in {"UDP", "DHCP", "DHCPV4"}
             for profile in self._profiles
         )
+        self._dhcpv6_raw_active = any(
+            str(profile).upper() in {"UDP", "DHCP", "DHCPV6"}
+            for profile in self._profiles
+        )
         self._thread.start()
         self._started.wait()
         if self._startup_error is not None:
@@ -18732,8 +18959,9 @@ class EmulatorSession:
                         packet["destination"],
                         packet_index,
                     )
-                    if "timestamp" in packet:
-                        merged["timestamp"] = packet["timestamp"]
+                    for field in ("source", "destination", "timestamp", "ttl", "tos", "hops"):
+                        if field in packet:
+                            merged[field] = packet[field]
                     return merged, 0
         if packet["protocol"] == "udp" and self._dhcpv4_raw_active:
             source_port = packet.get("source", {}).get("port")
@@ -18750,8 +18978,28 @@ class EmulatorSession:
                         packet["destination"],
                         packet_index,
                     )
-                    if "timestamp" in packet:
-                        merged["timestamp"] = packet["timestamp"]
+                    for field in ("source", "destination", "timestamp", "ttl", "tos", "hops"):
+                        if field in packet:
+                            merged[field] = packet[field]
+                    return merged, 0
+        if packet["protocol"] == "udp" and self._dhcpv6_raw_active:
+            source_port = packet.get("source", {}).get("port")
+            destination_port = packet.get("destination", {}).get("port")
+            if DHCPV6_PORTS.intersection({source_port, destination_port}):
+                raw_payload = packet.get("_wire_payload")
+                if raw_payload is None and "_wire_length" in packet:
+                    raw_payload = b""
+                if raw_payload is not None:
+                    merged = _decode_dhcpv6_payload(
+                        raw_payload,
+                        packet["direction"],
+                        packet["source"],
+                        packet["destination"],
+                        packet_index,
+                    )
+                    for field in ("source", "destination", "timestamp", "ttl", "tos", "hops"):
+                        if field in packet:
+                            merged[field] = packet[field]
                     return merged, 0
         if packet["protocol"] == "udp" and packet.get("_wire_payload"):
             decoded_dns = _decode_dns_payload(

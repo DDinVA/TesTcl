@@ -95,6 +95,32 @@ def _raw_ipv4_udp_hex(
     return (ip + udp + payload).hex()
 
 
+def _raw_ipv6_udp_hex(
+    source: str,
+    destination: str,
+    source_port: int,
+    destination_port: int,
+    payload: bytes,
+    *,
+    traffic_class: int = 0,
+    hop_limit: int = 64,
+    next_header: int = 17,
+    extension_header: bytes = b"",
+) -> str:
+    udp = struct.pack("!HHHH", source_port, destination_port, 8 + len(payload), 0)
+    first_word = (6 << 28) | (traffic_class << 20)
+    ip = struct.pack(
+        "!IHBB16s16s",
+        first_word,
+        len(extension_header) + len(udp) + len(payload),
+        next_header,
+        hop_limit,
+        ipaddress.ip_address(source).packed,
+        ipaddress.ip_address(destination).packed,
+    )
+    return (ip + extension_header + udp + payload).hex()
+
+
 def _pcp_address_bytes(address: str) -> bytes:
     parsed = ipaddress.ip_address(address)
     if parsed.version == 4:
@@ -199,6 +225,19 @@ def _dhcpv4_message(
     return bytes(header) + bytes(message_options)
 
 
+def _dhcpv6_message(
+    *,
+    message_type: int = 1,
+    transaction_id: bytes = b"\x01\x02\x03",
+    options: tuple[tuple[int, bytes], ...] = ((8, b"\x00\x2a"),),
+) -> bytes:
+    message = bytearray(bytes([message_type]) + transaction_id)
+    for option_code, option_data in options:
+        message.extend(struct.pack("!HH", option_code, len(option_data)))
+        message.extend(option_data)
+    return bytes(message)
+
+
 def _gtp_v2_hex(
     message_type: int,
     *,
@@ -291,6 +330,10 @@ def _pcapng_bytes(
 
 def _ethernet_ipv4(raw_hex: str) -> bytes:
     return b"\x00" * 12 + b"\x08\x00" + bytes.fromhex(raw_hex)
+
+
+def _ethernet_ipv6(raw_hex: str) -> bytes:
+    return b"\x00" * 12 + b"\x86\xdd" + bytes.fromhex(raw_hex)
 
 
 def _load_adapter():
@@ -3832,6 +3875,135 @@ when SERVER_DATA {
             "CLIENT_DATA",
             [event["event"] for event in replay["trace"][0]["events"]],
         )
+
+    def test_raw_dhcpv6_packets_reach_the_structured_event_adapter(self) -> None:
+        request_payload = _dhcpv6_message(
+            options=(
+                (6, struct.pack("!HH", 1, 23)),
+                (23, ipaddress.ip_address("2001:db8::53").packed),
+            )
+        )
+        response_payload = _dhcpv6_message(
+            message_type=7,
+            transaction_id=b"\x01\x02\x03",
+            options=((13, struct.pack("!H", 0) + b"ok"),),
+        )
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": """
+when CLIENT_DATA {
+    log local0. "client=[DHCP::version]/[DHCPv6::msg_type]/[DHCPv6::transaction_id]/[DHCPv6::option 6]/[DHCPv6::option 23]"
+}
+when SERVER_DATA {
+    log local0. "server=[DHCPv6::msg_type]/[DHCPv6::option 13]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "network": "ipv6",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv6_udp_hex(
+                        "fe80::10", "ff02::1:2", 546, 547, request_payload,
+                        traffic_class=0x2E,
+                        next_header=0,
+                        extension_header=b"\x11\x00" + b"\x00" * 6,
+                    ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "network": "ipv6",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv6_udp_hex(
+                            "fe80::1", "fe80::10", 547, 546, response_payload
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request, response = result["trace"]
+        self.assertEqual(request["protocol"], "dhcpv6")
+        self.assertEqual(response["protocol"], "dhcpv6")
+        client_event = next(event for event in request["events"] if event["event"] == "CLIENT_DATA")
+        server_event = next(event for event in response["events"] if event["event"] == "SERVER_DATA")
+        self.assertEqual(client_event["state"]["datagram"]["ip_ttl"], "64")
+        self.assertEqual(client_event["state"]["datagram"]["ip_tos"], "46")
+        self.assertEqual(client_event["state"]["dhcp"]["version"], "6")
+        self.assertEqual(client_event["state"]["dhcpv6"]["msg_type"], "SOLICIT")
+        self.assertEqual(client_event["state"]["dhcpv6"]["transaction_id"], "010203")
+        self.assertTrue(any("client=6/SOLICIT/010203/1 23/2001:db8::53" in entry for entry in client_event["logs"]))
+        self.assertTrue(any("server=REPLY/0 ok" in entry for entry in server_event["logs"]))
+
+        capture = _pcap_bytes([
+            (
+                11,
+                12,
+                _ethernet_ipv6(
+                    _raw_ipv6_udp_hex(
+                        "fe80::10", "ff02::1:2", 546, 547, request_payload
+                    )
+                ),
+            )
+        ])
+        replay = self.adapter.run_pcap_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": "when CLIENT_DATA { log local0. dhcpv6-pcap }",
+            },
+            capture,
+            tcl_lsp_root=self.tcl_lsp_root,
+            direction="client_to_server",
+        )
+        self.assertEqual(replay["capture"]["ip_packet_count"], 1)
+        self.assertEqual(replay["capture"]["ipv6_packet_count"], 1)
+        self.assertEqual(replay["trace"][0]["protocol"], "dhcpv6")
+
+    def test_raw_dhcpv6_rejects_truncated_message_and_options(self) -> None:
+        base = {
+            "profiles": ["UDP"],
+            "irule": "when CLIENT_DATA { log local0. request }",
+        }
+        malformed_payloads = (
+            (b"\x01\x02", "wire packet 0 DHCPv6 message is truncated"),
+            (_dhcpv6_message(options=()) + b"\x00", "wire packet 0 DHCPv6 option header is truncated"),
+            (_dhcpv6_message() + b"\x00\x01\x00\x02\x01", "wire packet 0 DHCPv6 option 1 exceeds the message"),
+        )
+        for payload, message in malformed_payloads:
+            with self.subTest(message=message):
+                scenario = dict(base)
+                scenario["packets"] = [{
+                    "protocol": "wire",
+                    "network": "ipv6",
+                    "direction": "client_to_server",
+                    "raw_hex": _raw_ipv6_udp_hex(
+                        "fe80::10", "ff02::1:2", 546, 547, payload
+                    ),
+                }]
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+        fragmented = dict(base)
+        fragmented["packets"] = [{
+            "protocol": "wire",
+            "network": "ipv6",
+            "direction": "client_to_server",
+            "raw_hex": _raw_ipv6_udp_hex(
+                "fe80::10",
+                "ff02::1:2",
+                546,
+                547,
+                _dhcpv6_message(),
+                next_header=44,
+                extension_header=b"\x11\x00\x00\x08\x00\x00\x00\x00",
+            ),
+        }]
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "wire packet 0 is fragmented; IPv6 fragment reassembly is not supported",
+        ):
+            self.adapter.run_scenario(fragmented, tcl_lsp_root=self.tcl_lsp_root)
 
     def test_raw_dhcpv4_rejects_malformed_bootp_and_options(self) -> None:
         base = {

@@ -2433,12 +2433,13 @@ multiplex live streams, contact an origin, or emit pushed frames.
 }
 ```
 
-For raw captures, use `protocol: "wire"`, `network: "ipv4"`, and an IPv4
-packet in `raw_hex`; the current decoder rejects fragmented IPv4 packets and
-performs bounded sequence-aware TCP application reassembly across records and
-persistent session calls, including out-of-order segments and duplicate
-retransmissions. Classic PCAP and pcapng file/HTTP/MCP ingestion is supported
-separately; IPv4 fragment handling remains outside this slice.
+For raw captures, use `protocol: "wire"`, `network: "ipv4"` or `"ipv6"`, and
+the corresponding IP packet in `raw_hex`. The decoder rejects fragmented IPv4
+and IPv6 packets, skips bounded IPv6 extension headers, and performs bounded
+sequence-aware TCP application reassembly across records and persistent
+session calls, including out-of-order segments and duplicate retransmissions.
+Classic PCAP and pcapng file/HTTP/MCP ingestion supports Ethernet or raw IPv4
+and IPv6 frames; fragment reassembly remains outside this slice.
 
 ```json
 {

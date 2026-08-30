@@ -109,7 +109,7 @@ decisions only and are not a claim of live routing, QoS, or packet behavior.
 The optional TMOS 17.5 emulator exposes the pinned `tcl-lsp` registry in
 bounded chunks and reports static command-handler and packet-event coverage
 through its conformance endpoint. Structured packet traces currently cover
-TCP, TLS, HTTP, generic UDP, SCTP, DNS, SIP over TCP or UDP, Diameter over TCP, RADIUS over UDP, GTP over UDP or GTP-Prime over TCP, Message Routing Framework messages over TCP, and raw IPv4 transport records. HTTP requests and client-side structured HTTP packets accept bounded `persist_down` and `lb_queue` inputs for causally exercising `PERSIST_DOWN` and `LB_QUEUED`; the adapter places those events around `LB_SELECTED`, emits `LB_FAILED` with `queue_limit` when a positive queue depth limit is exceeded, and rejects the inputs on server-side response packets. HTTP packet traces also expose the collected request/response data events, request-send phase, request/response rewrite completion, HTML tag/comment matching, and server lifecycle events when the corresponding profile or rule condition is present. They also accept a bounded client-side `lb_failure` cause for exercising `LB_FAILED` fallback and `LB::reselect`; explicit failure cannot be combined with the other causal inputs. Fragmented IPv4
+TCP, TLS, HTTP, generic UDP, SCTP, DNS, SIP over TCP or UDP, Diameter over TCP, RADIUS over UDP, GTP over UDP or GTP-Prime over TCP, Message Routing Framework messages over TCP, and raw IPv4 or IPv6 transport records. HTTP requests and client-side structured HTTP packets accept bounded `persist_down` and `lb_queue` inputs for causally exercising `PERSIST_DOWN` and `LB_QUEUED`; the adapter places those events around `LB_SELECTED`, emits `LB_FAILED` with `queue_limit` when a positive queue depth limit is exceeded, and rejects the inputs on server-side response packets. HTTP packet traces also expose the collected request/response data events, request-send phase, request/response rewrite completion, HTML tag/comment matching, and server lifecycle events when the corresponding profile or rule condition is present. They also accept a bounded client-side `lb_failure` cause for exercising `LB_FAILED` fallback and `LB::reselect`; explicit failure cannot be combined with the other causal inputs. Fragmented IPv4 or IPv6
 packets remain outside the current boundary. Classic PCAP and bounded pcapng
 ingestion are supported, and TCP stream reassembly includes bounded gap,
 overlap, and retransmission de-duplication handling. Diameter validates and
@@ -181,9 +181,10 @@ The DHCP adapter models the 17.5 `DHCP::version`, `DHCPv4::*`, and `DHCPv6::*`
 surfaces for structured client/server data events, DHCP header readers
 (including `DHCPv4::htype`), option lookup/mutation, and drop/reject decisions.
 DHCPv6 option deletion is modeled explicitly. Raw IPv4/UDP DHCPv4 packets on
-ports 67/68 are decoded into that same state path, including BOOTP headers,
-message types, bounded common options, and option-overload areas. It does not
-run a lease allocator or send real ICMP rejection traffic.
+ports 67/68 and raw IPv6/UDP DHCPv6 packets on ports 546/547 are decoded into
+their respective state paths, including BOOTP/DHCPv6 headers, message types,
+bounded common options, and DHCPv4 option-overload areas. It does not run a
+lease allocator or send real ICMP rejection traffic.
 The FTP adapter models the six 17.5 `FTP::*` controls for structured TCP
 control-channel traces, including active-mode permission, FTP handler state,
 FTPS activation mode, TLS session-reuse enforcement, and passive-port range
