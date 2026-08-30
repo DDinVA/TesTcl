@@ -62,6 +62,15 @@ namespace eval ::itest::semantic {
     variable traffic_intents {}
     variable traffic_intent_counter 0
     variable traffic_intent_max 256
+    # Legacy lookup/telemetry fixtures are session configuration with
+    # connection-scoped access history. No external geo, TAC, or TMM source is
+    # consulted by the emulator.
+    variable cpu_usage {}
+    variable cpu_accesses {}
+    variable whereis_records {}
+    variable whereis_accesses {}
+    variable pem_dtos_records {}
+    variable pem_dtos_accesses {}
     # IPFIX templates and destinations are session-scoped, like the static
     # objects an iRule normally keeps in static variables. Messages are
     # connection-scoped and are cleared by ipfix_reset_connection.
@@ -1885,6 +1894,213 @@ namespace eval ::itest::semantic {
     proc traffic_intents_snapshot {} {
         variable traffic_intents
         return [list intents $traffic_intents]
+    }
+
+    proc _legacy_fixture_text {value field {allow_empty 0}} {
+        if {(!$allow_empty && $value eq "") || [string first "\x00" $value] >= 0 || [string bytelength $value] > 4096} {
+            error "$field must be non-empty and at most 4096 bytes"
+        }
+        return $value
+    }
+
+    proc _legacy_cpu_value {value field} {
+        if {![string is double -strict $value] || $value < 0 || $value > 100} {
+            error "$field must be a number from 0 through 100"
+        }
+        return $value
+    }
+
+    proc cpu_configure {entries} {
+        variable cpu_usage
+        if {[llength $entries] % 2} {
+            error "cpu fixture configuration requires interval/value pairs"
+        }
+        set cpu_usage [dict create]
+        foreach {interval value} $entries {
+            if {$interval ni {1sec 5secs 15secs 1min 5mins 15mins all_seconds all_minutes}} {
+                error "unsupported cpu fixture interval $interval"
+            }
+            if {$interval in {all_seconds all_minutes}} {
+                if {[llength $value] != 3} {
+                    error "cpu fixture $interval requires three values"
+                }
+                set samples {}
+                foreach sample $value {
+                    lappend samples [_legacy_cpu_value $sample "cpu fixture $interval"]
+                }
+                set value $samples
+            } else {
+                if {[llength $value] != 1} {
+                    error "cpu fixture $interval requires one value"
+                }
+                set value [_legacy_cpu_value $value "cpu fixture $interval"]
+            }
+            dict set cpu_usage $interval $value
+        }
+    }
+
+    proc whereis_configure {entries} {
+        variable whereis_records
+        set fields {continent country state abbrev city zip area_code latitude longitude isp org country_cf state_cf city_cf proxy_type}
+        if {[llength $entries] % 2} {
+            error "whereis fixture configuration requires address/record pairs"
+        }
+        set whereis_records [dict create]
+        foreach {address raw_record} $entries {
+            _legacy_fixture_text $address "whereis fixture address"
+            if {[llength $raw_record] % 2} {
+                error "whereis fixture record requires field/value pairs"
+            }
+            set record [dict create]
+            foreach {field value} $raw_record {
+                if {$field ni $fields || [dict exists $record $field]} {
+                    error "whereis fixture has an unknown or duplicate field $field"
+                }
+                dict set record $field [_legacy_fixture_text $value "whereis fixture $field" 1]
+            }
+            dict set whereis_records $address $record
+        }
+    }
+
+    proc pem_dtos_configure {entries} {
+        variable pem_dtos_records
+        if {[llength $entries] % 2} {
+            error "pem_dtos fixture configuration requires input/result pairs"
+        }
+        set pem_dtos_records [dict create]
+        foreach {input value} $entries {
+            _legacy_fixture_text $input "pem_dtos fixture input"
+            if {[dict exists $pem_dtos_records $input]} {
+                error "duplicate pem_dtos fixture input $input"
+            }
+            dict set pem_dtos_records $input [_legacy_fixture_text $value "pem_dtos fixture result" 1]
+        }
+    }
+
+    proc legacy_fixture_reset_connection {} {
+        variable cpu_accesses
+        variable whereis_accesses
+        variable pem_dtos_accesses
+        set cpu_accesses {}
+        set whereis_accesses {}
+        set pem_dtos_accesses {}
+    }
+
+    proc cpu_command {args} {
+        variable cpu_usage
+        variable cpu_accesses
+        if {[llength $args] ni {2 3} || [lindex $args 0] ne "usage"} {
+            error "cpu syntax is cpu usage INTERVAL"
+        }
+        set interval [string tolower [lindex $args 1]]
+        if {[llength $args] == 3} {
+            append interval [string tolower [lindex $args 2]]
+        }
+        switch -exact -- $interval {
+            1secs - 1second - 1seconds { set interval 1sec }
+            5sec - 5second - 5seconds { set interval 5secs }
+            15sec - 15second - 15seconds { set interval 15secs }
+            1mins - 1minute - 1minutes { set interval 1min }
+            5min - 5minute - 5minutes { set interval 5mins }
+            15min - 15minute - 15minutes { set interval 15mins }
+        }
+        if {$interval ni {1sec 5secs 15secs 1min 5mins 15mins all_seconds all_minutes}} {
+            error "cpu usage interval must be 1sec, 5secs, 15secs, 1min, 5mins, 15mins, all_seconds, or all_minutes"
+        }
+        if {[dict exists $cpu_usage $interval]} {
+            set result [dict get $cpu_usage $interval]
+        } elseif {$interval in {all_seconds all_minutes}} {
+            set result [list 0 0 0]
+        } else {
+            set result 0
+        }
+        lappend cpu_accesses [list $interval $result]
+        if {[llength $cpu_accesses] > 1024} {
+            set cpu_accesses [lrange $cpu_accesses end-1023 end]
+        }
+        ::itest::log_decision toplevel cpu [list usage $interval $result]
+        return $result
+    }
+
+    proc imid_command {args} {
+        if {[llength $args] != 0} {
+            error "imid takes no arguments"
+        }
+        # F5 documents the current implementation as nonfunctional; retain
+        # that compatibility behavior instead of inventing an i-mode parser.
+        ::itest::log_decision toplevel imid {}
+        return ""
+    }
+
+    proc _whereis_default {field} {
+        if {$field in {latitude longitude}} {
+            return 0
+        }
+        if {$field eq "proxy_type"} {
+            return unknown
+        }
+        return ""
+    }
+
+    proc whereis_command {args} {
+        variable whereis_records
+        variable whereis_accesses
+        if {[llength $args] < 1 || [llength $args] > 9} {
+            error "whereis requires an address and at most eight fields"
+        }
+        set address [_legacy_fixture_text [lindex $args 0] "whereis address"]
+        set fields [lrange $args 1 end]
+        if {[llength $fields] == 0} {
+            set fields {continent country state city}
+        }
+        set valid_fields {continent country state abbrev city zip area_code latitude longitude isp org country_cf state_cf city_cf proxy_type}
+        set record [dict create]
+        if {[dict exists $whereis_records $address]} {
+            set record [dict get $whereis_records $address]
+        }
+        set result {}
+        foreach field $fields {
+            if {$field ni $valid_fields} {
+                error "whereis field $field is not supported"
+            }
+            if {[dict exists $record $field]} {
+                lappend result [dict get $record $field]
+            } else {
+                lappend result [_whereis_default $field]
+            }
+        }
+        lappend whereis_accesses [list $address $fields $result]
+        if {[llength $whereis_accesses] > 1024} {
+            set whereis_accesses [lrange $whereis_accesses end-1023 end]
+        }
+        ::itest::log_decision toplevel whereis [list $address $fields]
+        return $result
+    }
+
+    proc pem_dtos_command {args} {
+        variable pem_dtos_records
+        variable pem_dtos_accesses
+        if {[llength $args] != 3 || [lindex $args 0] ne "tac" || [lindex $args 1] ne "lookup"} {
+            error "pem_dtos syntax is pem_dtos tac lookup IMEI"
+        }
+        set input [_legacy_fixture_text [lindex $args 2] "pem_dtos input"]
+        set result ""
+        if {[dict exists $pem_dtos_records $input]} {
+            set result [dict get $pem_dtos_records $input]
+        }
+        lappend pem_dtos_accesses [list $input $result]
+        if {[llength $pem_dtos_accesses] > 1024} {
+            set pem_dtos_accesses [lrange $pem_dtos_accesses end-1023 end]
+        }
+        ::itest::log_decision toplevel pem_dtos [list tac lookup $input]
+        return $result
+    }
+
+    proc legacy_fixture_snapshot {} {
+        variable cpu_accesses
+        variable whereis_accesses
+        variable pem_dtos_accesses
+        return [list cpu $cpu_accesses whereis $whereis_accesses pem_dtos $pem_dtos_accesses]
     }
 
     proc prepare_lb_failure {cause} {
@@ -23735,6 +23951,30 @@ if {[::tmm::_orig_info commands ::itest::cmd::cmd_use] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::cmd_use ::itest::cmd::_testcl_use_orig
     proc ::itest::cmd::cmd_use {args} {
         return [eval [linsert $args 0 ::itest::semantic::use_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_cpu] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_cpu ::itest::cmd::_testcl_cpu_orig
+    proc ::itest::cmd::cmd_cpu {args} {
+        return [eval [linsert $args 0 ::itest::semantic::cpu_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_imid] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_imid ::itest::cmd::_testcl_imid_orig
+    proc ::itest::cmd::cmd_imid {args} {
+        return [eval [linsert $args 0 ::itest::semantic::imid_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_pem_dtos] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_pem_dtos ::itest::cmd::_testcl_pem_dtos_orig
+    proc ::itest::cmd::cmd_pem_dtos {args} {
+        return [eval [linsert $args 0 ::itest::semantic::pem_dtos_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_whereis] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_whereis ::itest::cmd::_testcl_whereis_orig
+    proc ::itest::cmd::cmd_whereis {args} {
+        return [eval [linsert $args 0 ::itest::semantic::whereis_command]]
     }
 }
 if {[::tmm::_orig_info commands ::itest::cmd::cmd_table] ne ""} {

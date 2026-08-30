@@ -82,6 +82,15 @@ argument shapes and emit deterministic connection-scoped intent records in
 256 per connection, and are cleared at connection reset. This is an explicit
 control-flow and observability model: no listener, clone socket, related flow,
 second virtual server, or live forwarding path is created.
+Legacy lookup compatibility is fixture-backed: `cpu usage` accepts the
+documented interval spellings and returns zero unless a scenario-level `cpu`
+map supplies values; `whereis` resolves exact addresses and requested fields
+from a scenario-level fixture map; and `pem_dtos tac lookup IMEI` resolves
+exact inputs from a scenario-level `pem_dtos` map. Their bounded query
+histories appear under `semantic.utilities` and reset with the emulated
+connection. No external TMM telemetry, geolocation database, or TAC database
+is contacted. `imid` accepts no arguments and returns an empty string, which
+matches the current F5 reference note that the function does not work.
 The related legacy connection controls are deterministic as well: `forward`
 records strict-forwarding intent, `translate` tracks address/port/service
 translation toggles, `rateclass` records the selected rate class, and

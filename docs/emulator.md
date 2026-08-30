@@ -91,6 +91,21 @@ connection and reset on connection rollover or close. They describe the
 iRule-visible request to clone, listen, relate, or select a resource; the
 emulator does not open sockets, create a second virtual server, or forward
 live traffic as a consequence.
+Several legacy lookup commands use caller-supplied deterministic fixtures.
+The [`cpu`](https://clouddocs.f5.com/api/irules/cpu.html) command accepts the
+documented `usage` intervals, returns zero-valued telemetry by default, and
+can be seeded with a scenario-level `cpu` object such as
+`{"5secs": 2.5, "all_seconds": [1, 2, 3]}`. The [`whereis`](https://clouddocs.f5.com/api/irules/whereis.html)
+command accepts up to eight documented fields and reads exact-address records
+from a scenario-level `whereis` object; missing records return empty strings
+or the documented numeric/unknown defaults. The [`pem_dtos`](https://clouddocs.f5.com/api/irules/pem_dtos.html)
+command reads exact `tac lookup` inputs from a scenario-level `pem_dtos`
+object. Query history for these commands is exposed under
+`result.semantic.utilities` and resets with the emulated connection. No
+external CPU, geolocation, or TAC database is contacted. The legacy
+[`imid`](https://clouddocs.f5.com/api/irules/imid.html) command accepts no
+arguments and returns the empty string, matching the reference behavior
+documented for its currently nonfunctional implementation.
 The legacy global helpers `http_client_ip`, `http_content_len_max`,
 `http_cookie`, `http_header`, `http_host`, `http_method`, `http_uri`,
 `http_version`, `ip_addr`, `ip_protocol`, `ip_tos`, `ip_ttl`, `htonl`, `htons`,

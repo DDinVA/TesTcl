@@ -51,6 +51,44 @@ except ModuleNotFoundError:  # test modules load this script by absolute path
 
 
 TMOS_VERSION = "17.5"
+CPU_INTERVALS = frozenset(
+    {"1sec", "5secs", "15secs", "1min", "5mins", "15mins", "all_seconds", "all_minutes"}
+)
+WHEREIS_FIELDS = frozenset(
+    {
+        "continent", "country", "state", "abbrev", "city", "zip", "area_code",
+        "latitude", "longitude", "isp", "org", "country_cf", "state_cf",
+        "city_cf", "proxy_type",
+    }
+)
+CPU_INTERVAL_ALIASES = {
+    "1sec": "1sec",
+    "1secs": "1sec",
+    "1second": "1sec",
+    "1seconds": "1sec",
+    "5sec": "5secs",
+    "5secs": "5secs",
+    "5second": "5secs",
+    "5seconds": "5secs",
+    "15sec": "15secs",
+    "15secs": "15secs",
+    "15second": "15secs",
+    "15seconds": "15secs",
+    "1min": "1min",
+    "1mins": "1min",
+    "1minute": "1min",
+    "1minutes": "1min",
+    "5min": "5mins",
+    "5mins": "5mins",
+    "5minute": "5mins",
+    "5minutes": "5mins",
+    "15min": "15mins",
+    "15mins": "15mins",
+    "15minute": "15mins",
+    "15minutes": "15mins",
+    "all_seconds": "all_seconds",
+    "all_minutes": "all_minutes",
+}
 # The pinned tcl-lsp registry is intentionally broader than one BIG-IP
 # release. These entries are documented by F5 as introduced in 21.0, so they
 # remain visible in the complete catalog but must not be presented as 17.5
@@ -1343,6 +1381,11 @@ SEMANTIC_MOCK_COMMANDS = {
     "sharedvar",
     "priority",
     "timing",
+    "cpu",
+    "imid",
+    "pem_dtos",
+    "proc",
+    "whereis",
     "clone",
     "listen",
     "relate_client",
@@ -3370,6 +3413,30 @@ def _configure_urlcat(session: Any, urlcat: dict[str, Any]) -> None:
             )
 
 
+def _configure_cpu(session: Any, cpu_usage: dict[str, str | list[str]]) -> None:
+    flattened: list[str] = []
+    for interval, value in cpu_usage.items():
+        encoded = _tcl_list_value(value) if isinstance(value, list) else value
+        flattened.extend((interval, encoded))
+    session.eval_tcl("::itest::semantic::cpu_configure " + _tcl_list(flattened))
+
+
+def _configure_whereis(
+    session: Any, records: dict[str, dict[str, str]]
+) -> None:
+    flattened: list[str] = []
+    for address, record in records.items():
+        flattened.extend((address, _tcl_dict_value(record)))
+    session.eval_tcl("::itest::semantic::whereis_configure " + _tcl_list(flattened))
+
+
+def _configure_pem_dtos(session: Any, records: dict[str, str]) -> None:
+    flattened: list[str] = []
+    for input_value, result in records.items():
+        flattened.extend((input_value, result))
+    session.eval_tcl("::itest::semantic::pem_dtos_configure " + _tcl_list(flattened))
+
+
 def _split_tcl_list(value: Any) -> list[str]:
     """Parse a Tcl list returned by the bridge using a temporary interpreter."""
     try:
@@ -3777,6 +3844,85 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
     if len(traffic_intents) > 256:
         raise EmulatorInputError("too many traffic intent records")
     traffic_state = {"intents": traffic_intents}
+    utility_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::legacy_fixture_snapshot")
+    )
+    if len(utility_parts) != 6 or utility_parts[::2] != [
+        "cpu", "whereis", "pem_dtos"
+    ]:
+        raise EmulatorInputError("invalid legacy utility state")
+    cpu_accesses: list[dict[str, Any]] = []
+    for raw_access in _split_tcl_list(utility_parts[1]):
+        access_parts = _split_tcl_list(raw_access)
+        if len(access_parts) != 2 or access_parts[0] not in CPU_INTERVALS:
+            raise EmulatorInputError("invalid CPU access state")
+        values = _split_tcl_list(access_parts[1])
+        expected_count = 3 if access_parts[0] in {"all_seconds", "all_minutes"} else 1
+        if len(values) != expected_count:
+            raise EmulatorInputError("invalid CPU access value")
+        for value in values:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                raise EmulatorInputError("invalid CPU access value") from None
+            if not math.isfinite(numeric) or not 0 <= numeric <= 100:
+                raise EmulatorInputError("invalid CPU access value")
+        cpu_accesses.append({
+            "interval": access_parts[0],
+            "value": values if expected_count == 3 else values[0],
+        })
+    if len(cpu_accesses) > 1024:
+        raise EmulatorInputError("too many CPU access records")
+
+    whereis_accesses: list[dict[str, Any]] = []
+    for raw_access in _split_tcl_list(utility_parts[3]):
+        access_parts = _split_tcl_list(raw_access)
+        if len(access_parts) != 3:
+            raise EmulatorInputError("invalid whereis access state")
+        address = access_parts[0]
+        fields = _split_tcl_list(access_parts[1])
+        values = _split_tcl_list(access_parts[2])
+        if (
+            not address
+            or "\x00" in address
+            or len(address.encode("utf-8")) > 4096
+            or not fields
+            or len(fields) > 8
+            or len(fields) != len(values)
+            or any(field not in WHEREIS_FIELDS for field in fields)
+            or any(
+                "\x00" in value or len(value.encode("utf-8")) > 4096
+                for value in values
+            )
+        ):
+            raise EmulatorInputError("invalid whereis access state")
+        whereis_accesses.append({
+            "address": address,
+            "fields": fields,
+            "values": values,
+        })
+    if len(whereis_accesses) > 1024:
+        raise EmulatorInputError("too many whereis access records")
+
+    pem_dtos_accesses: list[dict[str, str]] = []
+    for raw_access in _split_tcl_list(utility_parts[5]):
+        access_parts = _split_tcl_list(raw_access)
+        if len(access_parts) != 2 or any(
+            "\x00" in value or len(value.encode("utf-8")) > 4096
+            for value in access_parts
+        ):
+            raise EmulatorInputError("invalid pem_dtos access state")
+        pem_dtos_accesses.append({
+            "input": access_parts[0],
+            "value": access_parts[1],
+        })
+    if len(pem_dtos_accesses) > 1024:
+        raise EmulatorInputError("too many pem_dtos access records")
+    legacy_utilities = {
+        "cpu": cpu_accesses,
+        "whereis": whereis_accesses,
+        "pem_dtos": pem_dtos_accesses,
+    }
     bwc_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::bwc_snapshot")
     )
@@ -5312,6 +5458,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "session": session_state,
         "sharedvar": sharedvar_state,
         "traffic": traffic_state,
+        "utilities": legacy_utilities,
         "bwc": bwc,
         "ipfix": ipfix,
         "ilx": ilx,
@@ -6286,6 +6433,116 @@ def _normalise_pools(raw: Any) -> dict[str, list[str]]:
             raise EmulatorInputError(f"pool {name!r} members must be an array of strings")
         pools[name] = members
     return pools
+
+
+def _normalise_cpu(raw: Any) -> dict[str, str | list[str]]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("cpu must map intervals to fixture values")
+    if len(raw) > len(CPU_INTERVALS):
+        raise EmulatorInputError("cpu cannot contain more than eight intervals")
+
+    def normalise_value(value: Any, field: str) -> str:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            raise EmulatorInputError(f"{field} must be a number from 0 through 100")
+        text = str(value)
+        try:
+            numeric = float(text)
+        except ValueError:
+            raise EmulatorInputError(f"{field} must be a number from 0 through 100") from None
+        if not math.isfinite(numeric) or not 0 <= numeric <= 100:
+            raise EmulatorInputError(f"{field} must be a number from 0 through 100")
+        return text
+
+    result: dict[str, str | list[str]] = {}
+    for raw_interval, raw_value in raw.items():
+        interval = _require_string(raw_interval, "cpu interval")
+        canonical = CPU_INTERVAL_ALIASES.get("".join(interval.lower().split()))
+        if canonical is None:
+            raise EmulatorInputError(f"unsupported cpu interval {interval!r}")
+        if canonical in result:
+            raise EmulatorInputError(f"cpu interval {interval!r} was configured more than once")
+        if canonical in {"all_seconds", "all_minutes"}:
+            if not isinstance(raw_value, list) or len(raw_value) != 3:
+                raise EmulatorInputError(
+                    f"cpu.{canonical} must contain three numeric values"
+                )
+            result[canonical] = [
+                normalise_value(value, f"cpu.{canonical}[{index}]")
+                for index, value in enumerate(raw_value)
+            ]
+        else:
+            if isinstance(raw_value, list):
+                raise EmulatorInputError(f"cpu.{canonical} must contain one numeric value")
+            result[canonical] = normalise_value(raw_value, f"cpu.{canonical}")
+    return result
+
+
+def _normalise_whereis(raw: Any) -> dict[str, dict[str, str]]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("whereis must map lookup addresses to field objects")
+    if len(raw) > 256:
+        raise EmulatorInputError("whereis cannot contain more than 256 fixtures")
+    result: dict[str, dict[str, str]] = {}
+    for raw_address, raw_record in raw.items():
+        address = _require_string(raw_address, "whereis fixture address")
+        if not address or "\x00" in address or len(address.encode("utf-8")) > 4096:
+            raise EmulatorInputError(
+                "whereis fixture addresses must be non-empty strings of at most 4096 UTF-8 bytes"
+            )
+        if not isinstance(raw_record, dict):
+            raise EmulatorInputError(f"whereis fixture {address!r} must be an object")
+        unknown = [
+            raw_field
+            for raw_field in raw_record
+            if not isinstance(raw_field, str) or raw_field not in WHEREIS_FIELDS
+        ]
+        if unknown:
+            raise EmulatorInputError(
+                f"whereis fixture {address!r} has unsupported field(s): "
+                + ", ".join(str(field) for field in unknown)
+            )
+        record: dict[str, str] = {}
+        for raw_field, raw_value in raw_record.items():
+            field = _require_string(raw_field, "whereis fixture field")
+            if isinstance(raw_value, bool) or not isinstance(raw_value, (str, int, float)):
+                raise EmulatorInputError(
+                    f"whereis fixture {address!r}.{field} must be a string or number"
+                )
+            value = str(raw_value)
+            if "\x00" in value or len(value.encode("utf-8")) > 4096:
+                raise EmulatorInputError(
+                    f"whereis fixture {address!r}.{field} must be at most 4096 UTF-8 bytes"
+                )
+            record[field] = value
+        result[address] = record
+    return result
+
+
+def _normalise_pem_dtos(raw: Any) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("pem_dtos must map IMEI values to fixture results")
+    if len(raw) > 256:
+        raise EmulatorInputError("pem_dtos cannot contain more than 256 fixtures")
+    result: dict[str, str] = {}
+    for raw_input, raw_value in raw.items():
+        input_value = _require_string(raw_input, "pem_dtos fixture input")
+        if not input_value or "\x00" in input_value or len(input_value.encode("utf-8")) > 4096:
+            raise EmulatorInputError(
+                "pem_dtos fixture inputs must be non-empty strings of at most 4096 UTF-8 bytes"
+            )
+        value = _require_string(raw_value, f"pem_dtos fixture {input_value!r} result")
+        if "\x00" in value or len(value.encode("utf-8")) > 4096:
+            raise EmulatorInputError(
+                f"pem_dtos fixture {input_value!r} result must be at most 4096 UTF-8 bytes"
+            )
+        result[input_value] = value
+    return result
 
 
 def _normalise_profile_settings(raw: Any) -> dict[str, dict[str, str]]:
@@ -7836,6 +8093,9 @@ def _normalise_scenario_config(
     dict[str, Any],
     dict[str, Any],
     dict[str, dict[str, str]],
+    dict[str, str | list[str]],
+    dict[str, dict[str, str]],
+    dict[str, str],
 ]:
     if not isinstance(scenario, dict):
         raise EmulatorInputError("scenario must be a JSON object")
@@ -7863,6 +8123,9 @@ def _normalise_scenario_config(
         "sideband",
         "ifiles",
         "urlcat",
+        "cpu",
+        "whereis",
+        "pem_dtos",
     }
     if allow_requests:
         allowed_fields.update(("request", "requests"))
@@ -7918,6 +8181,9 @@ def _normalise_scenario_config(
         _normalise_sideband(scenario.get("sideband")),
         _normalise_ifiles(scenario.get("ifiles")),
         _normalise_urlcat(scenario.get("urlcat")),
+        _normalise_cpu(scenario.get("cpu")),
+        _normalise_whereis(scenario.get("whereis")),
+        _normalise_pem_dtos(scenario.get("pem_dtos")),
     )
 
 
@@ -13252,6 +13518,9 @@ class EmulatorSession:
             sideband_config,
             ifile_config,
             urlcat_config,
+            cpu_config,
+            whereis_config,
+            pem_dtos_config,
         ) = _normalise_scenario_config(
             scenario,
             allow_irule_file=allow_irule_file,
@@ -13283,6 +13552,9 @@ class EmulatorSession:
         self._sideband_config = sideband_config
         self._ifile_config = ifile_config
         self._urlcat_config = urlcat_config
+        self._cpu_config = cpu_config
+        self._whereis_config = whereis_config
+        self._pem_dtos_config = pem_dtos_config
         self._fidelity = _analyze_rule_capabilities(root, self._prepared_source, profiles)
         incompatible = [
             warning
@@ -13379,6 +13651,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::session_reset")
                 session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
                 session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+                session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
                 for procedure, arguments, body in _extract_irule_procedures(
                     self._root, self._prepared_source
                 ):
@@ -13462,6 +13735,10 @@ class EmulatorSession:
                 _configure_sideband(session, self._sideband_config)
                 _configure_ifiles(session, self._ifile_config)
                 _configure_urlcat(session, self._urlcat_config)
+                _configure_cpu(session, self._cpu_config)
+                _configure_whereis(session, self._whereis_config)
+                _configure_pem_dtos(session, self._pem_dtos_config)
+                session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
                 session.eval_tcl("::itest::semantic::rewrite_reset_connection")
                 session.eval_tcl("::itest::semantic::html_reset_connection")
                 session.eval_tcl("::itest::semantic::compression_reset_connection")
@@ -13556,6 +13833,7 @@ class EmulatorSession:
                 session.close_connection()
                 session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
                 session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+                session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
                 session.eval_tcl("::itest::semantic::stream_reset_connection")
                 session.eval_tcl("::itest::semantic::route_reset_connection")
                 session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
@@ -13575,6 +13853,7 @@ class EmulatorSession:
             session.eval_tcl("::state::reset_connection_state")
             session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
             session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+            session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
             session.eval_tcl("::itest::semantic::lb_reset_connection")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
             session.eval_tcl("::itest::semantic::psm_reset_connection")
@@ -13776,6 +14055,7 @@ class EmulatorSession:
             session.eval_tcl("::state::reset_connection_state")
             session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
             session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+            session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
             session.eval_tcl("::itest::semantic::psm_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
             session.eval_tcl("::itest::semantic::flow_reset_connection")
@@ -13827,6 +14107,7 @@ class EmulatorSession:
             session.close_connection()
             session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
             session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+            session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
             session.eval_tcl("::itest::semantic::rewrite_reset_connection")
@@ -14108,6 +14389,7 @@ class EmulatorSession:
                 "session": semantic_snapshot["session"],
                 "sharedvar": semantic_snapshot["sharedvar"],
                 "traffic": semantic_snapshot["traffic"],
+                "utilities": semantic_snapshot["utilities"],
                 "adapt": semantic_snapshot["adapt"],
                 "psm": semantic_snapshot["psm"],
                 "ip": semantic_snapshot["ip"],
@@ -15217,6 +15499,7 @@ class EmulatorSession:
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
         session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+        session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
         session.eval_tcl("::itest::semantic::mqtt_reset_connection")
         session.eval_tcl("::itest::semantic::sip_reset_connection")
         session.eval_tcl("::itest::semantic::feature_controls_reset_connection")
@@ -15313,6 +15596,7 @@ class EmulatorSession:
         session.eval_tcl("::state::reset_connection_state")
         session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
         session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+        session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
         session.eval_tcl("::itest::semantic::bigtcp_prepare_connection")
         session.eval_tcl("::itest::semantic::psm_reset_connection")
         session.eval_tcl("::itest::semantic::dosl7_reset_connection")

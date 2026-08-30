@@ -1961,7 +1961,7 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 11)
+        self.assertEqual(queue["command_count"], 6)
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -6629,6 +6629,125 @@ when HTTP_REQUEST {
             [intent["ordinal"] for intent in after_close["semantic"]["traffic"]["intents"]],
             [1],
         )
+
+    def test_legacy_utility_commands_use_bounded_fixtures(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "cpu": {
+                    "5 secs": 2.5,
+                    "all_seconds": [1, 2, 3],
+                },
+                "whereis": {
+                    "192.0.2.10": {
+                        "country": "US",
+                        "city": "Ashburn",
+                        "latitude": "390431",
+                    },
+                },
+                "pem_dtos": {
+                    "012430000000132": "{Apple-iPhone 4 model MC603KS} iOS",
+                },
+                "irule": """
+when HTTP_REQUEST {
+    log local0. "cpu=[cpu usage 5 sec] all=[cpu usage all_seconds]"
+    log local0. "geo=[whereis 192.0.2.10 country city latitude]"
+    log local0. "tac=[pem_dtos tac lookup 012430000000132] imid=[imid]"
+}
+""",
+                "requests": [{"uri": "/"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        event_result = result["results"][0]
+        self.assertTrue(any("cpu=2.5 all=1 2 3" in entry for entry in event_result["logs"]))
+        self.assertTrue(
+            any(
+                "geo=US Ashburn 390431" in entry
+                for entry in event_result["logs"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "tac={Apple-iPhone 4 model MC603KS} iOS imid=" in entry
+                for entry in event_result["logs"]
+            )
+        )
+        utilities = event_result["semantic"]["utilities"]
+        self.assertEqual(
+            utilities["cpu"],
+            [
+                {"interval": "5secs", "value": "2.5"},
+                {"interval": "all_seconds", "value": ["1", "2", "3"]},
+            ],
+        )
+        self.assertEqual(
+            utilities["whereis"],
+            [{
+                "address": "192.0.2.10",
+                "fields": ["country", "city", "latitude"],
+                "values": ["US", "Ashburn", "390431"],
+            }],
+        )
+        self.assertEqual(
+            utilities["pem_dtos"],
+            [{"input": "012430000000132", "value": "{Apple-iPhone 4 model MC603KS} iOS"}],
+        )
+        self.assertEqual(
+            {
+                entry["name"]: entry["runtime_status"]
+                for entry in result["fidelity"]["commands"]
+                if entry["name"] in {"cpu", "imid", "pem_dtos", "whereis"}
+            },
+            {
+                "cpu": "semantic-mock",
+                "imid": "semantic-mock",
+                "pem_dtos": "semantic-mock",
+                "whereis": "semantic-mock",
+            },
+        )
+
+    def test_legacy_utility_commands_reject_invalid_inputs(self) -> None:
+        invalid_rules = (
+            "when HTTP_REQUEST { cpu usage 2 hours }",
+            "when HTTP_REQUEST { cpu usage 1sec extra }",
+            "when HTTP_REQUEST { whereis 192.0.2.10 not_a_field }",
+            "when HTTP_REQUEST { pem_dtos tac query 012430000000132 }",
+            "when HTTP_REQUEST { imid unexpected }",
+        )
+        for irule in invalid_rules:
+            with self.subTest(irule=irule), self.assertRaises(
+                self.adapter.EmulatorInputError
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "requests": [{"uri": "/"}],
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "whereis"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "whereis": {"192.0.2.10": {1: "US"}},
+                    "irule": "when HTTP_REQUEST { log local0. ready }",
+                    "requests": [{"uri": "/"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "cpu"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "cpu": {"all_seconds": [1, 2]},
+                    "irule": "when HTTP_REQUEST { log local0. ready }",
+                    "requests": [{"uri": "/"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_outer_priority_orders_handlers_and_exposes_timing_metadata(self) -> None:
         result = self.adapter.run_scenario(
