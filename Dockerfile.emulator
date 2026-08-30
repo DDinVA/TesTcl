@@ -37,6 +37,6 @@ ENV TCL_LSP_ROOT=/opt/tcl-lsp \
     PYTHONUNBUFFERED=1
 
 WORKDIR /work
-EXPOSE 8080
+EXPOSE 8080 18080
 ENTRYPOINT ["python", "/opt/testcl/tools/irule-emulator.py"]
 CMD ["--serve", "--host", "0.0.0.0"]

@@ -23,6 +23,9 @@ When the emulator is started with `--serve`, open `http://127.0.0.1:8080/` for
 the dependency-free browser workbench. It can create a session, run HTTP
 requests, inject events, replay packet arrays, and search the complete 17.5
 catalog through the same local API.
+For real-client HTTP smoke tests, use `--data-plane` with a scenario file, or
+combine `--serve --data-plane-scenario PATH`; the container exposes the API on
+8080 and the optional data plane on 18080.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:
