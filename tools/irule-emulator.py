@@ -23335,7 +23335,7 @@ def _run_isolated_packet_trace(
                 root,
                 child_scenario,
                 allow_irule_file=True,
-                allow_requests=False,
+                allow_requests=persistent_sessions is not None,
                 allow_packets=False,
                 backend=backend,
             )
@@ -23454,7 +23454,7 @@ class _PersistentEmulatorSession:
             root,
             self._scenario,
             allow_irule_file=False,
-            allow_requests=False,
+            allow_requests=True,
             backend=backend,
         )
         self._base_flow_key: tuple[str, ...] | None = None
@@ -23495,6 +23495,46 @@ class _PersistentEmulatorSession:
                 f"persistent packet session cannot retain more than {MAX_PACKET_FLOWS} flows"
             )
 
+    def _new_flow_session(self) -> EmulatorSession:
+        return EmulatorSession(
+            self._root,
+            self._scenario,
+            allow_irule_file=True,
+            allow_requests=True,
+            allow_packets=False,
+            backend=self._backend,
+        )
+
+    def _select_flow_session(
+        self, flow_id: Any, *, field: str
+    ) -> tuple[EmulatorSession, tuple[str, ...] | None, bool]:
+        """Select or create a context for a request/event operation."""
+        if flow_id is None:
+            if len(self._active_flow_keys()) > 1:
+                raise EmulatorInputError(
+                    f"{field} requires flow_id when multiple flow contexts exist"
+                )
+            if self._base_flow_key is not None:
+                return self._base, self._base_flow_key, False
+            if self._flow_sessions:
+                flow_key, session = next(iter(self._flow_sessions.items()))
+                return session, flow_key, False
+            return self._base, None, False
+
+        normalised_flow_id = _normalise_flow_id(flow_id, f"{field} flow_id")
+        assert normalised_flow_id is not None
+        flow_key = ("id", normalised_flow_id)
+        session = self._flow_sessions.get(flow_key)
+        if session is None and self._base_flow_key == flow_key:
+            session = self._base
+        if session is not None:
+            return session, flow_key, False
+
+        self._ensure_flow_capacity({flow_key})
+        session = self._new_flow_session()
+        self._flow_sessions[flow_key] = session
+        return session, flow_key, True
+
     def _retire_closed_flows(
         self, flow_groups: dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]]
     ) -> None:
@@ -23513,8 +23553,28 @@ class _PersistentEmulatorSession:
             if self._base_flow_key == flow_key:
                 self._base_flow_key = None
 
-    def run_request(self, request: dict[str, Any]) -> dict[str, Any]:
-        return self._base.run_request(request)
+    def run_request(
+        self, request: dict[str, Any], flow_id: Any = None
+    ) -> dict[str, Any]:
+        if not isinstance(request, dict):
+            raise EmulatorInputError("session request must be a JSON object")
+        with self._lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
+            session, flow_key, created = self._select_flow_session(
+                flow_id, field="session request"
+            )
+            try:
+                return session.run_request(request)
+            except BaseException:
+                if (
+                    created
+                    and flow_key is not None
+                    and self._flow_sessions.get(flow_key) is session
+                ):
+                    del self._flow_sessions[flow_key]
+                    session.close()
+                raise
 
     def fire_event(
         self, event_name: Any, state: Any = None, flow_id: Any = None
@@ -23522,42 +23582,41 @@ class _PersistentEmulatorSession:
         with self._lock:
             if self._closed:
                 raise EmulatorInputError("emulator session is closed")
-            created = False
+            session, flow_key, created = self._select_flow_session(
+                flow_id, field="session event"
+            )
+            try:
+                return session.fire_event(event_name, state)
+            except BaseException:
+                if (
+                    created
+                    and flow_key is not None
+                    and self._flow_sessions.get(flow_key) is session
+                ):
+                    del self._flow_sessions[flow_key]
+                    session.close()
+                raise
+
+    def metadata(self, session_id: str, flow_id: Any = None) -> dict[str, Any]:
+        with self._lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
             if flow_id is None:
-                if len(self._active_flow_keys()) > 1:
-                    raise EmulatorInputError(
-                        "session event requires flow_id when multiple flow contexts exist"
-                    )
                 session = self._state_session()
             else:
-                normalised_flow_id = _normalise_flow_id(flow_id, "session event flow_id")
+                normalised_flow_id = _normalise_flow_id(
+                    flow_id, "session metadata flow_id"
+                )
                 assert normalised_flow_id is not None
                 flow_key = ("id", normalised_flow_id)
                 session = self._flow_sessions.get(flow_key)
                 if session is None and self._base_flow_key == flow_key:
                     session = self._base
                 if session is None:
-                    self._ensure_flow_capacity({flow_key})
-                    session = EmulatorSession(
-                        self._root,
-                        self._scenario,
-                        allow_irule_file=True,
-                        allow_requests=False,
-                        allow_packets=False,
-                        backend=self._backend,
+                    raise EmulatorInputError(
+                        f"unknown flow_id for session metadata: {normalised_flow_id}"
                     )
-                    self._flow_sessions[flow_key] = session
-                    created = True
-            try:
-                return session.fire_event(event_name, state)
-            except BaseException:
-                if created and self._flow_sessions.get(flow_key) is session:
-                    del self._flow_sessions[flow_key]
-                    session.close()
-                raise
-
-    def metadata(self, session_id: str) -> dict[str, Any]:
-        return self._state_session().metadata(session_id)
+            return session.metadata(session_id)
 
     def run_packet_trace(self, packets: Any) -> dict[str, Any]:
         normalised_packets = _normalise_packets(packets)
@@ -23640,7 +23699,7 @@ class _PersistentEmulatorSession:
                     self._root,
                     self._scenario,
                     allow_irule_file=True,
-                    allow_requests=False,
+                    allow_requests=True,
                     allow_packets=False,
                     backend=self._backend,
                 )
@@ -23756,8 +23815,14 @@ class SessionManager:
                     current.active_operations -= 1
                     current.last_used = time.monotonic()
 
-    def metadata(self, session_id: str) -> dict[str, Any]:
-        return self.execute(session_id, lambda session: session.metadata(session_id))
+    def metadata(self, session_id: str, flow_id: Any = None) -> dict[str, Any]:
+        if flow_id is None:
+            return self.execute(
+                session_id, lambda session: session.metadata(session_id)
+            )
+        return self.execute(
+            session_id, lambda session: session.metadata(session_id, flow_id)
+        )
 
     def close(self, session_id: str) -> None:
         with self._lock:
@@ -23984,6 +24049,11 @@ class McpProtocolServer:
                     {
                         "session_id": {"type": "string", "minLength": 1},
                         "request": {"type": "object"},
+                        "flow_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": PACKET_FLOW_ID_MAX_BYTES,
+                        },
                     },
                     ["session_id", "request"],
                 ),
@@ -24226,10 +24296,17 @@ class McpProtocolServer:
             return self._tool_success(self._manager.metadata(session_id))
 
         if name == "irule_session_request":
-            if set(args) != {"session_id", "request"} or not isinstance(args["request"], dict):
+            if (
+                set(args) - {"session_id", "request", "flow_id"}
+                or not isinstance(args.get("request"), dict)
+            ):
                 raise McpProtocolError(-32602, "irule_session_request requires session_id and request object")
-            result = self._manager.execute(session_id, lambda session: session.run_request(args["request"]))
-            metadata = self._manager.metadata(session_id)
+            flow_id = args.get("flow_id")
+            result = self._manager.execute(
+                session_id,
+                lambda session: session.run_request(args["request"], flow_id),
+            )
+            metadata = self._manager.metadata(session_id, flow_id)
             return self._tool_success(
                 {
                     "status": "ok",
@@ -24237,6 +24314,7 @@ class McpProtocolServer:
                     "profile": "tmos-17.5",
                     "tmos_version": TMOS_VERSION,
                     "session_id": session_id,
+                    **({"flow_id": flow_id} if flow_id is not None else {}),
                     "fidelity": metadata["fidelity"],
                     "request_number": metadata["request_count"],
                     "result": result,
@@ -25798,21 +25876,30 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                     return
                 if len(parts) == 4 and parts[:2] == ["v1", "sessions"] and parts[3] == "requests":
                     try:
-                        request = self._read_json()
-                        if not isinstance(request, dict):
+                        request_payload = self._read_json()
+                        if not isinstance(request_payload, dict):
                             raise EmulatorInputError("session request must be a JSON object")
+                        flow_id = request_payload.get("flow_id")
+                        request = {
+                            key: value
+                            for key, value in request_payload.items()
+                            if key != "flow_id"
+                        }
                         result = session_manager.execute(
-                            parts[2], lambda session: session.run_request(request)
+                            parts[2],
+                            lambda session: session.run_request(request, flow_id),
                         )
-                        metadata = session_manager.metadata(parts[2])
+                        metadata = session_manager.metadata(parts[2], flow_id)
                         payload = {
                             "status": "ok",
                             "schema_version": 1,
                             "profile": "tmos-17.5",
                             "tmos_version": TMOS_VERSION,
                             "session_id": parts[2],
+                            **({"flow_id": flow_id} if flow_id is not None else {}),
                             "fidelity": session_manager.execute(
-                                parts[2], lambda session: session.fidelity
+                                parts[2],
+                                lambda session: session.fidelity,
                             ),
                             "request_number": metadata["request_count"],
                             "result": result,

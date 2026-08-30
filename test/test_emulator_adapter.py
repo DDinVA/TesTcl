@@ -19368,6 +19368,50 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         finally:
             manager.close(session_id)
 
+    def test_persistent_request_and_event_share_explicit_flow_context(self) -> None:
+        manager = self.adapter.SessionManager(Path(self.tcl_lsp_root), idle_timeout=60)
+        session_id = manager.create(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": (
+                    'when HTTP_REQUEST { set ::flow_marker [HTTP::host] } '
+                    'when CLIENT_DATA { log local0. "marker=$::flow_marker" }'
+                ),
+            }
+        )
+        try:
+            manager.execute(
+                session_id,
+                lambda session: session.run_request(
+                    {"host": "a.example", "uri": "/a"}, "flow-a"
+                ),
+            )
+            manager.execute(
+                session_id,
+                lambda session: session.run_request(
+                    {"host": "b.example", "uri": "/b"}, "flow-b"
+                ),
+            )
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "session request requires flow_id",
+            ):
+                manager.execute(
+                    session_id,
+                    lambda session: session.run_request({"uri": "/unscoped"}),
+                )
+            event = manager.execute(
+                session_id,
+                lambda session: session.fire_event("CLIENT_DATA", {}, "flow-a"),
+            )
+            flow_metadata = manager.metadata(session_id, "flow-a")
+        finally:
+            manager.close(session_id)
+
+        self.assertTrue(event["fired"])
+        self.assertTrue(any("marker=a.example" in entry for entry in event["logs"]))
+        self.assertEqual(flow_metadata["request_count"], 1)
+
     def test_persistent_http_session_preserves_connection_state(self) -> None:
         manager = self.adapter.SessionManager(Path(self.tcl_lsp_root), idle_timeout=60)
         server = self.adapter.ThreadingHTTPServer(
@@ -19422,6 +19466,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
                 f"/v1/sessions/{session_id}/requests",
                 "POST",
                 {
+                    "flow_id": "http-flow",
                     "body": "ping",
                     "response_body": "pong",
                     "response_headers": {"Content-Type": "text/plain"},

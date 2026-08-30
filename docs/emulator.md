@@ -2331,6 +2331,12 @@ HTTP request may be sent in one `/packets` call and its response in a later
 call; use the same explicit `flow_id` on both calls when endpoint metadata is
 not available. Persistent flow contexts are retired after FIN/RST and are
 bounded by the same 64-flow limit.
+The persistent request API accepts an optional `flow_id` field in its request
+object, and the MCP request tool accepts the same field as a tool argument.
+Requests, packet traces, and injected events carrying the same explicit ID use
+the same Tcl context. An unscoped request follows the same routing rule as an
+unscoped event: it uses the base context or sole retained flow, and is rejected
+when multiple flow contexts are active.
 Persistent session event injection may also provide the same `flow_id`; an
 event without one is routed to the base context before flow multiplexing, to
 the sole retained flow when exactly one exists, and is rejected when multiple
