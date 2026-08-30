@@ -55,3 +55,16 @@ jobs:
 
       - name: Build the portable emulator image
         run: docker build --build-arg TCL_LSP_COMMIT="$TCL_LSP_COMMIT" -f Dockerfile.emulator -t testcl-irule-emulator:ci .
+
+      - name: Smoke test the portable emulator image
+        run: |
+          docker run --detach --name testcl-irule-emulator-ci --publish 18080:8080 testcl-irule-emulator:ci
+          trap 'docker rm --force testcl-irule-emulator-ci >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18080/healthz >/tmp/testcl-healthz.json; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:18080/healthz | grep -F 'tmos-17.5'
+          curl --fail --silent http://127.0.0.1:18080/ | grep -F 'BIG-IP 17.5 iRule Emulator'
