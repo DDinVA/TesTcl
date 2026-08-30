@@ -4084,6 +4084,102 @@ when HTTP_RESPONSE_RELEASE {
                 wrong_profile, tcl_lsp_root=self.tcl_lsp_root
             )
 
+    def test_capture_assembly_requires_complete_records_and_preserves_external_evidence(self) -> None:
+        plan = {
+            "schema_version": 1,
+            "profile": "tmos-17.5",
+            "name": "capture-plan",
+            "source": "bigip-vlab-17.5.4",
+            "provenance": {
+                "collector": "fixture-collector",
+                "tmos_build": "17.5.4",
+                "capture_id": "capture-001",
+            },
+            "observations": [
+                {
+                    "id": "host",
+                    "operation": "command_probe",
+                    "input": {
+                        "command": "HTTP::host",
+                        "event": "HTTP_REQUEST",
+                        "request": {"host": "api.example.com"},
+                    },
+                    "comparisons": [
+                        {
+                            "label": "host",
+                            "actual_path": ["execution", "value"],
+                            "reference_path": ["value"],
+                        }
+                    ],
+                },
+                {
+                    "id": "status",
+                    "operation": "scenario",
+                    "input": {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": "when HTTP_REQUEST { return }",
+                        "requests": [{"uri": "/health"}],
+                    },
+                    "comparisons": [
+                        {
+                            "label": "status",
+                            "actual_path": ["results", 0, "response", "status"],
+                            "reference_path": ["results", 0, "response", "status"],
+                        }
+                    ],
+                },
+            ],
+        }
+        records = [
+            {"id": "status", "output": {"results": [{"response": {"status": 200}}]}},
+            {"id": "host", "output": {"value": "api.example.com"}},
+        ]
+
+        assembled = self.adapter.run_capture_assemble(
+            plan, records, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(assembled["status"], "ok")
+        self.assertEqual(assembled["summary"]["executed"], False)
+        self.assertEqual(assembled["summary"]["record_count"], 2)
+        self.assertEqual(
+            [vector["id"] for vector in assembled["pack"]["vectors"]],
+            ["host", "status"],
+        )
+        self.assertEqual(
+            assembled["pack"]["provenance"]["assembly"], "tmos17-capture-v1"
+        )
+        self.assertEqual(
+            assembled["pack"]["provenance"]["capture_id"], "capture-001"
+        )
+        self.assertEqual(len(assembled["summary"]["records_sha256"]), 64)
+        self.assertEqual(
+            [entry["id"] for entry in assembled["summary"]["record_digests"]],
+            ["host", "status"],
+        )
+
+        replay = self.adapter.run_golden_vectors(
+            assembled["pack"], tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(replay["status"], "passed")
+        self.assertEqual(replay["summary"]["passed"], 2)
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "missing records"):
+            self.adapter.run_capture_assemble(
+                plan, records[:1], tcl_lsp_root=self.tcl_lsp_root
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "unexpected records"):
+            self.adapter.run_capture_assemble(
+                plan,
+                records + [{"id": "extra", "output": {}}],
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        wrong_build = json.loads(json.dumps(plan))
+        wrong_build["provenance"]["tmos_build"] = "16.1.5"
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "TMOS 17.5 build"):
+            self.adapter.run_capture_assemble(
+                wrong_build, records, tcl_lsp_root=self.tcl_lsp_root
+            )
+
     def test_behavior_packs_cover_dns_tcp_lb_uri_sip_and_stateful_scenarios(self) -> None:
         expected_counts = {
             "dns-17.5.json": 7,
@@ -19972,6 +20068,61 @@ when HTTP_RESPONSE {
             thread.join(timeout=5)
             server.server_close()
 
+    def test_http_api_assembles_capture_plan_and_ndjson_equivalent_records(self) -> None:
+        request_body = {
+            "plan": {
+                "name": "api-capture-plan",
+                "source": "bigip-vlab-17.5.4",
+                "provenance": {
+                    "collector": "api-test",
+                    "tmos_build": "17.5.4",
+                    "capture_id": "api-001",
+                },
+                "observations": [
+                    {
+                        "id": "host",
+                        "operation": "command_probe",
+                        "input": {
+                            "command": "HTTP::host",
+                            "event": "HTTP_REQUEST",
+                            "request": {"host": "api.example.com"},
+                        },
+                        "comparisons": [
+                            {
+                                "label": "host",
+                                "actual_path": ["execution", "value"],
+                                "reference_path": ["value"],
+                            }
+                        ],
+                    }
+                ],
+            },
+            "records": [{"id": "host", "output": {"value": "api.example.com"}}],
+        }
+        server = self.adapter.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self.adapter._http_handler(Path(self.tcl_lsp_root))
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/observations/assemble",
+                data=json.dumps(request_body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(response.status, 200)
+                payload = json.loads(response.read())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["summary"]["executed"], False)
+            self.assertEqual(payload["pack"]["vectors"][0]["id"], "host")
+            self.assertEqual(payload["pack"]["provenance"]["tmos_build"], "17.5.4")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_cli_replays_classic_pcap_file(self) -> None:
         capture = _pcap_bytes([
             (5, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
@@ -20006,6 +20157,65 @@ when HTTP_RESPONSE {
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["capture"]["ipv4_packet_count"], 1)
         self.assertEqual(payload["trace"][0]["timestamp"], 5.0)
+
+    def test_cli_assembles_ndjson_capture_records(self) -> None:
+        plan = {
+            "name": "cli-capture-plan",
+            "source": "bigip-vlab-17.5.4",
+            "provenance": {
+                "collector": "cli-test",
+                "tmos_build": "17.5.4",
+                "capture_id": "cli-001",
+            },
+            "observations": [
+                {
+                    "id": "host",
+                    "operation": "command_probe",
+                    "input": {
+                        "command": "HTTP::host",
+                        "event": "HTTP_REQUEST",
+                        "request": {"host": "cli.example.com"},
+                    },
+                    "comparisons": [
+                        {
+                            "label": "host",
+                            "actual_path": ["execution", "value"],
+                            "reference_path": ["value"],
+                        }
+                    ],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.json"
+            records_path = Path(directory) / "records.ndjson"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            records_path.write_text(
+                json.dumps({"id": "host", "output": {"value": "cli.example.com"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ADAPTER_PATH),
+                    "--assemble-observations",
+                    "--capture-plan",
+                    str(plan_path),
+                    "--capture-records",
+                    str(records_path),
+                    "--tcl-lsp-root",
+                    self.tcl_lsp_root,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["summary"]["record_count"], 1)
+        self.assertEqual(payload["pack"]["vectors"][0]["id"], "host")
 
     def test_cli_runs_golden_vector_path_form(self) -> None:
         completed = subprocess.run(
@@ -20228,6 +20438,7 @@ when HTTP_RESPONSE {
         self.assertIn("irule_behavior_pack", tool_names)
         self.assertIn("irule_differential_vectors", tool_names)
         self.assertIn("irule_import_observations", tool_names)
+        self.assertIn("irule_assemble_observations", tool_names)
         capability_payload = responses[4]["result"]["structuredContent"]
         self.assertEqual(capability_payload["chunk"]["offset"], 1498)
         self.assertLessEqual(capability_payload["chunk"]["count"], 2)
@@ -20424,6 +20635,56 @@ when HTTP_RESPONSE {
             self.assertEqual(imported_payload["status"], "ok")
             self.assertEqual(imported_payload["summary"]["executed"], False)
             self.assertEqual(imported_payload["pack"]["vectors"][0]["id"], "host")
+
+            assembled_observations = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 16,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_assemble_observations",
+                        "arguments": {
+                            "plan": {
+                                "name": "mcp-capture-plan",
+                                "source": "bigip-vlab-17.5.4",
+                                "provenance": {
+                                    "collector": "mcp-test",
+                                    "tmos_build": "17.5.4",
+                                    "capture_id": "mcp-assemble-001",
+                                },
+                                "observations": [
+                                    {
+                                        "id": "host",
+                                        "operation": "command_probe",
+                                        "input": {
+                                            "command": "HTTP::host",
+                                            "event": "HTTP_REQUEST",
+                                            "request": {"host": "mcp.example.com"},
+                                        },
+                                        "comparisons": [
+                                            {
+                                                "label": "host",
+                                                "actual_path": ["execution", "value"],
+                                                "reference_path": ["value"],
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                            "records": [
+                                {"id": "host", "output": {"value": "mcp.example.com"}}
+                            ],
+                        },
+                    },
+                }
+            )
+            assembled_payload = assembled_observations["result"]["structuredContent"]
+            self.assertEqual(assembled_payload["status"], "ok")
+            self.assertEqual(assembled_payload["summary"]["executed"], False)
+            self.assertEqual(
+                assembled_payload["pack"]["provenance"]["assembly"],
+                "tmos17-capture-v1",
+            )
 
             udp_behavior_pack = server.handle_message(
                 {

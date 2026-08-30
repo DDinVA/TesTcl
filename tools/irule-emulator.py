@@ -307,6 +307,11 @@ GOLDEN_VECTOR_MAX_MISMATCH_GROUPS = 128
 GOLDEN_VECTOR_MAX_MISMATCH_VECTOR_IDS = 32
 OBSERVATION_PROVENANCE_MAX_FIELDS = 16
 OBSERVATION_PROVENANCE_MAX_VALUE_BYTES = 256
+CAPTURE_RECORD_MAX_BYTES = 512 * 1024
+CAPTURE_MAX_RECORDS = GOLDEN_VECTOR_MAX_CASES
+CAPTURE_REQUIRED_PROVENANCE_FIELDS = frozenset(
+    {"collector", "tmos_build", "capture_id"}
+)
 EVENT_STATE_FIELDS = {
     "connection": {
         "client_addr",
@@ -25833,6 +25838,18 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_assemble_observations",
+                "title": "Assemble TMOS 17.5 capture records",
+                "description": "Combine a portable TMOS 17.5 capture plan with externally collected records into a provenance-backed observation pack without executing the emulator.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "plan": {"type": "object"},
+                        "records": {"type": "array", "minItems": 1, "maxItems": CAPTURE_MAX_RECORDS},
+                    },
+                    ["plan", "records"],
+                ),
+            },
+            {
                 "name": "irule_conformance",
                 "title": "Report catalog conformance",
                 "description": "Report static 17.5 catalog coverage for runtime command handlers and packet-to-event adapters.",
@@ -26095,6 +26112,22 @@ class McpProtocolServer:
                 run_observation_import(args["pack"], tcl_lsp_root=str(self._root))
             )
 
+        if name == "irule_assemble_observations":
+            if (
+                set(args) != {"plan", "records"}
+                or not isinstance(args["plan"], dict)
+                or not isinstance(args["records"], list)
+            ):
+                raise McpProtocolError(
+                    -32602,
+                    "irule_assemble_observations requires plan and records",
+                )
+            return self._tool_success(
+                run_capture_assemble(
+                    args["plan"], args["records"], tcl_lsp_root=str(self._root)
+                )
+            )
+
         if name == "irule_conformance":
             if args:
                 raise McpProtocolError(-32602, "irule_conformance accepts no arguments")
@@ -26294,6 +26327,40 @@ class McpProtocolServer:
 
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"invalid JSON constant: {value}")
+
+
+def _read_capture_records(stream: Any) -> list[Any]:
+    """Read bounded collector records from newline-delimited JSON."""
+    records: list[Any] = []
+    for line_number, line in enumerate(stream, start=1):
+        if not line.strip():
+            continue
+        try:
+            line_bytes = line.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise EmulatorInputError(
+                f"capture record line {line_number} must be valid UTF-8"
+            ) from exc
+        if len(line_bytes) > CAPTURE_RECORD_MAX_BYTES:
+            raise EmulatorInputError(
+                f"capture record line {line_number} exceeds the "
+                f"{CAPTURE_RECORD_MAX_BYTES // 1024} KiB limit"
+            )
+        if len(records) >= CAPTURE_MAX_RECORDS:
+            raise EmulatorInputError(
+                f"capture records accept at most {CAPTURE_MAX_RECORDS} records"
+            )
+        try:
+            records.append(json.loads(line, parse_constant=_reject_json_constant))
+        except json.JSONDecodeError as exc:
+            raise EmulatorInputError(
+                f"capture record line {line_number} is not valid JSON: {exc.msg}"
+            ) from exc
+        except ValueError as exc:
+            raise EmulatorInputError(
+                f"capture record line {line_number} contains an invalid JSON value"
+            ) from exc
+    return records
 
 
 def serve_mcp(root: Path, input_stream: Any = None, output_stream: Any = None) -> None:
@@ -27280,6 +27347,381 @@ def _normalise_golden_vectors(root: Path, pack: Any) -> dict[str, Any]:
     }
 
 
+def _normalise_capture_plan(root: Path, plan: Any) -> dict[str, Any]:
+    """Validate a portable plan before an external TMOS collector runs."""
+    if not isinstance(plan, dict):
+        raise EmulatorInputError("capture plan must be a JSON object")
+    try:
+        plan_bytes = len(
+            json.dumps(plan, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            .encode("utf-8")
+        )
+    except (TypeError, ValueError, OverflowError, UnicodeEncodeError) as exc:
+        raise EmulatorInputError(
+            "capture plan must contain only finite JSON-compatible UTF-8 data"
+        ) from exc
+    if plan_bytes > GOLDEN_VECTOR_MAX_BYTES:
+        raise EmulatorInputError(
+            f"capture plan exceeds the {GOLDEN_VECTOR_MAX_BYTES // (1024 * 1024)} MiB limit"
+        )
+    allowed = {
+        "schema_version", "profile", "name", "source", "provenance", "observations"
+    }
+    unknown = sorted(str(field) for field in plan if field not in allowed)
+    if unknown:
+        raise EmulatorInputError(
+            f"unsupported capture plan field(s): {', '.join(unknown)}"
+        )
+    schema_version = plan.get("schema_version", 1)
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version != 1:
+        raise EmulatorInputError("capture plan schema_version must be 1")
+    if plan.get("profile", "tmos-17.5") != "tmos-17.5":
+        raise EmulatorInputError("capture plan profile must be tmos-17.5")
+
+    name = plan.get("name")
+    source = plan.get("source")
+    if not isinstance(name, str) or not name:
+        raise EmulatorInputError("capture plan name must be a non-empty string")
+    if not isinstance(source, str) or not source or "\x00" in source:
+        raise EmulatorInputError(
+            "capture plan source must be a non-empty NUL-free string"
+        )
+    try:
+        name_bytes = name.encode("utf-8")
+        source_bytes = source.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise EmulatorInputError("capture plan name and source must be valid UTF-8") from exc
+    if "\x00" in name or len(name_bytes) > GOLDEN_VECTOR_MAX_NAME_BYTES:
+        raise EmulatorInputError("capture plan name is too long or contains NUL")
+    if len(source_bytes) > GOLDEN_VECTOR_MAX_NAME_BYTES:
+        raise EmulatorInputError("capture plan source is too long")
+
+    provenance = _normalise_observation_provenance(plan.get("provenance"))
+    missing_provenance = sorted(CAPTURE_REQUIRED_PROVENANCE_FIELDS - set(provenance))
+    if missing_provenance:
+        raise EmulatorInputError(
+            "capture plan provenance requires " + ", ".join(missing_provenance)
+        )
+    reserved_provenance = {"assembly", "record_count", "records_sha256"}
+    if reserved_provenance & set(provenance):
+        raise EmulatorInputError(
+            "capture plan provenance cannot provide assembler-managed fields"
+        )
+    if len(provenance) > OBSERVATION_PROVENANCE_MAX_FIELDS - len(reserved_provenance):
+        raise EmulatorInputError(
+            "capture plan provenance must leave room for assembler-managed fields"
+        )
+    for field in sorted(CAPTURE_REQUIRED_PROVENANCE_FIELDS):
+        value = provenance[field]
+        if not isinstance(value, str) or not value:
+            raise EmulatorInputError(
+                f"capture plan provenance field {field!r} must be a non-empty string"
+            )
+    if provenance["tmos_build"] != "17.5" and not provenance["tmos_build"].startswith("17.5."):
+        raise EmulatorInputError(
+            "capture plan provenance tmos_build must identify a TMOS 17.5 build"
+        )
+
+    observations = plan.get("observations")
+    if not isinstance(observations, list) or not observations:
+        raise EmulatorInputError("capture plan observations must be a non-empty array")
+    if len(observations) > CAPTURE_MAX_RECORDS:
+        raise EmulatorInputError(
+            f"capture plan accepts at most {CAPTURE_MAX_RECORDS} observations"
+        )
+
+    normalised: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, observation in enumerate(observations):
+        if not isinstance(observation, dict):
+            raise EmulatorInputError(f"capture plan observation {index} must be an object")
+        required = {"id", "operation", "input", "comparisons"}
+        unknown_observation = sorted(
+            str(field) for field in observation if field not in required
+        )
+        missing = sorted(field for field in required if field not in observation)
+        if missing or unknown_observation:
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            if unknown_observation:
+                details.append("unsupported " + ", ".join(unknown_observation))
+            raise EmulatorInputError(
+                f"capture plan observation {index} fields invalid: {'; '.join(details)}"
+            )
+
+        observation_id = observation["id"]
+        if not isinstance(observation_id, str) or not observation_id:
+            raise EmulatorInputError(
+                f"capture plan observation {index} id must be a non-empty string"
+            )
+        try:
+            observation_id_bytes = observation_id.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise EmulatorInputError(
+                f"capture plan observation {index} id must be valid UTF-8"
+            ) from exc
+        if "\x00" in observation_id or len(observation_id_bytes) > GOLDEN_VECTOR_MAX_NAME_BYTES:
+            raise EmulatorInputError(
+                f"capture plan observation {index} id is too long or contains NUL"
+            )
+        if observation_id in seen_ids:
+            raise EmulatorInputError(
+                f"capture plan contains duplicate observation id {observation_id!r}"
+            )
+        seen_ids.add(observation_id)
+
+        operation = observation["operation"]
+        vector_input = observation["input"]
+        if operation == "scenario":
+            if not isinstance(vector_input, dict) or "irule_file" in vector_input:
+                raise EmulatorInputError(
+                    f"capture plan observation {observation_id!r} scenario must use inline irule"
+                )
+            if "packets" in vector_input and any(
+                field in vector_input for field in ("request", "requests")
+            ):
+                raise EmulatorInputError(
+                    f"capture plan observation {observation_id!r} scenario cannot contain packets and requests"
+                )
+            _normalise_scenario_config(
+                vector_input,
+                allow_irule_file=False,
+                allow_requests=True,
+                allow_packets=True,
+                require_http=False,
+            )
+        elif operation == "command_probe":
+            _normalise_command_probe_request(root, vector_input)
+        elif operation == "pcap":
+            if not isinstance(vector_input, dict):
+                raise EmulatorInputError(
+                    f"capture plan observation {observation_id!r} pcap input must be an object"
+                )
+            pcap_allowed = {
+                "scenario", "pcap_base64", "direction", "client_addr", "server_addr"
+            }
+            pcap_unknown = sorted(set(vector_input) - pcap_allowed)
+            if pcap_unknown or "scenario" not in vector_input or "pcap_base64" not in vector_input:
+                raise EmulatorInputError(
+                    f"capture plan observation {observation_id!r} pcap input requires scenario and pcap_base64"
+                )
+            pcap_scenario = vector_input["scenario"]
+            if not isinstance(pcap_scenario, dict) or "irule_file" in pcap_scenario:
+                raise EmulatorInputError(
+                    f"capture plan observation {observation_id!r} pcap scenario must use inline irule"
+                )
+            if any(field in pcap_scenario for field in ("request", "requests", "packets")):
+                raise EmulatorInputError(
+                    f"capture plan observation {observation_id!r} pcap scenario cannot contain packets or requests"
+                )
+            _normalise_scenario_config(
+                pcap_scenario,
+                allow_irule_file=False,
+                allow_requests=False,
+                allow_packets=False,
+                require_http=False,
+            )
+            _decode_pcap_base64(vector_input["pcap_base64"])
+        else:
+            raise EmulatorInputError(
+                f"capture plan observation {observation_id!r} operation must be scenario, command_probe, or pcap"
+            )
+
+        comparisons = observation["comparisons"]
+        if not isinstance(comparisons, list) or not comparisons:
+            raise EmulatorInputError(
+                f"capture plan observation {observation_id!r} comparisons must be a non-empty array"
+            )
+        if len(comparisons) > GOLDEN_VECTOR_MAX_COMPARISONS:
+            raise EmulatorInputError(
+                f"capture plan observation {observation_id!r} accepts at most "
+                f"{GOLDEN_VECTOR_MAX_COMPARISONS} comparisons"
+            )
+        normalised_comparisons: list[dict[str, Any]] = []
+        for comparison_index, comparison in enumerate(comparisons):
+            if not isinstance(comparison, dict) or set(comparison) != {
+                "label", "actual_path", "reference_path"
+            }:
+                raise EmulatorInputError(
+                    f"capture plan observation {observation_id!r} comparison {comparison_index} must contain "
+                    "label, actual_path, and reference_path"
+                )
+            label = comparison["label"]
+            if not isinstance(label, str) or not label or "\x00" in label:
+                raise EmulatorInputError(
+                    f"capture plan observation {observation_id!r} comparison {comparison_index} label must be non-empty"
+                )
+            try:
+                label_bytes = label.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise EmulatorInputError(
+                    f"capture plan observation {observation_id!r} comparison {comparison_index} label must be valid UTF-8"
+                ) from exc
+            if len(label_bytes) > GOLDEN_VECTOR_MAX_LABEL_BYTES:
+                raise EmulatorInputError(
+                    f"capture plan observation {observation_id!r} comparison {comparison_index} label is too long"
+                )
+            normalised_comparisons.append(
+                {
+                    "label": label,
+                    "actual_path": _golden_path(
+                        comparison["actual_path"],
+                        f"capture plan observation {observation_id!r} comparison {comparison_index} actual_path",
+                    ),
+                    "reference_path": _golden_path(
+                        comparison["reference_path"],
+                        f"capture plan observation {observation_id!r} comparison {comparison_index} reference_path",
+                    ),
+                }
+            )
+        normalised.append(
+            {
+                "id": observation_id,
+                "operation": operation,
+                "input": vector_input,
+                "comparisons": normalised_comparisons,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "name": name,
+        "source": source,
+        "provenance": provenance,
+        "observations": normalised,
+    }
+
+
+def _normalise_capture_records(records: Any) -> list[dict[str, Any]]:
+    """Validate collector records while preserving their supplied output exactly."""
+    if not isinstance(records, list) or not records:
+        raise EmulatorInputError("capture records must be a non-empty array")
+    if len(records) > CAPTURE_MAX_RECORDS:
+        raise EmulatorInputError(
+            f"capture records accept at most {CAPTURE_MAX_RECORDS} records"
+        )
+    normalised: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, record in enumerate(records):
+        if not isinstance(record, dict) or set(record) != {"id", "output"}:
+            raise EmulatorInputError(
+                f"capture record {index} must contain only id and output"
+            )
+        record_id = record["id"]
+        if not isinstance(record_id, str) or not record_id or "\x00" in record_id:
+            raise EmulatorInputError(
+                f"capture record {index} id must be a non-empty NUL-free string"
+            )
+        try:
+            record_id_bytes = record_id.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise EmulatorInputError(
+                f"capture record {index} id must be valid UTF-8"
+            ) from exc
+        if len(record_id_bytes) > GOLDEN_VECTOR_MAX_NAME_BYTES:
+            raise EmulatorInputError(f"capture record {index} id is too long")
+        if record_id in seen_ids:
+            raise EmulatorInputError(f"capture records contain duplicate id {record_id!r}")
+        seen_ids.add(record_id)
+        output = record["output"]
+        try:
+            encoded = json.dumps(
+                output, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+            ).encode("utf-8")
+        except (TypeError, ValueError, OverflowError, UnicodeEncodeError) as exc:
+            raise EmulatorInputError(
+                f"capture record {record_id!r} output must be finite JSON-compatible UTF-8 data"
+            ) from exc
+        if len(encoded) > CAPTURE_RECORD_MAX_BYTES:
+            raise EmulatorInputError(
+                f"capture record {record_id!r} output exceeds the "
+                f"{CAPTURE_RECORD_MAX_BYTES // 1024} KiB limit"
+            )
+        normalised.append({"id": record_id, "output": output})
+    return normalised
+
+
+def run_capture_assemble(
+    plan: Any,
+    records: Any,
+    *,
+    tcl_lsp_root: str | None = None,
+) -> dict[str, Any]:
+    """Assemble external TMOS observations without running or fabricating output."""
+    root = _find_tcl_lsp_root(tcl_lsp_root)
+    prepared_plan = _normalise_capture_plan(root, plan)
+    prepared_records = _normalise_capture_records(records)
+    expected_ids = [observation["id"] for observation in prepared_plan["observations"]]
+    expected_set = set(expected_ids)
+    record_by_id = {record["id"]: record for record in prepared_records}
+    record_set = set(record_by_id)
+    missing = [record_id for record_id in expected_ids if record_id not in record_set]
+    unexpected = sorted(record_set - expected_set)
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append("missing records: " + ", ".join(missing[:8]))
+        if unexpected:
+            details.append("unexpected records: " + ", ".join(unexpected[:8]))
+        raise EmulatorInputError("capture record set does not match plan (" + "; ".join(details) + ")")
+
+    ordered_records = [record_by_id[record_id] for record_id in expected_ids]
+    digest_input = json.dumps(
+        ordered_records, ensure_ascii=False, allow_nan=False,
+        separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")
+    provenance = dict(prepared_plan["provenance"])
+    provenance.update(
+        {
+            "assembly": "tmos17-capture-v1",
+            "record_count": len(ordered_records),
+            "records_sha256": hashlib.sha256(digest_input).hexdigest(),
+        }
+    )
+    observation_pack = {
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "name": prepared_plan["name"],
+        "source": prepared_plan["source"],
+        "provenance": provenance,
+        "observations": [
+            {
+                **observation,
+                "output": record_by_id[observation["id"]]["output"],
+            }
+            for observation in prepared_plan["observations"]
+        ],
+    }
+    canonical = _normalise_observation_pack(root, observation_pack)
+    return {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "pack": canonical,
+        "summary": {
+            "observation_count": len(ordered_records),
+            "record_count": len(ordered_records),
+            "executed": False,
+            "reference_source": prepared_plan["source"],
+            "records_sha256": provenance["records_sha256"],
+            "record_digests": [
+                {
+                    "id": record["id"],
+                    "sha256": hashlib.sha256(
+                        json.dumps(
+                            record["output"], ensure_ascii=False, allow_nan=False,
+                            separators=(",", ":"), sort_keys=True,
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                }
+                for record in ordered_records
+            ],
+        },
+    }
+
+
 def _normalise_observation_pack(root: Path, pack: Any) -> dict[str, Any]:
     """Convert an external TMOS observation pack into golden-vector form."""
     if not isinstance(pack, dict):
@@ -28074,6 +28516,26 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                     return
                 _json_response(self, 200, payload)
                 return
+            if parsed.path == "/v1/observations/assemble":
+                try:
+                    request = self._read_json()
+                    if not isinstance(request, dict) or set(request) != {"plan", "records"}:
+                        raise EmulatorInputError(
+                            "observation assembly request must contain only plan and records"
+                        )
+                    payload = run_capture_assemble(
+                        request["plan"], request["records"], tcl_lsp_root=str(root)
+                    )
+                except (
+                    json.JSONDecodeError,
+                    EmulatorInputError,
+                    EmulatorResourceError,
+                    OSError,
+                ) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
             if parsed.path == "/v1/simulations/pcap":
                 try:
                     request = self._read_json()
@@ -28429,6 +28891,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="validate external TMOS 17.5 observations and emit a golden-vector pack",
     )
+    mode.add_argument(
+        "--assemble-observations",
+        action="store_true",
+        help="assemble a TMOS 17.5 observation pack from a plan and NDJSON collector records",
+    )
     mode.add_argument("--serve", action="store_true", help="serve the HTTP API instead of reading stdin")
     mode.add_argument(
         "--data-plane",
@@ -28476,6 +28943,15 @@ def main(argv: list[str] | None = None) -> int:
         default="inprocess",
         help="tcl-lsp bridge backend (in-process Tcl/Tk is required)",
     )
+    parser.add_argument(
+        "--capture-plan",
+        help="capture plan JSON path used with --assemble-observations",
+    )
+    parser.add_argument(
+        "--capture-records",
+        default="-",
+        help="newline-delimited collector record path used with --assemble-observations, or - for stdin",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -28486,10 +28962,23 @@ def main(argv: list[str] | None = None) -> int:
             if args.import_observations not in (None, "-")
             else None
         )
+        if args.assemble_observations and not args.capture_plan:
+            raise EmulatorInputError(
+                "--assemble-observations requires --capture-plan PATH"
+            )
+        if args.capture_plan is not None and not args.assemble_observations:
+            raise EmulatorInputError(
+                "--capture-plan requires --assemble-observations"
+            )
+        if args.capture_records != "-" and not args.assemble_observations:
+            raise EmulatorInputError(
+                "--capture-records requires --assemble-observations"
+            )
         if args.scenario != "-" and (
             direct_pack_path is not None
             or direct_golden_path is not None
             or direct_observation_path is not None
+            or args.assemble_observations
         ):
             raise EmulatorInputError(
                 "use either --scenario PATH or a direct pack path, not both"
@@ -28498,7 +28987,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.pcap and (
             args.serve or args.data_plane or args.mcp or args.capabilities or args.catalog or args.probe
             or args.command_probe or args.behavior_pack or args.golden_vectors
-            or args.import_observations or args.conformance
+            or args.import_observations or args.assemble_observations or args.conformance
         ):
             raise EmulatorInputError(
                 "--pcap can only be used with one-shot scenario execution"
@@ -28609,6 +29098,20 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 pack = json.loads(Path(pack_path).read_text(encoding="utf-8"))
             response = run_observation_import(pack, tcl_lsp_root=str(root))
+        elif args.assemble_observations:
+            plan = json.loads(
+                Path(args.capture_plan).read_text(encoding="utf-8")
+            )
+            if args.capture_records == "-":
+                records = _read_capture_records(sys.stdin)
+            else:
+                with Path(args.capture_records).open(
+                    "r", encoding="utf-8", newline=""
+                ) as records_stream:
+                    records = _read_capture_records(records_stream)
+            response = run_capture_assemble(
+                plan, records, tcl_lsp_root=str(root)
+            )
         else:
             if args.scenario == "-":
                 scenario = json.load(sys.stdin)

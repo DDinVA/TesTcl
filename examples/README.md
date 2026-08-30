@@ -3,9 +3,23 @@ This folder contains examples demonstrating how to write your TesTcl tests
 The examples used are identical to the ones found on [testcl.com](http://testcl.com)
 
 The `observations/` directory contains a TMOS 17.5 external-observation
-template. Replace its placeholders with output collected independently from a
-BIG-IP or vLab, then import it with `--import-observations` before running the
-resulting golden-vector pack.
+template. For larger captures, `http-17.5.capture-plan.json` separates the
+portable test inputs and comparison paths from the output collected on a
+BIG-IP or vLab. Feed one JSON object per line through the assembler:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --assemble-observations \
+  --capture-plan examples/observations/http-17.5.capture-plan.json \
+  --capture-records examples/observations/http-17.5.records.ndjson
+```
+
+The checked-in records file is only a shape example and deliberately contains
+a placeholder value. Replace it with records emitted by an independent
+TMOS 17.5 collector. The assembler requires exactly one record for every plan
+case, preserves plan order, adds a digest of the supplied records, and never
+executes the emulator to generate reference output. The assembled result can
+then be passed to `--golden-vectors` or `POST /v1/differential-vectors`.
 
 The `scenarios/multi-irule-17.5.json` fixture demonstrates multiple attached
 iRules with priority ordering and a shared pool fixture.

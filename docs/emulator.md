@@ -266,6 +266,40 @@ unchanged to `--golden-vectors`, `POST /v1/differential-vectors`, or
 `irule_differential_vectors`. Importing never fabricates reference output from
 the emulator; it only normalizes and validates collector-supplied output.
 
+### Assemble a capture from a collector stream
+
+For a repeatable capture run, keep the test inputs in a capture plan and send
+the observed outputs as newline-delimited JSON. A plan contains the same
+`id`, `operation`, `input`, and comparison mappings used by an observation, but
+does not contain `output`. Each collector record contains exactly:
+
+```json
+{"id":"http-host","output":{"value":"api.example.com"}}
+```
+
+The plan must identify a TMOS 17.5 build and a collector/capture ID. The
+assembler requires exactly one record for every plan case, restores plan order,
+validates each operation against the pinned 17.5 catalog, and adds both an
+aggregate `records_sha256` and per-record digests to the result. It is an
+assembly boundary only: it does not connect to BIG-IP, execute Tcl, or invent
+missing reference values.
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --assemble-observations \
+  --capture-plan examples/observations/http-17.5.capture-plan.json \
+  --capture-records collector-output.ndjson > observations.json
+
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --golden-vectors observations.json
+```
+
+The HTTP equivalent is `POST /v1/observations/assemble` with a JSON body of
+`{"plan": {...}, "records": [...]}`. The MCP equivalent is
+`irule_assemble_observations`. Both expose the same bounded, non-executing
+contract. The example records in the repository are placeholders and are not
+live-device evidence.
+
 The scenario-capable stateful pack can be run directly with:
 
 ```sh
@@ -2301,6 +2335,8 @@ clients can discover these tools with `tools/list`:
 - `irule_session_create`, `irule_session_inspect`, `irule_session_request`,
   `irule_session_trace`, `irule_session_event`, and `irule_session_close` manage
   persistent sessions.
+- `irule_assemble_observations` combines a capture plan with externally
+  collected TMOS 17.5 records without executing the emulator.
 
 Tool failures are returned as MCP tool results with `isError: true`; malformed
 JSON-RPC requests and unknown methods use protocol-level errors. The facade
