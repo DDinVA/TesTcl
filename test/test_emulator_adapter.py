@@ -3145,6 +3145,10 @@ when HTTP_REQUEST {
             coverage["event_lifecycle"]["target_unmapped_events"],
         )
         self.assertNotIn(
+            "EPI_NA_CHECK_HTTP_REQUEST",
+            coverage["event_lifecycle"]["target_unmapped_events"],
+        )
+        self.assertNotIn(
             "ACCESS_SAML_SLO_REQ",
             coverage["event_lifecycle"]["target_unmapped_events"],
         )
@@ -3180,6 +3184,7 @@ when HTTP_REQUEST {
                 "ACCESS_SAML_SLO_REQ",
                 "ACCESS_SAML_SLO_RESP",
                 "ACCESS2_POLICY_EXPRESSION_EVAL",
+                "EPI_NA_CHECK_HTTP_REQUEST",
                 "BOTDEFENSE_REQUEST",
                 "BOTDEFENSE_ACTION",
                 "ANTIFRAUD_LOGIN",
@@ -3206,6 +3211,7 @@ when HTTP_REQUEST {
                 "ACCESS_SAML_SLO_REQ": "ACCESS SAML logout request fixture after policy",
                 "ACCESS_SAML_SLO_RESP": "ACCESS SAML logout response fixture after policy",
                 "ACCESS2_POLICY_EXPRESSION_EVAL": "ACCESS2 policy-expression procedure fixture after policy",
+                "EPI_NA_CHECK_HTTP_REQUEST": "Endpoint Inspector special status request",
                 "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",
                 "BOTDEFENSE_ACTION": "Bot Defense action from HTTP request",
                 "ANTIFRAUD_LOGIN": "Anti-Fraud login inspection from HTTP request",
@@ -13216,6 +13222,47 @@ when ACCESS2_POLICY_EXPRESSION_EVAL {
             item["semantic"]["access2"],
             {"proc": "::policy::evaluate_request"},
         )
+
+    def test_epi_na_special_http_paths_emit_internal_event(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ACCESS"],
+                "irule": (
+                    "when EPI_NA_CHECK_HTTP_REQUEST { "
+                    "log local0. \"epi=[HTTP::path]\" }\n"
+                    "when HTTP_REQUEST { log local0. \"request=[HTTP::path]\" }"
+                ),
+                "requests": [
+                    {"uri": "/my.status.eps?client=one"},
+                    {"uri": "/normal"},
+                    {"uri": "/my.status.na"},
+                    {"uri": "/my.report.na"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(
+            [
+                item["request"]["uri"]
+                for item in result["results"]
+                if "EPI_NA_CHECK_HTTP_REQUEST" in item["events_fired"]
+            ],
+            [
+                "/my.status.eps?client=one",
+                "/my.status.na",
+                "/my.report.na",
+            ],
+        )
+        self.assertEqual(
+            [
+                item["events_fired"].count("EPI_NA_CHECK_HTTP_REQUEST")
+                for item in result["results"]
+            ],
+            [1, 0, 1, 1],
+        )
+        self.assertTrue(any("epi=/my.status.eps" in log for log in result["results"][0]["logs"]))
+        self.assertTrue(any("request=/normal" in log for log in result["results"][1]["logs"]))
 
     def test_am_commands_model_acceleration_metadata_and_disable_state(self) -> None:
         session = self.adapter.EmulatorSession(

@@ -14496,6 +14496,22 @@ namespace eval ::itest::semantic {
         return $access2_default_proc
     }
 
+    proc epi_na_auto_event {} {
+        if {![_profile_enabled ACCESS] ||
+            ![info exists ::state::http::request::uri]} {
+            return ""
+        }
+        array set uri_parts [_uri_parts $::state::http::request::uri]
+        if {$uri_parts(path) ni {/my.status.eps /my.status.na /my.report.na}} {
+            return ""
+        }
+        if {[lsearch -exact [::itest::registered_events] EPI_NA_CHECK_HTTP_REQUEST] >= 0} {
+            set event_result [::itest::_testcl_fire_event_orig EPI_NA_CHECK_HTTP_REQUEST]
+            ::itest::semantic::event_errors_record EPI_NA_CHECK_HTTP_REQUEST $event_result
+        }
+        return $uri_parts(path)
+    }
+
     proc access2_proc_command {args} {
         if {$::itest::current_event ne "ACCESS2_POLICY_EXPRESSION_EVAL"} {
             error "ACCESS2::access2_proc is not valid during $::itest::current_event"
@@ -25849,6 +25865,11 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                     [lsearch -exact $events HTTP_REQUEST] < 0} {
                     lappend events HTTP_REQUEST
                 }
+                if {[::itest::semantic::_profile_enabled ACCESS] &&
+                    [lsearch -exact $events EPI_NA_CHECK_HTTP_REQUEST] >= 0 &&
+                    [lsearch -exact $events HTTP_REQUEST] < 0} {
+                    lappend events HTTP_REQUEST
+                }
             }
             return $events
         }
@@ -26015,6 +26036,10 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::_maybe_fire_lb_failed_for_queue
         }
         if {$gated && $event_name eq "HTTP_REQUEST"} {
+            # Endpoint Inspector/Network Access status requests are surfaced
+            # before the ordinary HTTP_REQUEST handler, using the parsed path
+            # so a query string does not change the internal-event trigger.
+            ::itest::semantic::epi_na_auto_event
             # ASM request inspection is a pre-LB lifecycle.  Dispatch it
             # here, after HTTP_REQUEST has run but before the request can
             # select or connect to an origin server.

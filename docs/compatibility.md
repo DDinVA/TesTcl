@@ -620,6 +620,11 @@ event once after an allowed policy completes. Direct-event values are reset at
 each event boundary; automatic fixture delivery is gated once per ACCESS
 session. This remains a fixture-driven observation point, not an APM policy
 engine.
+The `EPI_NA_CHECK_HTTP_REQUEST` event is emitted for the three documented
+Endpoint Inspector/Network Access status paths when an ACCESS profile is
+attached; the event is not a status-report processor. See the F5
+[`EPI_NA_CHECK_HTTP_REQUEST`](https://clouddocs.f5.com/api/irules/EPI_NA_CHECK_HTTP_REQUEST.html)
+reference.
 The global `call` command is modeled for top-level iRule `proc` declarations,
 including optional `-debug`, list-safe argument dispatch, and propagation of
 Tcl procedure return/error codes. It does not evaluate arbitrary top-level

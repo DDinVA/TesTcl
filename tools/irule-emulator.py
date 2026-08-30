@@ -10299,6 +10299,7 @@ PACKET_EVENT_ADAPTERS = {
     "ACCESS_SAML_SLO_REQ": "ACCESS SAML logout request fixture after policy",
     "ACCESS_SAML_SLO_RESP": "ACCESS SAML logout response fixture after policy",
     "ACCESS2_POLICY_EXPRESSION_EVAL": "ACCESS2 policy-expression procedure fixture after policy",
+    "EPI_NA_CHECK_HTTP_REQUEST": "Endpoint Inspector special status request",
     "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",
     "BOTDEFENSE_ACTION": "Bot Defense action from HTTP request",
     "ANTIFRAUD_LOGIN": "Anti-Fraud login inspection from HTTP request",
