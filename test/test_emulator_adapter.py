@@ -672,6 +672,26 @@ when HTTP_REQUEST { log local0. "origin-request=[HTTP::uri]" }
             successful_request["semantic"]["http_proxy"]["chain_response"]["status"], 200
         )
 
+        packet_success = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "HTTP_PROXY_CONNECT"],
+                "http_proxy": {
+                    "chain": {"responses": [{"status": 407}, {"status": 200}]}
+                },
+                "irule": "when HTTP_PROXY_RESPONSE { HTTP::proxy chain retry }",
+                "packets": [
+                    {"protocol": "http", "method": "GET", "uri": "/packet-retry"},
+                    {"protocol": "http", "direction": "server_to_client", "status": 200},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        packet_request = packet_success["trace"][0]["http_result"]
+        self.assertEqual(packet_request["events_fired"].count("HTTP_PROXY_RESPONSE"), 2)
+        self.assertIn("HTTP_REQUEST", packet_request["events_fired"])
+        self.assertEqual(packet_request["semantic"]["http_proxy"]["chain_response_index"], 1)
+        self.assertEqual(packet_request["semantic"]["http_proxy"]["chain_retry_count"], 1)
+
         exhausted = self.adapter.run_scenario(
             {
                 "profiles": ["TCP", "HTTP", "HTTP_PROXY_CONNECT"],

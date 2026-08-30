@@ -1764,7 +1764,9 @@ is a bounded sequence of structured packet records. TCP SYN/FIN/RST, TCP
 payloads, TLS handshake/data records, HTTP
 request/response pairs, WebSocket upgrade/frame packets, DNS request/response
 messages, and SIP request/response messages are translated into the same Tcl events and state
-layers used by the HTTP API. Generic UDP payloads are reported as unmapped
+layers used by the HTTP API. Structured HTTP packet traces also honor
+`http_proxy.chain.responses`, so a bounded proxy `407`/retry/`200` negotiation
+can be exercised without changing the packet input format. Generic UDP payloads are reported as unmapped
 because there is no protocol-specific event to infer. WebSocket support is a
 structured packet adapter: it models the HTTP upgrade and the eight WebSocket
 frame/data events, and the raw TCP/PCAP path decodes RFC 6455 frames after a
