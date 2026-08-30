@@ -655,6 +655,14 @@ internal handoff. See the F5
 and
 [`IVS_ENTRY_RESPONSE`](https://clouddocs.f5.com/api/irules/IVS_ENTRY_RESPONSE.html)
 references.
+The pinned registry also retains `IP_GTM`, `TCP_GTM`, and `UDP_GTM` as
+compatibility event names. They are supported as synthetic event injections
+with ordinary protocol state, but no GTM wide-IP selection or DNS dataplane is
+created. The current F5 master event list groups GTM behavior around
+`DNS_REQUEST`, `DNS_RESPONSE`, and load-balancing events; these legacy names
+should therefore be treated as dispatch-compatibility hooks rather than a
+claim of full GTM emulation. See the F5
+[master event list](https://clouddocs.f5.com/api/irules/Events.html).
 The global `call` command is modeled for top-level iRule `proc` declarations,
 including optional `-debug`, list-safe argument dispatch, and propagation of
 Tcl procedure return/error codes. It does not evaluate arbitrary top-level

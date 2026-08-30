@@ -1631,6 +1631,28 @@ and
 [`IVS_ENTRY_RESPONSE`](https://clouddocs.f5.com/api/irules/IVS_ENTRY_RESPONSE.html)
 references.
 
+### Legacy GTM event injection
+
+The pinned registry retains `IP_GTM`, `TCP_GTM`, and `UDP_GTM` as compatibility
+event names even though the current F5 master event list documents GTM DNS
+events rather than these legacy names. They can be fired synchronously as
+synthetic event packets, using the normal `connection` or `datagram` state
+layers for rule-visible protocol values. This exercises handler dispatch and
+command behavior only; it does not emulate GTM wide-IP selection, DNS
+resolution, or a second GTM dataplane:
+
+```json
+{
+  "profiles": ["TCP"],
+  "irule": "when TCP_GTM { log local0. [TCP::client_port] }",
+  "packets": [{
+    "protocol": "event",
+    "event": "TCP_GTM",
+    "state": {"connection": {"client_port": 41000}}
+  }]
+}
+```
+
 ### BWC flow controls
 
 The BWC overlay models the complete TMOS 17.5 command family as deterministic
