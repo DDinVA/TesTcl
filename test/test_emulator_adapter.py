@@ -2785,6 +2785,10 @@ when HTTP_RESPONSE_RELEASE {
         self.assertGreater(nested["summary"]["probed_count"], 0)
         self.assertTrue(all(command["registered"] for command in nested["commands"]))
 
+        language = self.adapter._build_capabilities(root, 1000, 1000)
+        when = next(command for command in language["commands"] if command["name"] == "when")
+        self.assertEqual(when["catalog_kind"], "irule-language")
+
     def test_common_global_string_and_pool_functions_are_semantic(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -3316,6 +3320,15 @@ when HTTP_REQUEST {
         self.assertEqual(report["profile"], "tmos-17.5")
         self.assertGreaterEqual(report["commands"]["catalog_count"], 1400)
         coverage = report["coverage"]
+        self.assertGreater(report["commands"]["target_f5_command_count"], 900)
+        self.assertEqual(
+            report["commands"]["target_catalog_kind_runtime_status_counts"]["f5-irule"]["generated-stub"],
+            0,
+        )
+        self.assertGreater(
+            report["coverage"]["support_command_behavior"]["placeholder_count"],
+            400,
+        )
         self.assertEqual(coverage["command_catalog"]["status"], "complete")
         self.assertEqual(
             coverage["command_catalog"]["target_count"],

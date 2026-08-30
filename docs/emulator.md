@@ -1922,7 +1922,12 @@ The conformance response includes a machine-readable `coverage` matrix. It
 separates complete catalog ingestion from partial command behavior and event
 lifecycle coverage, and reports target-only behavioral, placeholder, unhandled,
 and unmapped counts. These are inventory dimensions, not a fidelity score:
-generated stubs are recognized commands, not claims of BIG-IP semantics.
+generated stubs are recognized commands, not claims of BIG-IP semantics. The
+registry also contains Tcl language/runtime support entries used while parsing
+or executing iRules. Use `commands.catalog_kind_counts` and the separate
+`coverage.f5_command_behavior` / `coverage.support_command_behavior` sections
+to distinguish the F5 iRule surface from those support entries; `when` is
+classified as an iRule language construct rather than a runtime command.
 
 `GET /v1/probes` provides live registration evidence for one bounded catalog
 chunk. It accepts the same `offset`, `limit`, `namespace`, `runtime_status`,

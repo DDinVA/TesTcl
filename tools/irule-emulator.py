@@ -2339,6 +2339,29 @@ def _capability_status(proc_name: str, handwritten: set[str], generated: set[str
     return "no-runtime-handler"
 
 
+def _catalog_kind(name: str, spec: Any) -> str:
+    """Classify a registry entry as F5 iRule or Tcl support surface."""
+    if name == "when":
+        return "irule-language"
+    namespace = name.split("::", 1)[0] if "::" in name else ""
+    hover = getattr(spec, "hover", None)
+    source = getattr(hover, "source", "") if hover else ""
+    if not isinstance(source, str):
+        source = ""
+    if (
+        namespace.isupper()
+        or bool(getattr(spec, "event_requires", None))
+        or source.startswith("https://clouddocs.f5.com/api/irules/")
+    ):
+        return "f5-irule"
+    if (
+        getattr(spec, "tcllib_package", None)
+        or getattr(spec, "required_package", None)
+    ):
+        return "tcllib"
+    return "tcl-core"
+
+
 def _catalog_event_names(namespace_registry: Any) -> list[str]:
     """Return the pinned event catalog plus documented 17.5 compatibility overrides."""
     return sorted(set(namespace_registry.all_event_names()) | set(TMOS_17_5_EVENT_OVERRIDES))
@@ -2431,6 +2454,7 @@ def _build_capabilities(
             {
                 "name": name,
                 "namespace": name.split("::", 1)[0] if "::" in name else "",
+                "catalog_kind": _catalog_kind(name, spec),
                 "subcommands": sorted(spec.subcommands),
                 "documentation": {
                     "summary": getattr(hover, "summary", "") if hover else "",
@@ -2708,8 +2732,27 @@ def _build_conformance(root: Path) -> dict[str, Any]:
         "generated-stub": 0,
         "no-runtime-handler": 0,
     }
-    for status in status_map.values():
+    catalog_kind_counts = {
+        "f5-irule": 0,
+        "tcllib": 0,
+        "tcl-core": 0,
+        "irule-language": 0,
+    }
+    target_kind_status_counts = {
+        "f5-irule": {status: 0 for status in sorted(RUNTIME_STATUS_VALUES)},
+        "tcllib": {status: 0 for status in sorted(RUNTIME_STATUS_VALUES)},
+        "tcl-core": {status: 0 for status in sorted(RUNTIME_STATUS_VALUES)},
+        "irule-language": {status: 0 for status in sorted(RUNTIME_STATUS_VALUES)},
+    }
+    for name, status in status_map.items():
         command_counts[status] = command_counts.get(status, 0) + 1
+        kind = _catalog_kind(name, registry.get_any(name))
+        catalog_kind_counts[kind] += 1
+        if (
+            name not in TMOS_17_5_POST_TARGET_COMMANDS
+            and name not in TMOS_17_5_UNAVAILABLE_COMMANDS
+        ):
+            target_kind_status_counts[kind][status] += 1
     event_names = _catalog_event_names(NAMESPACE_REGISTRY)
     post_target_commands = sorted(
         name for name in status_map if name in TMOS_17_5_POST_TARGET_COMMANDS
@@ -2743,11 +2786,7 @@ def _build_conformance(root: Path) -> dict[str, Any]:
             continue
         spec = registry.get_any(name)
         namespace = name.split("::", 1)[0] if "::" in name else ""
-        # F5 command namespaces are conventionally uppercase. Global F5
-        # commands are retained when their registry entry has event metadata;
-        # lower-case Tcl library commands are not implementation work items.
-        is_f5_command = bool(getattr(spec, "event_requires", None)) or namespace.isupper()
-        if is_f5_command:
+        if _catalog_kind(name, spec) == "f5-irule":
             implementation_buckets.setdefault((namespace, status), []).append(name)
     implementation_queue = [
         {
@@ -2765,6 +2804,14 @@ def _build_conformance(root: Path) -> dict[str, Any]:
     ]
     target_runtime_counts = {
         status: sum(status_map[name] == status for name in target_command_names)
+        for status in sorted(RUNTIME_STATUS_VALUES)
+    }
+    target_f5_runtime_counts = target_kind_status_counts["f5-irule"]
+    target_support_runtime_counts = {
+        status: sum(
+            target_kind_status_counts[kind][status]
+            for kind in ("tcllib", "tcl-core")
+        )
         for status in sorted(RUNTIME_STATUS_VALUES)
     }
     target_unmapped_events = [
@@ -2800,6 +2847,9 @@ def _build_conformance(root: Path) -> dict[str, Any]:
             "unavailable_count": len(unavailable_commands),
             "unavailable_commands": unavailable_commands,
             "runtime_status_counts": command_counts,
+            "catalog_kind_counts": catalog_kind_counts,
+            "target_catalog_kind_runtime_status_counts": target_kind_status_counts,
+            "target_f5_command_count": sum(target_kind_status_counts["f5-irule"].values()),
             "implementation_queue": {
                 "candidate_statuses": sorted(implementation_statuses),
                 "command_count": sum(item["count"] for item in implementation_queue),
@@ -2838,6 +2888,26 @@ def _build_conformance(root: Path) -> dict[str, Any]:
                 "behavioral_count": behavioral_command_count,
                 "placeholder_count": target_runtime_counts["generated-stub"],
                 "unhandled_count": target_runtime_counts["no-runtime-handler"],
+            },
+            "f5_command_behavior": {
+                "status": "partial",
+                "target_runtime_status_counts": dict(target_f5_runtime_counts),
+                "behavioral_count": sum(
+                    target_f5_runtime_counts[status]
+                    for status in ("handwritten-mock", "semantic-mock")
+                ),
+                "placeholder_count": target_f5_runtime_counts["generated-stub"],
+                "unhandled_count": target_f5_runtime_counts["no-runtime-handler"],
+            },
+            "support_command_behavior": {
+                "status": "partial",
+                "target_runtime_status_counts": target_support_runtime_counts,
+                "behavioral_count": sum(
+                    target_support_runtime_counts[status]
+                    for status in ("handwritten-mock", "semantic-mock")
+                ),
+                "placeholder_count": target_support_runtime_counts["generated-stub"],
+                "unhandled_count": target_support_runtime_counts["no-runtime-handler"],
             },
             "event_catalog": {
                 "status": "complete",
@@ -2878,7 +2948,7 @@ def _runtime_status_map(root: Path) -> tuple[Any, dict[str, str]]:
 
 def _is_f5_runtime_command(name: str, spec: Any) -> bool:
     """Avoid warning on ordinary Tcl control commands in a rule."""
-    return "::" in name or bool(getattr(spec, "event_requires", None))
+    return _catalog_kind(name, spec) == "f5-irule"
 
 
 def _rule_priority(value: str, context: str) -> int:
