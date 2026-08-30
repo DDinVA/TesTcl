@@ -94,6 +94,33 @@ and the event result. A Tcl command error is reported as
 argument, and 64 KiB total argument data, and it never exposes arbitrary Tcl
 evaluation.
 
+### Catalog behavior packs
+
+Behavior packs turn catalog entries into checked-in, reproducible contracts.
+Each case contains an `id`, one `probe` accepted by the command workbench,
+and an `expect` object. Supported expectations are exact `status`, `value`,
+`value_base64`, `value_bytes`, `tcl_return_code`, and `event_fired` values,
+plus an `error_contains` substring assertion. Packs are limited to 256 cases;
+each case is normalized before execution, and a malformed case prevents the
+pack from running.
+
+The repository includes
+[`examples/behavior-packs/http-core-17.5.json`](../examples/behavior-packs/http-core-17.5.json),
+which covers HTTP getters, headers, cookies, payloads, profile gating, and a
+negative argument contract:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/http-core-17.5.json
+```
+
+The command exits non-zero when a case fails and prints every mismatch without
+discarding the passing cases. The same runner is available as
+`POST /v1/behavior-packs` and the MCP tool `irule_behavior_pack`. Packs are
+fixture-only: they cannot provide an iRule source, local file, request list,
+or packet trace. This makes a catalog chunk plus its behavior pack a portable
+implementation checkpoint for adding higher-fidelity semantic mocks.
+
 For a stateful data-plane fixture, keep the simple `pools` member-array format
 and add `backends` keyed by the same `address:port` member values. A backend
 can be `up`, `down`, or `disabled`; down and disabled members are excluded from
@@ -1957,7 +1984,8 @@ curl -X POST -H 'Content-Type: application/json' \
 ```
 
 The service exposes `GET /healthz`, `GET /v1/capabilities`,
-`GET /v1/probes`, `GET /v1/conformance`, `POST /v1/simulations`, and
+`GET /v1/probes`, `GET /v1/conformance`, `POST /v1/simulations`,
+`POST /v1/command-probes`, `POST /v1/behavior-packs`, and
 `POST /v1/simulations/pcap`. It also supports persistent sessions through
 `POST /v1/sessions`, `GET /v1/sessions/{session_id}`,
 `POST /v1/sessions/{session_id}/requests`,

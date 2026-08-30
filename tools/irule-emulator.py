@@ -286,6 +286,8 @@ MAX_HTTP_PROXY_CHAIN_RETRIES = 1
 COMMAND_PROBE_MAX_ARGS = 64
 COMMAND_PROBE_MAX_ARG_BYTES = 16 * 1024
 COMMAND_PROBE_MAX_TOTAL_ARG_BYTES = 64 * 1024
+BEHAVIOR_PACK_MAX_CASES = 256
+BEHAVIOR_PACK_MAX_NAME_BYTES = 256
 EVENT_STATE_FIELDS = {
     "connection": {
         "client_addr",
@@ -23067,6 +23069,14 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_behavior_pack",
+                "title": "Run iRule behavior contracts",
+                "description": "Execute a bounded TMOS 17.5 catalog behavior pack and return pass/fail results with exact mismatches.",
+                "inputSchema": _mcp_object_schema(
+                    {"pack": {"type": "object"}}, ["pack"]
+                ),
+            },
+            {
                 "name": "irule_conformance",
                 "title": "Report catalog conformance",
                 "description": "Report static 17.5 catalog coverage for runtime command handlers and packet-to-event adapters.",
@@ -23283,6 +23293,15 @@ class McpProtocolServer:
                 )
             return self._tool_success(
                 run_command_probe(args, tcl_lsp_root=str(self._root))
+            )
+
+        if name == "irule_behavior_pack":
+            if set(args) != {"pack"} or not isinstance(args["pack"], dict):
+                raise McpProtocolError(
+                    -32602, "irule_behavior_pack requires a pack object"
+                )
+            return self._tool_success(
+                run_behavior_pack(args["pack"], tcl_lsp_root=str(self._root))
             )
 
         if name == "irule_conformance":
@@ -23652,6 +23671,234 @@ def run_command_probe(
             session.close()
 
 
+def _normalise_behavior_pack(root: Path, pack: Any) -> dict[str, Any]:
+    """Validate a catalog behavior pack before any case is executed."""
+    if not isinstance(pack, dict):
+        raise EmulatorInputError("behavior pack must be a JSON object")
+    allowed = {"schema_version", "profile", "name", "cases"}
+    unknown = sorted(set(pack) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            f"unsupported behavior pack field(s): {', '.join(unknown)}"
+        )
+    schema_version = pack.get("schema_version", 1)
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version != 1:
+        raise EmulatorInputError("behavior pack schema_version must be 1")
+    if pack.get("profile", "tmos-17.5") != "tmos-17.5":
+        raise EmulatorInputError("behavior pack profile must be tmos-17.5")
+    name = pack.get("name", "anonymous")
+    if not isinstance(name, str) or not name:
+        raise EmulatorInputError("behavior pack name must be a non-empty string")
+    try:
+        name_bytes = name.encode("utf-8")
+    except UnicodeEncodeError:
+        raise EmulatorInputError("behavior pack name must be valid UTF-8") from None
+    if "\x00" in name or len(name_bytes) > BEHAVIOR_PACK_MAX_NAME_BYTES:
+        raise EmulatorInputError(
+            "behavior pack name must not contain NUL and must be at most "
+            f"{BEHAVIOR_PACK_MAX_NAME_BYTES} UTF-8 bytes"
+        )
+    cases = pack.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise EmulatorInputError("behavior pack cases must be a non-empty array")
+    if len(cases) > BEHAVIOR_PACK_MAX_CASES:
+        raise EmulatorInputError(
+            f"behavior pack accepts at most {BEHAVIOR_PACK_MAX_CASES} cases"
+        )
+
+    normalised_cases: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict):
+            raise EmulatorInputError(f"behavior pack case {index} must be an object")
+        case_allowed = {"id", "probe", "expect"}
+        case_unknown = sorted(set(case) - case_allowed)
+        if case_unknown:
+            raise EmulatorInputError(
+                f"behavior pack case {index} has unsupported field(s): "
+                + ", ".join(case_unknown)
+            )
+        case_id = case.get("id")
+        if not isinstance(case_id, str) or not case_id:
+            raise EmulatorInputError(
+                f"behavior pack case {index} id must be a non-empty string"
+            )
+        try:
+            case_id_bytes = case_id.encode("utf-8")
+        except UnicodeEncodeError:
+            raise EmulatorInputError(
+                f"behavior pack case {index} id must be valid UTF-8"
+            ) from None
+        if "\x00" in case_id or len(case_id_bytes) > BEHAVIOR_PACK_MAX_NAME_BYTES:
+            raise EmulatorInputError(
+                f"behavior pack case {index} id is too long or contains NUL"
+            )
+        if case_id in seen_ids:
+            raise EmulatorInputError(f"behavior pack contains duplicate case id {case_id!r}")
+        seen_ids.add(case_id)
+
+        probe = case.get("probe")
+        if not isinstance(probe, dict):
+            raise EmulatorInputError(f"behavior pack case {case_id!r} probe must be an object")
+        expect = case.get("expect")
+        if not isinstance(expect, dict):
+            raise EmulatorInputError(f"behavior pack case {case_id!r} expect must be an object")
+        expect_allowed = {
+            "status",
+            "value",
+            "value_base64",
+            "value_bytes",
+            "tcl_return_code",
+            "event_fired",
+            "error_contains",
+        }
+        expect_unknown = sorted(set(expect) - expect_allowed)
+        if expect_unknown:
+            raise EmulatorInputError(
+                f"behavior pack case {case_id!r} has unsupported expectation field(s): "
+                + ", ".join(expect_unknown)
+            )
+        expected_status = expect.get("status")
+        if expected_status not in {"ok", "error", "profile-gated"}:
+            raise EmulatorInputError(
+                f"behavior pack case {case_id!r} expect.status must be ok, error, or profile-gated"
+            )
+        for field in ("value", "value_base64", "error_contains"):
+            if field in expect and not isinstance(expect[field], str):
+                raise EmulatorInputError(
+                    f"behavior pack case {case_id!r} expect.{field} must be a string"
+                )
+        for field in ("value_bytes", "tcl_return_code"):
+            if field in expect and (
+                isinstance(expect[field], bool) or not isinstance(expect[field], int)
+            ):
+                raise EmulatorInputError(
+                    f"behavior pack case {case_id!r} expect.{field} must be an integer"
+                )
+        if "value_bytes" in expect and expect["value_bytes"] < 0:
+            raise EmulatorInputError(
+                f"behavior pack case {case_id!r} expect.value_bytes must be non-negative"
+            )
+        if "event_fired" in expect and not isinstance(expect["event_fired"], bool):
+            raise EmulatorInputError(
+                f"behavior pack case {case_id!r} expect.event_fired must be a boolean"
+            )
+        # Normalize the probe now so malformed cases fail before a preceding
+        # case can mutate any external state or consume interpreter resources.
+        _normalise_command_probe_request(root, probe)
+        normalised_cases.append(
+            {
+                "id": case_id,
+                "probe": dict(probe),
+                "expect": dict(expect),
+            }
+        )
+    return {
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "name": name,
+        "cases": normalised_cases,
+    }
+
+
+def _command_probe_observation(result: dict[str, Any]) -> dict[str, Any]:
+    """Reduce one command-probe result to stable behavior-pack assertions."""
+    execution = result.get("execution")
+    if not isinstance(execution, dict):
+        raise EmulatorInputError("command probe returned invalid execution state")
+    observation: dict[str, Any] = {"status": execution.get("status")}
+    for field in ("value", "value_base64", "value_bytes", "tcl_return_code", "error"):
+        if field in execution:
+            observation[field] = execution[field]
+    event = execution.get("event")
+    if isinstance(event, dict) and "fired" in event:
+        observation["event_fired"] = event["fired"]
+    return observation
+
+
+def _behavior_case_mismatches(
+    expected: dict[str, Any], actual: dict[str, Any]
+) -> list[dict[str, Any]]:
+    mismatches: list[dict[str, Any]] = []
+    for field, expected_value in expected.items():
+        if field == "error_contains":
+            actual_value = actual.get("error", "")
+            if not isinstance(actual_value, str) or expected_value not in actual_value:
+                mismatches.append(
+                    {"field": field, "expected": expected_value, "actual": actual_value}
+                )
+            continue
+        actual_value = actual.get(field)
+        if actual_value != expected_value:
+            mismatches.append(
+                {"field": field, "expected": expected_value, "actual": actual_value}
+            )
+    return mismatches
+
+
+def run_behavior_pack(
+    pack: Any,
+    *,
+    tcl_lsp_root: str | None = None,
+    backend: str = "inprocess",
+) -> dict[str, Any]:
+    """Execute bounded catalog behavior contracts and report exact mismatches."""
+    if backend != "inprocess":
+        raise EmulatorInputError(
+            "behavior packs require the in-process Tcl backend; use the repo uv "
+            "environment with Tcl/Tk support"
+        )
+    root = _find_tcl_lsp_root(tcl_lsp_root)
+    prepared = _normalise_behavior_pack(root, pack)
+    rows: list[dict[str, Any]] = []
+    passed = 0
+    for case in prepared["cases"]:
+        try:
+            result = run_command_probe(
+                case["probe"],
+                tcl_lsp_root=str(root),
+                backend=backend,
+            )
+            actual = _command_probe_observation(result)
+        except EmulatorInputError as exc:
+            # A valid pack can still encounter a runtime/fixture problem as
+            # the semantic layer evolves. Keep the other cases observable and
+            # make the failure explicit instead of tearing down the report.
+            actual = {"status": "runner-error", "error": str(exc)}
+        mismatches = _behavior_case_mismatches(case["expect"], actual)
+        if not mismatches:
+            passed += 1
+        rows.append(
+            {
+                "id": case["id"],
+                "command": case["probe"].get("command"),
+                "event": case["probe"].get("event"),
+                "expected": case["expect"],
+                "actual": actual,
+                "status": "passed" if not mismatches else "failed",
+                "mismatches": mismatches,
+            }
+        )
+    failed = len(rows) - passed
+    return {
+        "status": "passed" if failed == 0 else "failed",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "pack": {
+            "name": prepared["name"],
+            "schema_version": prepared["schema_version"],
+            "case_count": len(rows),
+        },
+        "summary": {
+            "case_count": len(rows),
+            "passed": passed,
+            "failed": failed,
+        },
+        "cases": rows,
+    }
+
+
 def run_pcap_scenario(
     scenario: Any,
     pcap_data: bytes,
@@ -23832,6 +24079,20 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                 try:
                     request = self._read_json()
                     payload = run_command_probe(request, tcl_lsp_root=str(root))
+                except (
+                    json.JSONDecodeError,
+                    EmulatorInputError,
+                    EmulatorResourceError,
+                    OSError,
+                ) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
+            if parsed.path == "/v1/behavior-packs":
+                try:
+                    pack = self._read_json()
+                    payload = run_behavior_pack(pack, tcl_lsp_root=str(root))
                 except (
                     json.JSONDecodeError,
                     EmulatorInputError,
@@ -24102,6 +24363,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="execute one catalogued F5 command from a JSON command-probe request",
     )
+    mode.add_argument(
+        "--behavior-pack",
+        action="store_true",
+        help="execute a bounded catalog behavior pack from JSON",
+    )
     mode.add_argument("--serve", action="store_true", help="serve the HTTP API instead of reading stdin")
     mode.add_argument(
         "--mcp",
@@ -24135,7 +24401,7 @@ def main(argv: list[str] | None = None) -> int:
         root = _find_tcl_lsp_root(args.tcl_lsp_root)
         if args.pcap and (
             args.serve or args.mcp or args.capabilities or args.catalog or args.probe
-            or args.command_probe or args.conformance
+            or args.command_probe or args.behavior_pack or args.conformance
         ):
             raise EmulatorInputError(
                 "--pcap can only be used with one-shot scenario execution"
@@ -24186,6 +24452,16 @@ def main(argv: list[str] | None = None) -> int:
                 tcl_lsp_root=str(root),
                 backend=args.backend,
             )
+        elif args.behavior_pack:
+            if args.scenario == "-":
+                pack = json.load(sys.stdin)
+            else:
+                pack = json.loads(Path(args.scenario).read_text(encoding="utf-8"))
+            response = run_behavior_pack(
+                pack,
+                tcl_lsp_root=str(root),
+                backend=args.backend,
+            )
         else:
             if args.scenario == "-":
                 scenario = json.load(sys.stdin)
@@ -24209,7 +24485,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(json.dumps(response, separators=(",", ":")))
-    return 0
+    return 1 if args.behavior_pack and response.get("status") == "failed" else 0
 
 
 if __name__ == "__main__":

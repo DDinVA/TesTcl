@@ -2863,6 +2863,57 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(result["execution"]["status"], "profile-gated")
         self.assertEqual(result["execution"]["event"]["reason"], "profile_gate")
 
+    def test_behavior_pack_runs_catalog_contracts_and_reports_mismatches(self) -> None:
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        result = self.adapter.run_behavior_pack(
+            pack, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["summary"], {"case_count": 9, "passed": 9, "failed": 0})
+        self.assertTrue(all(case["status"] == "passed" for case in result["cases"]))
+
+        pack["cases"][0]["expect"]["value"] = "wrong.example"
+        failed = self.adapter.run_behavior_pack(
+            pack, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["summary"]["failed"], 1)
+        mismatch = failed["cases"][0]["mismatches"][0]
+        self.assertEqual(mismatch["field"], "value")
+        self.assertEqual(mismatch["actual"], "api.example.com")
+
+    def test_behavior_pack_validation_is_bounded_and_atomic(self) -> None:
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "schema_version"):
+            self.adapter.run_behavior_pack(
+                {"schema_version": True, "cases": []},
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "duplicate case id"):
+            self.adapter.run_behavior_pack(
+                {
+                    "name": "bad",
+                    "cases": [
+                        {"id": "same", "probe": {"command": "HTTP::host", "event": "HTTP_REQUEST"}, "expect": {"status": "ok"}},
+                        {"id": "same", "probe": {"command": "HTTP::host", "event": "HTTP_REQUEST"}, "expect": {"status": "ok"}},
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "at most 256"):
+            self.adapter.run_behavior_pack(
+                {
+                    "name": "too-many",
+                    "cases": [
+                        {"id": str(index), "probe": {"command": "HTTP::host", "event": "HTTP_REQUEST"}, "expect": {"status": "ok"}}
+                        for index in range(257)
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_common_global_string_and_pool_functions_are_semantic(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -17959,6 +18010,33 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             thread.join(timeout=5)
             server.server_close()
 
+    def test_http_api_runs_behavior_pack(self) -> None:
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        server = self.adapter.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self.adapter._http_handler(Path(self.tcl_lsp_root))
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/behavior-packs",
+                data=json.dumps(pack).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(response.status, 200)
+                payload = json.loads(response.read())
+            self.assertEqual(payload["status"], "passed")
+            self.assertEqual(payload["summary"]["passed"], 9)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_cli_replays_classic_pcap_file(self) -> None:
         capture = _pcap_bytes([
             (5, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
@@ -18146,6 +18224,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         self.assertIn("irule_catalog", tool_names)
         self.assertIn("irule_probe", tool_names)
         self.assertIn("irule_command_probe", tool_names)
+        self.assertIn("irule_behavior_pack", tool_names)
         capability_payload = responses[4]["result"]["structuredContent"]
         self.assertEqual(capability_payload["chunk"]["offset"], 1498)
         self.assertLessEqual(capability_payload["chunk"]["count"], 2)
@@ -18243,6 +18322,26 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             self.assertEqual(
                 command_probe_payload["execution"]["value"], "mcp.example.com"
             )
+
+            behavior_pack = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 12,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_behavior_pack",
+                        "arguments": {
+                            "pack": json.loads(
+                                (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+                                .read_text(encoding="utf-8")
+                            )
+                        },
+                    },
+                }
+            )
+            behavior_payload = behavior_pack["result"]["structuredContent"]
+            self.assertEqual(behavior_payload["status"], "passed")
+            self.assertEqual(behavior_payload["summary"]["case_count"], 9)
 
             catalog_response = server.handle_message(
                 {

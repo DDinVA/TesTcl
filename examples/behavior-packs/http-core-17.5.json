@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "http-core-17.5",
+  "cases": [
+    {
+      "id": "host-getter",
+      "probe": {
+        "command": "HTTP::host",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {
+          "method": "GET",
+          "uri": "/a?x=1",
+          "host": "api.example.com"
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "api.example.com",
+        "value_bytes": 15,
+        "tcl_return_code": 0,
+        "event_fired": true
+      }
+    },
+    {
+      "id": "method-getter",
+      "probe": {
+        "command": "HTTP::method",
+        "event": "HTTP_REQUEST",
+        "request": {
+          "method": "POST",
+          "uri": "/submit"
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "POST",
+        "value_base64": "UE9TVA=="
+      }
+    },
+    {
+      "id": "uri-path-query-getters",
+      "probe": {
+        "command": "HTTP::query",
+        "event": "HTTP_REQUEST",
+        "request": {
+          "uri": "/a?x=1"
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "x=1"
+      }
+    },
+    {
+      "id": "header-value",
+      "probe": {
+        "command": "HTTP::header",
+        "args": ["value", "X-Test"],
+        "event": "HTTP_REQUEST",
+        "request": {
+          "headers": {
+            "X-Test": "safe"
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "safe",
+        "value_bytes": 4
+      }
+    },
+    {
+      "id": "header-count",
+      "probe": {
+        "command": "HTTP::header",
+        "args": ["count"],
+        "event": "HTTP_REQUEST",
+        "request": {
+          "headers": {
+            "X-Test": "safe",
+            "X-Two": "2"
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "2"
+      }
+    },
+    {
+      "id": "cookie-value",
+      "probe": {
+        "command": "HTTP::cookie",
+        "args": ["value", "sid"],
+        "event": "HTTP_REQUEST",
+        "request": {
+          "headers": {
+            "Cookie": "sid=abc123; theme=dark"
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "abc123"
+      }
+    },
+    {
+      "id": "payload-getter",
+      "probe": {
+        "command": "HTTP::payload",
+        "event": "HTTP_REQUEST",
+        "request": {
+          "method": "POST",
+          "uri": "/submit",
+          "body": "hello"
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "hello",
+        "value_bytes": 5
+      }
+    },
+    {
+      "id": "profile-gate",
+      "probe": {
+        "command": "HTTP::host",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP"],
+        "request": {
+          "host": "gated.example"
+        }
+      },
+      "expect": {
+        "status": "profile-gated",
+        "event_fired": false
+      }
+    },
+    {
+      "id": "argument-error",
+      "probe": {
+        "command": "HTTP::is_keepalive",
+        "args": ["unexpected"],
+        "event": "HTTP_REQUEST",
+        "request": {
+          "uri": "/a"
+        }
+      },
+      "expect": {
+        "status": "error",
+        "tcl_return_code": 1,
+        "error_contains": "takes no arguments"
+      }
+    }
+  ]
+}
