@@ -51,6 +51,7 @@ except ModuleNotFoundError:  # test modules load this script by absolute path
 
 
 TMOS_VERSION = "17.5"
+MAX_IRULE_SOURCES = 64
 ADAPT_FIXTURE_RESULTS = frozenset({"noop", "modified", "response", "error"})
 ADAPT_FIXTURE_RESULT_ALIASES = {
     "noop": "noop",
@@ -10040,6 +10041,85 @@ def _validate_request_flags(request: dict[str, Any]) -> None:
             raise EmulatorInputError(f"request field {flag} must be a boolean")
 
 
+def _normalise_irule_sources(
+    scenario: dict[str, Any], *, allow_irule_file: bool
+) -> str:
+    """Resolve one or more attached iRule sources into one loader input.
+
+    BIG-IP dispatches handlers from every iRule attached to a virtual server.
+    The tcl-lsp loader accepts repeated event declarations in one source, so
+    joining bounded sources preserves its priority and source-order behavior.
+    Each source starts with the default TMOS priority/timing values to prevent
+    outer-scope directives in one iRule from leaking into the next one.
+    """
+    source = scenario.get("irule")
+    irule_file = scenario.get("irule_file")
+    irules = scenario.get("irules")
+    if irules is not None and (source is not None or irule_file is not None):
+        raise EmulatorInputError("provide only one of irule, irule_file, or irules")
+
+    if irules is None:
+        if source is not None and irule_file is not None:
+            raise EmulatorInputError("provide only one of irule and irule_file")
+        if irule_file is not None:
+            if not allow_irule_file:
+                raise EmulatorInputError("this API accepts inline irule only")
+            rule_path = Path(_require_string(irule_file, "irule_file")).expanduser()
+            try:
+                source = rule_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise EmulatorInputError(
+                    f"could not read irule_file {rule_path}: {exc}"
+                ) from exc
+        if not isinstance(source, str) or not source.strip():
+            raise EmulatorInputError("scenario requires a non-empty irule or irule_file")
+        return source
+
+    if not isinstance(irules, list) or not irules:
+        raise EmulatorInputError(
+            f"irules must be a non-empty array of at most {MAX_IRULE_SOURCES} sources"
+        )
+    if len(irules) > MAX_IRULE_SOURCES:
+        raise EmulatorInputError(
+            f"irules cannot contain more than {MAX_IRULE_SOURCES} sources"
+        )
+
+    sources: list[str] = []
+    for index, item in enumerate(irules):
+        context = f"irules[{index}]"
+        item_source: Any = item
+        item_file: Any = None
+        if isinstance(item, dict):
+            unknown = sorted(set(item) - {"irule", "irule_file"})
+            if unknown:
+                raise EmulatorInputError(
+                    f"{context} has unsupported field(s): {', '.join(unknown)}"
+                )
+            item_source = item.get("irule")
+            item_file = item.get("irule_file")
+            if item_source is not None and item_file is not None:
+                raise EmulatorInputError(
+                    f"{context} must provide only irule or irule_file"
+                )
+            if item_file is not None:
+                if not allow_irule_file:
+                    raise EmulatorInputError("this API accepts inline irule only")
+                rule_path = Path(_require_string(item_file, f"{context}.irule_file")).expanduser()
+                try:
+                    item_source = rule_path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    raise EmulatorInputError(
+                        f"could not read irule_file {rule_path}: {exc}"
+                    ) from exc
+        if not isinstance(item_source, str) or not item_source.strip():
+            raise EmulatorInputError(f"{context} must be a non-empty iRule source string")
+        # Reset outer-scope controls at every attached-rule boundary. An
+        # individual source can still override these defaults with its own
+        # top-level priority/timing directive.
+        sources.append("priority 500\ntiming on\n" + item_source)
+    return "\n".join(sources)
+
+
 def _normalise_scenario_config(
     scenario: Any,
     *,
@@ -10083,6 +10163,7 @@ def _normalise_scenario_config(
         "tmos_version",
         "irule",
         "irule_file",
+        "irules",
         "profiles",
         "pools",
         "backends",
@@ -10122,20 +10203,7 @@ def _normalise_scenario_config(
     if scenario.get("tmos_version", TMOS_VERSION) != TMOS_VERSION:
         raise EmulatorInputError("only the tmos-17.5 emulator profile is supported")
 
-    source = scenario.get("irule")
-    irule_file = scenario.get("irule_file")
-    if source is not None and irule_file is not None:
-        raise EmulatorInputError("provide only one of irule and irule_file")
-    if irule_file is not None:
-        if not allow_irule_file:
-            raise EmulatorInputError("this API accepts inline irule only")
-        rule_path = Path(_require_string(irule_file, "irule_file")).expanduser()
-        try:
-            source = rule_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise EmulatorInputError(f"could not read irule_file {rule_path}: {exc}") from exc
-    if not isinstance(source, str) or not source.strip():
-        raise EmulatorInputError("scenario requires a non-empty irule or irule_file")
+    source = _normalise_irule_sources(scenario, allow_irule_file=allow_irule_file)
 
     profiles = scenario.get("profiles", DEFAULT_PROFILES)
     if not isinstance(profiles, list) or not profiles or not all(

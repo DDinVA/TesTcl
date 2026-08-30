@@ -10911,6 +10911,57 @@ when CLIENT_ACCEPTED { log local0. timing-disabled }
                     tcl_lsp_root=self.tcl_lsp_root,
                 )
 
+    def test_multiple_attached_irules_compose_with_isolated_defaults(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irules": [
+                    "priority 100\nwhen HTTP_REQUEST { log local0. first }",
+                    {"irule": "when HTTP_REQUEST { log local0. second }"},
+                    "priority 50\ntiming off\nwhen HTTP_REQUEST { log local0. third }",
+                ],
+                "requests": [{"uri": "/"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(
+            result["event_controls"],
+            [
+                {"ordinal": 0, "event": "HTTP_REQUEST", "priority": 100, "timing": "on"},
+                {"ordinal": 1, "event": "HTTP_REQUEST", "priority": 500, "timing": "on"},
+                {"ordinal": 2, "event": "HTTP_REQUEST", "priority": 50, "timing": "off"},
+            ],
+        )
+        logs = result["results"][0]["logs"]
+        log_indexes = {
+            label: next(index for index, entry in enumerate(logs) if label in entry)
+            for label in ("first", "second", "third")
+        }
+        self.assertLess(log_indexes["third"], log_indexes["first"])
+        self.assertLess(log_indexes["first"], log_indexes["second"])
+
+    def test_multiple_attached_irules_validate_shape_and_conflicts(self) -> None:
+        for scenario in (
+            {"irules": []},
+            {"irules": [""]},
+            {"irules": [{"unexpected": "field"}]},
+            {"irules": [{"irule": "when HTTP_REQUEST {}", "irule_file": "x.tcl"}]},
+            {"irule": "when HTTP_REQUEST {}", "irules": ["when HTTP_REQUEST {}"]},
+            {"irules": ["when HTTP_REQUEST {}"] * 65},
+        ):
+            with self.subTest(scenario=scenario), self.assertRaises(
+                self.adapter.EmulatorInputError
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "requests": [{"uri": "/"}],
+                        **scenario,
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+
     def test_semantic_overlay_models_connection_table_subtables_and_mutations(self) -> None:
         result = self.adapter.run_scenario(
             {

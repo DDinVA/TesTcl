@@ -343,6 +343,15 @@ them. Lower priorities run first and equal-priority handlers retain source
 order. Timing is represented as event metadata (`on`/`off`) and does not invent
 wall-clock performance data. Effective controls are returned in the
 top-level `event_controls` array and in persistent-session metadata.
+Scenarios may also provide `irules`, a bounded array of inline source strings
+or `{ "irule": "..." }` objects. The sources are treated as multiple iRules
+attached to one virtual server: handlers share the normal priority ordering,
+and equal-priority handlers retain the array order. Each source starts with
+priority `500` and timing `on`, so outer-scope directives from one attached
+iRule cannot leak into the next; a source may override either value in its own
+top-level declarations. `irule`, `irule_file`, and `irules` are mutually
+exclusive. The array is limited to 64 sources; this is composition of Tcl
+handlers, not a claim that the emulator creates a live virtual-server object.
 The adapter-owned semantic-mock status identifies commands with behavior
 implemented against the scenario state. Semantic state is returned under
 `result.semantic`, including STATS counters, captured HSL messages, and
