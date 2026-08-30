@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import base64
+import hashlib
 import io
 import ipaddress
 import json
@@ -19,8 +20,13 @@ import unittest
 import urllib.error
 import urllib.request
 import zlib
+from datetime import datetime, timezone
 from pathlib import Path
 
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from hpack import Encoder
 
 from tools.http2_wire import HTTP2_CLIENT_PREFACE, Http2ConnectionDecoder
@@ -69,6 +75,38 @@ def _tls_client_hello_payload(host: str) -> bytes:
     )
     handshake = b"\x01" + len(body).to_bytes(3, "big") + body
     return b"\x16\x03\x03" + struct.pack("!H", len(handshake)) + handshake
+
+
+def _valid_client_certificate() -> tuple[str, bytes]:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Example Org"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "client.example.com"),
+    ])
+    issuer = x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Example Root"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "Example Root CA"),
+    ])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(0x010203)
+        .not_valid_before(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        .not_valid_after(datetime(2027, 1, 1, tzinfo=timezone.utc))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName("client.example.com")]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    der = certificate.public_bytes(serialization.Encoding.DER)
+    pem = certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
+    return pem, der
 
 
 def _http2_frame(frame_type: int, flags: int, stream_id: int, payload: bytes = b"") -> bytes:
@@ -10935,6 +10973,56 @@ when CLIENTSSL_CLIENTCERT {
             "X509::whole",
         }:
             self.assertEqual(x509_statuses[command], "semantic-mock")
+
+    def test_x509_certificate_inspection_derives_fields_from_valid_pem(self) -> None:
+        pem, der = _valid_client_certificate()
+        expected_hash = ":".join(
+            f"{byte:02X}"
+            for byte in hashlib.md5(der, usedforsecurity=False).digest()
+        )
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "CLIENTSSL"],
+                "irule": """
+when CLIENTSSL_CLIENTCERT {
+    set cert [SSL::cert 0]
+    log local0. "subject=[X509::subject $cert] cn=[X509::subject $cert commonName] issuer=[X509::issuer $cert] hash=[X509::hash $cert] serial=[X509::serial_number $cert] sig=[X509::signature_algorithm $cert] type=[X509::subject_public_key_type $cert] bits=[X509::subject_public_key bits $cert] rsa_bits=[X509::subject_public_key_RSA_bits $cert] version=[X509::version $cert] before=[X509::not_valid_before $cert] after=[X509::not_valid_after $cert] ext=[X509::extensions $cert] der=[string length [X509::pem2der [X509::whole $cert]]]"
+}
+""",
+                "packets": [{
+                    "protocol": "tls",
+                    "direction": "client_to_server",
+                    "type": "client_cert",
+                    "cert_pem": pem,
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        event = next(
+            item
+            for item in result["trace"][0]["events"]
+            if item["event"] == "CLIENTSSL_CLIENTCERT"
+        )
+        self.assertTrue(event["fired"])
+        self.assertTrue(any("subject=C=US,O=Example Org,CN=client.example.com" in entry for entry in event["logs"]))
+        self.assertTrue(any("cn=client.example.com issuer=C=US,O=Example Root,CN=Example Root CA" in entry for entry in event["logs"]))
+        self.assertTrue(any(f"hash={expected_hash}" in entry for entry in event["logs"]))
+        self.assertTrue(any("serial=10203 sig=sha256WithRSAEncryption type=RSA bits=2048 rsa_bits=2048 version=3" in entry for entry in event["logs"]))
+        self.assertTrue(any("before=Jan  1 00:00:00 2026 GMT after=Jan  1 00:00:00 2027 GMT" in entry for entry in event["logs"]))
+        self.assertTrue(any("X509v3 extensions:" in entry and "X509v3 Subject Alternative Name:" in entry for entry in event["logs"]))
+        self.assertTrue(any(f"der={len(der)}" in entry for entry in event["logs"]))
+
+        normalised = self.adapter._normalise_packets([{
+            "protocol": "tls",
+            "direction": "client_to_server",
+            "type": "client_cert",
+            "cert_der": der.hex(),
+        }])[0]
+        self.assertEqual(normalised["cert_count"], 1)
+        self.assertEqual(normalised["cert_subject"], "C=US,O=Example Org,CN=client.example.com")
+        self.assertEqual(normalised["cert_hash"], expected_hash)
+        self.assertEqual(normalised["cert_version"], 3)
 
     def test_packet_trace_exposes_directional_tcp_payload_and_mutations(self) -> None:
         result = self.adapter.run_scenario(

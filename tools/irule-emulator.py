@@ -3153,6 +3153,262 @@ def _require_string(value: Any, field: str) -> str:
     return value
 
 
+def _x509_name_text(name: Any) -> str:
+    """Render a cryptography X.509 name in the order used by iRules.
+
+    ``Name.rfc4514_string()`` reverses the RDN sequence.  BIG-IP's examples
+    expose the certificate's original sequence, so retain the order supplied
+    by the certificate and apply the RFC 2253-style escaping used by the
+    existing Tcl fixtures.
+    """
+    try:
+        from cryptography.x509.oid import NameOID
+    except ImportError:  # pragma: no cover - dependency is locked in pyproject
+        return str(name)
+
+    short_names = {
+        NameOID.COMMON_NAME: "CN",
+        NameOID.COUNTRY_NAME: "C",
+        NameOID.DOMAIN_COMPONENT: "DC",
+        NameOID.EMAIL_ADDRESS: "emailAddress",
+        NameOID.GIVEN_NAME: "GN",
+        NameOID.LOCALITY_NAME: "L",
+        NameOID.ORGANIZATION_NAME: "O",
+        NameOID.ORGANIZATIONAL_UNIT_NAME: "OU",
+        NameOID.POSTAL_CODE: "postalCode",
+        NameOID.SERIAL_NUMBER: "serialNumber",
+        NameOID.STATE_OR_PROVINCE_NAME: "ST",
+        NameOID.STREET_ADDRESS: "street",
+        NameOID.SURNAME: "SN",
+        NameOID.USER_ID: "UID",
+    }
+
+    def escape(value: str) -> str:
+        value = value.replace("\\", "\\\\")
+        value = value.replace(",", "\\,").replace("+", "\\+")
+        value = value.replace('"', '\\"').replace("<", "\\<")
+        value = value.replace(">", "\\>").replace(";", "\\;")
+        value = value.replace("=", "\\=")
+        if value.startswith((" ", "#")):
+            value = "\\" + value
+        if value.endswith(" "):
+            value = value[:-1] + "\\ "
+        return value
+
+    rendered: list[str] = []
+    for rdn in name.rdns:
+        attributes = []
+        for attribute in rdn:
+            label = short_names.get(attribute.oid, attribute.oid.dotted_string)
+            value = attribute.value
+            if not isinstance(value, str):
+                value = str(value)
+            attributes.append(f"{label}={escape(value)}")
+        rendered.append("+".join(attributes))
+    return ",".join(rendered)
+
+
+def _x509_date_text(value: Any) -> str:
+    """Render a certificate datetime in OpenSSL/F5's conventional form."""
+    value = value.replace(tzinfo=None)
+    months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    return f"{months[value.month - 1]} {value.day:2d} {value:%H:%M:%S} {value:%Y} GMT"
+
+
+def _x509_extension_text(certificate: Any) -> str:
+    """Render the common OpenSSL-style extension summary used by X509::extensions."""
+    from cryptography import x509
+
+    values: list[str] = []
+    extension_names = {
+        "basicConstraints": "X509v3 Basic Constraints",
+        "subjectAltName": "X509v3 Subject Alternative Name",
+        "keyUsage": "X509v3 Key Usage",
+        "extendedKeyUsage": "X509v3 Extended Key Usage",
+        "subjectKeyIdentifier": "X509v3 Subject Key Identifier",
+        "authorityKeyIdentifier": "X509v3 Authority Key Identifier",
+    }
+    friendly_eku = {
+        "1.3.6.1.5.5.7.3.1": "TLS Web Server Authentication",
+        "1.3.6.1.5.5.7.3.2": "TLS Web Client Authentication",
+        "1.3.6.1.5.5.7.3.3": "Code Signing",
+        "1.3.6.1.5.5.7.3.4": "E-mail Protection",
+        "1.3.6.1.5.5.7.3.8": "Time Stamping",
+        "1.3.6.1.5.5.7.3.9": "OCSP Signing",
+    }
+    for extension in certificate.extensions:
+        oid_name = getattr(extension.oid, "_name", None)
+        name = extension_names.get(oid_name, oid_name or extension.oid.dotted_string)
+        value = extension.value
+        if isinstance(value, x509.BasicConstraints):
+            rendered = f"CA:{'TRUE' if value.ca else 'FALSE'}"
+            if value.path_length is not None:
+                rendered += f", pathlen:{value.path_length}"
+        elif isinstance(value, x509.SubjectAlternativeName):
+            rendered = ", ".join(
+                (
+                    f"DNS:{entry.value}" if isinstance(entry, x509.DNSName)
+                    else f"IP Address:{entry.value}" if isinstance(entry, x509.IPAddress)
+                    else f"email:{entry.value}" if isinstance(entry, x509.RFC822Name)
+                    else f"URI:{entry.value}" if isinstance(entry, x509.UniformResourceIdentifier)
+                    else str(entry.value)
+                )
+                for entry in value
+            )
+        elif isinstance(value, x509.KeyUsage):
+            usages = [
+                label for label, present in (
+                    ("Digital Signature", value.digital_signature),
+                    ("Key Encipherment", value.key_encipherment),
+                    ("Key Agreement", value.key_agreement),
+                    ("Certificate Sign", value.key_cert_sign),
+                    ("CRL Sign", value.crl_sign),
+                    ("Content Commitment", value.content_commitment),
+                    ("Data Encipherment", value.data_encipherment),
+                ) if present
+            ]
+            rendered = ", ".join(usages)
+        elif isinstance(value, x509.ExtendedKeyUsage):
+            rendered = ", ".join(
+                friendly_eku.get(usage.dotted_string, usage.dotted_string)
+                for usage in value
+            )
+        elif isinstance(value, x509.SubjectKeyIdentifier):
+            rendered = ":".join(f"{byte:02X}" for byte in value.digest)
+        elif isinstance(value, x509.AuthorityKeyIdentifier):
+            rendered = (
+                ":".join(f"{byte:02X}" for byte in value.key_identifier)
+                if value.key_identifier is not None else ""
+            )
+        else:
+            rendered = str(value)
+        values.extend([f"    {name}:", f"        {rendered}"])
+    if not values:
+        return "(no extensions)"
+    return "X509v3 extensions:\n" + "\n".join(values)
+
+
+def _normalise_tls_certificate_bytes(packet: dict[str, Any], packet_index: int) -> None:
+    """Populate TLS certificate fields from a valid PEM or hexadecimal DER value.
+
+    Structured tests historically supplied individual certificate fields,
+    including deliberately invalid PEM.  Those fixtures remain authoritative
+    when no valid certificate bytes are available.  When valid bytes are
+    supplied, the certificate is authoritative and derived fields replace any
+    conflicting metadata so rules exercise the same object consistently.
+    """
+    if "cert_pem" not in packet and "cert_der" not in packet:
+        return
+
+    pem = packet.get("cert_pem")
+    if isinstance(pem, str):
+        try:
+            pem_size = len(pem.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise EmulatorInputError(
+                f"packet {packet_index} TLS cert_pem must be valid UTF-8"
+            ) from exc
+        if pem_size > TLS_CERT_MAX_BYTES:
+            raise EmulatorInputError(
+                f"packet {packet_index} TLS cert_pem exceeds "
+                f"{TLS_CERT_MAX_BYTES // (1024 * 1024)} MiB"
+            )
+    raw_der = packet.get("cert_der")
+    if isinstance(raw_der, str) and len(raw_der) > TLS_CERT_MAX_BYTES * 2:
+        raise EmulatorInputError(
+            f"packet {packet_index} TLS cert_der exceeds "
+            f"{TLS_CERT_MAX_BYTES * 2} hexadecimal characters"
+        )
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed25519, ed448, rsa
+    from cryptography.exceptions import UnsupportedAlgorithm
+
+    certificate = None
+    der: bytes | None = None
+    if isinstance(pem, str) and pem.strip():
+        try:
+            certificate = x509.load_pem_x509_certificate(pem.encode("ascii"))
+            der = certificate.public_bytes(serialization.Encoding.DER)
+        except (UnicodeEncodeError, ValueError, TypeError):
+            certificate = None
+    if certificate is None:
+        if isinstance(raw_der, str) and re.fullmatch(r"[0-9A-Fa-f]+", raw_der.strip()):
+            encoded_der = raw_der.strip()
+            if len(encoded_der) % 2 == 0:
+                try:
+                    der = bytes.fromhex(encoded_der)
+                    certificate = x509.load_der_x509_certificate(der)
+                except (ValueError, TypeError):
+                    certificate = None
+                    der = None
+    if certificate is None or der is None:
+        return
+
+    public_key = certificate.public_key()
+    try:
+        signature_hash_name = certificate.signature_hash_algorithm.name
+    except (UnsupportedAlgorithm, ValueError):
+        signature_hash_name = certificate.signature_algorithm_oid.dotted_string
+    if isinstance(public_key, rsa.RSAPublicKey):
+        key_type = "RSA"
+        key_bits = public_key.key_size
+        key_curve = ""
+        signature_name = signature_hash_name + "WithRSAEncryption"
+    elif isinstance(public_key, dsa.DSAPublicKey):
+        key_type = "DSA"
+        key_bits = public_key.key_size
+        key_curve = ""
+        signature_name = signature_hash_name + "WithDSA"
+    elif isinstance(public_key, ec.EllipticCurvePublicKey):
+        key_type = "EC"
+        key_bits = public_key.key_size
+        key_curve = public_key.curve.name
+        signature_name = "ecdsa-with-" + signature_hash_name.upper()
+    elif isinstance(public_key, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
+        key_type = "ED25519" if isinstance(public_key, ed25519.Ed25519PublicKey) else "ED448"
+        key_bits = public_key.key_size
+        key_curve = ""
+        signature_name = certificate.signature_algorithm_oid.dotted_string
+    else:
+        key_type = "unknown"
+        key_bits = 0
+        key_curve = ""
+        signature_name = certificate.signature_algorithm_oid.dotted_string
+
+    try:
+        not_valid_before = certificate.not_valid_before_utc
+        not_valid_after = certificate.not_valid_after_utc
+    except AttributeError:  # pragma: no cover - compatibility with older cryptography
+        not_valid_before = certificate.not_valid_before
+        not_valid_after = certificate.not_valid_after
+    public_key_pem = public_key.public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("ascii")
+    packet.update({
+        "cert_count": packet.get("cert_count", 1),
+        "cert_subject": _x509_name_text(certificate.subject),
+        "cert_issuer": _x509_name_text(certificate.issuer),
+        "cert_serial": format(certificate.serial_number, "X"),
+        "cert_hash": ":".join(
+            f"{byte:02X}"
+            for byte in hashlib.md5(der, usedforsecurity=False).digest()
+        ),
+        "cert_extensions": _x509_extension_text(certificate),
+        "cert_not_valid_before": _x509_date_text(not_valid_before),
+        "cert_not_valid_after": _x509_date_text(not_valid_after),
+        "cert_signature_algorithm": signature_name,
+        "cert_public_key": public_key_pem,
+        "cert_public_key_type": key_type,
+        "cert_public_key_bits": key_bits,
+        "cert_public_key_curve": key_curve,
+        "cert_version": certificate.version.value + 1,
+        "cert_pem": certificate.public_bytes(serialization.Encoding.PEM).decode("ascii"),
+    })
+
+
 def _tcl_quote(value: str) -> str:
     """Quote a string for one Tcl word without enabling substitutions."""
     if "\x00" in value:
@@ -9776,6 +10032,7 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
 
 PACKET_MAX_COUNT = 1000
 STREAM_MAX_BYTES = 2 * 1024 * 1024
+TLS_CERT_MAX_BYTES = 2 * 1024 * 1024
 WEBSOCKET_MAX_FRAME_BYTES = STREAM_MAX_BYTES
 MQTT_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 SIP_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
@@ -15862,6 +16119,9 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 )
             else:
                 normalised[field] = _packet_scalar(packet[field], f"packet {index} {field}")
+
+        if protocol == "tls":
+            _normalise_tls_certificate_bytes(normalised, index)
 
         if wire_payload is not None:
             normalised["_wire_payload"] = wire_payload

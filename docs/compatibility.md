@@ -809,9 +809,14 @@ records, validate certificates, or expose cryptographic key material from a
 live connection. The complete catalogued X509 inspection surface now consumes
 packet-supplied certificate metadata and supports deterministic PEM-to-DER
 conversion, ModSSL field-list generation, extension inspection, validity and
-public-key queries, and verification-error descriptions. It validates opaque
-certificate handles and PEM structure; it does not validate certificate
-chains or perform cryptographic verification.
+public-key queries, and verification-error descriptions. When `cert_pem` is a
+valid PEM certificate, or `cert_der` is valid hexadecimal DER, the adapter
+parses the certificate and derives the subject, issuer, serial, MD5
+fingerprint, extensions, validity dates, signature algorithm, public-key
+metadata, version, and canonical PEM. Individual metadata fields remain
+supported as a fallback for synthetic or intentionally malformed fixtures.
+The parser validates certificate encoding but does not validate certificate
+chains or perform cryptographic signature verification.
 The SSL control layer also models ALPN, SSL mode, handshake hold/resume,
 renegotiation and secure-renegotiation policy/inspection, non-SSL allowance,
 dynamic record sizing, maximum record size, profile selection, session

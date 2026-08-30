@@ -22945,7 +22945,13 @@ namespace eval ::itest::semantic {
         set certificate [lindex $args 1]
         switch -exact -- $selector {
             type { return [_ssl_cert_get $certificate public_key_type] }
-            bits { return [_ssl_cert_get $certificate public_key_bits] }
+            bits {
+                set key_type [_ssl_cert_get $certificate public_key_type]
+                if {[string toupper $key_type] ni {RSA DSA}} {
+                    error "X509::subject_public_key bits requires an RSA or DSA certificate"
+                }
+                return [_ssl_cert_get $certificate public_key_bits]
+            }
             curve_name { return [_ssl_cert_get $certificate public_key_curve] }
         }
     }

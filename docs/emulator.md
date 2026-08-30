@@ -2607,16 +2607,22 @@ exercise those inspection paths, for example `initial_session_id`,
 `forward_proxy_cert`, and `forward_proxy_cert_status`. Values are test
 fixtures, not material extracted from a live TLS connection.
 
-Certificate inspection uses the same deterministic fixture model. A TLS
-packet can provide `cert_subject`, `cert_issuer`, `cert_serial`,
-`cert_hash`, `cert_extensions`, validity dates, signature algorithm, public
-key metadata, `cert_version`, and `cert_pem`/`cert_der`. `SSL::cert 0` then
-returns a stable certificate handle for the current side, which can be passed
-to the complete X.509 inspection surface, including `X509::cert_fields`,
-`X509::extensions`, `X509::hash`, `X509::pem2der`, public-key queries,
+Certificate inspection supports both deterministic fixtures and real
+certificate bytes. A TLS packet can provide individual fields such as
+`cert_subject`, `cert_issuer`, `cert_serial`, `cert_hash`, `cert_extensions`,
+validity dates, signature algorithm, public-key metadata, and `cert_version`.
+Alternatively, provide a valid PEM certificate in `cert_pem` or hexadecimal
+DER in `cert_der`; the adapter parses it and derives those fields, including
+the MD5 fingerprint, extension summary, public-key type/size/curve, version,
+and canonical PEM. Byte-backed fields take precedence when parsing succeeds,
+while individual metadata fields remain a fallback for synthetic or
+intentionally malformed fixtures. `SSL::cert 0` returns a stable certificate
+handle for the current side, which can be passed to the complete X.509
+inspection surface, including `X509::cert_fields`, `X509::extensions`,
+`X509::hash`, `X509::pem2der`, public-key queries,
 `X509::verify_cert_error_string`, and `X509::whole`. The adapter validates
-handles and PEM structure but does not validate certificate chains or perform
-cryptographic verification.
+certificate encoding and handles but does not validate chains or perform
+cryptographic signature verification.
 
 The packet adapter also covers the target-valid TLS lifecycle events
 `CLIENTSSL_PASSTHROUGH`, `CLIENTSSL_SERVERHELLO_SEND`, and
