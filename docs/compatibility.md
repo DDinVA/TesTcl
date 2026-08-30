@@ -419,12 +419,16 @@ Structured packets use bounded caller-supplied fields and TCP lifecycle
 ordering; arbitrary TDS wire decoding and database-peer behavior remain out of
 scope.
 
-The IKE namespace is implemented for direct `IKE_AUTH` events. The emulator
-models certificate retrieval, SAN getters, and the `IKE::auth_success` decision
-against caller-supplied certificate/SAN state. It does not negotiate IKE,
-parse X.509 certificates, or process IPsec packets. `IKE_AUTH` is included as
-a transparent 17.5 event compatibility override because it is documented by
-F5 but absent from the pinned tcl-lsp event registry.
+The IKE namespace is implemented for direct `IKE_AUTH` events and the bounded
+packet adapter. It models certificate retrieval, SAN getters, and the
+`IKE::auth_success` decision against caller-supplied certificate/SAN state.
+Raw IKEv2 UDP envelopes on ports 500 and 4500 (including the NAT-T non-ESP
+marker) expose the header and generic payload chain and fire `IKE_AUTH` for
+exchange type 35; encrypted payload contents remain opaque. It does not
+negotiate IKE, parse X.509 certificates, or process ESP/IPsec traffic.
+`IKE_AUTH` is included as a transparent 17.5 event compatibility override
+because it is documented by F5 but absent from the pinned tcl-lsp event
+registry.
 
 The three catalogued TMOS 17.5 `QOE::*` commands are modeled for direct
 `QOE_PARSE_DONE` and `CLIENT_CLOSED` events. `QOE::video` reads caller-supplied

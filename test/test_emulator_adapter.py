@@ -121,6 +121,28 @@ def _raw_ipv6_udp_hex(
     return (ip + extension_header + udp + payload).hex()
 
 
+def _ikev2_message(
+    *, exchange_type: int = 35, response: bool = False,
+    payload_types: tuple[int, ...] = (35, 39),
+) -> bytes:
+    payload = bytearray()
+    for index, payload_type in enumerate(payload_types):
+        next_payload = payload_types[index + 1] if index + 1 < len(payload_types) else 0
+        payload.extend(bytes([next_payload, 0]) + (4).to_bytes(2, "big"))
+    flags = 0x20 if response else 0
+    return struct.pack(
+        "!8s8sBBBBII",
+        bytes.fromhex("0102030405060708"),
+        bytes.fromhex("1112131415161718"),
+        payload_types[0] if payload_types else 0,
+        0x20,
+        exchange_type,
+        flags,
+        1,
+        28 + len(payload),
+    ) + bytes(payload)
+
+
 def _pcp_address_bytes(address: str) -> bytes:
     parsed = ipaddress.ip_address(address)
     if parsed.version == 4:
@@ -3096,7 +3118,7 @@ when HTTP_REQUEST {
         self.assertEqual(report["commands"]["unavailable_count"], 12)
         self.assertIn("XML::payload", report["commands"]["unavailable_commands"])
         self.assertIn("JSON::parse", report["commands"]["post_target_commands"])
-        self.assertIn("IKE_AUTH", report["events"]["unmapped_events"])
+        self.assertNotIn("IKE_AUTH", report["events"]["unmapped_events"])
         self.assertIn("IKE_AUTH", report["source"]["event_overrides"])
         queue = report["commands"]["implementation_queue"]
         self.assertEqual(queue["candidate_statuses"], ["generated-stub", "no-runtime-handler"])
@@ -3189,6 +3211,10 @@ when HTTP_REQUEST {
         self.assertEqual(
             packet_adapters["HTTP_RESPONSE_CONTINUE"],
             "raw HTTP 100 Continue response",
+        )
+        self.assertEqual(
+            packet_adapters["IKE_AUTH"],
+            "IKEv2 IKE_AUTH exchange",
         )
         self.assertEqual(
             packet_adapters["HTTP_RESPONSE_RELEASE"],
@@ -3959,6 +3985,154 @@ when SERVER_DATA {
         self.assertEqual(replay["capture"]["ip_packet_count"], 1)
         self.assertEqual(replay["capture"]["ipv6_packet_count"], 1)
         self.assertEqual(replay["trace"][0]["protocol"], "dhcpv6")
+
+    def test_ikev2_packet_adapter_fires_ike_auth_and_supports_nat_t(self) -> None:
+        request_payload = _ikev2_message()
+        response_payload = _ikev2_message(response=True, payload_types=(36, 46))
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": """
+when IKE_AUTH {
+    log local0. "ike=[IKE::cert 0]/[IKE::san_dns]"
+    IKE::auth_success
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "network": "ipv4",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_udp_hex(
+                            "198.51.100.10", "203.0.113.10", 500, 500, request_payload
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "network": "ipv4",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv4_udp_hex(
+                            "203.0.113.10", "198.51.100.10", 4500, 4500,
+                            b"\x00\x00\x00\x00" + response_payload,
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request, response = result["trace"]
+        self.assertEqual(request["protocol"], "ike")
+        self.assertEqual(request["ike"]["exchange_type"], "IKE_AUTH")
+        self.assertEqual(request["ike"]["payloads"][0]["type"], "IDi")
+        self.assertEqual(
+            [event["event"] for event in request["events"]],
+            ["RULE_INIT", "CLIENT_ACCEPTED", "IKE_AUTH"],
+        )
+        self.assertTrue(request["events"][-1]["fired"])
+        self.assertEqual(response["protocol"], "ike")
+        self.assertTrue(response["ike"]["response"])
+        self.assertEqual(response["ike"]["payloads"][-1]["type"], "SK")
+        self.assertTrue(any("ike=/" in entry for entry in request["events"][-1]["logs"]))
+        self.assertEqual(request["events"][-1]["state"]["ike"]["auth_success"], "1")
+
+        structured = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": "when IKE_AUTH { log local0. \"[IKE::cert]/[IKE::san_dns]\" }",
+                "packets": [
+                    {
+                        "protocol": "ike",
+                        "source": {"address": "198.51.100.10", "port": 500},
+                        "destination": {"address": "203.0.113.10", "port": 500},
+                        "ike": {
+                            "cert": "CERTIFICATE-DATA",
+                            "san_dns": "vpn.example.test",
+                            "payloads": ["IDi", "AUTH"],
+                        },
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = structured["trace"][0]["events"][-1]
+        self.assertTrue(any("CERTIFICATE-DATA/vpn.example.test" in entry for entry in event["logs"]))
+
+        esp_like = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": "when CLIENT_DATA { log local0. esp-udp }",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "network": "ipv4",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv4_udp_hex(
+                            "203.0.113.10", "198.51.100.10", 4500, 4500,
+                            b"\x01\x02\x03\x04",
+                        ),
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        esp_entry = esp_like["trace"][0]
+        self.assertEqual(esp_entry["protocol"], "udp")
+        self.assertEqual(esp_entry["events"][-1]["event"], "SERVER_DATA")
+
+    def test_ikev2_packet_adapter_rejects_invalid_envelopes(self) -> None:
+        base = {
+            "profiles": ["UDP"],
+            "irule": "when IKE_AUTH { }",
+            "packets": [
+                {
+                    "protocol": "wire",
+                    "network": "ipv4",
+                    "direction": "client_to_server",
+                    "raw_hex": "",
+                }
+            ],
+        }
+        trailing = bytearray(_ikev2_message(payload_types=(35,)) + b"\x00")
+        trailing[24:28] = len(trailing).to_bytes(4, "big")
+        for payload, message in (
+            (b"\x02", "IKE header is truncated"),
+            (_ikev2_message()[:-1], "IKE message length is invalid"),
+            (bytes(trailing), "IKE payload chain has trailing bytes"),
+        ):
+            scenario = dict(base)
+            scenario["packets"] = [dict(base["packets"][0], raw_hex=_raw_ipv4_udp_hex(
+                "198.51.100.10", "203.0.113.10", 500, 500, payload
+            ))]
+            with self.subTest(message=message), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, message
+            ):
+                self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+    def test_structured_ike_packet_rejects_inconsistent_metadata(self) -> None:
+        base = {
+            "profiles": ["UDP"],
+            "irule": "when IKE_AUTH { }",
+            "packets": [
+                {
+                    "protocol": "ike",
+                    "source": {"address": "198.51.100.10", "port": 500},
+                    "destination": {"address": "203.0.113.10", "port": 500},
+                    "ike": {},
+                }
+            ],
+        }
+        invalid_ikes = (
+            ({"flags": 0x20, "response": False}, "response disagrees"),
+            ({"version": "2.16"}, "version must be an IKEv2 version"),
+            ({"payloads": [], "next_payload": "AUTH"}, "next_payload disagrees"),
+            ({"payloads": ["NONE"]}, "cannot be NONE"),
+        )
+        for ike, message in invalid_ikes:
+            with self.subTest(message=message):
+                scenario = dict(base)
+                scenario["packets"] = [dict(base["packets"][0], ike=ike)]
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
 
     def test_raw_dhcpv6_rejects_truncated_message_and_options(self) -> None:
         base = {

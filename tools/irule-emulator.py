@@ -9558,6 +9558,42 @@ DHCPV6_MESSAGE_TYPES = {
     16: "LEASEQUERY-DONE",
     17: "LEASEQUERY-DATA",
 }
+IKE_PORTS = frozenset({500, 4500})
+IKE_HEADER_BYTES = 28
+IKE_MAX_MESSAGE_BYTES = 2 * 1024 * 1024
+IKE_EXCHANGE_TYPES = {
+    34: "IKE_SA_INIT",
+    35: "IKE_AUTH",
+    36: "CREATE_CHILD_SA",
+    37: "INFORMATIONAL",
+}
+IKE_PAYLOAD_TYPES = {
+    0: "NONE",
+    33: "SA",
+    34: "KE",
+    35: "IDi",
+    36: "IDr",
+    37: "CERT",
+    38: "CERTREQ",
+    39: "AUTH",
+    40: "Ni",
+    41: "N(payload)",
+    42: "D",
+    43: "V",
+    44: "TSi",
+    45: "TSr",
+    46: "SK",
+    47: "CP",
+    48: "EAP",
+    49: "GSPM",
+    50: "GSA",
+    51: "KD",
+    52: "IDr2",
+    53: "EAP_ONLY_AUTHENTICATION",
+    54: "GSPM2",
+    55: "GSA2",
+    56: "KD2",
+}
 MAX_PACKET_STREAMS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
@@ -9585,7 +9621,7 @@ STREAM_EXPRESSION_MAX_BYTES = 64 * 1024
 STREAM_MAX_EXPRESSION_PAIRS = 128
 CATEGORY_RESULT_MAX_ITEMS = 128
 CATEGORY_RESULT_MAX_BYTES = 64 * 1024
-PACKET_PROTOCOLS = {"event", "tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "socks", "diameter", "radius", "mr", "gtp", "rtsp", "tds", "qoe", "l7check", "fix", "pcp", "wire"}
+PACKET_PROTOCOLS = {"event", "tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ike", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "socks", "diameter", "radius", "mr", "gtp", "rtsp", "tds", "qoe", "l7check", "fix", "pcp", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -9653,6 +9689,10 @@ PACKET_PROTOCOL_FIELDS = {
         "peer_address",
         "reject",
         "transaction_id",
+    },
+    "ike": {
+        "payload_hex",
+        "ike",
     },
     "ftp": {
         "payload_hex",
@@ -10045,6 +10085,7 @@ PACKET_EVENT_ADAPTERS = {
     "RADIUS_AAA_ACCT_RESPONSE": "RADIUS accounting response",
     "PCP_REQUEST": "structured PCP request packet",
     "PCP_RESPONSE": "structured PCP response packet",
+    "IKE_AUTH": "IKEv2 IKE_AUTH exchange",
     "MR_INGRESS": "Message Routing Framework ingress",
     "MR_EGRESS": "Message Routing Framework egress",
     "MR_FAILED": "Message Routing Framework route failure",
@@ -11279,6 +11320,154 @@ def _decode_dhcpv6_payload(
     }
 
 
+def _ike_exchange_type(value: Any, field: str) -> int:
+    if isinstance(value, bool):
+        raise EmulatorInputError(f"{field} must be an IKE exchange type")
+    if isinstance(value, int):
+        exchange_type = value
+    elif isinstance(value, str):
+        upper = value.upper()
+        exchange_type = next(
+            (code for code, name in IKE_EXCHANGE_TYPES.items() if name == upper),
+            None,
+        )
+        if exchange_type is None and value.isdigit():
+            exchange_type = int(value, 10)
+    else:
+        exchange_type = None
+    if exchange_type is None or not 0 <= exchange_type <= 255:
+        raise EmulatorInputError(
+            f"{field} must be one of: {', '.join(IKE_EXCHANGE_TYPES.values())} or 0-255"
+        )
+    return exchange_type
+
+
+def _ike_spi(value: Any, field: str) -> str:
+    if not isinstance(value, str) or len(value) != 16:
+        raise EmulatorInputError(f"{field} must be exactly 8 bytes of hexadecimal")
+    try:
+        bytes.fromhex(value)
+    except ValueError as exc:
+        raise EmulatorInputError(f"{field} must be exactly 8 bytes of hexadecimal") from exc
+    return value.lower()
+
+
+def _ike_payload_type(value: Any, field: str) -> int:
+    if isinstance(value, bool):
+        raise EmulatorInputError(f"{field} must be an IKE payload type")
+    if isinstance(value, int):
+        payload_type = value
+    elif isinstance(value, str):
+        upper = value.upper()
+        if upper == "NONE":
+            return 0
+        payload_type = next(
+            (code for code, name in IKE_PAYLOAD_TYPES.items() if name.upper() == upper),
+            None,
+        )
+        if payload_type is None and value.isdigit():
+            payload_type = int(value, 10)
+    else:
+        payload_type = None
+    if payload_type is None or not 0 <= payload_type <= 255:
+        raise EmulatorInputError(f"{field} must be an IKE payload name or 0-255")
+    return payload_type
+
+
+def _ike_payload_chain(
+    message: bytes,
+    first_payload: int,
+    index: int,
+) -> list[dict[str, Any]]:
+    if first_payload == 0:
+        if len(message) != IKE_HEADER_BYTES:
+            raise EmulatorInputError(
+                f"wire packet {index} IKE has trailing bytes without a payload"
+            )
+        return []
+    payloads: list[dict[str, Any]] = []
+    cursor = IKE_HEADER_BYTES
+    payload_type = first_payload
+    while payload_type:
+        if len(payloads) >= 64:
+            raise EmulatorInputError(
+                f"wire packet {index} IKE payload chain exceeds 64 payloads"
+            )
+        if cursor + 4 > len(message):
+            raise EmulatorInputError(f"wire packet {index} IKE payload header is truncated")
+        next_payload = message[cursor]
+        payload_flags = message[cursor + 1]
+        payload_length = int.from_bytes(message[cursor + 2 : cursor + 4], "big")
+        if payload_length < 4 or cursor + payload_length > len(message):
+            raise EmulatorInputError(f"wire packet {index} IKE payload length is invalid")
+        payloads.append(
+            {
+                "type": IKE_PAYLOAD_TYPES.get(payload_type, str(payload_type)),
+                "type_code": payload_type,
+                "flags": payload_flags,
+                "length": payload_length,
+            }
+        )
+        cursor += payload_length
+        payload_type = next_payload
+    if cursor != len(message):
+        raise EmulatorInputError(f"wire packet {index} IKE payload chain has trailing bytes")
+    return payloads
+
+
+def _decode_ike_datagram(
+    payload: bytes,
+    direction: str,
+    source: dict[str, Any],
+    destination: dict[str, Any],
+    index: int,
+) -> dict[str, Any]:
+    """Decode the bounded, unencrypted IKEv2 envelope used by IKE_AUTH."""
+    endpoints = {source.get("port"), destination.get("port")}
+    message = payload
+    if 4500 in endpoints:
+        if len(message) < 4 or message[:4] != b"\x00\x00\x00\x00":
+            raise EmulatorInputError(
+                f"wire packet {index} IKE NAT-T datagrams require a four-byte zero marker"
+            )
+        message = message[4:]
+    if len(message) < IKE_HEADER_BYTES:
+        raise EmulatorInputError(f"wire packet {index} IKE header is truncated")
+    version = message[17]
+    if version >> 4 != 2:
+        raise EmulatorInputError(f"wire packet {index} is not an IKEv2 message")
+    declared_length = int.from_bytes(message[24:28], "big")
+    if (
+        declared_length < IKE_HEADER_BYTES
+        or declared_length > IKE_MAX_MESSAGE_BYTES
+        or declared_length != len(message)
+    ):
+        raise EmulatorInputError(f"wire packet {index} IKE message length is invalid")
+    exchange_type = message[18]
+    first_payload = message[16]
+    return {
+        "protocol": "ike",
+        "direction": direction,
+        "source": source,
+        "destination": destination,
+        "ike": {
+            "exchange_type": IKE_EXCHANGE_TYPES.get(exchange_type, str(exchange_type)),
+            "exchange_type_code": exchange_type,
+            "flags": message[19],
+            "response": bool(message[19] & 0x20),
+            "initiator_spi": message[0:8].hex(),
+            "responder_spi": message[8:16].hex(),
+            "next_payload": IKE_PAYLOAD_TYPES.get(first_payload, str(first_payload)),
+            "next_payload_code": first_payload,
+            "version": f"{version >> 4}.{version & 0x0F}",
+            "message_id": int.from_bytes(message[20:24], "big"),
+            "payloads": _ike_payload_chain(message, first_payload, index),
+        },
+        "payload_hex": message.hex(),
+        "_wire_payload": payload,
+    }
+
+
 def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) -> dict[str, Any]:
     unknown = sorted(
         set(raw_packet) - {"protocol", "direction", "raw_hex", "network", "timestamp"}
@@ -11993,6 +12182,151 @@ def _packet_bool(value: Any, field: str) -> str:
     if isinstance(value, str) and value.lower() in {"0", "1", "false", "true"}:
         return "1" if value.lower() in {"1", "true"} else "0"
     raise EmulatorInputError(f"{field} must be a boolean or 0/1")
+
+
+IKE_SEMANTIC_FIELDS = frozenset(
+    {
+        "auth_success",
+        "cert",
+        "san_dirname",
+        "san_dns",
+        "san_ediparty",
+        "san_email",
+        "san_ipadd",
+        "san_othername",
+        "san_rid",
+        "san_uri",
+        "san_x400",
+        "subjectAltName",
+    }
+)
+IKE_PACKET_FIELDS = frozenset(
+    {
+        "exchange_type",
+        "exchange_type_code",
+        "flags",
+        "response",
+        "initiator_spi",
+        "responder_spi",
+        "next_payload",
+        "next_payload_code",
+        "version",
+        "message_id",
+        "payloads",
+    }
+) | IKE_SEMANTIC_FIELDS
+
+
+def _normalise_ike_packet(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise EmulatorInputError(f"{field} must be an object")
+    unknown = sorted(set(value) - IKE_PACKET_FIELDS)
+    if unknown:
+        raise EmulatorInputError(
+            f"{field} contains unsupported field(s): {', '.join(unknown)}"
+        )
+    result: dict[str, Any] = {
+        "exchange_type": "IKE_AUTH",
+        "exchange_type_code": 35,
+        "flags": 0,
+        "response": False,
+        "initiator_spi": "0000000000000000",
+        "responder_spi": "0000000000000000",
+        "next_payload": "NONE",
+        "next_payload_code": 0,
+        "version": "2.0",
+        "message_id": 0,
+        "payloads": [],
+    }
+    if "exchange_type" in value:
+        result["exchange_type_code"] = _ike_exchange_type(
+            value["exchange_type"], f"{field}.exchange_type"
+        )
+        result["exchange_type"] = IKE_EXCHANGE_TYPES.get(
+            result["exchange_type_code"], str(result["exchange_type_code"])
+        )
+    if "exchange_type_code" in value:
+        code = _ike_exchange_type(value["exchange_type_code"], f"{field}.exchange_type_code")
+        if "exchange_type" in value and code != result["exchange_type_code"]:
+            raise EmulatorInputError(
+                f"{field}.exchange_type and exchange_type_code disagree"
+            )
+        result["exchange_type_code"] = code
+        result["exchange_type"] = IKE_EXCHANGE_TYPES.get(code, str(code))
+    for spi_field in ("initiator_spi", "responder_spi"):
+        if spi_field in value:
+            result[spi_field] = _ike_spi(value[spi_field], f"{field}.{spi_field}")
+    if "flags" in value:
+        flags = value["flags"]
+        if isinstance(flags, bool) or not isinstance(flags, int) or not 0 <= flags <= 255:
+            raise EmulatorInputError(f"{field}.flags must be an integer from 0 to 255")
+        result["flags"] = flags
+    if "response" in value:
+        response = _packet_bool(value["response"], f"{field}.response") == "1"
+        if response != bool(result["flags"] & 0x20):
+            raise EmulatorInputError(
+                f"{field}.response disagrees with the IKE response flag"
+            )
+        result["response"] = response
+    elif result["flags"] & 0x20:
+        result["response"] = True
+    if "version" in value:
+        version = _require_string(value["version"], f"{field}.version")
+        version_match = re.fullmatch(r"2\.([0-9]+)", version)
+        if version_match is None or int(version_match.group(1), 10) > 15:
+            raise EmulatorInputError(f"{field}.version must be an IKEv2 version such as 2.0")
+        result["version"] = version
+    if "message_id" in value:
+        message_id = value["message_id"]
+        if isinstance(message_id, bool) or not isinstance(message_id, int) or not 0 <= message_id <= 0xFFFF_FFFF:
+            raise EmulatorInputError(f"{field}.message_id must be an integer from 0 to 4294967295")
+        result["message_id"] = message_id
+    if "payloads" in value:
+        payloads = value["payloads"]
+        if not isinstance(payloads, list) or len(payloads) > 64:
+            raise EmulatorInputError(f"{field}.payloads must be an array of at most 64 items")
+        normalised_payloads: list[dict[str, Any]] = []
+        for payload_index, payload_type in enumerate(payloads):
+            code = _ike_payload_type(payload_type, f"{field}.payloads[{payload_index}]")
+            if code == 0:
+                raise EmulatorInputError(
+                    f"{field}.payloads[{payload_index}] cannot be NONE"
+                )
+            normalised_payloads.append(
+                {"type": IKE_PAYLOAD_TYPES.get(code, str(code)), "type_code": code}
+            )
+        result["payloads"] = normalised_payloads
+        if normalised_payloads:
+            result["next_payload_code"] = normalised_payloads[0]["type_code"]
+            result["next_payload"] = normalised_payloads[0]["type"]
+    if "next_payload" in value:
+        code = _ike_payload_type(value["next_payload"], f"{field}.next_payload")
+        if "payloads" in value and code != result["next_payload_code"]:
+            raise EmulatorInputError(f"{field}.next_payload disagrees with payloads[0]")
+        result["next_payload_code"] = code
+        result["next_payload"] = IKE_PAYLOAD_TYPES.get(code, str(code))
+    if "next_payload_code" in value:
+        code = _ike_payload_type(value["next_payload_code"], f"{field}.next_payload_code")
+        if "payloads" in value and code != result["next_payload_code"]:
+            raise EmulatorInputError(
+                f"{field}.next_payload_code disagrees with payloads[0]"
+            )
+        if "next_payload" in value and code != result["next_payload_code"]:
+            raise EmulatorInputError(f"{field}.next_payload and next_payload_code disagree")
+        result["next_payload_code"] = code
+        result["next_payload"] = IKE_PAYLOAD_TYPES.get(code, str(code))
+    for semantic_field in IKE_SEMANTIC_FIELDS:
+        if semantic_field not in value:
+            continue
+        if semantic_field == "auth_success":
+            result[semantic_field] = _packet_bool(
+                value[semantic_field], f"{field}.{semantic_field}"
+            )
+        else:
+            result[semantic_field] = _require_string(
+                value[semantic_field], f"{field}.{semantic_field}"
+            )
+    return result
 
 
 PCP_REQUEST_PACKET_FIELDS = frozenset(
@@ -14396,6 +14730,10 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             normalised["state"] = event_state
             packets.append(normalised)
             continue
+        if protocol == "ike" and "payload" in packet:
+            raise EmulatorInputError(
+                f"packet {index} IKE packets use ike or payload_hex, not payload"
+            )
         if "datagram" in packet:
             normalised["datagram"] = _normalise_datagram_metadata(
                 packet["datagram"], f"packet {index} datagram"
@@ -14607,7 +14945,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     else:
                         options[canonical_id] = _packet_scalar(option_value, "options")
                 normalised[field] = options
-            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", "socks", "l7check", "fix", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
+            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ike", "ftp", "icap", "tds", "socks", "l7check", "fix", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
                 value = _require_string(packet[field], f"packet {index} payload_hex")
                 if len(value) % 2:
                     raise EmulatorInputError(
@@ -14625,6 +14963,10 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     )
                 normalised[field] = payload_bytes.hex()
                 normalised["_wire_payload"] = payload_bytes
+            elif protocol == "ike" and field == "ike":
+                normalised[field] = _normalise_ike_packet(
+                    packet[field], f"packet {index} ike"
+                )
             elif protocol == "socks" and field == "version":
                 value = _packet_scalar(packet[field], f"packet {index} SOCKS version")
                 if value not in {"4", "5"}:
@@ -15113,6 +15455,25 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             normalised["_wire_payload"] = wire_payload
         if wire_length is not None:
             normalised["_wire_length"] = wire_length
+
+        if protocol == "ike":
+            if "payload_hex" in normalised and "ike" in normalised:
+                raise EmulatorInputError(
+                    f"packet {index} IKE packets must use ike or payload_hex, not both"
+                )
+            if "payload_hex" in normalised:
+                decoded = _decode_ike_datagram(
+                    normalised["_wire_payload"],
+                    direction,
+                    normalised["source"],
+                    normalised["destination"],
+                    index,
+                )
+                normalised.update(decoded)
+            elif "ike" not in normalised:
+                raise EmulatorInputError(
+                    f"packet {index} IKE packets require an ike object or payload_hex"
+                )
 
         if protocol == "tls" and "type" not in normalised:
             raise EmulatorInputError(f"packet {index} TLS packets require type")
@@ -17399,7 +17760,7 @@ class EmulatorSession:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol == "sctp":
             connection.update({"protocol": "132", "transport": "sctp"})
-        elif protocol in {"udp", "dns", "radius", "dhcpv4", "dhcpv6", "pcp"}:
+        elif protocol in {"udp", "dns", "radius", "dhcpv4", "dhcpv6", "ike", "pcp"}:
             connection.update({"protocol": "17", "transport": "udp"})
         elif protocol == "gtp":
             endpoints = {
@@ -17430,7 +17791,7 @@ class EmulatorSession:
         inferred_version = 6 if any(":" in address for address in addresses) else 4
         protocol = (
             17
-            if packet["protocol"] in {"udp", "dns", "radius", "dhcpv4", "dhcpv6", "pcp"}
+            if packet["protocol"] in {"udp", "dns", "radius", "dhcpv4", "dhcpv6", "ike", "pcp"}
             or (packet["protocol"] == "sip" and packet.get("transport", "tcp") == "udp")
             else 6
             if packet["protocol"] in {
@@ -17736,6 +18097,16 @@ class EmulatorSession:
                     "transaction_id": str(packet.get("transaction_id", "000000")),
                 }
                 state["dhcpv6"] = dhcp_state
+        elif protocol == "ike":
+            ike_packet = packet.get("ike", {})
+            if not isinstance(ike_packet, dict):  # guarded by packet normalisation
+                raise EmulatorInputError("invalid IKE packet state")
+            ike_state = {
+                field: _packet_scalar(ike_packet[field], f"ike.{field}")
+                for field in IKE_SEMANTIC_FIELDS
+                if field in ike_packet
+            }
+            state["ike"] = ike_state
         elif protocol == "sctp":
             source = packet.get("source", {})
             destination = packet.get("destination", {})
@@ -18502,7 +18873,7 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "socks", "qoe", "l7check", "fix", "pcp", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ike", "ftp", "icap", "socks", "qoe", "l7check", "fix", "pcp", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
@@ -18585,7 +18956,7 @@ class EmulatorSession:
         )
         accepted_state = (
             self._packet_event_state(packet)
-            if packet["protocol"] in {"udp", "sctp", "dhcpv4", "dhcpv6", "pcp"} or packet_has_tcp_layer
+            if packet["protocol"] in {"udp", "sctp", "dhcpv4", "dhcpv6", "ike", "pcp"} or packet_has_tcp_layer
             else {"connection": self._packet_connection_state(packet)}
         )
         if any(str(profile).upper() == "FLOW" for profile in self._profiles):
@@ -18991,6 +19362,30 @@ class EmulatorSession:
                     raw_payload = b""
                 if raw_payload is not None:
                     merged = _decode_dhcpv6_payload(
+                        raw_payload,
+                        packet["direction"],
+                        packet["source"],
+                        packet["destination"],
+                        packet_index,
+                    )
+                    for field in ("source", "destination", "timestamp", "ttl", "tos", "hops"):
+                        if field in packet:
+                            merged[field] = packet[field]
+                    return merged, 0
+        if packet["protocol"] == "udp":
+            source_port = packet.get("source", {}).get("port")
+            destination_port = packet.get("destination", {}).get("port")
+            if IKE_PORTS.intersection({source_port, destination_port}):
+                raw_payload = packet.get("_wire_payload")
+                if raw_payload is not None:
+                    if 4500 in {source_port, destination_port} and not raw_payload.startswith(
+                        b"\x00\x00\x00\x00"
+                    ):
+                        # UDP/4500 also carries ESP-in-UDP. Without the
+                        # non-ESP marker it is not an IKE message, so leave
+                        # it available to the generic UDP adapter.
+                        return packet, 0
+                    merged = _decode_ike_datagram(
                         raw_payload,
                         packet["direction"],
                         packet["source"],
@@ -19452,6 +19847,7 @@ class EmulatorSession:
                 "qname",
                 "qtype",
                 "pcp",
+                "ike",
                 "frame_type",
                 "fin",
                 "masked",
@@ -20634,6 +21030,22 @@ class EmulatorSession:
                 icap_state = event_result.get("state", {}).get("icap", {})
                 if "payload" in icap_state:
                     entry["payload_after"] = icap_state["payload"]
+                continue
+            elif protocol == "ike":
+                self._activate_packet_connection(session, packet, entry["events"])
+                ike_packet = packet.get("ike", {})
+                exchange_type = ike_packet.get("exchange_type")
+                if exchange_type == "IKE_AUTH":
+                    entry["events"].append(
+                        self._fire_event_on_worker(
+                            session, "IKE_AUTH", self._packet_event_state(packet)
+                        )
+                    )
+                else:
+                    entry["ignored"] = (
+                        f"no iRule event for IKE exchange {exchange_type}"
+                    )
+                finish_packet_connection(packet, entry, index)
                 continue
             elif protocol == "sctp":
                 self._activate_packet_connection(session, packet, entry["events"])

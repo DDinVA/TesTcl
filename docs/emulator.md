@@ -2082,13 +2082,30 @@ does not decode arbitrary TDS wire bytes or synthesize a database peer. See the 
 [`TDS::msg`](https://clouddocs.f5.com/api/irules/TDS__msg.html) and
 [`TDS::session`](https://clouddocs.f5.com/api/irules/TDS__session.html)
 references for the production command contract.
-The IKE surface is also available through the direct `IKE_AUTH` event API.
+The IKE surface is available through the direct `IKE_AUTH` event API and the
+packet adapter.
 Supply an `ike` object with the certificate and subjectAltName values, then
 use `IKE::cert` (optionally with index `0`), the SAN accessors, and
 `IKE::auth_success` from the rule. The event result exposes the supplied
 certificate/SAN state and whether the rule accepted authentication under
 `state.ike`. This is a certificate-authentication decision model only: it
-does not perform IKE negotiation, X.509 parsing, or IPsec packet processing.
+does not perform IKE negotiation, X.509 parsing, or ESP/IPsec processing.
+Packet replay accepts `protocol: "ike"` with a structured `ike` object or
+`payload_hex`. Raw `protocol: "wire"` IPv4/IPv6 UDP packets on ports 500 and
+4500 are decoded as IKEv2; port 4500 requires the four-byte non-ESP marker.
+The adapter validates the IKE header length and generic payload chain, fires
+`IKE_AUTH` for exchange type 35, and leaves encrypted `SK` payload contents
+opaque. For example:
+
+```json
+{
+  "protocol": "ike",
+  "direction": "client_to_server",
+  "source": {"address": "198.51.100.10", "port": 500},
+  "destination": {"address": "203.0.113.10", "port": 500},
+  "ike": {"exchange_type": "IKE_AUTH", "message_id": 1, "payloads": ["IDi", "AUTH"]}
+}
+```
 The pinned tcl-lsp registry does not currently list `IKE_AUTH`, so the
 emulator reports it as a documented TMOS 17.5 event compatibility override in
 the catalog metadata. See the F5 [`IKE` reference](https://clouddocs.f5.com/api/irules/IKE.html)
