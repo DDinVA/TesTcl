@@ -95,6 +95,79 @@ def _raw_ipv4_udp_hex(
     return (ip + udp + payload).hex()
 
 
+def _pcp_address_bytes(address: str) -> bytes:
+    parsed = ipaddress.ip_address(address)
+    if parsed.version == 4:
+        return b"\x00" * 10 + b"\xff\xff" + parsed.packed
+    return parsed.packed
+
+
+def _pcp_map_request(
+    *,
+    client_addr: str = "192.0.2.10",
+    lifetime: int = 3600,
+    internal_port: int = 22,
+    suggested_port: int = 40000,
+    suggested_addr: str = "0.0.0.0",
+    third_party_addr: str | None = None,
+    prefer_failure: bool = False,
+) -> bytes:
+    message = (
+        bytes([2, 1, 0, 0])
+        + lifetime.to_bytes(4, "big")
+        + _pcp_address_bytes(client_addr)
+        + b"\x00" * 12
+        + bytes([6, 0, 0, 0])
+        + internal_port.to_bytes(2, "big")
+        + suggested_port.to_bytes(2, "big")
+        + _pcp_address_bytes(suggested_addr)
+    )
+    if third_party_addr is not None:
+        option_data = _pcp_address_bytes(third_party_addr)
+        message += bytes([1, 0]) + len(option_data).to_bytes(2, "big") + option_data
+    if prefer_failure:
+        message += bytes([2, 0, 0, 0])
+    return message
+
+
+def _pcp_map_response(
+    *,
+    lifetime: int = 1800,
+    result: int = 0,
+    internal_port: int = 22,
+    assigned_port: int = 40000,
+    assigned_addr: str = "198.51.100.20",
+    epoch: int = 123,
+) -> bytes:
+    return (
+        bytes([2, 0x81, 0, result])
+        + lifetime.to_bytes(4, "big")
+        + epoch.to_bytes(4, "big")
+        + b"\x00" * 12
+        + b"\x00" * 12
+        + bytes([6, 0, 0, 0])
+        + internal_port.to_bytes(2, "big")
+        + assigned_port.to_bytes(2, "big")
+        + _pcp_address_bytes(assigned_addr)
+    )
+
+
+def _pcp_peer_request() -> bytes:
+    return (
+        bytes([2, 2, 0, 0])
+        + (600).to_bytes(4, "big")
+        + _pcp_address_bytes("192.0.2.10")
+        + b"\x00" * 12
+        + bytes([17, 0, 0, 0])
+        + (5353).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+        + _pcp_address_bytes("0.0.0.0")
+        + (443).to_bytes(2, "big")
+        + b"\x00" * 2
+        + _pcp_address_bytes("198.51.100.30")
+    )
+
+
 def _gtp_v2_hex(
     message_type: int,
     *,
@@ -1055,6 +1128,201 @@ when PCP_RESPONSE {
             missing_object = json.loads(json.dumps(base))
             del missing_object["packets"][0]["pcp"]
             self.adapter.run_scenario(missing_object, tcl_lsp_root=self.tcl_lsp_root)
+
+    def test_pcp_raw_ipv4_udp_packets_reach_the_same_event_adapter(self) -> None:
+        request_payload = _pcp_map_request(
+            third_party_addr="192.0.2.11",
+            prefer_failure=True,
+        )
+        response_payload = _pcp_map_response()
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["PCP"],
+                "irule": """
+when PCP_REQUEST {
+    log local0. "raw-request=[PCP::request opcode]/[PCP::request protocol]/[PCP::request internal-port]/[PCP::request prefer-failure]/[PCP::request third-party-int-addr]"
+}
+when PCP_RESPONSE {
+    log local0. "raw-response=[PCP::response opcode]/[PCP::response result]/[PCP::response assigned-ext-port]/[PCP::response assigned-ext-addr]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "network": "ipv4",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_udp_hex(
+                            "192.0.2.10", "192.0.2.20", 40000, 5351, request_payload
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "network": "ipv4",
+                        "direction": "server_to_client",
+                        "raw_hex": _raw_ipv4_udp_hex(
+                            "192.0.2.20", "192.0.2.10", 5351, 40000, response_payload
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        request, response = result["trace"]
+        self.assertEqual(request["protocol"], "pcp")
+        self.assertEqual(response["protocol"], "pcp")
+        self.assertEqual(request["pcp"]["client_addr"], "192.0.2.10")
+        self.assertEqual(request["pcp"]["third_party_int_addr"], "192.0.2.11")
+        self.assertEqual(response["pcp"]["assigned_ext_addr"], "198.51.100.20")
+        self.assertEqual(request["payload_hex"], request_payload.hex())
+        self.assertEqual(response["message_hex"], response_payload.hex())
+        request_event = next(event for event in request["events"] if event["event"] == "PCP_REQUEST")
+        response_event = next(event for event in response["events"] if event["event"] == "PCP_RESPONSE")
+        self.assertTrue(any(
+            "raw-request=map/tcp/22/2/192.0.2.11" in entry
+            for entry in request_event["logs"]
+        ))
+        self.assertTrue(any(
+            "raw-response=map/0/40000/198.51.100.20" in entry
+            for entry in response_event["logs"]
+        ))
+
+    def test_pcp_raw_ipv4_udp_rejects_truncated_message(self) -> None:
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "wire packet 0 PCP header is truncated",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["PCP"],
+                    "irule": "when PCP_REQUEST { log local0. request }",
+                    "packets": [
+                        {
+                            "protocol": "wire",
+                            "network": "ipv4",
+                            "direction": "client_to_server",
+                            "raw_hex": _raw_ipv4_udp_hex(
+                                "192.0.2.10", "192.0.2.20", 40000, 5351, b"\x02\x01"
+                            ),
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "wire packet 0 PCP header is truncated",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["PCP"],
+                    "irule": "when PCP_REQUEST { log local0. request }",
+                    "packets": [
+                        {
+                            "protocol": "wire",
+                            "network": "ipv4",
+                            "direction": "client_to_server",
+                            "raw_hex": _raw_ipv4_udp_hex(
+                                "192.0.2.10", "192.0.2.20", 40000, 5351, b""
+                            ),
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_pcp_raw_ipv4_udp_rejects_truncated_option(self) -> None:
+        malformed = _pcp_map_request() + b"\x01\x00\x00\x10" + b"\x00" * 8
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "wire packet 0 PCP option exceeds the datagram",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["PCP"],
+                    "irule": "when PCP_REQUEST { log local0. request }",
+                    "packets": [
+                        {
+                            "protocol": "wire",
+                            "network": "ipv4",
+                            "direction": "client_to_server",
+                            "raw_hex": _raw_ipv4_udp_hex(
+                                "192.0.2.10", "192.0.2.20", 40000, 5351, malformed
+                            ),
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_pcp_raw_pcap_replay_uses_the_wire_decoder(self) -> None:
+        payload = _pcp_map_request()
+        capture = _pcap_bytes([
+            (
+                7,
+                11,
+                _ethernet_ipv4(
+                    _raw_ipv4_udp_hex(
+                        "192.0.2.10", "192.0.2.20", 40000, 5351, payload
+                    )
+                ),
+            )
+        ])
+        result = self.adapter.run_pcap_scenario(
+            {
+                "profiles": ["PCP"],
+                "irule": "when PCP_REQUEST { log local0. pcp-pcap }",
+            },
+            capture,
+            tcl_lsp_root=self.tcl_lsp_root,
+            direction="client_to_server",
+        )
+        self.assertEqual(result["capture"]["record_count"], 1)
+        self.assertEqual(result["trace"][0]["protocol"], "pcp")
+        self.assertEqual(
+            next(event for event in result["trace"][0]["events"] if event["event"] == "PCP_REQUEST")["event"],
+            "PCP_REQUEST",
+        )
+
+    def test_pcp_raw_wire_supports_peer_and_announce_opcodes(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["PCP"],
+                "irule": """
+when PCP_REQUEST {
+    log local0. "opcode=[PCP::request opcode] protocol=[PCP::request protocol] port=[PCP::request internal-port]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "network": "ipv4",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_udp_hex(
+                            "192.0.2.10", "192.0.2.20", 40000, 5351, _pcp_peer_request()
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "network": "ipv4",
+                        "direction": "client_to_server",
+                        "raw_hex": _raw_ipv4_udp_hex(
+                            "192.0.2.10", "192.0.2.20", 40000, 5351,
+                            bytes([2, 0, 0, 0]) + b"\x00" * 4 + _pcp_address_bytes("192.0.2.10"),
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        peer, announce = result["trace"]
+        self.assertEqual(peer["pcp"]["opcode"], "peer")
+        self.assertEqual(announce["pcp"]["opcode"], "announce")
+        peer_event = next(event for event in peer["events"] if event["event"] == "PCP_REQUEST")
+        announce_event = next(event for event in announce["events"] if event["event"] == "PCP_REQUEST")
+        self.assertTrue(any("opcode=peer protocol=NA port=NA" in entry for entry in peer_event["logs"]))
+        self.assertTrue(any("opcode=announce protocol=NA port=NA" in entry for entry in announce_event["logs"]))
 
     def test_psc_subscriber_identity_policy_address_and_attribute_state(self) -> None:
         session = self.adapter.EmulatorSession(

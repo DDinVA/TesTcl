@@ -1240,8 +1240,10 @@ Packet traces can use `protocol: "pcp"` with the same nested `pcp` object. A
 client-to-server packet fires `PCP_REQUEST`; a server-to-client packet fires
 `PCP_RESPONSE`. The adapter validates bounded numeric/address fields, derives a
 missing client address from the packet endpoint, and reports `PCP::reject` in
-the packet result. It is a structured fixture adapter: it does not yet decode
-raw PCP wire payloads, perform proxying, allocate mappings, or emulate NAT.
+the packet result. Raw IPv4/UDP packets on port 5351 are decoded into this same
+adapter shape, including bounded MAP/PEER/ANNOUNCE headers and the
+THIRD_PARTY and PREFER_FAILURE options. It is still a deterministic inspection
+adapter: it does not perform proxying, allocate mappings, or emulate NAT.
 
 ### PSC subscriber/session state
 

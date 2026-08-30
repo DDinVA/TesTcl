@@ -155,6 +155,12 @@ optional `datagram` object. The adapter dispatches `FLOW_INIT` for packet
 connections carrying a `FLOW` profile, and keeps command event/protocol
 restrictions explicit. This is deterministic header inspection; it does not
 replace a kernel network stack or mutate captured packets.
+The PCP packet adapter accepts structured PCP request/response records and raw
+IPv4/UDP datagrams on port 5351. Raw MAP, PEER, and ANNOUNCE common and
+opcode-specific fields are decoded into the same `PCP_REQUEST` and
+`PCP_RESPONSE` event path, including the `THIRD_PARTY` and `PREFER_FAILURE`
+request options. The adapter validates datagram and option bounds but does not
+allocate mappings, perform NAT, or emulate a live PCP server.
 The TCP semantic layer additionally models documented connection tuning
 controls including Appropriate Byte Counting, analytics state and key,
 automatic window tuning, delayed ACK, D-SACK, early retransmit, ECN, enhanced

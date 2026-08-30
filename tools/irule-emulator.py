@@ -9495,6 +9495,12 @@ DNS_RCODE_NAMES = {
     10: "NOTZONE",
 }
 DNS_OPCODE_NAMES = {0: "QUERY", 1: "IQUERY", 2: "STATUS", 4: "NOTIFY", 5: "UPDATE"}
+PCP_PORT = 5351
+PCP_MAX_MESSAGE_BYTES = 1100
+PCP_COMMON_HEADER_BYTES = 24
+PCP_RESPONSE_FLAG = 0x80
+PCP_MAP_BODY_BYTES = 36
+PCP_PEER_BODY_BYTES = 56
 MAX_PACKET_STREAMS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
@@ -10795,6 +10801,155 @@ def _decode_dns_payload(payload: bytes, direction: str, index: int) -> dict[str,
     }
     result.update(sections)
     return result
+
+
+def _pcp_wire_address(value: bytes, field: str) -> str:
+    if len(value) != 16:
+        raise EmulatorInputError(f"{field} must contain a 128-bit address")
+    address = ipaddress.ip_address(value)
+    if address.version == 6 and address.ipv4_mapped is not None:
+        return str(address.ipv4_mapped)
+    return str(address)
+
+
+def _pcp_wire_options(
+    payload: bytes,
+    start: int,
+    direction: str,
+    index: int,
+) -> dict[str, Any]:
+    """Validate PCP TLV options and expose fields used by PCP::request."""
+    options: dict[str, Any] = {
+        "prefer_failure": False,
+        "third_party": False,
+        "third_party_int_addr": "0.0.0.0",
+    }
+    cursor = start
+    while cursor < len(payload):
+        if len(payload) - cursor < 4:
+            raise EmulatorInputError(f"wire packet {index} PCP option header is truncated")
+        option_code = payload[cursor]
+        option_length = int.from_bytes(payload[cursor + 2 : cursor + 4], "big")
+        data_start = cursor + 4
+        data_end = data_start + option_length
+        padded_end = data_start + ((option_length + 3) & ~3)
+        if padded_end > len(payload):
+            raise EmulatorInputError(f"wire packet {index} PCP option exceeds the datagram")
+        option_data = payload[data_start:data_end]
+        if option_code == 1:
+            if option_length != 16:
+                raise EmulatorInputError(
+                    f"wire packet {index} PCP THIRD_PARTY option must be 16 bytes"
+                )
+            if direction == "client_to_server":
+                options["third_party"] = True
+                options["third_party_int_addr"] = _pcp_wire_address(
+                    option_data, f"wire packet {index} PCP THIRD_PARTY address"
+                )
+        elif option_code == 2:
+            if option_length != 0:
+                raise EmulatorInputError(
+                    f"wire packet {index} PCP PREFER_FAILURE option must be empty"
+                )
+            if direction == "client_to_server":
+                options["prefer_failure"] = True
+        cursor = padded_end
+    return options
+
+
+def _decode_pcp_payload(
+    payload: bytes,
+    direction: str,
+    source: dict[str, Any],
+    destination: dict[str, Any],
+    index: int,
+) -> dict[str, Any]:
+    """Decode one bounded PCP UDP payload into the structured PCP adapter shape."""
+    if len(payload) < PCP_COMMON_HEADER_BYTES:
+        raise EmulatorInputError(f"wire packet {index} PCP header is truncated")
+    if len(payload) > PCP_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"wire packet {index} PCP datagram exceeds the {PCP_MAX_MESSAGE_BYTES}-byte limit"
+        )
+    version = payload[0]
+    opcode_byte = payload[1]
+    is_response = bool(opcode_byte & PCP_RESPONSE_FLAG)
+    expected_response = direction == "server_to_client"
+    if is_response != expected_response:
+        kind = "response" if is_response else "request"
+        expected = "server_to_client" if expected_response else "client_to_server"
+        raise EmulatorInputError(
+            f"wire packet {index} PCP {kind} cannot use {direction}; expected {expected}"
+        )
+    opcode_number = opcode_byte & 0x7F
+    opcode = PCP_OPCODE_NAMES.get(opcode_number, str(opcode_number))
+    lifetime = int.from_bytes(payload[4:8], "big")
+    client_addr = (
+        _pcp_wire_address(payload[8:24], f"wire packet {index} PCP client address")
+        if not is_response
+        else str(destination.get("address", "0.0.0.0"))
+    )
+    try:
+        client_addr = str(ipaddress.ip_address(client_addr))
+    except ValueError:
+        client_addr = "0.0.0.0"
+
+    pcp: dict[str, Any] = {
+        "version": version,
+        "opcode": opcode,
+        "lifetime": lifetime,
+        "client_addr": client_addr,
+    }
+    body_start = PCP_COMMON_HEADER_BYTES
+    if is_response:
+        pcp["result"] = payload[3]
+    else:
+        pcp.update({
+            "prefer_failure": False,
+            "third_party": False,
+            "third_party_int_addr": "0.0.0.0",
+        })
+
+    if opcode_number in {1, 2}:
+        body_bytes = PCP_MAP_BODY_BYTES if opcode_number == 1 else PCP_PEER_BODY_BYTES
+        if len(payload) - body_start < body_bytes:
+            raise EmulatorInputError(
+                f"wire packet {index} PCP {opcode} body is truncated"
+            )
+        body = payload[body_start : body_start + body_bytes]
+        protocol_number = body[12]
+        pcp["protocol"] = PCP_PROTOCOL_NAMES.get(protocol_number, str(protocol_number))
+        pcp["internal_port"] = int.from_bytes(body[16:18], "big")
+        external_port = int.from_bytes(body[18:20], "big")
+        external_address = _pcp_wire_address(
+            body[20:36], f"wire packet {index} PCP external address"
+        )
+        if is_response:
+            pcp["assigned_ext_port"] = external_port
+            pcp["assigned_ext_addr"] = external_address
+        else:
+            pcp["suggested_ext_port"] = external_port
+            pcp["suggested_ext_addr"] = external_address
+    options_start = body_start
+    if opcode_number == 1:
+        options_start += PCP_MAP_BODY_BYTES
+    elif opcode_number == 2:
+        options_start += PCP_PEER_BODY_BYTES
+    else:
+        options_start = len(payload)
+    options = _pcp_wire_options(payload, options_start, direction, index)
+    if not is_response:
+        pcp.update(options)
+    return {
+        "protocol": "pcp",
+        "direction": direction,
+        "source": source,
+        "destination": destination,
+        "pcp": pcp,
+        "payload_hex": payload.hex(),
+        "message_hex": payload.hex(),
+        "_wire_payload": payload,
+    }
 
 
 def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) -> dict[str, Any]:
@@ -15610,6 +15765,7 @@ class EmulatorSession:
             str(profile).upper() in {"RADIUS", "RADIUS_AAA"} for profile in self._profiles
         )
         self._gtp_raw_active = any(str(profile).upper() == "GTP" for profile in self._profiles)
+        self._pcp_raw_active = any(str(profile).upper() == "PCP" for profile in self._profiles)
         self._thread.start()
         self._started.wait()
         if self._startup_error is not None:
@@ -18373,6 +18529,24 @@ class EmulatorSession:
                     for field in ("source", "destination", "timestamp"):
                         if field in packet:
                             merged[field] = packet[field]
+                    return merged, 0
+        if packet["protocol"] == "udp" and self._pcp_raw_active:
+            source_port = packet.get("source", {}).get("port")
+            destination_port = packet.get("destination", {}).get("port")
+            if PCP_PORT in {source_port, destination_port}:
+                raw_payload = packet.get("_wire_payload")
+                if raw_payload is None and "_wire_length" in packet:
+                    raw_payload = b""
+                if raw_payload is not None:
+                    merged = _decode_pcp_payload(
+                        raw_payload,
+                        packet["direction"],
+                        packet["source"],
+                        packet["destination"],
+                        packet_index,
+                    )
+                    if "timestamp" in packet:
+                        merged["timestamp"] = packet["timestamp"]
                     return merged, 0
         if packet["protocol"] == "udp" and packet.get("_wire_payload"):
             decoded_dns = _decode_dns_payload(
