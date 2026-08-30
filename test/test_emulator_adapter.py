@@ -177,6 +177,67 @@ def _raw_ipv6_udp_hex(
     return (ip + extension_header + udp + payload).hex()
 
 
+def _raw_ipv4_fragment_hex(
+    source: str,
+    destination: str,
+    identification: int,
+    offset: int,
+    payload: bytes,
+    *,
+    more_fragments: bool,
+    protocol: int,
+) -> str:
+    if offset % 8:
+        raise ValueError("IPv4 fragment offsets must be multiples of eight")
+    fragment_field = (offset // 8) | (0x2000 if more_fragments else 0)
+    total_length = 20 + len(payload)
+    ip = struct.pack(
+        "!BBHHHBBH4s4s",
+        0x45,
+        0,
+        total_length,
+        identification,
+        fragment_field,
+        64,
+        protocol,
+        0,
+        ipaddress.ip_address(source).packed,
+        ipaddress.ip_address(destination).packed,
+    )
+    return (ip + payload).hex()
+
+
+def _raw_ipv6_fragment_hex(
+    source: str,
+    destination: str,
+    identification: int,
+    offset: int,
+    payload: bytes,
+    *,
+    more_fragments: bool,
+    next_header: int,
+) -> str:
+    if offset % 8:
+        raise ValueError("IPv6 fragment offsets must be multiples of eight")
+    fragment_field = ((offset // 8) << 3) | (1 if more_fragments else 0)
+    fragment_header = (
+        bytes([next_header, 0])
+        + fragment_field.to_bytes(2, "big")
+        + identification.to_bytes(4, "big")
+    )
+    first_word = 6 << 28
+    ip = struct.pack(
+        "!IHBB16s16s",
+        first_word,
+        len(fragment_header) + len(payload),
+        44,
+        64,
+        ipaddress.ip_address(source).packed,
+        ipaddress.ip_address(destination).packed,
+    )
+    return (ip + fragment_header + payload).hex()
+
+
 def _ikev2_message(
     *, exchange_type: int = 35, response: bool = False,
     payload_types: tuple[int, ...] = (35, 39),
@@ -4958,7 +5019,7 @@ when IKE_AUTH {
         }]
         with self.assertRaisesRegex(
             self.adapter.EmulatorInputError,
-            "wire packet 0 is fragmented; IPv6 fragment reassembly is not supported",
+            "raw input contains incomplete IP fragments",
         ):
             self.adapter.run_scenario(fragmented, tcl_lsp_root=self.tcl_lsp_root)
 
@@ -17927,7 +17988,10 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         self.assertEqual(result["results"][0]["request"]["uri"], "/first")
         self.assertEqual(result["trace"][0]["completed_at"], 1)
 
-    def test_raw_wire_rejects_fragmented_ipv4_input(self) -> None:
+    def test_raw_wire_rejects_incomplete_fragment_set(self) -> None:
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "packet 0 must be an object"):
+            self.adapter._normalise_packets(["not-a-packet"])
+
         raw = bytearray.fromhex(
             _raw_ipv4_tcp_hex("10.0.0.5", "192.0.2.10", 51000, 443, 0x02)
         )
@@ -17936,6 +18000,103 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             self.adapter._normalise_packets(
                 [{"protocol": "wire", "direction": "client_to_server", "raw_hex": raw.hex()}]
             )
+
+    def test_raw_wire_reassembles_out_of_order_ipv4_tcp_fragments(self) -> None:
+        request_payload = b"GET /fragmented HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+        response_payload = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        request_ip = bytes.fromhex(
+            _raw_ipv4_tcp_hex(
+                "10.0.0.5", "192.0.2.10", 51000, 443, 0x18,
+                request_payload, sequence=1001,
+            )
+        )
+        request_transport = request_ip[20:]
+        fragments = [
+            {
+                "protocol": "wire",
+                "direction": "client_to_server",
+                "network": "ipv4",
+                "raw_hex": _raw_ipv4_fragment_hex(
+                    "10.0.0.5", "192.0.2.10", 0x4242, 24,
+                    request_transport[24:], more_fragments=False, protocol=6,
+                ),
+            },
+            {
+                "protocol": "wire",
+                "direction": "client_to_server",
+                "network": "ipv4",
+                "raw_hex": _raw_ipv4_fragment_hex(
+                    "10.0.0.5", "192.0.2.10", 0x4242, 0,
+                    request_transport[:24], more_fragments=True, protocol=6,
+                ),
+            },
+            {
+                "protocol": "wire",
+                "direction": "server_to_client",
+                "network": "ipv4",
+                "raw_hex": _raw_ipv4_tcp_hex(
+                    "192.0.2.10", "10.0.0.5", 443, 51000, 0x18,
+                    response_payload, sequence=2000,
+                ),
+            },
+        ]
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { pool api_pool }",
+                "pools": {"api_pool": ["10.0.0.10:80"]},
+                "packets": fragments,
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(result["trace"][0]["protocol"], "http")
+        self.assertEqual(result["trace"][0]["index"], 0)
+        self.assertEqual(result["results"][0]["request"]["uri"], "/fragmented")
+        self.assertEqual(result["results"][0]["response"]["body"], "ok")
+
+    def test_raw_wire_reassembles_ipv6_udp_fragments_and_rejects_overlap(self) -> None:
+        udp_payload = b"fragmented-udp!"
+        udp = struct.pack("!HHHH", 53000, 5353, 8 + len(udp_payload), 0) + udp_payload
+        packets = [
+            {
+                "protocol": "wire",
+                "direction": "client_to_server",
+                "network": "ipv6",
+                "raw_hex": _raw_ipv6_fragment_hex(
+                    "2001:db8::5", "2001:db8::53", 0xABCDEF01, 16,
+                    udp[16:], more_fragments=False, next_header=17,
+                ),
+            },
+            {
+                "protocol": "wire",
+                "direction": "client_to_server",
+                "network": "ipv6",
+                "raw_hex": _raw_ipv6_fragment_hex(
+                    "2001:db8::5", "2001:db8::53", 0xABCDEF01, 0,
+                    udp[:16], more_fragments=True, next_header=17,
+                ),
+            },
+        ]
+        normalised = self.adapter._normalise_packets(packets)
+        self.assertEqual(len(normalised), 1)
+        self.assertEqual(normalised[0]["protocol"], "udp")
+        self.assertEqual(normalised[0]["payload"], "fragmented-udp!")
+
+        overlap = dict(packets[1])
+        overlap["raw_hex"] = _raw_ipv6_fragment_hex(
+            "2001:db8::5", "2001:db8::53", 0xABCDEF01, 8,
+            udp[8:24], more_fragments=False, next_header=17,
+        )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "overlaps"):
+            self.adapter._normalise_packets([packets[1], overlap, packets[0]])
+
+        reserved = dict(packets[1])
+        reserved_raw = bytearray.fromhex(reserved["raw_hex"])
+        reserved_raw[42:44] = (0x0002).to_bytes(2, "big")
+        reserved["raw_hex"] = reserved_raw.hex()
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "reserved"):
+            self.adapter._normalise_packets([reserved])
 
     def test_classic_pcap_replay_decodes_ethernet_and_preserves_timestamps(self) -> None:
         request_payload = b"GET /health HTTP/1.1\r\nHost: api.example.com\r\n\r\n"

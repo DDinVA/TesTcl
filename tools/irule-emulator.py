@@ -10643,6 +10643,7 @@ IKE_PAYLOAD_TYPES = {
     56: "KD2",
 }
 MAX_PACKET_STREAMS = 128
+MAX_IP_FRAGMENT_SETS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
 PCAP_MAX_BYTES = 16 * 1024 * 1024
@@ -12630,6 +12631,321 @@ def _decode_ike_datagram(
         "payload_hex": message.hex(),
         "_wire_payload": payload,
     }
+
+
+def _ipv4_header_checksum(header: bytes) -> int:
+    """Return the Internet checksum for an IPv4 header."""
+    if len(header) % 2:
+        raise EmulatorInputError("IPv4 header length must be even")
+    total = sum(
+        int.from_bytes(header[offset : offset + 2], "big")
+        for offset in range(0, len(header), 2)
+    )
+    total = (total & 0xFFFF) + (total >> 16)
+    total = (total & 0xFFFF) + (total >> 16)
+    return (~total) & 0xFFFF
+
+
+def _wire_fragment_descriptor(
+    raw_packet: dict[str, Any], index: int, direction: str
+) -> dict[str, Any] | None:
+    """Parse just enough IP metadata to collect one raw fragment.
+
+    The regular wire decoder remains the single transport decoder.  This
+    helper only identifies fragmented packets and returns the unfragmentable
+    prefix plus fragment payload needed to reconstruct one complete IP packet.
+    """
+    unknown = set(raw_packet) - {
+        "protocol", "direction", "raw_hex", "network", "timestamp"
+    }
+    if unknown:
+        raise EmulatorInputError(
+            f"unsupported wire packet {index} field(s): {', '.join(sorted(unknown))}"
+        )
+    network = _require_string(
+        raw_packet.get("network", "ipv4"), f"wire packet {index} network"
+    ).lower()
+    if network not in {"ipv4", "ipv6"}:
+        raise EmulatorInputError("raw wire packets must use IPv4 or IPv6")
+    raw_hex = _require_string(raw_packet.get("raw_hex"), f"wire packet {index} raw_hex")
+    try:
+        raw = bytes.fromhex(raw_hex)
+    except ValueError as exc:
+        raise EmulatorInputError(
+            f"wire packet {index} raw_hex is not valid hexadecimal"
+        ) from exc
+
+    if network == "ipv4":
+        if len(raw) < 20 or raw[0] >> 4 != 4:
+            raise EmulatorInputError(f"wire packet {index} must contain an IPv4 packet")
+        header_length = (raw[0] & 0x0F) * 4
+        if header_length < 20 or len(raw) < header_length:
+            raise EmulatorInputError(
+                f"wire packet {index} has an invalid IPv4 header length"
+            )
+        total_length = int.from_bytes(raw[2:4], "big")
+        if total_length < header_length or total_length > len(raw):
+            raise EmulatorInputError(
+                f"wire packet {index} has an invalid IPv4 total length"
+            )
+        fragment_field = int.from_bytes(raw[6:8], "big")
+        if not fragment_field & 0x3FFF:
+            return None
+        if fragment_field & 0x8000:
+            raise EmulatorInputError(
+                f"wire packet {index} has the IPv4 reserved fragment bit set"
+            )
+        payload = raw[header_length:total_length]
+        more_fragments = bool(fragment_field & 0x2000)
+        if more_fragments and (not payload or len(payload) % 8):
+            raise EmulatorInputError(
+                f"wire packet {index} has a non-final IPv4 fragment with an invalid payload length"
+            )
+        offset = (fragment_field & 0x1FFF) * 8
+        if offset + len(payload) > 0xFFFF - header_length:
+            raise EmulatorInputError(
+                f"wire packet {index} exceeds the IPv4 reassembly length limit"
+            )
+        source = raw[12:16]
+        destination = raw[16:20]
+        key = ("ipv4", direction, source, destination, raw[9], raw[4:6])
+        fingerprint = bytearray(raw[:header_length])
+        fingerprint[2:4] = b"\x00\x00"
+        fingerprint[6:8] = (fragment_field & 0x4000).to_bytes(2, "big")
+        fingerprint[10:12] = b"\x00\x00"
+        return {
+            "network": network,
+            "key": key,
+            "offset": offset,
+            "payload": payload,
+            "more": more_fragments,
+            "prefix": raw[:header_length],
+            "fingerprint": bytes(fingerprint),
+            "header_length": header_length,
+            "fragment_field": fragment_field,
+            "source": source,
+            "destination": destination,
+            "protocol": raw[9],
+        }
+
+    if len(raw) < IPV6_FIXED_HEADER_BYTES or raw[0] >> 4 != 6:
+        raise EmulatorInputError(f"wire packet {index} must contain an IPv6 packet")
+    declared_payload_length = int.from_bytes(raw[4:6], "big")
+    total_length = IPV6_FIXED_HEADER_BYTES + declared_payload_length
+    if total_length > len(raw):
+        raise EmulatorInputError(
+            f"wire packet {index} has an invalid IPv6 payload length"
+        )
+    source = raw[8:24]
+    destination = raw[24:40]
+    next_header = raw[6]
+    payload_offset = IPV6_FIXED_HEADER_BYTES
+    previous_next_header_offset = 6
+    extension_count = 0
+    while next_header in IPV6_EXTENSION_HEADERS or next_header in {
+        IPV6_FRAGMENT_HEADER,
+        IPV6_AH_HEADER,
+    }:
+        extension_count += 1
+        if extension_count > 16:
+            raise EmulatorInputError(
+                f"wire packet {index} has too many IPv6 extension headers"
+            )
+        if next_header == IPV6_FRAGMENT_HEADER:
+            if payload_offset + 8 > total_length:
+                raise EmulatorInputError(
+                    f"wire packet {index} has an incomplete IPv6 fragment header"
+                )
+            fragment_next_header = raw[payload_offset]
+            fragment_field = int.from_bytes(
+                raw[payload_offset + 2 : payload_offset + 4], "big"
+            )
+            if fragment_field & 0x0006:
+                raise EmulatorInputError(
+                    f"wire packet {index} has reserved IPv6 fragment bits set"
+                )
+            if not (fragment_field & 0xFFF9):
+                return None
+            payload = raw[payload_offset + 8 : total_length]
+            more_fragments = bool(fragment_field & 1)
+            if more_fragments and (not payload or len(payload) % 8):
+                raise EmulatorInputError(
+                    f"wire packet {index} has a non-final IPv6 fragment with an invalid payload length"
+                )
+            offset = ((fragment_field >> 3) & 0x1FFF) * 8
+            if offset + len(payload) > 0xFFFF:
+                raise EmulatorInputError(
+                    f"wire packet {index} exceeds the IPv6 reassembly length limit"
+                )
+            prefix = bytearray(raw[:payload_offset])
+            prefix[previous_next_header_offset] = fragment_next_header
+            fingerprint = bytearray(prefix)
+            fingerprint[4:6] = b"\x00\x00"
+            key = (
+                "ipv6", direction, source, destination,
+                fragment_next_header, raw[payload_offset + 4 : payload_offset + 8],
+            )
+            return {
+                "network": network,
+                "key": key,
+                "offset": offset,
+                "payload": payload,
+                "more": more_fragments,
+                "prefix": bytes(prefix),
+                "fingerprint": bytes(fingerprint),
+                "fragment_next_header": fragment_next_header,
+            }
+        if payload_offset + 2 > total_length:
+            raise EmulatorInputError(
+                f"wire packet {index} has an incomplete IPv6 extension header"
+            )
+        extension_length = (
+            (raw[payload_offset + 1] + 1) * 8
+            if next_header in IPV6_EXTENSION_HEADERS
+            else (raw[payload_offset + 1] + 2) * 4
+        )
+        if extension_length < 8 or payload_offset + extension_length > total_length:
+            raise EmulatorInputError(
+                f"wire packet {index} has an invalid IPv6 extension header length"
+            )
+        previous_next_header_offset = payload_offset
+        next_header = raw[payload_offset]
+        payload_offset += extension_length
+    return None
+
+
+def _reassemble_wire_fragments(raw_packets: list[Any]) -> list[dict[str, Any]]:
+    """Reassemble bounded raw IPv4/IPv6 fragments before transport decoding."""
+    fragment_sets: dict[tuple[Any, ...], dict[str, Any]] = {}
+    result: list[dict[str, Any]] = []
+
+    def build_packet(record: dict[str, Any]) -> dict[str, Any]:
+        segments = record["segments"]
+        final_length = record.get("final_length")
+        if final_length is None:
+            raise AssertionError("fragment set has no final length")
+        cursor = 0
+        payload_parts: list[bytes] = []
+        for offset, payload in sorted(segments.items()):
+            if offset != cursor:
+                raise ValueError("fragment set contains a gap")
+            payload_parts.append(payload)
+            cursor += len(payload)
+        if cursor != final_length:
+            raise ValueError("fragment set is incomplete")
+        payload = b"".join(payload_parts)
+        if len(payload) > PCAP_MAX_PACKET_BYTES:
+            raise EmulatorInputError(
+                f"reassembled IP payload exceeds {PCAP_MAX_PACKET_BYTES // (1024 * 1024)} MiB"
+            )
+        if record["network"] == "ipv4":
+            prefix = bytearray(record["prefix"])
+            total_length = len(prefix) + len(payload)
+            if total_length > 0xFFFF:
+                raise EmulatorInputError("reassembled IPv4 packet exceeds 65535 bytes")
+            prefix[2:4] = total_length.to_bytes(2, "big")
+            prefix[6:8] = (record["fragment_field"] & 0x4000).to_bytes(2, "big")
+            prefix[10:12] = b"\x00\x00"
+            prefix[10:12] = _ipv4_header_checksum(bytes(prefix)).to_bytes(2, "big")
+            raw = bytes(prefix) + payload
+        else:
+            prefix = bytearray(record["prefix"])
+            payload_length = len(prefix) - IPV6_FIXED_HEADER_BYTES + len(payload)
+            if payload_length > 0xFFFF:
+                raise EmulatorInputError("reassembled IPv6 packet exceeds 65535 payload bytes")
+            prefix[4:6] = payload_length.to_bytes(2, "big")
+            raw = bytes(prefix) + payload
+        packet = dict(record["packet"])
+        packet["raw_hex"] = raw.hex()
+        packet["network"] = record["network"]
+        return packet
+
+    for index, packet in enumerate(raw_packets):
+        if not isinstance(packet, dict):
+            raise EmulatorInputError(f"packet {index} must be an object")
+        protocol = _require_string(packet.get("protocol"), f"packet {index} protocol").lower()
+        if protocol != "wire":
+            result.append(packet)
+            continue
+        direction = _packet_direction(packet.get("direction", "client_to_server"))
+        descriptor = _wire_fragment_descriptor(packet, index, direction)
+        if descriptor is None:
+            result.append(packet)
+            continue
+        key = descriptor["key"]
+        record = fragment_sets.get(key)
+        if record is None:
+            if len(fragment_sets) >= MAX_IP_FRAGMENT_SETS:
+                raise EmulatorInputError(
+                    f"raw input contains more than {MAX_IP_FRAGMENT_SETS} incomplete IP fragment sets"
+                )
+            record = {
+                "network": descriptor["network"],
+                "prefix": descriptor["prefix"],
+                "fingerprint": descriptor["fingerprint"],
+                "segments": {},
+                "final_length": None,
+                "packet": dict(packet),
+            }
+            if descriptor["network"] == "ipv4":
+                record["fragment_field"] = descriptor["fragment_field"]
+            fragment_sets[key] = record
+        elif record["fingerprint"] != descriptor["fingerprint"]:
+            raise EmulatorInputError(
+                f"wire packet {index} does not match the unfragmentable IP header"
+            )
+
+        offset = descriptor["offset"]
+        payload = descriptor["payload"]
+        end = offset + len(payload)
+        if end > PCAP_MAX_PACKET_BYTES:
+            raise EmulatorInputError(
+                f"wire packet {index} exceeds the {PCAP_MAX_PACKET_BYTES // (1024 * 1024)} MiB reassembly limit"
+            )
+        if (
+            descriptor["more"]
+            and record["final_length"] is not None
+            and end > record["final_length"]
+        ):
+            raise EmulatorInputError(
+                f"wire packet {index} extends beyond the final IP fragment"
+            )
+        if not descriptor["more"]:
+            if record["final_length"] is not None and record["final_length"] != end:
+                raise EmulatorInputError(
+                    f"wire packet {index} conflicts with the final IP fragment length"
+                )
+            record["final_length"] = end
+
+        for existing_offset, existing_payload in record["segments"].items():
+            existing_end = existing_offset + len(existing_payload)
+            overlap_start = max(offset, existing_offset)
+            overlap_end = min(end, existing_end)
+            if overlap_start < overlap_end:
+                if (
+                    offset == existing_offset
+                    and end == existing_end
+                    and payload == existing_payload
+                ):
+                    break
+                raise EmulatorInputError(
+                    f"wire packet {index} overlaps an existing IP fragment"
+                )
+        else:
+            record["segments"][offset] = payload
+
+        if record["final_length"] is None:
+            continue
+        try:
+            assembled = build_packet(record)
+        except ValueError:
+            continue
+        result.append(assembled)
+        del fragment_sets[key]
+
+    if fragment_sets:
+        raise EmulatorInputError("raw input contains incomplete IP fragments")
+    return result
 
 
 def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) -> dict[str, Any]:
@@ -15846,7 +16162,8 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
         raise EmulatorInputError(f"packets cannot contain more than {PACKET_MAX_COUNT} entries")
 
     packets: list[dict[str, Any]] = []
-    for index, packet in enumerate(raw):
+    raw_packets = _reassemble_wire_fragments(raw)
+    for index, packet in enumerate(raw_packets):
         if not isinstance(packet, dict):
             raise EmulatorInputError(f"packet {index} must be an object")
         protocol = _require_string(packet.get("protocol"), f"packet {index} protocol").lower()
