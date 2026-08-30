@@ -638,7 +638,10 @@ APM/AFM/PEM classification, deep packet inspection, or external lookups.
 `L7CHECK::protocol` supports the documented `set VALUE` and `get` forms during
 `L7CHECK_CLIENT_DATA`, `L7CHECK_SERVER_DATA`, and `CONNECTOR_OPEN`. The value
 is connection-scoped and can be supplied or inspected through the structured
-event-state API. The four `LINK::*` commands (`lasthop`, `nexthop`, `qos`, and
+event-state API. Packet replay accepts `protocol: "l7check"` with an optional
+`l7_protocol` label and payload, emitting the corresponding client/server data
+event for each packet. The adapter does not classify arbitrary payload bytes.
+The four `LINK::*` commands (`lasthop`, `nexthop`, `qos`, and
 `vlan_id`) read deterministic link metadata from that same API; a next-hop MAC
 defaults to the documented broadcast value until the caller supplies one.
 The legacy `lasthop` and `nexthop` setters update that shared metadata and

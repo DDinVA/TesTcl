@@ -12416,6 +12416,116 @@ when QOE_PARSE_DONE {
             finally:
                 invalid.close()
 
+    def test_l7check_packet_adapter_preserves_protocol_across_directions(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "L7CHECK"],
+                "irule": """
+when L7CHECK_CLIENT_DATA {
+    log local0. "client-before=[L7CHECK::protocol get]"
+    L7CHECK::protocol set https
+}
+when L7CHECK_SERVER_DATA {
+    log local0. "server=[L7CHECK::protocol get]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "l7check",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.10", "port": 40000},
+                        "destination": {"address": "192.0.2.20", "port": 443},
+                        "l7_protocol": "http",
+                        "payload": "GET / HTTP/1.1\r\n\r\n",
+                    },
+                    {
+                        "protocol": "l7check",
+                        "direction": "server_to_client",
+                        "source": {"address": "192.0.2.20", "port": 443},
+                        "destination": {"address": "192.0.2.10", "port": 40000},
+                        "payload_hex": "485454502f312e3120323030204f4b0d0a0d0a",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        client_event = next(
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] == "L7CHECK_CLIENT_DATA"
+        )
+        server_event = next(
+            event
+            for event in result["trace"][1]["events"]
+            if event["event"] == "L7CHECK_SERVER_DATA"
+        )
+        self.assertTrue(client_event["fired"])
+        self.assertTrue(server_event["fired"])
+        self.assertEqual(client_event["state"]["l7check"]["protocol"], "https")
+        self.assertEqual(server_event["state"]["l7check"]["protocol"], "https")
+        self.assertEqual(server_event["state"]["datagram"]["payload_length"], "19")
+        self.assertTrue(any("client-before=http" in log for log in client_event["logs"]))
+        self.assertTrue(any("server=https" in log for log in server_event["logs"]))
+        self.assertEqual(result["trace"][0]["l7_protocol"], "https")
+        self.assertEqual(result["trace"][1]["l7_protocol"], "https")
+
+        without_profile = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": "when L7CHECK_CLIENT_DATA { return }",
+                "packets": [{"protocol": "l7check", "payload": "probe"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        gated_event = next(
+            event
+            for event in without_profile["trace"][0]["events"]
+            if event["event"] == "L7CHECK_CLIENT_DATA"
+        )
+        self.assertFalse(gated_event["fired"])
+        self.assertEqual(
+            without_profile["trace"][0]["ignored"],
+            "L7CHECK profile is not attached",
+        )
+
+        invalid_packets = [
+            (
+                {
+                    "protocol": "l7check",
+                    "l7_protocol": {"name": "http"},
+                },
+                "packet 0 l7_protocol must be a string",
+            ),
+            (
+                {
+                    "protocol": "l7check",
+                    "l7_protocol": "http\x00",
+                },
+                "packet 0 l7_protocol cannot contain NUL bytes",
+            ),
+            (
+                {
+                    "protocol": "l7check",
+                    "payload": "probe",
+                    "payload_hex": "70726f6265",
+                },
+                "L7CHECK packets must use payload or payload_hex, not both",
+            ),
+        ]
+        for packet, message in invalid_packets:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                self.adapter.EmulatorInputError, message
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "L7CHECK"],
+                        "irule": "when L7CHECK_CLIENT_DATA { return }",
+                        "packets": [packet],
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
+
     def test_sdp_commands_model_fields_media_and_session_id(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),

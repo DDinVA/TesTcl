@@ -9442,7 +9442,7 @@ STREAM_EXPRESSION_MAX_BYTES = 64 * 1024
 STREAM_MAX_EXPRESSION_PAIRS = 128
 CATEGORY_RESULT_MAX_ITEMS = 128
 CATEGORY_RESULT_MAX_BYTES = 64 * 1024
-PACKET_PROTOCOLS = {"event", "tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "socks", "diameter", "radius", "mr", "gtp", "rtsp", "tds", "qoe", "wire"}
+PACKET_PROTOCOLS = {"event", "tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "socks", "diameter", "radius", "mr", "gtp", "rtsp", "tds", "qoe", "l7check", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -9536,6 +9536,10 @@ PACKET_PROTOCOL_FIELDS = {
     },
     "qoe": {
         "qoe",
+    },
+    "l7check": {
+        "payload_hex",
+        "l7_protocol",
     },
     "icap": {
         "payload_hex",
@@ -9799,6 +9803,8 @@ PACKET_EVENT_ADAPTERS = {
     "SERVER_DATA": "server payload (TCP or generic UDP)",
     "TDS_REQUEST": "structured TDS request message",
     "TDS_RESPONSE": "structured TDS response message",
+    "L7CHECK_CLIENT_DATA": "L7 check client ingress data",
+    "L7CHECK_SERVER_DATA": "L7 check server ingress data",
     "CLIENTSSL_CLIENTHELLO": "TLS client hello",
     "CLIENTSSL_CLIENTCERT": "TLS client certificate",
     "CLIENTSSL_HANDSHAKE": "TLS client handshake",
@@ -13569,7 +13575,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             raise EmulatorInputError(
                 f"unsupported packet {index} field(s): {', '.join(unknown)}"
             )
-        if protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", "socks", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and "payload" in packet and "payload_hex" in packet:
+        if protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", "socks", "l7check", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and "payload" in packet and "payload_hex" in packet:
             raise EmulatorInputError(
                 f"packet {index} {protocol.upper()} packets must use payload or payload_hex, not both"
             )
@@ -13646,7 +13652,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     f"packet {index} {protocol.upper()} payload exceeds "
                     f"{STARTTLS_PAYLOAD_MAX_BYTES} bytes"
                 )
-            if protocol in {"ntlm", "protocol_inspection", "classification", "category"} and len(
+            if protocol in {"l7check", "ntlm", "protocol_inspection", "classification", "category"} and len(
                 normalised["payload"].encode("utf-8")
             ) > STREAM_MAX_BYTES:
                 raise EmulatorInputError(
@@ -13799,7 +13805,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     else:
                         options[canonical_id] = _packet_scalar(option_value, "options")
                 normalised[field] = options
-            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", "socks", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
+            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", "socks", "l7check", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
                 value = _require_string(packet[field], f"packet {index} payload_hex")
                 if len(value) % 2:
                     raise EmulatorInputError(
@@ -14202,6 +14208,19 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = _normalise_qoe_packet(
                     packet[field], f"packet {index} qoe"
                 )
+            elif protocol == "l7check" and field == "l7_protocol":
+                value = _require_string(
+                    packet[field], f"packet {index} l7_protocol"
+                )
+                if "\x00" in value:
+                    raise EmulatorInputError(
+                        f"packet {index} l7_protocol cannot contain NUL bytes"
+                    )
+                if len(value.encode("utf-8")) > 256:
+                    raise EmulatorInputError(
+                        f"packet {index} l7_protocol exceeds 256 bytes"
+                    )
+                normalised[field] = value
             elif protocol == "icap" and field == "status":
                 value = packet[field]
                 if isinstance(value, bool) or not isinstance(value, int) or not 100 <= value <= 999:
@@ -16256,7 +16275,7 @@ class EmulatorSession:
         def install_state_layer(layer: str, values: dict[str, str]) -> None:
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "rtsp", "cache", "datagram", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
+                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "l7check", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "rtsp", "cache", "datagram", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -16500,7 +16519,7 @@ class EmulatorSession:
         protocol = packet["protocol"]
         if protocol == "sip" and packet.get("transport", "tcp") == "udp":
             connection.update({"protocol": "17", "transport": "udp"})
-        elif protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "rtsp", "ftp", "icap", "socks", "qoe", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}:
+        elif protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "rtsp", "ftp", "icap", "socks", "qoe", "l7check", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol == "sctp":
             connection.update({"protocol": "132", "transport": "sctp"})
@@ -16553,6 +16572,7 @@ class EmulatorSession:
                 "classification",
                 "category",
                 "qoe",
+                "l7check",
             }
             else 132
             if packet["protocol"] == "sctp"
@@ -16777,6 +16797,16 @@ class EmulatorSession:
                 field: _packet_scalar(value, f"qoe.{field}")
                 for field, value in packet["qoe"].items()
             }
+        elif protocol == "l7check":
+            l7check_state: dict[str, Any] = {}
+            if "l7_protocol" in packet:
+                l7check_state["protocol"] = packet["l7_protocol"]
+            payload = packet.get("_wire_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                payload = str(packet.get("payload", "")).encode("utf-8")
+            l7check_state["payload"] = bytes(payload)
+            l7check_state["payload_length"] = str(len(payload))
+            state["l7check"] = l7check_state
         elif protocol in {"dhcpv4", "dhcpv6"}:
             payload = packet.get("_wire_payload")
             if not isinstance(payload, (bytes, bytearray)):
@@ -17482,7 +17512,7 @@ class EmulatorSession:
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
-        if packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp", "ftp", "icap", "socks", "qoe", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}:
+        if packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp", "ftp", "icap", "socks", "qoe", "l7check", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}:
             return
         source = packet["source"]
         destination = packet["destination"]
@@ -17588,7 +17618,7 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "socks", "qoe", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "socks", "qoe", "l7check", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
@@ -17667,7 +17697,7 @@ class EmulatorSession:
         packet_has_tcp_layer = (
             packet["protocol"] in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp", "ftp", "socks", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}
             or (packet["protocol"] == "sip" and packet.get("transport", "tcp") == "tcp")
-            or packet["protocol"] == "qoe"
+            or packet["protocol"] in {"qoe", "l7check"}
         )
         accepted_state = (
             self._packet_event_state(packet)
@@ -19245,6 +19275,29 @@ class EmulatorSession:
                 entry["events"].append(event_result)
                 if not event_result.get("fired") and event_result.get("reason") == "profile_gate":
                     entry["ignored"] = "QOE profile is not attached"
+                finish_packet_connection(packet, entry, index)
+                continue
+
+            if protocol == "l7check":
+                self._activate_packet_connection(session, packet, entry["events"])
+                if direction == "server_to_client" and not self._server_connection_open:
+                    self._activate_packet_server_connection(
+                        session, packet, entry["events"], emit_init=True
+                    )
+                event_name = (
+                    "L7CHECK_CLIENT_DATA"
+                    if direction == "client_to_server"
+                    else "L7CHECK_SERVER_DATA"
+                )
+                event_result = self._fire_event_on_worker(
+                    session, event_name, self._packet_event_state(packet)
+                )
+                entry["events"].append(event_result)
+                if not event_result.get("fired") and event_result.get("reason") == "profile_gate":
+                    entry["ignored"] = "L7CHECK profile is not attached"
+                l7check_state = event_result.get("state", {}).get("l7check", {})
+                if "protocol" in l7check_state:
+                    entry["l7_protocol"] = l7check_state["protocol"]
                 finish_packet_connection(packet, entry, index)
                 continue
 

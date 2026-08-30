@@ -1499,6 +1499,23 @@ classification is performed.
 session has the `L7CHECK` or `CONNECTOR` profile. The value persists across
 events in one connection and is reset when a new client connection starts.
 
+Packet replay can emit the two data events from structured `l7check` packets:
+
+```json
+{
+  "protocol": "l7check",
+  "direction": "client_to_server",
+  "l7_protocol": "http",
+  "payload": "GET / HTTP/1.1\r\n\r\n"
+}
+```
+
+Each packet emits `L7CHECK_CLIENT_DATA` or `L7CHECK_SERVER_DATA` according to
+its direction. `l7_protocol` is optional; when supplied it seeds
+`L7CHECK::protocol`, while a value changed by the iRule persists into later
+packets in the same connection. The adapter supplies the payload and label; it
+does not classify arbitrary bytes or reproduce the BIG-IP L7 check engine.
+
 The link commands read a caller-supplied `link` event-state layer:
 
 ```json
