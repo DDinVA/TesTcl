@@ -15223,6 +15223,7 @@ class EmulatorSession:
         self._call_lock = threading.RLock()
         self._closed = False
         self._name_resolution_dispatching = False
+        self._tcp_notify_dispatching = False
         self._thread = threading.Thread(
             target=self._worker_main,
             name="testcl-irule-session",
@@ -16217,6 +16218,29 @@ class EmulatorSession:
         event_errors_before = len(_event_error_snapshot(session))
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
         event_result = session.fire_event(event_name)
+        tcp_notifications: list[dict[str, Any]] = []
+        if not self._tcp_notify_dispatching:
+            self._tcp_notify_dispatching = True
+            try:
+                notification_dispatches = 0
+                while True:
+                    notification_event = session.eval_tcl(
+                        "::itest::semantic::tcp_notify_pop"
+                    )
+                    if notification_event == "":
+                        break
+                    if notification_dispatches >= 32:
+                        raise EmulatorInputError(
+                            "TCP::notify exceeded the 32-event dispatch limit"
+                        )
+                    notification_dispatches += 1
+                    tcp_notifications.append(
+                        self._fire_event_on_worker(
+                            session, notification_event, {}, packet
+                        )
+                    )
+            finally:
+                self._tcp_notify_dispatching = False
         if not self._name_resolution_dispatching:
             self._name_resolution_dispatching = True
             try:
@@ -16307,6 +16331,7 @@ class EmulatorSession:
             "fired": bool(event_result.fired),
             "reason": event_result.reason,
             "events_fired": fired_events[fired_before:],
+            "notifications": tcp_notifications,
             "state": state_snapshot,
             "decisions": [
                 entry if not isinstance(entry, tuple) else list(entry)

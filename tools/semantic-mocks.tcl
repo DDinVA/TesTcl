@@ -243,6 +243,7 @@ namespace eval ::itest::semantic {
     variable udp_unused_port_next 40000
     variable tcp_unused_port_next 49152
     variable tcp_unused_ports [dict create]
+    variable tcp_notifications {}
     variable rtsp_collection_requested 0
     variable rtsp_collection_length 0
     variable rtsp_release_requested 0
@@ -16811,9 +16812,12 @@ namespace eval ::itest::semantic {
             LB_QUEUED PERSIST_DOWN
             SERVERSSL_DATA SERVERSSL_HANDSHAKE SERVERSSL_SERVERCERT
             SERVERSSL_SERVERHELLO HTTP_RESPONSE HTTP_RESPONSE_CONTINUE HTTP_RESPONSE_DATA
-            HTTP_RESPONSE_RELEASE
+            HTTP_RESPONSE_RELEASE USER_REQUEST
         }} {
             return server
+        }
+        if {$::itest::current_event eq "USER_RESPONSE"} {
+            return client
         }
         return client
     }
@@ -16910,6 +16914,52 @@ namespace eval ::itest::semantic {
     proc tcp_clear_event_state {} {
         unset -nocomplain ::state::vars::connection_vars(__testcl_tcp_released)
         unset -nocomplain ::state::vars::connection_vars(__testcl_tcp_emissions)
+    }
+
+    proc tcp_notify_command {args} {
+        variable tcp_notifications
+        if {[llength $args] != 1} {
+            error "TCP::notify requires request, response, or eom"
+        }
+        set notification [string tolower [lindex $args 0]]
+        if {$notification eq "eom"} {
+            if {$::itest::current_event ni {
+                CLIENT_DATA CLIENTSSL_DATA SERVER_DATA SERVERSSL_DATA
+            }} {
+                error "TCP::notify eom is not valid in $::itest::current_event"
+            }
+            ::itest::log_decision tcp notify eom
+            return ""
+        }
+        if {$notification ni {request response}} {
+            error "TCP::notify requires request, response, or eom"
+        }
+        if {$::itest::current_event ni {
+            CLIENT_DATA CLIENTSSL_DATA SERVER_DATA SERVERSSL_DATA
+            USER_REQUEST USER_RESPONSE
+        }} {
+            error "TCP::notify $notification is not valid in $::itest::current_event"
+        }
+        set expected_side [expr {$notification eq "request" ? "client" : "server"}]
+        if {[_tcp_side] ne $expected_side} {
+            error "TCP::notify $notification is not valid on the [_tcp_side] side"
+        }
+        set event_name [expr {
+            $notification eq "request" ? "USER_REQUEST" : "USER_RESPONSE"
+        }]
+        lappend tcp_notifications $event_name
+        ::itest::log_decision tcp notify [list $notification $event_name]
+        return ""
+    }
+
+    proc tcp_notify_pop {} {
+        variable tcp_notifications
+        if {[llength $tcp_notifications] == 0} {
+            return ""
+        }
+        set event_name [lindex $tcp_notifications 0]
+        set tcp_notifications [lrange $tcp_notifications 1 end]
+        return $event_name
     }
 
     proc tcp_event_released {} {
@@ -19530,6 +19580,8 @@ namespace eval ::itest::semantic {
     }
 
     proc tcp_reset_transport {} {
+        variable tcp_notifications
+        set tcp_notifications {}
         namespace eval ::state::tcp {
             set abc enable
             set analytics disable
@@ -25621,6 +25673,7 @@ foreach {name proc_name} {
     HTTP::username ::itest::semantic::http_username
     HTTP::cookie ::itest::cmd::http_cookie
     TCP::collect ::itest::cmd::tcp_collect
+    TCP::notify ::itest::semantic::tcp_notify_command
     TCP::abc ::itest::semantic::tcp_abc_command
     TCP::analytics ::itest::semantic::tcp_analytics_command
     TCP::autowin ::itest::semantic::tcp_autowin_command

@@ -16748,6 +16748,88 @@ when HTTP_RESPONSE {
                         tcl_lsp_root=self.tcl_lsp_root,
                     )
 
+    def test_tcp_notify_dispatches_user_events_after_current_handler(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED {
+    TCP::collect
+}
+when CLIENT_DATA {
+    log local0. before
+    TCP::release
+    TCP::notify request
+    log local0. after
+}
+when USER_REQUEST {
+    log local0. user-request
+    TCP::notify response
+}
+when USER_RESPONSE {
+    log local0. user-response
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.10", "port": 40000},
+                        "destination": {"address": "192.0.2.20", "port": 443},
+                        "payload": "request-data",
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        entry = result["trace"][0]
+        client_data = next(
+            event for event in entry["events"] if event["event"] == "CLIENT_DATA"
+        )
+        self.assertEqual(
+            client_data["events_fired"],
+            ["CLIENT_DATA", "USER_REQUEST", "USER_RESPONSE"],
+        )
+        self.assertEqual(
+            [notification["event"] for notification in client_data["notifications"]],
+            ["USER_REQUEST", "USER_RESPONSE"],
+        )
+        user_request, user_response = client_data["notifications"]
+        self.assertTrue(any("after" in log for log in client_data["logs"]))
+        self.assertTrue(any("user-request" in log for log in user_request["logs"]))
+        self.assertTrue(any("user-response" in log for log in user_response["logs"]))
+
+    def test_tcp_notify_rejects_wrong_side_and_event_context(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP"],
+                "irule": "when CLIENT_DATA { TCP::notify response }",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            with self.assertRaisesRegex(self.adapter.EmulatorInputError, "not valid on the client side"):
+                session.fire_event("CLIENT_DATA", {"connection": {"client_payload": "x"}})
+        finally:
+            session.close()
+
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP"],
+                "irule": "when CLIENT_ACCEPTED { TCP::notify request }",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            with self.assertRaisesRegex(self.adapter.EmulatorInputError, "not valid in CLIENT_ACCEPTED"):
+                session.fire_event("CLIENT_ACCEPTED", {})
+        finally:
+            session.close()
+
 
 if __name__ == "__main__":
     unittest.main()

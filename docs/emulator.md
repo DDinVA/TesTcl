@@ -98,6 +98,14 @@ The current cursor is visible in `result.semantic.pool_selection` as
 `next_index`. It is session-scoped, so repeated requests can exercise
 keep-alive distribution while a new emulator session starts from index zero.
 
+`TCP::notify request` and `TCP::notify response` queue the corresponding
+`USER_REQUEST` or `USER_RESPONSE` event after the current handler returns.
+Queued notifications are returned in dispatch order under an event's
+`notifications` array, including notifications raised by a user-event handler,
+and are bounded to 32 dispatches per event chain. `TCP::notify eom` records a
+message boundary marker without creating a user event; no real message-based
+load-balancing socket or asynchronous scheduler is created.
+
 HTTP requests can model load-balancer causality with bounded per-request inputs.
 `persist_down` supplies the persistence target (`member` is required and `pool`
 is optional); it causes `PERSIST_DOWN` before `LB_SELECTED`. `lb_queue` supplies
