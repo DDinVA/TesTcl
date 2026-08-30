@@ -3268,7 +3268,9 @@ def _configure_aaa(session: Any, aaa: dict[str, Any]) -> None:
     session.eval_tcl("::itest::semantic::aaa_configure " + _tcl_list(values))
 
 
-def _configure_access(session: Any, access: dict[str, Any]) -> None:
+def _configure_access(
+    session: Any, access: dict[str, Any], *, auto_interest: bool = False
+) -> None:
     """Install deterministic APM access-policy and session defaults."""
     scalar_values = [
         "1" if access["enabled"] else "0",
@@ -3278,6 +3280,7 @@ def _configure_access(session: Any, access: dict[str, Any]) -> None:
         "1" if access["policy_uri"] else "0",
         access["flow_id"],
         access["ephemeral_auth_password"],
+        "1" if auto_interest else "0",
     ]
     session_data: list[str] = []
     for key, value in access["session_data"].items():
@@ -7919,6 +7922,65 @@ def _normalise_access(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalise_access_request(raw: Any) -> dict[str, Any]:
+    """Normalize per-request APM access-policy and ACL overrides."""
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("request.access must be an object")
+    allowed = {
+        "acl_result", "acl_lookup", "acl_matched", "policy_result",
+        "policy_agent_id", "policy_uri", "flow_id",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            "request.access unsupported field(s): " + ", ".join(unknown)
+        )
+
+    def string_field(name: str, default: str = "") -> str:
+        return _normalise_asm_string(raw.get(name, default), f"request.access.{name}")
+
+    acl_result = string_field("acl_result", "Allow")
+    if acl_result not in ACCESS_ACL_RESULTS:
+        raise EmulatorInputError(
+            "request.access.acl_result must be one of: "
+            + ", ".join(sorted(ACCESS_ACL_RESULTS))
+        )
+    policy_result = string_field("policy_result", "allow")
+    if policy_result not in ACCESS_POLICY_RESULTS:
+        raise EmulatorInputError(
+            "request.access.policy_result must be one of: "
+            + ", ".join(sorted(ACCESS_POLICY_RESULTS))
+        )
+    policy_uri = raw.get("policy_uri", False)
+    if not isinstance(policy_uri, bool):
+        raise EmulatorInputError("request.access.policy_uri must be a boolean")
+
+    def string_list(name: str) -> list[str]:
+        value = raw.get(name, [])
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise EmulatorInputError(f"request.access.{name} must be an array of strings")
+        if any("\x00" in item for item in value):
+            raise EmulatorInputError(f"request.access.{name} values cannot contain NUL")
+        return list(value)
+
+    result: dict[str, Any] = {}
+    if "acl_result" in raw:
+        result["acl_result"] = acl_result
+    if "acl_lookup" in raw:
+        result["acl_lookup"] = string_list("acl_lookup")
+    if "acl_matched" in raw:
+        result["acl_matched"] = string_list("acl_matched")
+    if "policy_result" in raw:
+        result["policy_result"] = policy_result
+    if "policy_agent_id" in raw:
+        result["policy_agent_id"] = string_field("policy_agent_id")
+    if "policy_uri" in raw:
+        result["policy_uri"] = policy_uri
+    if "flow_id" in raw:
+        result["flow_id"] = string_field("flow_id")
+    return result
+
+
 def _normalise_route(raw: Any) -> dict[str, Any]:
     """Normalize deterministic route/congestion-metric cache inputs."""
     if raw is None:
@@ -8649,6 +8711,7 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
         "lb_queue",
         "dosl7",
         "antifraud",
+        "access",
     }
     unknown = sorted(set(request) - allowed - {"close_before", "close_after", "new_connection"})
     if unknown:
@@ -8712,6 +8775,8 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
         kwargs["dosl7"] = _normalise_dosl7_request(request["dosl7"])
     if "antifraud" in request:
         kwargs["antifraud"] = _normalise_antifraud_request(request["antifraud"])
+    if "access" in request:
+        kwargs["access"] = _normalise_access_request(request["access"])
     return kwargs
 
 
@@ -15474,7 +15539,13 @@ class EmulatorSession:
                 _configure_antifraud(session, self._antifraud)
                 _configure_auth(session, self._auth)
                 _configure_aaa(session, self._aaa)
-                _configure_access(session, self._access)
+                access_auto_interest = bool(
+                    "ACCESS::" in self._prepared_source
+                    or any(event.startswith("ACCESS_") for event in self._registered_events)
+                )
+                _configure_access(
+                    session, self._access, auto_interest=access_auto_interest
+                )
                 _configure_ip(session, self._ip_config)
                 _configure_route(session, self._route_config)
                 _configure_http_proxy(session, self._http_proxy_config)
@@ -15591,6 +15662,7 @@ class EmulatorSession:
         if request.get("close_before") or request.get("new_connection"):
             if self._connection_open:
                 session.close_connection()
+                session.eval_tcl("::itest::semantic::access_auto_close_session")
                 session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
                 session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
                 session.eval_tcl("::itest::semantic::diagnostics_reset_connection")
@@ -15651,6 +15723,7 @@ class EmulatorSession:
         lb_queue = kwargs.pop("lb_queue", None)
         dosl7_request = kwargs.pop("dosl7", None)
         antifraud_request = kwargs.pop("antifraud", None)
+        access_request = kwargs.pop("access", None)
         antifraud_login = self._antifraud["login"]
         antifraud_alert = self._antifraud["alert"]
         if antifraud_request is not None:
@@ -15744,6 +15817,20 @@ class EmulatorSession:
                     f"{_tcl_quote('1' if antifraud_alert else '0')}"
                 )
                 session.eval_tcl("::itest::semantic::access_prepare_request")
+                if access_request is not None:
+                    access_args: list[str] = []
+                    for field, value in access_request.items():
+                        access_args.append(_tcl_quote(field))
+                        if isinstance(value, list):
+                            access_args.append(_tcl_list(value))
+                        elif isinstance(value, bool):
+                            access_args.append(_tcl_quote("1" if value else "0"))
+                        else:
+                            access_args.append(_tcl_quote(str(value)))
+                    session.eval_tcl(
+                        "::itest::semantic::access_prepare_request "
+                        + " ".join(access_args)
+                    )
                 session.eval_tcl("::itest::semantic::websso_prepare_request")
                 session.eval_tcl(
                     f"::itest::semantic::prepare_lb_failure {_tcl_quote(attempt_failure)}"
@@ -15934,6 +16021,8 @@ class EmulatorSession:
                     retry_kwargs["dosl7"] = dosl7_request
                 if antifraud_request is not None:
                     retry_kwargs["antifraud"] = antifraud_request
+                if access_request is not None:
+                    retry_kwargs["access"] = access_request
                 if "http2" in original_kwargs:
                     retry_kwargs.setdefault("http2", original_kwargs["http2"])
                 kwargs = retry_kwargs
@@ -15959,6 +16048,7 @@ class EmulatorSession:
             connection_active = session.eval_tcl("set ::orch::_connection_active")
             if str(connection_active) == "1":
                 session.fire_event("CLIENT_CLOSED")
+                session.eval_tcl("::itest::semantic::access_auto_close_session")
                 close_errors = _event_error_snapshot(session)
                 if len(close_errors) > event_errors_before_close:
                     first_error = close_errors[event_errors_before_close]
@@ -16034,7 +16124,23 @@ class EmulatorSession:
                 "exhausted": retry_exhausted,
             }
         if request.get("close_after"):
+            close_events_before = len(
+                _split_tcl_list(session.eval_tcl("::itest::get_fired_events"))
+            )
+            close_decisions_before = len(session.get_decisions())
+            close_logs_before = len(session.get_logs())
             session.close_connection()
+            session.eval_tcl("::itest::semantic::access_auto_close_session")
+            close_events_after = _split_tcl_list(
+                session.eval_tcl("::itest::get_fired_events")
+            )
+            result["events_fired"].extend(
+                close_events_after[close_events_before:]
+            )
+            result["decisions"].extend(
+                session.get_decisions()[close_decisions_before:]
+            )
+            result["logs"].extend(session.get_logs()[close_logs_before:])
             session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
             session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
             session.eval_tcl("::itest::semantic::diagnostics_reset_connection")

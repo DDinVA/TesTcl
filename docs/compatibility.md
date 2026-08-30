@@ -563,8 +563,10 @@ variables, ACL lookups/results, policy metadata, SAML values, request
 enable/disable, and response commitment are inspectable in the semantic
 snapshot. Password-like session keys are redacted there. Ephemeral-auth and
 OAuth operations use deterministic placeholders and do not perform external
-authentication or cryptographic signing. The model does not execute an APM
-policy graph, enforce production ACLs, expire sessions against wall-clock
+authentication or cryptographic signing. The HTTP request runner additionally
+models the 17.5 session-start, policy-completion, per-request ACL outcome, and
+session-close boundaries, with request-level ACL/policy fixture overrides.
+This does not execute an APM policy graph, expire sessions against wall-clock
 time, or reproduce SAML/OAuth/AAA network behavior.
 The TMOS 17.5 `ACCESS2::access2_proc` command is also modeled for
 `ACCESS2_POLICY_EXPRESSION_EVAL`: the direct event state supplies the selected

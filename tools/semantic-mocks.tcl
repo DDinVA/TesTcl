@@ -470,6 +470,7 @@ namespace eval ::itest::semantic {
     variable access_default_acl_matched {}
     variable access_acl_matched {}
     variable access_acl_evaluated {}
+    variable access_acl_auto_evaluated 0
     variable access_default_policy_result allow
     variable access_policy_result allow
     variable access_default_policy_agent_id ""
@@ -484,8 +485,11 @@ namespace eval ::itest::semantic {
     variable access_session_data [dict create]
     variable access_default_perflow [dict create]
     variable access_perflow [dict create]
+    variable access_auto_interest 0
     variable access_sessions [dict create]
     variable access_current_sid ""
+    variable access_auto_sid ""
+    variable access_auto_policy_agent_fired 0
     variable access_next_sid 0
     variable access_ephemeral_auth_password temporary-password
     variable access_ephemeral [dict create]
@@ -14152,17 +14156,19 @@ namespace eval ::itest::semantic {
         variable access_default_flow_id
         variable access_flow_id
         variable access_ephemeral_auth_password
+        variable access_auto_interest
         variable access_default_session_data
         variable access_session_data
         variable access_default_perflow
         variable access_perflow
-        if {[llength $raw] != 7} { error "invalid ACCESS configuration" }
-        lassign $raw enabled acl_result policy_result policy_agent_id policy_uri flow_id ephemeral_password
+        if {[llength $raw] != 8} { error "invalid ACCESS configuration" }
+        lassign $raw enabled acl_result policy_result policy_agent_id policy_uri flow_id ephemeral_password auto_interest
         if {$enabled ni {0 1}} { error "ACCESS enabled state must be boolean" }
         if {$acl_result ni {Allow Reject}} { error "ACCESS ACL result is invalid" }
         if {$policy_result ni {allow deny redirect}} { error "ACCESS policy result is invalid" }
         if {$policy_uri ni {0 1}} { error "ACCESS policy URI state must be boolean" }
         if {$ephemeral_password eq ""} { error "ACCESS ephemeral auth password cannot be empty" }
+        if {$auto_interest ni {0 1}} { error "ACCESS auto-interest state must be boolean" }
         if {[llength $session_data] % 2 || [llength $perflow] % 2} {
             error "ACCESS data requires key/value pairs"
         }
@@ -14183,6 +14189,7 @@ namespace eval ::itest::semantic {
         set access_default_flow_id $flow_id
         set access_flow_id $flow_id
         set access_ephemeral_auth_password $ephemeral_password
+        set access_auto_interest $auto_interest
         set access_default_session_data [dict create {*}$session_data]
         set access_session_data $access_default_session_data
         set access_default_perflow [dict create {*}$perflow]
@@ -14300,6 +14307,7 @@ namespace eval ::itest::semantic {
         variable access_default_acl_matched
         variable access_acl_matched
         variable access_acl_evaluated
+        variable access_acl_auto_evaluated
         variable access_default_policy_result
         variable access_policy_result
         variable access_default_policy_agent_id
@@ -14309,13 +14317,14 @@ namespace eval ::itest::semantic {
         variable access_default_flow_id
         variable access_flow_id
         variable access_request_enabled
-        variable access_restrict_irule_events
         variable access_default_session_data
         variable access_session_data
         variable access_default_perflow
         variable access_perflow
         variable access_sessions
         variable access_current_sid
+        variable access_auto_sid
+        variable access_auto_policy_agent_fired
         variable access_next_sid
         variable access_ephemeral
         variable access_ephemeral_next
@@ -14327,16 +14336,18 @@ namespace eval ::itest::semantic {
         set access_acl_lookup $access_default_acl_lookup
         set access_acl_matched $access_default_acl_matched
         set access_acl_evaluated {}
+        set access_acl_auto_evaluated 0
         set access_policy_result $access_default_policy_result
         set access_policy_agent_id $access_default_policy_agent_id
         set access_policy_uri $access_default_policy_uri
         set access_flow_id $access_default_flow_id
         set access_request_enabled 1
-        set access_restrict_irule_events 1
         set access_session_data $access_default_session_data
         set access_perflow $access_default_perflow
         set access_sessions [dict create]
         set access_current_sid ""
+        set access_auto_sid ""
+        set access_auto_policy_agent_fired 0
         set access_next_sid 0
         set access_ephemeral [dict create]
         set access_ephemeral_next 0
@@ -14345,11 +14356,197 @@ namespace eval ::itest::semantic {
         set access_saml [dict create authn "" assertion "" slo_req "" slo_resp ""]
     }
 
-    proc access_prepare_request {} {
+    proc access_prepare_request {args} {
+        variable access_default_acl_result
+        variable access_acl_result
+        variable access_default_acl_lookup
+        variable access_acl_lookup
+        variable access_default_acl_matched
+        variable access_acl_matched
+        variable access_default_policy_result
+        variable access_policy_result
+        variable access_default_policy_agent_id
+        variable access_policy_agent_id
+        variable access_default_policy_uri
+        variable access_policy_uri
+        variable access_default_flow_id
+        variable access_flow_id
         variable access_request_enabled
         variable access_acl_evaluated
+        variable access_acl_auto_evaluated
+        if {[llength $args] % 2} {
+            error "ACCESS request configuration requires key/value pairs"
+        }
+        set access_acl_result $access_default_acl_result
+        set access_acl_lookup $access_default_acl_lookup
+        set access_acl_matched $access_default_acl_matched
+        set access_policy_result $access_default_policy_result
+        set access_policy_agent_id $access_default_policy_agent_id
+        set access_policy_uri $access_default_policy_uri
+        set access_flow_id $access_default_flow_id
         set access_request_enabled 1
         set access_acl_evaluated {}
+        set access_acl_auto_evaluated 0
+        foreach {key value} $args {
+            switch -exact -- $key {
+                acl_result {
+                    if {$value ni {Allow Reject}} { error "ACCESS request ACL result is invalid" }
+                    set access_acl_result $value
+                }
+                acl_lookup { set access_acl_lookup $value }
+                acl_matched { set access_acl_matched $value }
+                policy_result {
+                    if {$value ni {allow deny redirect}} { error "ACCESS request policy result is invalid" }
+                    set access_policy_result $value
+                }
+                policy_agent_id { set access_policy_agent_id $value }
+                policy_uri {
+                    if {$value ni {0 1}} { error "ACCESS request policy URI state must be boolean" }
+                    set access_policy_uri $value
+                }
+                flow_id { set access_flow_id $value }
+                default { error "unsupported ACCESS request field $key" }
+            }
+        }
+    }
+
+    proc access_auto_flow_enabled {} {
+        variable access_enabled
+        variable access_auto_interest
+        return [expr {[_profile_enabled ACCESS] && $access_enabled && $access_auto_interest}]
+    }
+
+    proc access_auto_start_session {} {
+        variable access_enabled
+        variable access_sessions
+        variable access_current_sid
+        variable access_auto_sid
+        if {![_profile_enabled ACCESS] || !$access_enabled ||
+            $::state::connection::state eq "closing"} { return "" }
+        if {$access_current_sid ne "" && [dict exists $access_sessions $access_current_sid]} {
+            access_auto_policy_agent
+            return $access_current_sid
+        }
+        if {[dict size $access_sessions] > 0} {
+            set sids [lsort -dictionary [dict keys $access_sessions]]
+            set access_current_sid [lindex $sids end]
+            set access_auto_sid ""
+            access_auto_policy_agent
+            return $access_current_sid
+        }
+        set sid [access_session create -flow]
+        if {[dict exists $access_sessions $sid]} {
+            set access_auto_sid $sid
+        }
+        access_auto_policy_agent
+        return $sid
+    }
+
+    proc access_auto_policy_agent {} {
+        variable access_auto_policy_agent_fired
+        variable access_current_sid
+        variable access_sessions
+        if {$access_auto_policy_agent_fired || $access_current_sid eq "" ||
+            ![dict exists $access_sessions $access_current_sid]} {
+            return ""
+        }
+        set access_auto_policy_agent_fired 1
+        if {[lsearch -exact [::itest::registered_events] ACCESS_POLICY_AGENT_EVENT] >= 0} {
+            _access_event ACCESS_POLICY_AGENT_EVENT $access_current_sid
+        }
+        return $access_current_sid
+    }
+
+    proc access_auto_per_request_agent {} {
+        variable access_request_enabled
+        variable access_current_sid
+        variable access_sessions
+        if {!$access_request_enabled || $access_current_sid eq "" ||
+            ![dict exists $access_sessions $access_current_sid]} {
+            return ""
+        }
+        if {[lsearch -exact [::itest::registered_events] ACCESS_PER_REQUEST_AGENT_EVENT] >= 0} {
+            _access_event ACCESS_PER_REQUEST_AGENT_EVENT $access_current_sid
+        }
+        return $access_current_sid
+    }
+
+    proc access_auto_complete_policy {} {
+        variable access_request_enabled
+        variable access_current_sid
+        variable access_sessions
+        variable access_policy_result
+        if {![_profile_enabled ACCESS] || !$access_request_enabled ||
+            (![dict exists $access_sessions $access_current_sid] &&
+             [dict size $access_sessions] == 0)} {
+            return ""
+        }
+        if {$access_current_sid eq "" ||
+            ![dict exists $access_sessions $access_current_sid]} {
+            access_auto_start_session
+        }
+        set session [dict get $access_sessions $access_current_sid]
+        if {[dict get $session policy_profile] ne ""} {
+            return [dict get $session state]
+        }
+        access_policy evaluate -sid $access_current_sid -profile /Common/emulator
+        set outcome $access_policy_result
+        if {$outcome eq "deny" && !$::state::http::response_committed} {
+            set ::state::http::response::status 403
+            set ::state::http::response::reason Forbidden
+            set ::state::http::response_committed 1
+            set ::state::connection::state closing
+        } elseif {$outcome eq "redirect" && !$::state::http::response_committed} {
+            set ::state::http::response::status 302
+            set ::state::http::response::reason Found
+            set ::state::http::response_committed 1
+            set ::state::connection::state closing
+        }
+        return $outcome
+    }
+
+    proc access_auto_acl {} {
+        variable access_request_enabled
+        variable access_current_sid
+        variable access_sessions
+        variable access_acl_result
+        variable access_acl_lookup
+        variable access_acl_evaluated
+        variable access_acl_auto_evaluated
+        if {![_profile_enabled ACCESS] || !$access_request_enabled} { return "" }
+        if {$access_current_sid eq "" && [dict size $access_sessions] > 0} {
+            access_auto_start_session
+        }
+        if {$access_acl_auto_evaluated} { return $access_acl_result }
+        set access_acl_auto_evaluated 1
+        set access_acl_evaluated $access_acl_lookup
+        ::itest::log_decision access acl_check $access_acl_result
+        set event_name [expr {$access_acl_result eq "Allow" ? "ACCESS_ACL_ALLOWED" : "ACCESS_ACL_DENIED"}]
+        if {[lsearch -exact [::itest::registered_events] $event_name] >= 0} {
+            set event_result [::itest::_testcl_fire_event_orig $event_name]
+            ::itest::semantic::event_errors_record $event_name $event_result
+        }
+        if {$access_acl_result eq "Reject" && !$::state::http::response_committed} {
+            set ::state::http::response::status 403
+            set ::state::http::response::reason Forbidden
+            set ::state::http::response_committed 1
+            set ::state::connection::state closing
+        }
+        return $access_acl_result
+    }
+
+    proc access_auto_close_session {} {
+        variable access_auto_sid
+        variable access_sessions
+        variable access_current_sid
+        if {$access_auto_sid eq ""} { return "" }
+        set sid $access_auto_sid
+        set access_auto_sid ""
+        if {![dict exists $access_sessions $sid]} { return "" }
+        _access_event ACCESS_SESSION_CLOSED $sid
+        dict unset access_sessions $sid
+        if {$access_current_sid eq $sid} { set access_current_sid "" }
+        return $sid
     }
 
     proc _access_current_sid {command args} {
@@ -14735,11 +14932,13 @@ namespace eval ::itest::semantic {
                 return TRUE
             }
             remove {
+                variable access_auto_sid
                 set sid [_access_current_sid ACCESS::session {*}$rest]
                 set session [_access_require_session $sid ACCESS::session]
                 _access_event ACCESS_SESSION_CLOSED $sid
                 dict unset access_sessions $sid
                 if {$access_current_sid eq $sid} { set access_current_sid "" }
+                if {$access_auto_sid eq $sid} { set access_auto_sid "" }
                 ::itest::log_decision access session_remove $sid
                 return ""
             }
@@ -25143,6 +25342,26 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
         proc ::itest::registered_events {} {
             set events [::itest::_testcl_registered_events_orig]
             if {[info exists ::itest::semantic::automatic_http_flow]} {
+                # ACCESS is a profile-driven lifecycle.  The upstream
+                # request chain does not include CLIENT_ACCEPTED or
+                # LB_SELECTED unless the rule registers those events, so
+                # make the transport boundaries observable when an ACCESS
+                # profile is active.  The wrapper below still only runs
+                # handlers that the rule actually defines.
+                if {[::itest::semantic::access_auto_flow_enabled] &&
+                    [lsearch -exact $events CLIENT_ACCEPTED] < 0} {
+                    lappend events CLIENT_ACCEPTED
+                }
+                if {[::itest::semantic::access_auto_flow_enabled] &&
+                    [lsearch -exact $events HTTP_REQUEST] < 0} {
+                    lappend events HTTP_REQUEST
+                }
+                if {[::itest::semantic::access_auto_flow_enabled] &&
+                    ([lsearch -exact $events ACCESS_ACL_ALLOWED] >= 0 ||
+                     [lsearch -exact $events ACCESS_ACL_DENIED] >= 0) &&
+                    [lsearch -exact $events LB_SELECTED] < 0} {
+                    lappend events LB_SELECTED
+                }
                 if {$::itest::semantic::lb_persist_down_pending &&
                     [lsearch -exact $events PERSIST_DOWN] < 0} {
                     lappend events PERSIST_DOWN
@@ -25327,10 +25546,18 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::event_errors_record REWRITE_RESPONSE $rewrite_result
         }
         set result [uplevel 1 [list ::itest::_testcl_fire_event_orig $event_name]]
+        if {$gated && $event_name eq "CLIENT_ACCEPTED"} {
+            ::itest::semantic::access_auto_start_session
+        }
+        if {$gated && $event_name eq "CLIENT_CLOSED"} {
+            ::itest::semantic::access_auto_close_session
+        }
         if {$gated && $event_name eq "LB_QUEUED"} {
             ::itest::semantic::_maybe_fire_lb_failed_for_queue
         }
         if {$gated && $event_name eq "HTTP_REQUEST"} {
+            ::itest::semantic::access_auto_per_request_agent
+            ::itest::semantic::access_auto_complete_policy
             if {$rewrite_auto &&
                 [lsearch -exact [::itest::registered_events] REWRITE_REQUEST_DONE] >= 0} {
                 set ::itest::semantic::rewrite_injecting 1
@@ -25354,6 +25581,8 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::cache_request_event
             ::itest::semantic::compression_process_request
             ::itest::semantic::httplog_record request
+        } elseif {$gated && $event_name eq "LB_SELECTED"} {
+            ::itest::semantic::access_auto_acl
         } elseif {$gated && $event_name eq "HTTP_RESPONSE"} {
             if {[::itest::semantic::_profile_enabled HTML]} {
                 ::itest::semantic::html_process_response

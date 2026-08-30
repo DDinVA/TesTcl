@@ -964,12 +964,37 @@ the deterministic ephemeral-auth password prefix:
 }
 ```
 
+When the HTTP request runner is used and the rule contains ACCESS commands or
+ACCESS event handlers, it also models the surrounding lifecycle. A connection
+gets one deterministic session and emits `ACCESS_SESSION_STARTED`; the first
+request completes the policy before load balancing; and each request evaluates
+the configured ACL after `LB_SELECTED`, emitting either
+`ACCESS_ACL_ALLOWED` or `ACCESS_ACL_DENIED`. `close_after` removes an
+automatically created session and emits `ACCESS_SESSION_CLOSED`. A request can
+override the ACL and policy fixture without changing the scenario defaults:
+
+```json
+{
+  "uri": "/admin",
+  "access": {
+    "acl_result": "Reject",
+    "acl_lookup": ["/Common/admin"]
+  }
+}
+```
+
+Policy `deny` and ACL `Reject` produce a deterministic 403 response unless an
+iRule handler commits a different response with `ACCESS::respond`; policy
+`redirect` produces a deterministic 302. Policy completion is once per
+session, while ACL evaluation is per request, including keep-alive requests.
+
 `ACCESS::disable`, `ACCESS::enable`, `ACCESS::respond`, ACL evaluation,
 per-flow mutation, SAML getters/setters, OAuth signing placeholders, and
 ephemeral-auth create/verify are represented as deterministic test behavior.
 Session snapshots redact values whose keys look like passwords, secrets, or
-tokens. This does not run APM policy evaluation, ACL enforcement, SAML/OAuth
-cryptography, external authentication, or production session expiry.
+tokens. This remains a fixture-driven model: it does not execute a real APM
+policy graph, contact external authentication services, perform SAML/OAuth
+cryptography, or reproduce production session expiry.
 
 ### ACCESS2 policy-expression procedure
 

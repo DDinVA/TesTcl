@@ -5173,7 +5173,7 @@ when HTTP_RESPONSE_DATA {
                     "when ACCESS_SESSION_STARTED { log local0. \"started=[ACCESS::session sid]\" }\n"
                     "when ACCESS_POLICY_COMPLETED { log local0. \"completed=[ACCESS::policy result]\" }"
                 ),
-                "request": {"uri": "/protected"},
+                "request": {"uri": "/protected", "close_after": True},
             },
             tcl_lsp_root=self.tcl_lsp_root,
         )
@@ -5261,6 +5261,138 @@ when HTTP_RESPONSE_DATA {
             with self.subTest(access=access):
                 with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
                     self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+        request_invalid_cases = (
+            ({"acl_result": "deny"}, "request.access.acl_result must be one of"),
+            ({"policy_uri": 1}, "request.access.policy_uri must be a boolean"),
+            ({"acl_lookup": "not-a-list"}, "request.access.acl_lookup must be an array of strings"),
+            ({"unsupported": True}, r"request.access unsupported field\(s\): unsupported"),
+        )
+        for access, message in request_invalid_cases:
+            scenario = dict(base)
+            scenario["requests"] = [{"uri": "/", "access": access}]
+            scenario.pop("request", None)
+            with self.subTest(request_access=access):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+    def test_http_access_lifecycle_creates_session_and_emits_ordered_events(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ACCESS"],
+                "access": {
+                    "acl_lookup": ["/Common/web"],
+                    "acl_matched": ["/Common/web"],
+                    "session_data": {"session.logon.last.username": "alice"},
+                },
+                "irule": (
+                    "when HTTP_REQUEST { ACCESS::acl eval /Common/web }\n"
+                    "when ACCESS_SESSION_STARTED { log local0. \"started=[ACCESS::session sid]\" }\n"
+                    "when ACCESS_POLICY_AGENT_EVENT { log local0. \"agent=[ACCESS::session sid]\" }\n"
+                    "when ACCESS_PER_REQUEST_AGENT_EVENT { log local0. \"per-request=[ACCESS::session sid]\" }\n"
+                    "when ACCESS_POLICY_COMPLETED { log local0. \"policy=[ACCESS::policy result]\" }\n"
+                    "when ACCESS_ACL_ALLOWED { log local0. \"allowed=[ACCESS::session sid]\" }"
+                ),
+                "request": {"uri": "/protected", "close_after": True},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        lifecycle = [
+            event
+            for event in item["events_fired"]
+            if event
+            in {
+                "ACCESS_SESSION_STARTED",
+                "ACCESS_POLICY_AGENT_EVENT",
+                "ACCESS_PER_REQUEST_AGENT_EVENT",
+                "ACCESS_POLICY_COMPLETED",
+                "ACCESS_ACL_ALLOWED",
+                "ACCESS_SESSION_CLOSED",
+            }
+        ]
+        self.assertEqual(
+            lifecycle,
+            [
+                "ACCESS_SESSION_STARTED",
+                "ACCESS_POLICY_AGENT_EVENT",
+                "ACCESS_PER_REQUEST_AGENT_EVENT",
+                "ACCESS_POLICY_COMPLETED",
+                "ACCESS_ACL_ALLOWED",
+                "ACCESS_SESSION_CLOSED",
+            ],
+        )
+        self.assertTrue(any("started=sid-1" in entry for entry in item["logs"]))
+        self.assertTrue(any("agent=sid-1" in entry for entry in item["logs"]))
+        self.assertTrue(any("per-request=sid-1" in entry for entry in item["logs"]))
+        self.assertTrue(any("policy=allow" in entry for entry in item["logs"]))
+        self.assertTrue(any("allowed=sid-1" in entry for entry in item["logs"]))
+        self.assertEqual(item["semantic"]["access"]["session_count"], 1)
+        self.assertEqual(item["semantic"]["access"]["acl_evaluated"], ["/Common/web"])
+
+    def test_http_access_request_override_emits_acl_denial(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ACCESS"],
+                "access": {"acl_result": "Allow"},
+                "irule": "when ACCESS_ACL_DENIED { ACCESS::respond 451 content blocked }",
+                "requests": [
+                    {
+                        "uri": "/blocked",
+                        "access": {
+                            "acl_result": "Reject",
+                            "acl_lookup": ["/Common/deny"],
+                        },
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        self.assertIn("ACCESS_ACL_DENIED", item["events_fired"])
+        self.assertEqual(item["response"]["status"], 451)
+        self.assertEqual(item["response"]["body"], "blocked")
+        self.assertEqual(item["semantic"]["access"]["acl_result"], "Reject")
+        self.assertEqual(item["semantic"]["access"]["acl_evaluated"], ["/Common/deny"])
+
+    def test_http_access_agent_events_follow_session_and_keepalive_multiplicity(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ACCESS"],
+                "irule": (
+                    "when ACCESS_POLICY_AGENT_EVENT { log local0. \"policy-agent\" }\n"
+                    "when ACCESS_PER_REQUEST_AGENT_EVENT { log local0. \"per-request\" }\n"
+                    "when ACCESS_POLICY_COMPLETED { log local0. \"policy-complete\" }\n"
+                    "when ACCESS_ACL_ALLOWED { log local0. \"acl\" }"
+                ),
+                "requests": [{"uri": "/one"}, {"uri": "/two"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        first, second = result["results"]
+        self.assertEqual(
+            [event for event in first["events_fired"] if event.startswith("ACCESS_")],
+            [
+                "ACCESS_SESSION_STARTED",
+                "ACCESS_POLICY_AGENT_EVENT",
+                "ACCESS_PER_REQUEST_AGENT_EVENT",
+                "ACCESS_POLICY_COMPLETED",
+                "ACCESS_ACL_ALLOWED",
+            ],
+        )
+        self.assertEqual(
+            [event for event in second["events_fired"] if event.startswith("ACCESS_")],
+            ["ACCESS_PER_REQUEST_AGENT_EVENT", "ACCESS_ACL_ALLOWED"],
+        )
+        self.assertEqual(first["semantic"]["access"]["session_count"], 1)
+        self.assertEqual(second["semantic"]["access"]["session_count"], 1)
+        self.assertEqual(sum("policy-agent" in log for log in first["logs"]), 1)
+        self.assertEqual(sum("policy-complete" in log for log in first["logs"]), 1)
+        self.assertEqual(sum("per-request" in log for log in first["logs"]), 1)
+        self.assertTrue(any("per-request" in log for log in second["logs"]))
 
     def test_semantic_overlay_implements_profiles_auth_uri_stats_and_hsl(self) -> None:
         result = self.adapter.run_scenario(
