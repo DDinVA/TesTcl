@@ -15224,6 +15224,7 @@ class EmulatorSession:
         self._closed = False
         self._name_resolution_dispatching = False
         self._tcp_notify_dispatching = False
+        self._packet_trace_active = False
         self._thread = threading.Thread(
             target=self._worker_main,
             name="testcl-irule-session",
@@ -15542,6 +15543,7 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::sctp_reset_connection")
             session.eval_tcl("::itest::semantic::feature_controls_reset_connection")
             session.eval_tcl("::itest::semantic::link_reset_connection")
+            session.eval_tcl("::itest::semantic::tcp_reset_transport")
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
@@ -16219,7 +16221,13 @@ class EmulatorSession:
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
         event_result = session.fire_event(event_name)
         tcp_notifications: list[dict[str, Any]] = []
-        if not self._tcp_notify_dispatching:
+        # Direct event injection is intentionally synchronous.  Packet replay
+        # models the transport boundary, so TCP::notify remains queued until
+        # a serverside connection has been established.
+        tcp_notifications_ready = (
+            not self._packet_trace_active or self._server_connection_open
+        )
+        if tcp_notifications_ready and not self._tcp_notify_dispatching:
             self._tcp_notify_dispatching = True
             try:
                 notification_dispatches = 0
@@ -17497,10 +17505,16 @@ class EmulatorSession:
             events.append(
                 self._fire_event_on_worker(session, "SERVER_INIT", connection_state)
             )
-        events.append(
-            self._fire_event_on_worker(session, "SERVER_CONNECTED", connection_state)
-        )
         self._server_connection_open = True
+        try:
+            events.append(
+                self._fire_event_on_worker(
+                    session, "SERVER_CONNECTED", connection_state
+                )
+            )
+        except BaseException:
+            self._server_connection_open = False
+            raise
 
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
@@ -18230,6 +18244,16 @@ class EmulatorSession:
         return packet, len(combined)
 
     def _run_packet_trace_on_worker(
+        self, session: Any, packets: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        previous_packet_trace_active = self._packet_trace_active
+        self._packet_trace_active = True
+        try:
+            return self._run_packet_trace_body_on_worker(session, packets)
+        finally:
+            self._packet_trace_active = previous_packet_trace_active
+
+    def _run_packet_trace_body_on_worker(
         self, session: Any, packets: list[dict[str, Any]]
     ) -> dict[str, Any]:
         session.eval_tcl("::itest::semantic::event_errors_reset")

@@ -16777,27 +16777,81 @@ when USER_RESPONSE {
                         "source": {"address": "192.0.2.10", "port": 40000},
                         "destination": {"address": "192.0.2.20", "port": 443},
                         "payload": "request-data",
-                    }
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": {"address": "192.0.2.20", "port": 443},
+                        "destination": {"address": "192.0.2.10", "port": 40000},
+                        "payload": "response-data",
+                    },
                 ],
             },
             tcl_lsp_root=self.tcl_lsp_root,
         )
-        entry = result["trace"][0]
+        client_entry = result["trace"][0]
         client_data = next(
-            event for event in entry["events"] if event["event"] == "CLIENT_DATA"
+            event
+            for event in client_entry["events"]
+            if event["event"] == "CLIENT_DATA"
+        )
+        self.assertEqual(client_data["events_fired"], ["CLIENT_DATA"])
+        self.assertEqual(client_data["notifications"], [])
+
+        server_entry = result["trace"][1]
+        server_connected = next(
+            event
+            for event in server_entry["events"]
+            if event["event"] == "SERVER_CONNECTED"
         )
         self.assertEqual(
-            client_data["events_fired"],
-            ["CLIENT_DATA", "USER_REQUEST", "USER_RESPONSE"],
+            server_connected["events_fired"],
+            ["SERVER_CONNECTED", "USER_REQUEST", "USER_RESPONSE"],
         )
         self.assertEqual(
-            [notification["event"] for notification in client_data["notifications"]],
+            [notification["event"] for notification in server_connected["notifications"]],
             ["USER_REQUEST", "USER_RESPONSE"],
         )
-        user_request, user_response = client_data["notifications"]
+        user_request, user_response = server_connected["notifications"]
         self.assertTrue(any("after" in log for log in client_data["logs"]))
         self.assertTrue(any("user-request" in log for log in user_request["logs"]))
         self.assertTrue(any("user-response" in log for log in user_response["logs"]))
+
+    def test_tcp_notify_queue_is_discarded_when_packet_connection_closes(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED { TCP::collect }
+when CLIENT_DATA { TCP::release; TCP::notify request }
+when USER_REQUEST { log local0. should-not-run }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.10", "port": 40000},
+                        "destination": {"address": "192.0.2.20", "port": 443},
+                        "payload": "request-data",
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.10", "port": 40000},
+                        "destination": {"address": "192.0.2.20", "port": 443},
+                        "flags": ["FIN"],
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        client_data = next(
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] == "CLIENT_DATA"
+        )
+        self.assertEqual(client_data["notifications"], [])
+        self.assertNotIn("should-not-run", str(result))
 
     def test_tcp_notify_rejects_wrong_side_and_event_context(self) -> None:
         session = self.adapter.EmulatorSession(

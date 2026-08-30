@@ -16947,6 +16947,9 @@ namespace eval ::itest::semantic {
         set event_name [expr {
             $notification eq "request" ? "USER_REQUEST" : "USER_RESPONSE"
         }]
+        if {[llength $tcp_notifications] >= 1024} {
+            error "TCP::notify queue exceeded the 1024-event limit"
+        }
         lappend tcp_notifications $event_name
         ::itest::log_decision tcp notify [list $notification $event_name]
         return ""

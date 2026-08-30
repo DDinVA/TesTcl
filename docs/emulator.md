@@ -106,6 +106,14 @@ and are bounded to 32 dispatches per event chain. `TCP::notify eom` records a
 message boundary marker without creating a user event; no real message-based
 load-balancing socket or asynchronous scheduler is created.
 
+During packet replay, request/response notifications remain pending until the
+modeled serverside connection reaches `SERVER_CONNECTED`; this prevents a
+client packet from making a serverside user event appear before a serverside
+connection exists. The pending queue is bounded to 1024 entries and is cleared
+when the packet connection closes. Direct `EmulatorSession.fire_event()` calls
+remain synchronous synthetic event injection and dispatch queued notifications
+immediately.
+
 HTTP requests can model load-balancer causality with bounded per-request inputs.
 `persist_down` supplies the persistence target (`member` is required and `pool`
 is optional); it causes `PERSIST_DOWN` before `LB_SELECTED`. `lb_queue` supplies
