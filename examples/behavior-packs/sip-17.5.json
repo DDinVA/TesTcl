@@ -311,6 +311,198 @@
       "expect": {"status": "ok", "value": "OK"}
     },
     {
+      "id": "sdp-session-id",
+      "probe": {
+        "command": "SDP::session_id",
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {"sdp": {"session_id": "2890844526"}}
+      },
+      "expect": {"status": "ok", "value": "2890844526"}
+    },
+    {
+      "id": "sdp-field-version",
+      "probe": {
+        "command": "SDP::field",
+        "args": ["v"],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sdp": {
+            "fields": "version 0 origin {alice 2890844526 2890842807 IN IP4 host.example}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "0"}
+    },
+    {
+      "id": "sdp-field-origin",
+      "probe": {
+        "command": "SDP::field",
+        "args": ["origin"],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sdp": {
+            "fields": "version 0 origin {alice 2890844526 2890842807 IN IP4 host.example}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "alice 2890844526 2890842807 IN IP4 host.example"}
+    },
+    {
+      "id": "sdp-media-count",
+      "probe": {
+        "command": "SDP::media",
+        "args": ["count"],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sdp": {
+            "media": "{type audio port 49170/2 transport RTP/AVP conn {IN IP4 203.0.113.1} attrs {sendrecv}}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "1"}
+    },
+    {
+      "id": "sdp-media-type",
+      "probe": {
+        "command": "SDP::media",
+        "args": ["type", 0],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sdp": {
+            "media": "{type audio port 49170/2 transport RTP/AVP conn {IN IP4 203.0.113.1} attrs {sendrecv}}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "audio"}
+    },
+    {
+      "id": "sdp-media-port",
+      "probe": {
+        "command": "SDP::media",
+        "args": ["port", 0],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sdp": {
+            "media": "{type audio port 49170/2 transport RTP/AVP conn {IN IP4 203.0.113.1} attrs {sendrecv}}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "49170/2"}
+    },
+    {
+      "id": "sdp-media-transport",
+      "probe": {
+        "command": "SDP::media",
+        "args": ["transport", 0],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sdp": {
+            "media": "{type audio port 49170/2 transport RTP/AVP conn {IN IP4 203.0.113.1} attrs {sendrecv}}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "RTP/AVP"}
+    },
+    {
+      "id": "sdp-media-connection",
+      "probe": {
+        "command": "SDP::media",
+        "args": ["conn", 0],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sdp": {
+            "media": "{type audio port 49170/2 transport RTP/AVP conn {IN IP4 203.0.113.1} attrs {sendrecv}}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "IN IP4 203.0.113.1"}
+    },
+    {
+      "id": "sdp-media-attribute",
+      "probe": {
+        "command": "SDP::media",
+        "args": ["attr", 0, 0],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sdp": {
+            "media": "{type audio port 49170/2 transport RTP/AVP conn {IN IP4 203.0.113.1} attrs {sendrecv}}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "sendrecv"}
+    },
+    {
+      "id": "sipalg-hairpin",
+      "probe": {
+        "command": "SIPALG::hairpin",
+        "args": ["enable"],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"]
+      },
+      "expect": {"status": "ok", "value": "enable"}
+    },
+    {
+      "id": "sipalg-hairpin-default",
+      "probe": {
+        "command": "SIPALG::hairpin_default",
+        "args": ["disable"],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"]
+      },
+      "expect": {"status": "ok", "value": "disable"}
+    },
+    {
+      "id": "sipalg-nonregister-listener",
+      "probe": {
+        "command": "SIPALG::nonregister_subscriber_listener",
+        "args": [1],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"]
+      },
+      "expect": {"status": "ok", "value": "1"}
+    },
+    {
+      "id": "sdp-and-sipalg-mutation",
+      "scenario": {
+        "profiles": ["SIP"],
+        "irule": "when SIP_REQUEST { SDP::field s 0 Updated; SDP::media port 0 6000/2; SIPALG::hairpin enable }",
+        "packets": [
+          {
+            "protocol": "sip",
+            "direction": "client_to_server",
+            "type": "request",
+            "method": "INVITE",
+            "uri": "sip:bob@example.com",
+            "headers": {
+              "Content-Type": "application/sdp",
+              "Call-ID": "sdp-pack-1"
+            },
+            "payload": "v=0\r\no=- 1 2 IN IP4 host\r\ns=Original\r\nt=0 0\r\nm=audio 5004/2 RTP/AVP 0\r\nc=IN IP4 198.51.100.1\r\na=sendrecv\r\n"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "SIP_REQUEST"},
+          {"path": ["trace", 0, "events", 2, "semantic", "sipalg", "hairpin"], "equals": "enable"},
+          {"path": ["trace", 0, "events", 2, "semantic", "sipalg", "hairpin_default"], "equals": "detect"},
+          {"path": ["trace", 0, "events", 2, "semantic", "sipalg", "nonregister_subscriber_listener"], "equals": false},
+          {"path": ["trace", 0, "payload_after"], "equals": "v=0\r\no=- 1 2 IN IP4 host\r\ns=Updated\r\nt=0 0\r\nm=audio 6000/2 RTP/AVP 0\r\nc=IN IP4 198.51.100.1\r\na=sendrecv\r\n"},
+          {"path": ["trace", 0, "message_after"], "equals": "INVITE sip:bob@example.com SIP/2.0\r\nContent-Type: application/sdp\r\nCall-ID: sdp-pack-1\r\nContent-Length: 105\r\n\r\nv=0\r\no=- 1 2 IN IP4 host\r\ns=Updated\r\nt=0 0\r\nm=audio 6000/2 RTP/AVP 0\r\nc=IN IP4 198.51.100.1\r\na=sendrecv\r\n"}
+        ]
+      }
+    },
+    {
       "id": "respond",
       "probe": {
         "command": "SIP::respond",

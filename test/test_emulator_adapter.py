@@ -2894,7 +2894,7 @@ when HTTP_RESPONSE_RELEASE {
             "stateful-17.5.json": 2,
             "ssl-tls-17.5.json": 16,
             "udp-datagram-17.5.json": 15,
-            "sip-17.5.json": 28,
+            "sip-17.5.json": 41,
         }
         for filename, case_count in expected_counts.items():
             with self.subTest(filename=filename):
@@ -2917,6 +2917,7 @@ when HTTP_RESPONSE_RELEASE {
                             case["probe"]["command"]
                             for case in pack["cases"]
                             if "probe" in case
+                            and case["probe"]["command"].startswith("SIP::")
                         },
                         {
                             "SIP::call_id",
@@ -2935,6 +2936,30 @@ when HTTP_RESPONSE_RELEASE {
                             "SIP::to",
                             "SIP::uri",
                             "SIP::via",
+                        },
+                    )
+                    self.assertEqual(
+                        {
+                            case["probe"]["command"]
+                            for case in pack["cases"]
+                            if "probe" in case and case["probe"]["command"].startswith("SDP::")
+                        },
+                        {
+                            "SDP::field",
+                            "SDP::media",
+                            "SDP::session_id",
+                        },
+                    )
+                    self.assertEqual(
+                        {
+                            case["probe"]["command"]
+                            for case in pack["cases"]
+                            if "probe" in case and case["probe"]["command"].startswith("SIPALG::")
+                        },
+                        {
+                            "SIPALG::hairpin",
+                            "SIPALG::hairpin_default",
+                            "SIPALG::nonregister_subscriber_listener",
                         },
                     )
 
@@ -18231,7 +18256,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
                 self.assertEqual(response.status, 200)
                 sip_payload = json.loads(response.read())
             self.assertEqual(sip_payload["status"], "passed")
-            self.assertEqual(sip_payload["summary"]["passed"], 28)
+            self.assertEqual(sip_payload["summary"]["passed"], 41)
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -18581,7 +18606,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             )
             sip_behavior_payload = sip_behavior_pack["result"]["structuredContent"]
             self.assertEqual(sip_behavior_payload["status"], "passed")
-            self.assertEqual(sip_behavior_payload["summary"]["case_count"], 28)
+            self.assertEqual(sip_behavior_payload["summary"]["case_count"], 41)
 
             catalog_response = server.handle_message(
                 {
