@@ -256,6 +256,11 @@ after a request handler, including a bounded `discard` flag and deterministic
 `HTTP::passthrough_reason` values. The control state is reset between
 keep-alive requests and does not model malformed-wire recovery or the full HTTP
 filter.
+High-level requests and structured HTTP packets may also carry a bounded
+`http_class` outcome (`selected` or `failed`, with class name and ASM/WA flags);
+the matching `HTTP_CLASS_SELECTED` or `HTTP_CLASS_FAILED` event fires before
+`HTTP_REQUEST`. This supplies event-visible selector state, not a class
+database or the deprecated classification engine.
 The TMOS 17.5 HTML surface models `HTML::comment`, `HTML::disable`,
 `HTML::enable`, `HTML::encode`, and `HTML::tag`. With the HTML profile and
 `HTML::enable` in `HTTP_RESPONSE`, the adapter scans the uncompressed response

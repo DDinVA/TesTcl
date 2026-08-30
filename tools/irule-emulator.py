@@ -235,6 +235,7 @@ DEFAULT_PROFILES = ["TCP", "HTTP"]
 LB_FAILURE_CAUSES = frozenset(
     {"no_member", "unreachable", "queue_limit", "connection_timeout"}
 )
+HTTP_CLASS_RESULTS = frozenset({"selected", "failed"})
 LB_QUEUE_MAX_VALUE = 2**31 - 1
 HTTP_REASON_PHRASES = {
     100: "Continue",
@@ -5898,6 +5899,43 @@ def _install_runtime_shims(session: Any) -> None:
                 return $result
             }
         }
+        if {[::tmm::_orig_info commands ::itest::cmd::_testcl_http_class_orig] eq ""} {
+            ::tmm::_orig_rename ::itest::cmd::http_class ::itest::cmd::_testcl_http_class_orig
+            proc ::itest::cmd::http_class {args} {
+                if {[llength $args] == 0} {
+                    return $::state::http::class_name
+                }
+                set command [lindex $args 0]
+                switch -exact -- $command {
+                    asm - wa {
+                        if {[llength $args] != 1} {
+                            error "HTTP::class $command takes no arguments"
+                        }
+                        return [set ::state::http::class_$command]
+                    }
+                    enable - disable {
+                        if {[llength $args] != 1} {
+                            error "HTTP::class $command takes no arguments"
+                        }
+                        set ::state::http::class_enabled [expr {$command eq "enable"}]
+                        ::itest::log_decision http class_$command
+                        return
+                    }
+                    select {
+                        if {[llength $args] != 2} {
+                            error "HTTP::class select requires a class name"
+                        }
+                        set name [lindex $args 1]
+                        set ::state::http::class_name $name
+                        ::itest::log_decision http class_select $name
+                        return
+                    }
+                    default {
+                        error "unsupported HTTP::class operation $command"
+                    }
+                }
+            }
+        }
         namespace eval ::itest::semantic {}
         proc ::itest::semantic::http_control_reset {} {
             set ::state::http::disabled 0
@@ -5905,7 +5943,19 @@ def _install_runtime_shims(session: Any) -> None:
             set ::state::http::passthrough_reason ""
             set ::state::http::passthrough_reason_num 0
         }
+        proc ::itest::semantic::http_class_reset {} {
+            set ::state::http::class_name ""
+            set ::state::http::class_enabled 1
+            set ::state::http::class_asm 0
+            set ::state::http::class_wa 0
+        }
+        proc ::itest::semantic::http_class_configure {name asm wa} {
+            set ::state::http::class_name $name
+            set ::state::http::class_asm $asm
+            set ::state::http::class_wa $wa
+        }
         ::itest::semantic::http_control_reset
+        ::itest::semantic::http_class_reset
         """
     )
     _install_python_digest_helper(session)
@@ -7589,6 +7639,38 @@ def _normalise_http_proxy(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalise_http_class(raw: Any, field: str) -> dict[str, Any]:
+    """Normalize one bounded HTTP class-selector outcome."""
+    if not isinstance(raw, dict):
+        raise EmulatorInputError(f"{field} must be an object")
+    if any(not isinstance(key, str) for key in raw):
+        raise EmulatorInputError(f"{field} field names must be strings")
+    allowed = {"result", "name", "asm", "wa"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            f"{field} unsupported field(s): " + ", ".join(unknown)
+        )
+    result = _require_string(raw.get("result", "selected"), f"{field}.result").lower()
+    if result not in HTTP_CLASS_RESULTS:
+        raise EmulatorInputError(
+            f"{field}.result must be one of: "
+            + ", ".join(sorted(HTTP_CLASS_RESULTS))
+        )
+    name = _require_string(raw.get("name", ""), f"{field}.name")
+    if "\x00" in name:
+        raise EmulatorInputError(f"{field}.name must not contain NUL")
+    if result == "selected" and not name:
+        raise EmulatorInputError(f"{field}.name is required when result is selected")
+    asm = raw.get("asm", False)
+    wa = raw.get("wa", False)
+    if not isinstance(asm, bool):
+        raise EmulatorInputError(f"{field}.asm must be a boolean")
+    if not isinstance(wa, bool):
+        raise EmulatorInputError(f"{field}.wa must be a boolean")
+    return {"result": result, "name": name, "asm": asm, "wa": wa}
+
+
 def _normalise_flowtable(raw: Any) -> dict[str, Any]:
     """Normalize bounded flow-table counts and configured limits."""
     if raw is None:
@@ -8049,6 +8131,7 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
         "response_headers",
         "response_body",
         "http2",
+        "http_class",
         "lb_failure",
         "persist_down",
         "lb_queue",
@@ -8075,6 +8158,10 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
             kwargs[field] = _require_string(request[field], field)
     if "http2" in request:
         kwargs["http2"] = _normalise_http2_state(request["http2"], "http2")
+    if "http_class" in request:
+        kwargs["http_class"] = _normalise_http_class(
+            request["http_class"], "http_class"
+        )
     if "response_status" in request:
         status = request["response_status"]
         if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 999:
@@ -8977,6 +9064,7 @@ PACKET_PROTOCOL_FIELDS = {
         "host",
         "headers",
         "body",
+        "http_class",
         "lb_failure",
         "persist_down",
         "lb_queue",
@@ -9168,6 +9256,8 @@ PACKET_EVENT_ADAPTERS = {
     "SERVERSSL_DATA": "TLS server data",
     "FLOW_INIT": "FLOW profile connection initialization",
     "HTTP_REQUEST": "HTTP request transaction",
+    "HTTP_CLASS_SELECTED": "supplied HTTP class selection outcome",
+    "HTTP_CLASS_FAILED": "supplied HTTP class selection failure",
     "HTTP_DISABLED": "HTTP::disable control outcome",
     "HTTP_REQUEST_DATA": "collected HTTP request body",
     "HTTP_REQUEST_SEND": "HTTP request serverside send",
@@ -12611,6 +12701,10 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                         f"packet {index} lb_failure must be one of: {causes}"
                     )
                 normalised[field] = failure
+            elif protocol == "http" and field == "http_class":
+                normalised[field] = _normalise_http_class(
+                    packet[field], f"packet {index} http_class"
+                )
             elif protocol == "http" and field == "persist_down":
                 normalised[field] = _normalise_persist_down(
                     packet[field], f"packet {index} persist_down"
@@ -13267,6 +13361,10 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
         if protocol == "http" and direction == "server_to_client" and "lb_queue" in normalised:
             raise EmulatorInputError(
                 f"packet {index} HTTP responses cannot specify lb_queue"
+            )
+        if protocol == "http" and direction == "server_to_client" and "http_class" in normalised:
+            raise EmulatorInputError(
+                f"packet {index} HTTP responses cannot specify http_class"
             )
         if protocol == "http" and "lb_failure" in normalised and (
             "persist_down" in normalised
@@ -13948,6 +14046,41 @@ def _http2_snapshot(session: Any) -> dict[str, Any]:
     return snapshot
 
 
+def _http_class_snapshot(session: Any) -> dict[str, Any]:
+    """Read the bounded HTTP class-selector state exposed by the shim."""
+    return {
+        "name": session.eval_tcl("set ::state::http::class_name"),
+        "enabled": session.eval_tcl("set ::state::http::class_enabled") == "1",
+        "asm": session.eval_tcl("set ::state::http::class_asm") == "1",
+        "wa": session.eval_tcl("set ::state::http::class_wa") == "1",
+    }
+
+
+def _prepare_http_class_request_state(session: Any, kwargs: dict[str, Any]) -> None:
+    """Seed request-visible HTTP fields before a class event fires."""
+    header_values = [
+        item
+        for name, value in kwargs.get("headers", {}).items()
+        for item in (name, value)
+    ]
+    command = (
+        "::state::http::request::configure "
+        f"-method {_tcl_quote(kwargs.get('method', 'GET'))} "
+        f"-uri {_tcl_quote(kwargs.get('uri', '/'))} "
+        f"-host {_tcl_quote(kwargs.get('host', ''))} "
+        f"-headers {_tcl_list(header_values)}"
+    )
+    session.eval_tcl(command)
+    body = kwargs.get("body", "")
+    session.eval_tcl(
+        "set ::state::http::request::payload " + _tcl_quote(body)
+    )
+    session.eval_tcl(
+        "set ::state::http::request::payload_length "
+        + str(len(body.encode("utf-8")))
+    )
+
+
 class EmulatorSession:
     """Own one Tcl interpreter on a dedicated thread.
 
@@ -14355,6 +14488,7 @@ class EmulatorSession:
             f"set ::itest::semantic::http_request_number {request_number}"
         )
         kwargs = _request_kwargs(request)
+        http_class = kwargs.pop("http_class", None)
         lb_failure = kwargs.pop("lb_failure", "")
         persist_down = kwargs.pop("persist_down", None)
         lb_queue = kwargs.pop("lb_queue", None)
@@ -14378,10 +14512,54 @@ class EmulatorSession:
         http_close_requested = False
         decision_history: list[Any] = []
         log_history: list[Any] = []
+        class_decision_history: list[Any] = []
+        class_log_history: list[Any] = []
+
+        def normalise_history_entry(entry: Any) -> Any:
+            return list(entry) if isinstance(entry, tuple) else entry
+
+        def merge_missing_history(prefix: list[Any], existing: list[Any]) -> list[Any]:
+            remaining = list(existing)
+            missing: list[Any] = []
+            for item in prefix:
+                try:
+                    remaining.remove(item)
+                except ValueError:
+                    missing.append(item)
+            return missing + list(existing)
+
         result: dict[str, Any]
         try:
             while True:
                 session.eval_tcl("::itest::semantic::http_control_reset")
+                session.eval_tcl("::itest::semantic::http_class_reset")
+                if http_class is not None:
+                    _prepare_http_class_request_state(session, kwargs)
+                    class_decisions_before = len(session.get_decisions())
+                    class_logs_before = len(session.get_logs())
+                    session.eval_tcl(
+                        "::itest::semantic::http_class_configure "
+                        + " ".join(
+                            _tcl_quote(value)
+                            for value in (
+                                http_class["name"],
+                                "1" if http_class["asm"] else "0",
+                                "1" if http_class["wa"] else "0",
+                            )
+                        )
+                    )
+                    self._fire_event_on_worker(
+                        session,
+                        "HTTP_CLASS_SELECTED"
+                        if http_class["result"] == "selected"
+                        else "HTTP_CLASS_FAILED",
+                        {},
+                    )
+                    class_decision_history.extend(
+                        normalise_history_entry(entry)
+                        for entry in session.get_decisions()[class_decisions_before:]
+                    )
+                    class_log_history.extend(session.get_logs()[class_logs_before:])
                 session.eval_tcl("::itest::semantic::http_proxy_prepare_request")
                 session.eval_tcl("::itest::semantic::rewrite_prepare_request")
                 session.eval_tcl("::itest::semantic::html_prepare_request")
@@ -14499,6 +14677,13 @@ class EmulatorSession:
                         )
                         == "1"
                     )
+
+                result["decisions"] = merge_missing_history(
+                    class_decision_history, result.get("decisions", [])
+                )
+                result["logs"] = merge_missing_history(
+                    class_log_history, result.get("logs", [])
+                )
 
                 if result.get("errors"):
                     first_error = result["errors"][0]
@@ -14650,6 +14835,11 @@ class EmulatorSession:
         result["decisions"] = decision_history
         result["logs"] = log_history
         result["events_fired"] = result["events_fired"][fired_before:]
+        if http_class is not None:
+            result["http_class"] = {
+                "outcome": http_class["result"],
+                **_http_class_snapshot(session),
+            }
         self._request_count += 1
         self._connection_request_number = request_number
         if retry_count:
@@ -16924,6 +17114,7 @@ class EmulatorSession:
                 "message_type",
                 "method",
                 "uri",
+                "http_class",
                 "headers",
                 "status",
                 "response_headers",
@@ -17128,6 +17319,8 @@ class EmulatorSession:
                     for field in ("host", "headers", "body"):
                         if field in packet:
                             request[field] = packet[field]
+                    if "http_class" in packet:
+                        request["http_class"] = packet["http_class"]
                     if "lb_failure" in packet:
                         request["lb_failure"] = packet["lb_failure"]
                     for field in ("persist_down", "lb_queue"):

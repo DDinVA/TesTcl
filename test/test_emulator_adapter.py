@@ -273,6 +273,97 @@ when HTTP_DISABLED { log local0. packet-disabled }
         self.assertTrue(packet_http_result["http_disabled"])
         self.assertTrue(any("packet-disabled" in entry for entry in packet_http_result["logs"]))
 
+    def test_http_class_outcome_precedes_request_for_requests_and_packets(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_CLASS_SELECTED {
+    log local0. "selected=[HTTP::class] asm=[HTTP::class asm] wa=[HTTP::class wa]"
+    HTTP::class disable
+    HTTP::class select selected-class
+}
+when HTTP_CLASS_FAILED { log local0. "failed=[HTTP::class]" }
+when HTTP_REQUEST { log local0. "request=[HTTP::class]" }
+""",
+                "requests": [
+                    {
+                        "uri": "/selected",
+                        "http_class": {
+                            "result": "selected",
+                            "name": "legacy-class",
+                            "asm": True,
+                        },
+                    },
+                    {
+                        "uri": "/failed",
+                        "http_class": {"result": "failed", "wa": True},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        selected, failed = result["results"]
+        self.assertLess(
+            selected["events_fired"].index("HTTP_CLASS_SELECTED"),
+            selected["events_fired"].index("HTTP_REQUEST"),
+        )
+        self.assertTrue(any("selected=legacy-class asm=1 wa=0" in entry for entry in selected["logs"]))
+        self.assertEqual(selected["http_class"]["name"], "selected-class")
+        self.assertFalse(selected["http_class"]["enabled"])
+        self.assertTrue(any("failed=" in entry for entry in failed["logs"]))
+        self.assertEqual(failed["http_class"]["outcome"], "failed")
+        self.assertTrue(failed["http_class"]["wa"])
+
+        packet_result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_CLASS_SELECTED { log local0. packet-class }",
+                "packets": [{
+                    "protocol": "http",
+                    "uri": "/packet",
+                    "http_class": {"result": "selected", "name": "packet-class"},
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        packet_http_result = packet_result["trace"][0]["http_result"]
+        self.assertIn("HTTP_CLASS_SELECTED", packet_http_result["events_fired"])
+        self.assertTrue(any("packet-class" in entry for entry in packet_http_result["logs"]))
+
+        for invalid in (
+            {"result": "unknown", "name": "x"},
+            {"result": "selected"},
+            {"result": "failed", "unexpected": True},
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(self.adapter.EmulatorInputError):
+                    self.adapter.run_scenario(
+                        {
+                            "profiles": ["TCP", "HTTP"],
+                            "irule": "when HTTP_REQUEST { log local0. ok }",
+                            "requests": [{"http_class": invalid}],
+                        },
+                        tcl_lsp_root=self.tcl_lsp_root,
+                    )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "HTTP responses cannot specify http_class",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when HTTP_RESPONSE { log local0. ok }",
+                    "packets": [{
+                        "protocol": "http",
+                        "direction": "server_to_client",
+                        "status": 200,
+                        "http_class": {"result": "selected", "name": "wrong-side"},
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_acl_action_and_eval_model_l4_and_l7_decisions(self) -> None:
         action_session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -2053,6 +2144,14 @@ when HTTP_REQUEST {
         self.assertEqual(
             packet_adapters["HTTP_DISABLED"],
             "HTTP::disable control outcome",
+        )
+        self.assertEqual(
+            packet_adapters["HTTP_CLASS_SELECTED"],
+            "supplied HTTP class selection outcome",
+        )
+        self.assertEqual(
+            packet_adapters["HTTP_CLASS_FAILED"],
+            "supplied HTTP class selection failure",
         )
         for event_name in (
             "FLOW_INIT",

@@ -420,6 +420,13 @@ values (`iRule` and numeric value `1`). The state is reset before each
 keep-alive request; this does not emulate the full HTTP filter or malformed
 wire-request recovery path.
 
+HTTP class-selection outcomes can be supplied on a high-level request or
+structured HTTP packet with an `http_class` object. Its `result` is `selected`
+or `failed`; `name`, `asm`, and `wa` seed the values visible to
+`HTTP::class`, and the corresponding `HTTP_CLASS_SELECTED` or
+`HTTP_CLASS_FAILED` event runs before `HTTP_REQUEST`. This is a bounded event
+input, not a class database or the deprecated HTTP classification engine.
+
 The HTTP compression slice models `COMPRESS::buffer_size`,
 `COMPRESS::disable`, `COMPRESS::enable`, `COMPRESS::gzip`,
 `COMPRESS::method`, `COMPRESS::nodelay`, `DECOMPRESS::disable`, and
