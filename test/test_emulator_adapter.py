@@ -12315,6 +12315,75 @@ when CLIENT_CLOSED {
             fresh.close()
         self.assertEqual(reset["semantic"]["qoe"]["enabled"], False)
 
+    def test_qoe_packet_adapter_emits_parse_event_and_honors_disable(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["QOE"],
+                "irule": """
+when QOE_PARSE_DONE {
+    log local0. "video=[QOE::video width]/[QOE::video height]/[QOE::video mos]"
+    QOE::disable
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "qoe",
+                        "direction": "server_to_client",
+                        "source": {"address": "192.0.2.20", "port": 443},
+                        "destination": {"address": "192.0.2.10", "port": 40000},
+                        "qoe": {
+                            "width": 1920,
+                            "height": 1080,
+                            "duration": "00:01:30",
+                            "framerate": "59.94",
+                            "nominal_bitrate": 8000000,
+                            "average_bitrate": 6500000,
+                            "mos": "4.7",
+                        },
+                    },
+                    {
+                        "protocol": "qoe",
+                        "direction": "server_to_client",
+                        "source": {"address": "192.0.2.20", "port": 443},
+                        "destination": {"address": "192.0.2.10", "port": 40000},
+                        "qoe": {"available": False},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first_event = next(
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] == "QOE_PARSE_DONE"
+        )
+        self.assertEqual(first_event["state"]["qoe"]["width"], "1920")
+        self.assertEqual(first_event["state"]["qoe"]["available"], "1")
+        self.assertTrue(
+            any("video=1920/1080/4.7" in log for log in first_event["logs"])
+        )
+        self.assertEqual(result["trace"][1]["ignored"], "QOE processing is disabled")
+        self.assertTrue(result["trace"][1]["disabled"])
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "QOE packets must be server_to_client",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["QOE"],
+                    "irule": "when QOE_PARSE_DONE { return }",
+                    "packets": [
+                        {
+                            "protocol": "qoe",
+                            "direction": "client_to_server",
+                            "qoe": {"width": 1},
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
         for irule, event, message in (
             (
                 "when QOE_PARSE_DONE { QOE::video bitrate }",

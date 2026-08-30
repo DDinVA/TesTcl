@@ -2024,6 +2024,32 @@ connection-scoped control flag, returned under `semantic.qoe`. This is a
 deterministic metric/control model: it does not parse media, calculate MOS,
 or reproduce a live QOE engine. See the F5
 [`QOE::video`](https://clouddocs.f5.com/api/irules/QOE__video.html) reference.
+
+Packet replay can represent the same parser completion with a structured
+server-to-client packet:
+
+```json
+{
+  "protocol": "qoe",
+  "direction": "server_to_client",
+  "source": {"address": "192.0.2.20", "port": 443},
+  "destination": {"address": "192.0.2.10", "port": 40000},
+  "qoe": {
+    "width": 1920,
+    "height": 1080,
+    "duration": "00:01:30",
+    "framerate": "59.94",
+    "nominal_bitrate": 8000000,
+    "average_bitrate": 6500000,
+    "mos": "4.7"
+  }
+}
+```
+
+The adapter emits `QOE_PARSE_DONE` after the serverside connection is
+established, defaults an omitted `available` value to `1`, and honors
+connection-scoped `QOE::disable` on subsequent packets. It supplies the
+measurements; it does not parse MP4/FLV bytes or calculate MOS.
 `OFFBOX::request SERVICE PAYLOAD ?cache KEY? ?blocking ?TIMEOUT??` is modeled
 as a bounded local request ledger. It validates the documented option forms,
 records service, payload, cache, blocking, and timeout fields under
