@@ -5,6 +5,16 @@
 # that depends on the adapter's scenario state without modifying the external
 # tcl-lsp checkout.
 
+# Tcl 8.6 still accepts `string bytelength`, but some supported Tcl runtimes
+# omit that legacy subcommand.  Keep byte-oriented limits deterministic by
+# measuring the UTF-8 representation directly instead of depending on that
+# optional spelling.
+namespace eval ::itest {
+    proc byte_length {value} {
+        return [string length [encoding convertto utf-8 $value]]
+    }
+}
+
 namespace eval ::itest::semantic {
     proc _asn1_signed_byte {value} {
         set value [expr {$value & 0xff}]
@@ -1590,7 +1600,7 @@ namespace eval ::itest::semantic {
         if {[string first "\x00" $value] >= 0} {
             error "session key must not contain NUL"
         }
-        if {[string bytelength $value] > 4096} {
+        if {[::itest::byte_length $value] > 4096} {
             error "session key cannot exceed 4096 bytes"
         }
         # BIG-IP 10+ ignores the legacy association qualifier.  Accept the
@@ -1642,7 +1652,7 @@ namespace eval ::itest::semantic {
         variable session_records
         set total 0
         foreach entry_key [dict keys $session_records] {
-            incr total [string bytelength [dict get [dict get $session_records $entry_key] data]]
+            incr total [::itest::byte_length [dict get [dict get $session_records $entry_key] data]]
         }
         return $total
     }
@@ -1672,7 +1682,7 @@ namespace eval ::itest::semantic {
             if {[string first "\x00" $data] >= 0} {
                 error "session data must not contain NUL"
             }
-            if {[string bytelength $data] > $session_max_value_bytes} {
+            if {[::itest::byte_length $data] > $session_max_value_bytes} {
                 error "session data cannot exceed $session_max_value_bytes bytes"
             }
             set timeout 180
@@ -1686,9 +1696,9 @@ namespace eval ::itest::semantic {
             set entry_key [_session_entry_key $mode $key]
             set old_bytes 0
             if {[dict exists $session_records $entry_key]} {
-                set old_bytes [string bytelength [dict get [dict get $session_records $entry_key] data]]
+                set old_bytes [::itest::byte_length [dict get [dict get $session_records $entry_key] data]]
             }
-            set projected [expr {[_session_total_value_bytes] - $old_bytes + [string bytelength $data]}]
+            set projected [expr {[_session_total_value_bytes] - $old_bytes + [::itest::byte_length $data]}]
             if {$projected > $session_max_total_bytes} {
                 error "session table data cannot exceed $session_max_total_bytes bytes"
             }
@@ -1764,7 +1774,7 @@ namespace eval ::itest::semantic {
         if {$name eq "" || [string first "\x00" $name] >= 0} {
             error "sharedvar variable name must be non-empty and must not contain NUL"
         }
-        if {[string bytelength $name] > 256 || ![regexp {^[A-Za-z_][A-Za-z0-9_]*$} $name]} {
+        if {[::itest::byte_length $name] > 256 || ![regexp {^[A-Za-z_][A-Za-z0-9_]*$} $name]} {
             error "sharedvar variable name must be a Tcl identifier of at most 256 bytes"
         }
         if {![info exists ::state::vars::connection_vars($name)]} {
@@ -1798,7 +1808,7 @@ namespace eval ::itest::semantic {
     }
 
     proc _traffic_text {value label} {
-        if {$value eq "" || [string first "\x00" $value] >= 0 || [string bytelength $value] > 4096} {
+        if {$value eq "" || [string first "\x00" $value] >= 0 || [::itest::byte_length $value] > 4096} {
             error "$label must be non-empty and at most 4096 bytes"
         }
         return $value
@@ -1818,7 +1828,7 @@ namespace eval ::itest::semantic {
         if {$kind ni {clone listen relate_client relate_server use}} {
             error "unsupported traffic intent kind $kind"
         }
-        if {[string first "\x00" $data] >= 0 || [string bytelength $data] > 16384} {
+        if {[string first "\x00" $data] >= 0 || [::itest::byte_length $data] > 16384} {
             error "traffic intent data must be at most 16384 bytes"
         }
         incr traffic_intent_counter
@@ -1985,7 +1995,7 @@ namespace eval ::itest::semantic {
     }
 
     proc _legacy_fixture_text {value field {allow_empty 0}} {
-        if {(!$allow_empty && $value eq "") || [string first "\x00" $value] >= 0 || [string bytelength $value] > 4096} {
+        if {(!$allow_empty && $value eq "") || [string first "\x00" $value] >= 0 || [::itest::byte_length $value] > 4096} {
             error "$field must be non-empty and at most 4096 bytes"
         }
         return $value
@@ -2185,7 +2195,7 @@ namespace eval ::itest::semantic {
     }
 
     proc _diagnostic_text {value field {allow_empty 1}} {
-        if {(!$allow_empty && $value eq "") || [string first "\x00" $value] >= 0 || [string bytelength $value] > 1048576} {
+        if {(!$allow_empty && $value eq "") || [string first "\x00" $value] >= 0 || [::itest::byte_length $value] > 1048576} {
             error "$field must be at most 1048576 bytes and contain no NUL"
         }
         return $value
@@ -2312,7 +2322,7 @@ namespace eval ::itest::semantic {
         set total 0
         foreach value $args {
             set value [_diagnostic_text $value "tcpdump argument"]
-            incr total [string bytelength $value]
+            incr total [::itest::byte_length $value]
         }
         if {$total > 16384} {
             error "tcpdump arguments exceed the 16384-byte emulator limit"
@@ -3019,7 +3029,7 @@ namespace eval ::itest::semantic {
             [lindex $backend_override_flags 2] eq "0"} {
             set ::state::http::response::payload [dict get $values body]
             set ::state::http::response::payload_length \
-                [string bytelength [dict get $values body]]
+                [::itest::byte_length [dict get $values body]]
         }
         if {$::state::http::backend::matched eq "1"} {
             set ::state::http::backend::status $::state::http::response::status
@@ -4321,7 +4331,7 @@ namespace eval ::itest::semantic {
         set ws_disconnect_requested 1
         set ws_disconnect_code $code
         set ws_disconnect_reason [expr {[llength $args] == 2 ? [lindex $args 1] : ""}]
-        if {[string bytelength $ws_disconnect_reason] > 123} {
+        if {[::itest::byte_length $ws_disconnect_reason] > 123} {
             error "WS::disconnect reason must be at most 123 bytes"
         }
         ::itest::log_decision ws disconnect [list $code $ws_disconnect_reason]
@@ -4693,7 +4703,7 @@ namespace eval ::itest::semantic {
         foreach {field value} $parsed {
             set ::state::mqtt::$field $value
         }
-        set ::state::mqtt::payload_length [string bytelength $::state::mqtt::payload]
+        set ::state::mqtt::payload_length [::itest::byte_length $::state::mqtt::payload]
         set ::itest::semantic::mqtt_message_replaced 1
         ::itest::log_decision mqtt replace $::state::mqtt::type
         return ""
@@ -4947,10 +4957,10 @@ namespace eval ::itest::semantic {
         if {$uri eq ""} {
             error "REST::send URI must not be empty"
         }
-        if {[string bytelength $uri] > 8192} {
+        if {[::itest::byte_length $uri] > 8192} {
             error "REST::send URI exceeds 8192 bytes"
         }
-        if {[string bytelength $body] > 1048576} {
+        if {[::itest::byte_length $body] > 1048576} {
             error "REST::send body exceeds 1048576 bytes"
         }
         set method [string toupper $method]
@@ -4962,7 +4972,7 @@ namespace eval ::itest::semantic {
         if {[llength $::state::rest::requests] > 1024} {
             set ::state::rest::requests [lrange $::state::rest::requests end-1023 end]
         }
-        ::itest::log_decision rest send [list $method $uri [string bytelength $body]]
+        ::itest::log_decision rest send [list $method $uri [::itest::byte_length $body]]
         return ""
     }
 
@@ -4998,10 +5008,10 @@ namespace eval ::itest::semantic {
         if {[string first $nul $service] >= 0 || [string first $nul $payload] >= 0} {
             error "OFFBOX::request arguments must not contain NUL"
         }
-        if {[string bytelength $service] > 4096} {
+        if {[::itest::byte_length $service] > 4096} {
             error "OFFBOX::request service exceeds 4096 bytes"
         }
-        if {[string bytelength $payload] > 1048576} {
+        if {[::itest::byte_length $payload] > 1048576} {
             error "OFFBOX::request payload exceeds 1048576 bytes"
         }
         set remaining [lrange $args 2 end]
@@ -5016,7 +5026,7 @@ namespace eval ::itest::semantic {
             if {$cache_key eq ""} {
                 error "OFFBOX::request cache key must not be empty"
             }
-            if {[string first $nul $cache_key] >= 0 || [string bytelength $cache_key] > 4096} {
+            if {[string first $nul $cache_key] >= 0 || [::itest::byte_length $cache_key] > 4096} {
                 error "OFFBOX::request cache key is invalid"
             }
             set remaining [lrange $remaining 2 end]
@@ -5530,7 +5540,7 @@ namespace eval ::itest::semantic {
                 lappend header_lines "$name: $value"
             }
         }
-        lappend header_lines "Content-Length: [string bytelength $payload]"
+        lappend header_lines "Content-Length: [::itest::byte_length $payload]"
         if {$::state::sip::type eq "request"} {
             set start "$::state::sip::method $::state::sip::uri $::state::sip::version"
         } else {
@@ -5538,8 +5548,8 @@ namespace eval ::itest::semantic {
         }
         set message "$start\r\n[join $header_lines \r\n]\r\n\r\n$payload"
         set ::state::sip::message $message
-        set ::state::sip::message_length [string bytelength $message]
-        set ::state::sip::payload_length [string bytelength $payload]
+        set ::state::sip::message_length [::itest::byte_length $message]
+        set ::state::sip::payload_length [::itest::byte_length $payload]
         return ""
     }
 
@@ -8576,18 +8586,18 @@ namespace eval ::itest::semantic {
         if {$event_name eq ""} { set event_name $::itest::current_event }
         if {$event_name eq "HTTP_REQUEST" &&
             [info exists ::state::http::request::payload]} {
-            return [string bytelength $::state::http::request::payload]
+            return [::itest::byte_length $::state::http::request::payload]
         }
         if {$event_name eq "HTTP_RESPONSE" &&
             [info exists ::state::http::response::payload]} {
-            return [string bytelength $::state::http::response::payload]
+            return [::itest::byte_length $::state::http::response::payload]
         }
         set connection_total 0
         foreach variable_name {
             ::state::connection::client_payload ::state::connection::server_payload
         } {
             if {[info exists $variable_name]} {
-                incr connection_total [string bytelength [set $variable_name]]
+                incr connection_total [::itest::byte_length [set $variable_name]]
             }
         }
         if {$connection_total > 0} { return $connection_total }
@@ -8597,8 +8607,8 @@ namespace eval ::itest::semantic {
             ::state::sip::payload ::state::diameter::payload ::state::radius::payload
             ::state::gtp::payload ::state::mr::payload ::state::rtsp::payload
         } {
-            if {[info exists $variable_name] && [string bytelength [set $variable_name]] > 0} {
-                return [string bytelength [set $variable_name]]
+            if {[info exists $variable_name] && [::itest::byte_length [set $variable_name]] > 0} {
+                return [::itest::byte_length [set $variable_name]]
             }
         }
         return 0
@@ -9798,7 +9808,7 @@ namespace eval ::itest::semantic {
         } else {
             error "MR::stream accepts bytes or end bytes"
         }
-        if {[string bytelength $::state::mr::streamed] + [string bytelength $value] > 2097152} {
+        if {[::itest::byte_length $::state::mr::streamed] + [::itest::byte_length $value] > 2097152} {
             error "MR::stream payload exceeds the 2 MiB limit"
         }
         append ::state::mr::streamed $value
@@ -9902,7 +9912,7 @@ namespace eval ::itest::semantic {
             if {[llength $args] == 1} { return $::state::mr::payload }
             if {[llength $args] == 2} {
                 set ::state::mr::payload [lindex $args 1]
-                set ::state::mr::payload_length [string bytelength $::state::mr::payload]
+                set ::state::mr::payload_length [::itest::byte_length $::state::mr::payload]
                 return $::state::mr::payload
             }
         }
@@ -10819,7 +10829,7 @@ namespace eval ::itest::semantic {
     }
 
     proc _legacy_hop_value_kind {command value} {
-        if {$value eq "" || [string first "\x00" $value] >= 0 || [string bytelength $value] > 256} {
+        if {$value eq "" || [string first "\x00" $value] >= 0 || [::itest::byte_length $value] > 256} {
             error "$command hop value must be non-empty, NUL-free, and at most 256 bytes"
         }
         if {[regexp -nocase {^([0-9a-f]{2}:){5}[0-9a-f]{2}$} $value]} {
@@ -10846,7 +10856,7 @@ namespace eval ::itest::semantic {
         set value [lindex $args end]
         if {[llength $args] == 2} {
             set vlan [lindex $args 0]
-            if {$vlan eq "" || [string first "\x00" $vlan] >= 0 || [string bytelength $vlan] > 256} {
+            if {$vlan eq "" || [string first "\x00" $vlan] >= 0 || [::itest::byte_length $vlan] > 256} {
                 error "$command VLAN must be non-empty, NUL-free, and at most 256 bytes"
             }
         } elseif {$hop eq "nexthop"} {
@@ -10855,7 +10865,7 @@ namespace eval ::itest::semantic {
             if {[catch {_legacy_hop_value_kind $command $value}]} {
                 set vlan $value
                 set value ""
-                if {$vlan eq "" || [string first "\x00" $vlan] >= 0 || [string bytelength $vlan] > 256} {
+                if {$vlan eq "" || [string first "\x00" $vlan] >= 0 || [::itest::byte_length $vlan] > 256} {
                     error "$command VLAN must be non-empty, NUL-free, and at most 256 bytes"
                 }
             }
@@ -10925,7 +10935,7 @@ namespace eval ::itest::semantic {
         if {$location eq "" || [string first "\x00" $location] >= 0} {
             error "redirect destination must be non-empty and free of NUL bytes"
         }
-        if {[string bytelength $location] > 8192} {
+        if {[::itest::byte_length $location] > 8192} {
             error "redirect destination exceeds the 8192-byte limit"
         }
         ::itest::semantic::http_redirect_command $location
@@ -10956,7 +10966,7 @@ namespace eval ::itest::semantic {
         if {$value eq "" || [string first "\x00" $value] >= 0} {
             error "rateclass must be non-empty and free of NUL bytes"
         }
-        if {[string bytelength $value] > 4096} {
+        if {[::itest::byte_length $value] > 4096} {
             error "rateclass exceeds the 4096-byte limit"
         }
         set ::state::connection::rateclass $value
@@ -11007,7 +11017,7 @@ namespace eval ::itest::semantic {
         if {$value eq "" || [string first "\x00" $value] >= 0} {
             error "$label must be non-empty and free of NUL bytes"
         }
-        if {[string bytelength $value] > 4096} {
+        if {[::itest::byte_length $value] > 4096} {
             error "$label exceeds the 4096-byte limit"
         }
         return $value
@@ -11017,7 +11027,7 @@ namespace eval ::itest::semantic {
         if {$value eq "" || [string first "\x00" $value] >= 0} {
             error "$label variable name must be non-empty and free of NUL bytes"
         }
-        if {[string bytelength $value] > 4096} {
+        if {[::itest::byte_length $value] > 4096} {
             error "$label variable name exceeds the 4096-byte limit"
         }
         return $value
@@ -11181,7 +11191,7 @@ namespace eval ::itest::semantic {
         set handle [lindex $remaining 0]
         set data [lindex $remaining 1]
         set record [_sideband_connection $handle send]
-        set count [string bytelength $data]
+        set count [::itest::byte_length $data]
         if {$count > 1048576} { error "send data cannot exceed 1048576 bytes" }
         dict set record sent_bytes [expr {[dict get $record sent_bytes] + $count}]
         dict set ::state::sideband::connections $handle $record
@@ -11265,7 +11275,7 @@ namespace eval ::itest::semantic {
         if {$count >= 0} {
             set selected [_sideband_prefix_bytes $selected $count]
         }
-        set received_count [string bytelength $selected]
+        set received_count [::itest::byte_length $selected]
         if {!$peek && $received_count > 0} {
             dict set record recv_buffer [_sideband_consume_bytes $buffered $received_count]
             dict set record received_bytes [expr {[dict get $record received_bytes] + $received_count}]
@@ -11311,7 +11321,7 @@ namespace eval ::itest::semantic {
                 closed [dict get $record closed] \
                 sent_bytes [dict get $record sent_bytes] \
                 received_bytes [dict get $record received_bytes] \
-                buffered_bytes [string bytelength [dict get $record recv_buffer]]]
+                buffered_bytes [::itest::byte_length [dict get $record recv_buffer]]]
         }
         return [list next_id $::state::sideband::next_id connections $rows]
     }
@@ -11336,21 +11346,21 @@ namespace eval ::itest::semantic {
             }
             lassign $record name encoded updated_by update_time revision checksum
             if {$name eq "" || [string first "\x00" $name] >= 0 ||
-                [string bytelength $name] > 4096} {
+                [::itest::byte_length $name] > 4096} {
                 error "invalid ifile name"
             }
             if {[catch {binary decode base64 $encoded} content]} {
                 error "invalid base64 content for ifile $name"
             }
-            if {[string bytelength $content] > 33554432} {
+            if {[::itest::byte_length $content] > 33554432} {
                 error "ifile $name exceeds the 33554432-byte limit"
             }
-            incr total_bytes [string bytelength $content]
+            incr total_bytes [::itest::byte_length $content]
             if {$total_bytes > 67108864} {
                 error "ifile fixtures exceed the 67108864-byte total limit"
             }
             foreach value [list $updated_by $update_time $checksum] {
-                if {[string first "\x00" $value] >= 0 || [string bytelength $value] > 4096} {
+                if {[string first "\x00" $value] >= 0 || [::itest::byte_length $value] > 4096} {
                     error "invalid ifile metadata for $name"
                 }
             }
@@ -11366,7 +11376,7 @@ namespace eval ::itest::semantic {
 
     proc _ifile_entry {name} {
         if {$name eq "" || [string first "\x00" $name] >= 0 ||
-            [string bytelength $name] > 4096} {
+            [::itest::byte_length $name] > 4096} {
             error "invalid ifile name"
         }
         if {![dict exists $::itest::semantic::ifile_files $name]} {
@@ -11400,12 +11410,12 @@ namespace eval ::itest::semantic {
         switch -exact -- $operation {
             get { return [dict get $entry content] }
             attributes {
-                return [list name $name size [string bytelength [dict get $entry content]] \
+                return [list name $name size [::itest::byte_length [dict get $entry content]] \
                     last_updated_by [dict get $entry last_updated_by] \
                     last_update_time [dict get $entry last_update_time] \
                     revision [dict get $entry revision] checksum [dict get $entry checksum]]
             }
-            size { return [string bytelength [dict get $entry content]] }
+            size { return [::itest::byte_length [dict get $entry content]] }
             last_updated_by { return [dict get $entry last_updated_by] }
             last_update_time { return [dict get $entry last_update_time] }
             revision { return [dict get $entry revision] }
@@ -13084,7 +13094,7 @@ namespace eval ::itest::semantic {
                 ASM_RESPONSE_LOGIN ASM_RESPONSE_VIOLATION
             }} {
                 set ::state::http::response::payload $asm_payload
-                set ::state::http::response::payload_length [string bytelength $asm_payload]
+                set ::state::http::response::payload_length [::itest::byte_length $asm_payload]
             }
             return ""
         }
@@ -14571,7 +14581,7 @@ namespace eval ::itest::semantic {
         if {[string first "\x00" $proc_name] >= 0} {
             error "ACCESS2 procedure cannot contain NUL bytes"
         }
-        if {[string bytelength $proc_name] > 4096} {
+        if {[::itest::byte_length $proc_name] > 4096} {
             error "ACCESS2 procedure exceeds 4096 UTF-8 bytes"
         }
         set access2_default_proc $proc_name
@@ -16137,7 +16147,7 @@ namespace eval ::itest::semantic {
             if {$header_name eq "" || [string first "\x00" $header_name] >= 0} {
                 error "$command_name header name must be non-empty and free of NUL bytes"
             }
-            if {[string bytelength $header_name] > 4096} {
+            if {[::itest::byte_length $header_name] > 4096} {
                 error "$command_name header name exceeds the 4096-byte limit"
             }
         }
@@ -16617,7 +16627,7 @@ namespace eval ::itest::semantic {
         }
         _adapt_require_profile $side ADAPT::context_create
         if {$name eq "" || [string first "\x00" $name] >= 0 ||
-            [string bytelength $name] > 256} {
+            [::itest::byte_length $name] > 256} {
             error "ADAPT::context_create requires a non-empty name without NUL bytes and no more than 256 bytes"
         }
         set dynamic_count 0
@@ -17820,7 +17830,7 @@ namespace eval ::itest::semantic {
         if {[llength $args] != 1} { error "TCP::respond requires a payload" }
         set response [lindex $args 0]
         lappend ::state::vars::connection_vars(__testcl_tcp_emissions) \
-            [list kind data side [_tcp_side] payload $response byte_length [string bytelength $response]]
+            [list kind data side [_tcp_side] payload $response byte_length [::itest::byte_length $response]]
         ::itest::log_decision tcp respond [list [_tcp_side] $response]
         return ""
     }
@@ -18984,7 +18994,7 @@ namespace eval ::itest::semantic {
         if {[llength $args] != 1} { error "UDP::respond requires a payload" }
         set ::state::udp::responded 1
         set ::state::udp::response [lindex $args 0]
-        set ::state::udp::response_length [string bytelength $::state::udp::response]
+        set ::state::udp::response_length [::itest::byte_length $::state::udp::response]
         ::itest::log_decision udp respond $::state::udp::response
         return ""
     }
@@ -19705,7 +19715,7 @@ namespace eval ::itest::semantic {
         }
         foreach category $default {
             if {$category eq "" || [string first "\x00" $category] >= 0 ||
-                [string bytelength $category] > 4096} {
+                [::itest::byte_length $category] > 4096} {
                 error "invalid urlcat default category"
             }
         }
@@ -19720,7 +19730,7 @@ namespace eval ::itest::semantic {
             error "invalid urlcat fixture kind"
         }
         if {$lookup eq "" || [string first "\x00" $lookup] >= 0 ||
-            [string bytelength $lookup] > 4096} {
+            [::itest::byte_length $lookup] > 4096} {
             error "invalid urlcat lookup input"
         }
         if {[llength $categories] < 1 || [llength $categories] > 64} {
@@ -19728,7 +19738,7 @@ namespace eval ::itest::semantic {
         }
         foreach category $categories {
             if {$category eq "" || [string first "\x00" $category] >= 0 ||
-                [string bytelength $category] > 4096} {
+                [::itest::byte_length $category] > 4096} {
                 error "invalid urlcat fixture category"
             }
         }
@@ -19747,7 +19757,7 @@ namespace eval ::itest::semantic {
         }
         set lookup [lindex $args 0]
         if {$lookup eq "" || [string first "\x00" $lookup] >= 0 ||
-            [string bytelength $lookup] > 4096} {
+            [::itest::byte_length $lookup] > 4096} {
             error "$command_name requires a non-empty input without NUL"
         }
         if {[regexp {^[0-9A-Fa-f:]+$} $lookup] &&
@@ -21985,7 +21995,7 @@ namespace eval ::itest::semantic {
                 error "HTTP2::push headers cannot contain NUL bytes"
             }
         }
-        if {[string bytelength $content] > 2097152} {
+        if {[::itest::byte_length $content] > 2097152} {
             error "HTTP2::push content exceeds 2 MiB"
         }
         if {!$nohost} {
@@ -22594,7 +22604,7 @@ namespace eval ::itest::semantic {
 
     proc _ssl_set_payload {ns value} {
         set ${ns}::payload $value
-        set ${ns}::payload_length [string bytelength $value]
+        set ${ns}::payload_length [::itest::byte_length $value]
         return $value
     }
 
@@ -22682,7 +22692,7 @@ namespace eval ::itest::semantic {
         set operation [lindex $args 0]
         if {$operation eq "length"} {
             if {[llength $args] != 1} { error "SSL::payload length takes no arguments" }
-            return [string bytelength $payload]
+            return [::itest::byte_length $payload]
         }
         if {$operation eq "replace"} {
             if {[llength $args] != 4} {
@@ -22713,7 +22723,7 @@ namespace eval ::itest::semantic {
         if {[llength $args] > 1} { error "SSL::release accepts an optional length" }
         set ns [_ssl_namespace]
         set payload [set ${ns}::payload]
-        set available [string bytelength $payload]
+        set available [::itest::byte_length $payload]
         set length $available
         if {[llength $args] == 1} { set length [lindex $args 0] }
         if {![string is integer -strict $length] || $length < 0} {
@@ -23826,9 +23836,9 @@ namespace eval ::itest::semantic {
                 switch -exact -- $field {
                     type - ttl - class { lappend values [_dns_rr_get $rr $field] }
                     qname { lappend values [_dns_rr_get $rr name] }
-                    qnamelen { lappend values [string bytelength [_dns_rr_get $rr name]] }
+                    qnamelen { lappend values [::itest::byte_length [_dns_rr_get $rr name]] }
                     rdata { lappend values [_dns_rr_get $rr rdata] }
-                    rdatalen { lappend values [string bytelength [_dns_rr_get $rr rdata]] }
+                    rdatalen { lappend values [::itest::byte_length [_dns_rr_get $rr rdata]] }
                 }
             }
             if {[llength $fields] == 1} { lappend result [lindex $values 0] } else { lappend result $values }
@@ -24152,7 +24162,7 @@ namespace eval ::itest::semantic {
                 }
             }
             ssl - tls - https {
-                if {[string bytelength $sample] >= 5} {
+                if {[::itest::byte_length $sample] >= 5} {
                     set record [binary encode hex [string range $sample 0 4]]
                     set matched [regexp {^(14|15|16|17)030[0-3]} $record]
                 }
@@ -24171,7 +24181,7 @@ namespace eval ::itest::semantic {
             }
         }
         set result [expr {$matched ? 1 : 0}]
-        ::itest::log_decision validate protocol [list $application $result [string bytelength $payload]]
+        ::itest::log_decision validate protocol [list $application $result [::itest::byte_length $payload]]
         return $result
     }
 
@@ -24613,7 +24623,7 @@ namespace eval ::itest::semantic {
         }
         if {[dict get $parsed has_data]} {
             set data [string cat [dict get $entry data] [dict get $parsed data]]
-            if {[string bytelength $data] > $crypto_context_max_bytes} {
+            if {[::itest::byte_length $data] > $crypto_context_max_bytes} {
                 error "$command_name context data exceeds the $crypto_context_max_bytes-byte limit"
             }
             dict set entry data $data
@@ -25203,7 +25213,7 @@ namespace eval ::itest::semantic {
         }
         if {[dict get $parsed has_data]} {
             set data [string cat [dict get $entry data] [dict get $parsed data]]
-            if {[string bytelength $data] > $crypto_context_max_bytes} { error "$command_name context data exceeds the $crypto_context_max_bytes-byte limit" }
+            if {[::itest::byte_length $data] > $crypto_context_max_bytes} { error "$command_name context data exceeds the $crypto_context_max_bytes-byte limit" }
             dict set entry data $data
             dict set entry data_started 1
         }
@@ -25335,7 +25345,7 @@ namespace eval ::itest::semantic {
         if {[string first "\x00" $value] >= 0} {
             error "$field_name must not contain NUL bytes"
         }
-        if {[string bytelength $value] > 1048576} {
+        if {[::itest::byte_length $value] > 1048576} {
             error "$field_name exceeds the 1048576-byte limit"
         }
         return $value
@@ -26069,7 +26079,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             }
             if {!$collecting ||
                 ![string is integer -strict $length] ||
-                ($length > 0 && [string bytelength $payload] < $length)} {
+                ($length > 0 && [::itest::byte_length $payload] < $length)} {
                 return [list fired 0 reason "collect_not_ready"]
             }
             # HTTP data collection is released when its data event completes.
@@ -26121,7 +26131,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                     -reason $::itest::semantic::http_proxy_chain_response_reason \
                     -headers $::itest::semantic::http_proxy_chain_response_headers \
                     -payload $::itest::semantic::http_proxy_chain_response_body \
-                    -payload_length [string bytelength $::itest::semantic::http_proxy_chain_response_body]
+                    -payload_length [::itest::byte_length $::itest::semantic::http_proxy_chain_response_body]
                 set proxy_response_rc [catch {
                     if {[lsearch -exact $proxy_events HTTP_PROXY_RESPONSE] >= 0} {
                         set proxy_response_result [::itest::_testcl_fire_event_orig HTTP_PROXY_RESPONSE]
