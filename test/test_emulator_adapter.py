@@ -2007,7 +2007,9 @@ when HTTP_REQUEST {
             "HTTP_REQUEST_SEND",
             "HTTP_RESPONSE_DATA",
             "HTML_TAG_MATCHED",
+            "HTML_COMMENT_MATCHED",
             "REWRITE_REQUEST_DONE",
+            "REWRITE_RESPONSE_DONE",
             "SA_PICKED",
             "SERVER_CONNECTED",
             "WS_REQUEST",
@@ -7674,7 +7676,10 @@ when HTTP_REQUEST {
                 "profiles": ["TCP", "HTTP", "REWRITE", "HTML"],
                 "irule": """
 when HTTP_REQUEST { HTTP::collect 3 }
-when REWRITE_REQUEST_DONE { log local0. rewrite-request }
+when REWRITE_REQUEST_DONE {
+    log local0. rewrite-request
+    REWRITE::post_process 1
+}
 when HTTP_REQUEST_DATA {
     log local0. "request-data=[HTTP::payload]"
     HTTP::release
@@ -7685,10 +7690,12 @@ when HTTP_RESPONSE {
     HTML::enable
 }
 when HTML_TAG_MATCHED { log local0. html-tag }
+when HTML_COMMENT_MATCHED { log local0. html-comment }
 when HTTP_RESPONSE_DATA {
     log local0. "response-data=[HTTP::payload]"
     HTTP::release
 }
+when REWRITE_RESPONSE_DONE { log local0. rewrite-response }
 """,
                 "packets": [
                     {
@@ -7703,10 +7710,10 @@ when HTTP_RESPONSE_DATA {
                         "direction": "server_to_client",
                         "status": 200,
                         "response_headers": {
-                            "Content-Length": "15",
+                            "Content-Length": "36",
                             "Content-Type": "text/html",
                         },
-                        "response_body": "<html>ok</html>",
+                        "response_body": "<html><!--x--><body>ok</body></html>",
                     },
                 ],
             },
@@ -7720,12 +7727,16 @@ when HTTP_RESPONSE_DATA {
             "HTTP_REQUEST_SEND",
             "HTTP_RESPONSE_DATA",
             "HTML_TAG_MATCHED",
+            "HTML_COMMENT_MATCHED",
+            "REWRITE_RESPONSE_DONE",
         ):
             self.assertIn(event, events)
         self.assertLess(events.index("HTTP_REQUEST_DATA"), events.index("HTTP_REQUEST_SEND"))
         self.assertTrue(any("request-data=abc" in log for log in transaction["logs"]))
         self.assertTrue(any("html-tag" in log for log in transaction["logs"]))
-        self.assertTrue(any("response-data=<html>ok</html>" in log for log in transaction["logs"]))
+        self.assertTrue(any("html-comment" in log for log in transaction["logs"]))
+        self.assertTrue(any("rewrite-response" in log for log in transaction["logs"]))
+        self.assertTrue(any("response-data=<html><!--x--><body>ok</body></html>" in log for log in transaction["logs"]))
 
     def test_packet_trace_fires_rule_init_once_across_connections(self) -> None:
         result = self.adapter.run_scenario(
