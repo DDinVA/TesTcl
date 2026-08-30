@@ -2759,6 +2759,32 @@ when HTTP_RESPONSE_RELEASE {
         self.assertFalse(empty["chunk"]["has_more"])
         self.assertEqual(empty["commands"], [])
 
+    def test_runtime_probe_reads_live_dispatch_registration(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        self.assertEqual(
+            self.adapter._mock_proc_name("math::statistics::mean"),
+            "math_mean",
+        )
+
+        result = self.adapter._build_runtime_probe(
+            root, 0, 10, namespace="AAA", runtime_status="semantic-mock"
+        )
+        self.assertEqual(result["probe"]["method"], "::itest::_command_map")
+        self.assertFalse(result["probe"]["executes_catalog_commands"])
+        self.assertEqual(result["chunk"]["total"], 4)
+        self.assertEqual(result["summary"]["probed_count"], 4)
+        self.assertEqual(result["summary"]["registered_count"], 4)
+        self.assertEqual(result["summary"]["unregistered_count"], 0)
+        self.assertTrue(all(command["registered"] for command in result["commands"]))
+        self.assertTrue(all(
+            command["resolved_handler"].startswith("::itest::")
+            for command in result["commands"]
+        ))
+
+        nested = self.adapter._build_runtime_probe(root, 0, 100, namespace="math")
+        self.assertGreater(nested["summary"]["probed_count"], 0)
+        self.assertTrue(all(command["registered"] for command in nested["commands"]))
+
     def test_common_global_string_and_pool_functions_are_semantic(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -17795,6 +17821,26 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             thread.join(timeout=5)
             server.server_close()
 
+    def test_http_api_exposes_runtime_registration_probe(self) -> None:
+        server = self.adapter.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self.adapter._http_handler(Path(self.tcl_lsp_root))
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/v1/probes?namespace=AAA&limit=2"
+            ) as response:
+                payload = json.loads(response.read())
+            self.assertEqual(payload["chunk"]["total"], 4)
+            self.assertEqual(payload["chunk"]["count"], 2)
+            self.assertEqual(payload["summary"]["registered_count"], 2)
+            self.assertTrue(all(command["registered"] for command in payload["commands"]))
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_cli_replays_classic_pcap_file(self) -> None:
         capture = _pcap_bytes([
             (5, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
@@ -17980,6 +18026,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         self.assertIn("irule_pcap_replay", tool_names)
         self.assertIn("irule_session_trace", tool_names)
         self.assertIn("irule_catalog", tool_names)
+        self.assertIn("irule_probe", tool_names)
         capability_payload = responses[4]["result"]["structuredContent"]
         self.assertEqual(capability_payload["chunk"]["offset"], 1498)
         self.assertLessEqual(capability_payload["chunk"]["count"], 2)
@@ -18042,6 +18089,21 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             filtered_payload = filtered["result"]["structuredContent"]
             self.assertEqual(filtered_payload["chunk"]["total"], 18)
             self.assertEqual(filtered_payload["commands"][0]["name"], "AUTH::abort")
+
+            probed = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 10,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_probe",
+                        "arguments": {"namespace": "AAA", "limit": 2},
+                    },
+                }
+            )
+            probed_payload = probed["result"]["structuredContent"]
+            self.assertEqual(probed_payload["summary"]["registered_count"], 2)
+            self.assertTrue(all(command["registered"] for command in probed_payload["commands"]))
 
             catalog_response = server.handle_message(
                 {

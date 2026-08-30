@@ -1344,7 +1344,12 @@ def _proc_names(path: Path) -> set[str]:
 
 def _mock_proc_name(command: str) -> str:
     if "::" in command:
-        namespace, subcommand = command.split("::", 1)
+        # The Tcl dispatcher uses the first namespace component and the
+        # final command component. This also handles nested names such as
+        # math::statistics::mean, which are common in the bundled Tcllib
+        # catalog even though F5 iRule namespaces are usually one level.
+        parts = command.split("::")
+        namespace, subcommand = parts[0], parts[-1]
         return "{}_{}".format(
             namespace.lower().replace("-", "_").replace(".", "_"),
             subcommand.replace("-", "_").replace(".", "_"),
@@ -2601,6 +2606,91 @@ def _build_catalog(
         "chunks": chunks,
         "events": first["events"],
         "profiles": first["profiles"],
+    }
+
+
+def _build_runtime_probe(
+    root: Path,
+    offset: int,
+    limit: int,
+    *,
+    namespace: str | None = None,
+    runtime_status: str | None = None,
+    target_status: str | None = None,
+) -> dict[str, Any]:
+    """Return live dispatch-registration evidence for one catalog chunk."""
+    capabilities = _build_capabilities(
+        root,
+        offset,
+        limit,
+        namespace=namespace,
+        runtime_status=runtime_status,
+        target_status=target_status,
+    )
+    capability_commands = capabilities["commands"]
+    command_names = [command["name"] for command in capability_commands]
+
+    probe_rows: list[dict[str, Any]] = []
+    if command_names:
+        session = EmulatorSession(
+            root,
+            {"irule": "when RULE_INIT {}", "profiles": ["TCP", "HTTP"]},
+            allow_irule_file=False,
+            allow_requests=False,
+            allow_packets=False,
+            backend="inprocess",
+        )
+        try:
+            probe_rows = session.probe_runtime_commands(command_names)
+        finally:
+            session.close()
+
+    rows_by_name = {row["name"]: row for row in probe_rows}
+    if len(rows_by_name) != len(capability_commands):
+        raise EmulatorInputError("runtime probe did not return one row per catalog command")
+    commands = [
+        {
+            "name": command["name"],
+            "namespace": command["namespace"],
+            "runtime_status": command["runtime_status"],
+            "target_status": command["target_status"],
+            "registered": rows_by_name[command["name"]]["registered"],
+            "resolved_handler": rows_by_name[command["name"]]["resolved_handler"],
+        }
+        for command in capability_commands
+    ]
+    registered_count = sum(1 for command in commands if command["registered"])
+    summary = dict(capabilities["summary"])
+    summary.update(
+        {
+            "probed_count": len(commands),
+            "registered_count": registered_count,
+            "unregistered_count": len(commands) - registered_count,
+            "registration_status_counts": {
+                "registered": registered_count,
+                "unregistered": len(commands) - registered_count,
+            },
+        }
+    )
+    return {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "source": capabilities["source"],
+        "probe": {
+            "method": "::itest::_command_map",
+            "operation": "dispatch-registration",
+            "executes_catalog_commands": False,
+            "interpretation": (
+                "registered confirms that the live iRule dispatcher resolves "
+                "the catalog name; it does not prove BIG-IP/TMM semantic parity"
+            ),
+        },
+        "summary": summary,
+        "chunk": capabilities["chunk"],
+        "filter": capabilities["filter"],
+        "commands": commands,
     }
 
 
@@ -17314,6 +17404,64 @@ class EmulatorSession:
     def fidelity(self) -> dict[str, Any]:
         return self._fidelity
 
+    def probe_runtime_commands(self, command_names: list[str]) -> list[dict[str, Any]]:
+        """Check catalog registration in the live iRule dispatch table.
+
+        F5 commands are intentionally routed through Tcl's ``unknown``
+        handler, so ``info commands`` would report false negatives. This
+        probe reads the dispatch table without invoking any catalog command.
+        """
+        if not isinstance(command_names, list):
+            raise EmulatorInputError("runtime probe command names must be a list")
+        if len(command_names) > 1000:
+            raise EmulatorInputError("runtime probe accepts at most 1000 commands")
+        if not all(isinstance(name, str) and name for name in command_names):
+            raise EmulatorInputError("runtime probe command names must be non-empty strings")
+
+        try:
+            raw_rows = self._call(
+                lambda session: session.eval_tcl(
+                    "set __testcl_probe_rows {}\n"
+                    "foreach __testcl_probe_name "
+                    + _tcl_list(command_names)
+                    + " {\n"
+                    "    set __testcl_probe_handler "
+                    "[::itest::_resolve_command $__testcl_probe_name]\n"
+                    "    set __testcl_probe_registered "
+                    "[expr {$__testcl_probe_handler ne {}}]\n"
+                    "    lappend __testcl_probe_rows [list "
+                    "$__testcl_probe_name $__testcl_probe_registered "
+                    "$__testcl_probe_handler]\n"
+                    "}\n"
+                    "set __testcl_probe_rows"
+                )
+            )
+        except Exception as exc:
+            raise EmulatorInputError(f"runtime probe failed: {exc}") from exc
+        try:
+            _load_session_class(self._root)
+            from shared.tcl_list import tcl_list_split
+
+            encoded_rows = tcl_list_split(str(raw_rows), strict=True, unescape=True)
+            rows: list[dict[str, Any]] = []
+            for encoded_row in encoded_rows:
+                values = tcl_list_split(encoded_row, strict=True, unescape=True)
+                if len(values) != 3 or values[1] not in {"0", "1"}:
+                    raise ValueError("unexpected runtime probe row")
+                rows.append(
+                    {
+                        "name": values[0],
+                        "registered": values[1] == "1",
+                        "resolved_handler": values[2] or None,
+                    }
+                )
+        except (TypeError, ValueError) as exc:
+            raise EmulatorInputError("runtime probe returned malformed Tcl data") from exc
+
+        if [row["name"] for row in rows] != list(command_names):
+            raise EmulatorInputError("runtime probe returned an unexpected command order")
+        return rows
+
     @property
     def event_controls(self) -> list[dict[str, Any]]:
         return [dict(control) for control in self._event_controls]
@@ -22457,6 +22605,26 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_probe",
+                "title": "Probe runtime registrations",
+                "description": "Verify a bounded catalog chunk against the live Tcl iRule dispatcher without executing catalog commands.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "offset": {"type": "integer", "minimum": 0, "default": 0},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100},
+                        "namespace": {"type": "string", "minLength": 1},
+                        "runtime_status": {
+                            "type": "string",
+                            "enum": sorted(RUNTIME_STATUS_VALUES),
+                        },
+                        "target_status": {
+                            "type": "string",
+                            "enum": sorted(TARGET_STATUS_VALUES),
+                        },
+                    }
+                ),
+            },
+            {
                 "name": "irule_conformance",
                 "title": "Report catalog conformance",
                 "description": "Report static 17.5 catalog coverage for runtime command handlers and packet-to-event adapters.",
@@ -22638,6 +22806,27 @@ class McpProtocolServer:
                 if field in args
             }
             return self._tool_success(_build_catalog(self._root, chunk_size, **filters))
+
+        if name == "irule_probe":
+            unknown = sorted(
+                set(args) - {"offset", "limit", "namespace", "runtime_status", "target_status"}
+            )
+            if unknown:
+                raise McpProtocolError(-32602, f"unsupported irule_probe field(s): {', '.join(unknown)}")
+            offset = args.get("offset", 0)
+            limit = args.get("limit", 100)
+            if isinstance(offset, bool) or not isinstance(offset, int):
+                raise McpProtocolError(-32602, "probe offset must be an integer")
+            if isinstance(limit, bool) or not isinstance(limit, int):
+                raise McpProtocolError(-32602, "probe limit must be an integer")
+            filters = {
+                field: args[field]
+                for field in ("namespace", "runtime_status", "target_status")
+                if field in args
+            }
+            return self._tool_success(
+                _build_runtime_probe(self._root, offset, limit, **filters)
+            )
 
         if name == "irule_conformance":
             if args:
@@ -23095,6 +23284,22 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                     return
                 _json_response(self, 200, payload)
                 return
+            if parsed.path == "/v1/probes":
+                query = parse_qs(parsed.query, strict_parsing=False)
+                try:
+                    offset = int(query.get("offset", ["0"])[0])
+                    limit = int(query.get("limit", ["100"])[0])
+                    filters = {
+                        field: query[field][0]
+                        for field in ("namespace", "runtime_status", "target_status")
+                        if field in query
+                    }
+                    payload = _build_runtime_probe(root, offset, limit, **filters)
+                except (TypeError, ValueError, EmulatorInputError, OSError) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
             if parsed.path == "/v1/conformance":
                 try:
                     payload = _build_conformance(root)
@@ -23366,6 +23571,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="report static catalog-to-runtime and packet-event adapter coverage",
     )
+    mode.add_argument(
+        "--probe",
+        action="store_true",
+        help="probe live iRule command registration for one bounded catalog chunk",
+    )
     mode.add_argument("--serve", action="store_true", help="serve the HTTP API instead of reading stdin")
     mode.add_argument(
         "--mcp",
@@ -23398,7 +23608,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         root = _find_tcl_lsp_root(args.tcl_lsp_root)
         if args.pcap and (
-            args.serve or args.mcp or args.capabilities or args.catalog or args.conformance
+            args.serve or args.mcp or args.capabilities or args.catalog or args.probe or args.conformance
         ):
             raise EmulatorInputError(
                 "--pcap can only be used with one-shot scenario execution"
@@ -23421,6 +23631,15 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.capabilities:
             response = _build_capabilities(
+                root,
+                args.offset,
+                args.limit,
+                namespace=args.namespace,
+                runtime_status=args.runtime_status,
+                target_status=args.target_status,
+            )
+        elif args.probe:
+            response = _build_runtime_probe(
                 root,
                 args.offset,
                 args.limit,

@@ -1908,7 +1908,7 @@ curl -X POST -H 'Content-Type: application/json' \
 ```
 
 The service exposes `GET /healthz`, `GET /v1/capabilities`,
-`GET /v1/conformance`, `POST /v1/simulations`, and
+`GET /v1/probes`, `GET /v1/conformance`, `POST /v1/simulations`, and
 `POST /v1/simulations/pcap`. It also supports persistent sessions through
 `POST /v1/sessions`, `GET /v1/sessions/{session_id}`,
 `POST /v1/sessions/{session_id}/requests`,
@@ -1923,6 +1923,21 @@ separates complete catalog ingestion from partial command behavior and event
 lifecycle coverage, and reports target-only behavioral, placeholder, unhandled,
 and unmapped counts. These are inventory dimensions, not a fidelity score:
 generated stubs are recognized commands, not claims of BIG-IP semantics.
+
+`GET /v1/probes` provides live registration evidence for one bounded catalog
+chunk. It accepts the same `offset`, `limit`, `namespace`, `runtime_status`,
+and `target_status` filters as `/v1/capabilities`:
+
+```sh
+curl -sS 'http://127.0.0.1:8080/v1/probes?namespace=HTTP&limit=25'
+```
+
+Each returned command includes `registered` and `resolved_handler`. The probe
+checks the running framework's `::itest::_command_map`, which is the dispatch
+table used by Tcl's `unknown` handler; it does not execute command bodies and
+does not turn registration into a claim of TMM semantic parity. This makes it
+safe to inventory getters, setters, and protocol-dependent commands while
+building implementation slices from the complete catalog.
 
 Raw classic PCAP or pcapng replay is available at `POST /v1/simulations/pcap`.
 The request contains an inline `scenario` and a base64-encoded `pcap_base64`
@@ -2007,6 +2022,8 @@ clients can discover these tools with `tools/list`:
 - `irule_pcap_replay` replays a base64-encoded classic PCAP or pcapng capture through the same
   packet and Tcl event adapters.
 - `irule_capabilities` returns a chunk of the complete 17.5 catalog.
+- `irule_probe` verifies live command registration for a bounded catalog chunk
+  without executing catalog commands.
 - `irule_conformance` reports static catalog/runtime and packet-adapter coverage.
 - `irule_session_create`, `irule_session_inspect`, `irule_session_request`,
   `irule_session_trace`, `irule_session_event`, and `irule_session_close` manage
