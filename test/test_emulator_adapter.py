@@ -2353,6 +2353,19 @@ when HTTP_PROXY_REQUEST {
                 },
                 tcl_lsp_root=self.tcl_lsp_root,
             )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "synthetic event packet"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when HTTP_PROXY_REQUEST { log local0. ok }",
+                    "packets": [{
+                        "protocol": "event",
+                        "event": "HTTP_PROXY_REQUEST",
+                        "payload": "must-not-be-ignored",
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_sctp_packet_collection_payload_and_response_controls(self) -> None:
         result = self.adapter.run_scenario(

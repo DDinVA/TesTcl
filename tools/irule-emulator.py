@@ -12218,6 +12218,12 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             raise EmulatorInputError(
                 f"packet {index} protocol must be one of: {', '.join(sorted(PACKET_PROTOCOLS))}"
             )
+        if protocol == "event":
+            unknown_event_fields = sorted(set(packet) - {"protocol", "event", "state"})
+            if unknown_event_fields:
+                raise EmulatorInputError(
+                    f"unsupported synthetic event packet field(s): {', '.join(unknown_event_fields)}"
+                )
         direction = _packet_direction(packet.get("direction", "client_to_server"))
         wire_payload: bytes | None = None
         wire_length: int | None = None
@@ -18118,7 +18124,7 @@ class McpProtocolServer:
             {
                 "name": "irule_session_trace",
                 "title": "Replay a packet trace",
-                "description": "Replay a bounded TCP/TLS/HTTP/HTTP2/UDP/DNS packet trace on a persistent emulator session.",
+                "description": "Replay a bounded protocol packet trace or synthetic catalogued-event sequence on a persistent emulator session.",
                 "inputSchema": _mcp_object_schema(
                     {
                         "session_id": {"type": "string", "minLength": 1},
