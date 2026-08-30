@@ -14460,7 +14460,40 @@ namespace eval ::itest::semantic {
     }
 
     proc access2_prepare_event {} {
-        set ::state::access2::proc ""
+        variable access2_default_proc
+        set ::state::access2::proc $access2_default_proc
+    }
+
+    proc access2_configure {proc_name} {
+        variable access2_default_proc
+        variable access2_auto_sid
+        if {[string first "\x00" $proc_name] >= 0} {
+            error "ACCESS2 procedure cannot contain NUL bytes"
+        }
+        if {[string bytelength $proc_name] > 4096} {
+            error "ACCESS2 procedure exceeds 4096 UTF-8 bytes"
+        }
+        set access2_default_proc $proc_name
+        set access2_auto_sid ""
+    }
+
+    proc access2_auto_policy_expression {} {
+        variable access2_default_proc
+        variable access2_auto_sid
+        variable access_current_sid
+        variable access_sessions
+        if {![_profile_enabled ACCESS] || $access2_default_proc eq "" ||
+            $access_current_sid eq "" ||
+            ![dict exists $access_sessions $access_current_sid] ||
+            $access2_auto_sid eq $access_current_sid} {
+            return ""
+        }
+        set access2_auto_sid $access_current_sid
+        set ::state::access2::proc $access2_default_proc
+        if {[lsearch -exact [::itest::registered_events] ACCESS2_POLICY_EXPRESSION_EVAL] >= 0} {
+            _access_event ACCESS2_POLICY_EXPRESSION_EVAL $access_current_sid
+        }
+        return $access2_default_proc
     }
 
     proc access2_proc_command {args} {
@@ -14589,6 +14622,7 @@ namespace eval ::itest::semantic {
         variable access_auto_sid
         variable access_auto_policy_agent_fired
         variable access_auto_saml_sid
+        variable access2_auto_sid
         variable access_next_sid
         variable access_ephemeral
         variable access_ephemeral_next
@@ -14614,6 +14648,7 @@ namespace eval ::itest::semantic {
         set access_auto_sid ""
         set access_auto_policy_agent_fired 0
         set access_auto_saml_sid ""
+        set access2_auto_sid ""
         set access_next_sid 0
         set access_ephemeral [dict create]
         set access_ephemeral_next 0
@@ -14782,6 +14817,7 @@ namespace eval ::itest::semantic {
         access_policy evaluate -sid $access_current_sid -profile /Common/emulator
         set outcome $access_policy_result
         if {$outcome eq "allow"} {
+            access2_auto_policy_expression
             access_auto_saml_events
         }
         if {$outcome eq "deny" && !$::state::http::response_committed} {

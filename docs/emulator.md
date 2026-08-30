@@ -1076,14 +1076,27 @@ cryptography, or reproduce production session expiry.
 With the `ACCESS` profile attached, the direct event API supports
 `ACCESS2_POLICY_EXPRESSION_EVAL`. Supply the currently selected policy
 procedure as `state.access2.proc`; `ACCESS2::access2_proc` returns that value
-without invoking it. The value is event-scoped and is cleared before the next
-policy-expression event, so this adapter does not execute hidden APM policy
-expressions or reproduce the policy engine:
+without invoking it. For HTTP request simulations, set the optional top-level
+`access2.proc` fixture to emit the event once after an allowed policy completes.
+The value is event-scoped for direct injection and is connection/session-scoped
+for the automatic fixture gate, so this adapter does not execute hidden APM
+policy expressions or reproduce the policy engine:
 
 ```json
 {
   "profiles": ["ACCESS"],
   "irule": "when ACCESS2_POLICY_EXPRESSION_EVAL { log local0. [ACCESS2::access2_proc] }"
+}
+```
+
+An automatic HTTP example is:
+
+```json
+{
+  "profiles": ["TCP", "HTTP", "ACCESS"],
+  "access2": {"proc": "::policy::evaluate_request"},
+  "irule": "when ACCESS2_POLICY_EXPRESSION_EVAL { log local0. [ACCESS2::access2_proc] }",
+  "request": {"uri": "/policy"}
 }
 ```
 

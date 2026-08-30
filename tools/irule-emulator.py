@@ -3424,6 +3424,14 @@ def _configure_access(
     )
 
 
+def _configure_access2(session: Any, access2: dict[str, str]) -> None:
+    """Install the deterministic ACCESS2 policy-expression fixture."""
+    session.eval_tcl(
+        "::itest::semantic::access2_configure "
+        f"{_tcl_quote(access2['proc'])}"
+    )
+
+
 def _configure_ip(session: Any, ip_config: dict[str, Any]) -> None:
     """Install deterministic IP path, intelligence, and reputation inputs."""
     session.eval_tcl(
@@ -8166,6 +8174,25 @@ def _normalise_access(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalise_access2(raw: Any) -> dict[str, str]:
+    """Normalize the optional ACCESS2 policy-expression procedure fixture."""
+    if raw is None:
+        return {"proc": ""}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("access2 must be an object")
+    unknown = sorted(set(raw) - {"proc"})
+    if unknown:
+        raise EmulatorInputError(
+            "access2 unsupported field(s): " + ", ".join(unknown)
+        )
+    value = raw.get("proc", "")
+    if not isinstance(value, str) or "\x00" in value:
+        raise EmulatorInputError("access2.proc must be a string without NUL")
+    if len(value.encode("utf-8")) > 4096:
+        raise EmulatorInputError("access2.proc exceeds 4096 UTF-8 bytes")
+    return {"proc": value}
+
+
 def _normalise_access_request(raw: Any) -> dict[str, Any]:
     """Normalize per-request APM access-policy and ACL overrides."""
     if not isinstance(raw, dict):
@@ -9266,6 +9293,7 @@ def _normalise_scenario_config(
     dict[str, str],
     dict[str, Any],
     dict[str, Any],
+    dict[str, str],
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
@@ -9303,6 +9331,7 @@ def _normalise_scenario_config(
         "auth",
         "aaa",
         "access",
+        "access2",
         "ip",
         "route",
         "http_proxy",
@@ -9374,6 +9403,7 @@ def _normalise_scenario_config(
         _normalise_auth(scenario.get("auth")),
         _normalise_aaa(scenario.get("aaa")),
         _normalise_access(scenario.get("access")),
+        _normalise_access2(scenario.get("access2")),
         _normalise_ip(scenario.get("ip")),
         _normalise_route(scenario.get("route")),
         _normalise_http_proxy(scenario.get("http_proxy")),
@@ -10268,6 +10298,7 @@ PACKET_EVENT_ADAPTERS = {
     "ACCESS_SAML_ASSERTION": "ACCESS SAML assertion fixture after policy",
     "ACCESS_SAML_SLO_REQ": "ACCESS SAML logout request fixture after policy",
     "ACCESS_SAML_SLO_RESP": "ACCESS SAML logout response fixture after policy",
+    "ACCESS2_POLICY_EXPRESSION_EVAL": "ACCESS2 policy-expression procedure fixture after policy",
     "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",
     "BOTDEFENSE_ACTION": "Bot Defense action from HTTP request",
     "ANTIFRAUD_LOGIN": "Anti-Fraud login inspection from HTTP request",
@@ -16689,6 +16720,7 @@ class EmulatorSession:
             auth,
             aaa,
             access,
+            access2,
             ip_config,
             route_config,
             http_proxy_config,
@@ -16725,6 +16757,7 @@ class EmulatorSession:
         self._auth = auth
         self._aaa = aaa
         self._access = access
+        self._access2 = access2
         self._ip_config = ip_config
         self._route_config = route_config
         self._route_visible = bool(route_config["metrics"]) or "ROUTE::" in source
@@ -16939,11 +16972,15 @@ class EmulatorSession:
                 _configure_aaa(session, self._aaa)
                 access_auto_interest = bool(
                     "ACCESS::" in self._prepared_source
-                    or any(event.startswith("ACCESS_") for event in self._registered_events)
+                    or any(
+                        event.startswith(("ACCESS_", "ACCESS2_"))
+                        for event in self._registered_events
+                    )
                 )
                 _configure_access(
                     session, self._access, auto_interest=access_auto_interest
                 )
+                _configure_access2(session, self._access2)
                 _configure_ip(session, self._ip_config)
                 _configure_route(session, self._route_config)
                 _configure_http_proxy(session, self._http_proxy_config)

@@ -3141,6 +3141,10 @@ when HTTP_REQUEST {
             coverage["event_lifecycle"]["target_unmapped_events"],
         )
         self.assertNotIn(
+            "ACCESS2_POLICY_EXPRESSION_EVAL",
+            coverage["event_lifecycle"]["target_unmapped_events"],
+        )
+        self.assertNotIn(
             "ACCESS_SAML_SLO_REQ",
             coverage["event_lifecycle"]["target_unmapped_events"],
         )
@@ -3175,6 +3179,7 @@ when HTTP_REQUEST {
                 "ACCESS_SAML_ASSERTION",
                 "ACCESS_SAML_SLO_REQ",
                 "ACCESS_SAML_SLO_RESP",
+                "ACCESS2_POLICY_EXPRESSION_EVAL",
                 "BOTDEFENSE_REQUEST",
                 "BOTDEFENSE_ACTION",
                 "ANTIFRAUD_LOGIN",
@@ -3200,6 +3205,7 @@ when HTTP_REQUEST {
                 "ACCESS_SAML_ASSERTION": "ACCESS SAML assertion fixture after policy",
                 "ACCESS_SAML_SLO_REQ": "ACCESS SAML logout request fixture after policy",
                 "ACCESS_SAML_SLO_RESP": "ACCESS SAML logout response fixture after policy",
+                "ACCESS2_POLICY_EXPRESSION_EVAL": "ACCESS2 policy-expression procedure fixture after policy",
                 "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",
                 "BOTDEFENSE_ACTION": "Bot Defense action from HTTP request",
                 "ANTIFRAUD_LOGIN": "Anti-Fraud login inspection from HTTP request",
@@ -13179,6 +13185,37 @@ when ACCESS2_POLICY_EXPRESSION_EVAL {
                 )
         finally:
             event_only.close()
+
+    def test_http_access2_fixture_emits_policy_expression_event(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ACCESS"],
+                "access2": {"proc": "::policy::evaluate_request"},
+                "irule": (
+                    "when ACCESS2_POLICY_EXPRESSION_EVAL { "
+                    "log local0. \"proc=[ACCESS2::access2_proc]\" }"
+                ),
+                "request": {"uri": "/policy"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        self.assertEqual(
+            item["events_fired"],
+            [
+                "CLIENT_ACCEPTED",
+                "ACCESS_SESSION_STARTED",
+                "HTTP_REQUEST",
+                "ACCESS_POLICY_COMPLETED",
+                "ACCESS2_POLICY_EXPRESSION_EVAL",
+            ],
+        )
+        self.assertTrue(any("proc=::policy::evaluate_request" in log for log in item["logs"]))
+        self.assertEqual(
+            item["semantic"]["access2"],
+            {"proc": "::policy::evaluate_request"},
+        )
 
     def test_am_commands_model_acceleration_metadata_and_disable_state(self) -> None:
         session = self.adapter.EmulatorSession(

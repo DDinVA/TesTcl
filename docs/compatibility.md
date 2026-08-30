@@ -613,9 +613,13 @@ event references.
 This does not execute an APM policy graph, expire sessions against wall-clock
 time, or reproduce SAML/OAuth/AAA network behavior.
 The TMOS 17.5 `ACCESS2::access2_proc` command is also modeled for
-`ACCESS2_POLICY_EXPRESSION_EVAL`: the direct event state supplies the selected
+`ACCESS2_POLICY_EXPRESSION_EVAL`: direct event state supplies the selected
 procedure name and the command returns it without invoking hidden policy code.
-That procedure value is reset at each event boundary.
+HTTP request simulations may instead supply `access2.proc`, which emits the
+event once after an allowed policy completes. Direct-event values are reset at
+each event boundary; automatic fixture delivery is gated once per ACCESS
+session. This remains a fixture-driven observation point, not an APM policy
+engine.
 The global `call` command is modeled for top-level iRule `proc` declarations,
 including optional `-debug`, list-safe argument dispatch, and propagation of
 Tcl procedure return/error codes. It does not evaluate arbitrary top-level
