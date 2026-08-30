@@ -2789,6 +2789,80 @@ when HTTP_RESPONSE_RELEASE {
         when = next(command for command in language["commands"] if command["name"] == "when")
         self.assertEqual(when["catalog_kind"], "irule-language")
 
+    def test_command_probe_executes_one_catalog_command_with_http_fixture(self) -> None:
+        result = self.adapter.run_command_probe(
+            {
+                "command": "HTTP::header",
+                "args": ["value", "X-Test"],
+                "event": "HTTP_REQUEST",
+                "profiles": ["TCP", "HTTP"],
+                "request": {
+                    "method": "GET",
+                    "uri": "/probe",
+                    "host": "api.example.com",
+                    "headers": {"X-Test": "safe"},
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["catalog"]["catalog_kind"], "f5-irule")
+        self.assertEqual(result["catalog"]["target_status"], "available-in-tmos-17.5")
+        self.assertEqual(result["execution"]["status"], "ok")
+        self.assertEqual(result["execution"]["value"], "safe")
+        self.assertEqual(result["execution"]["value_bytes"], 4)
+        self.assertEqual(result["execution"]["event"]["fired"], True)
+        self.assertEqual(
+            result["execution"]["event"]["result"]["request"]["uri"], "/probe"
+        )
+
+    def test_command_probe_quotes_arguments_and_reports_command_errors(self) -> None:
+        result = self.adapter.run_command_probe(
+            {
+                "command": "HTTP::header",
+                "args": ["value", "X-Test; set ::orch::injected 1"],
+                "event": "HTTP_REQUEST",
+                "request": {"headers": {"X-Test": "safe"}},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(result["execution"]["status"], "ok")
+        self.assertEqual(result["execution"]["value"], "")
+        self.assertNotIn("injected", result["execution"]["event"]["result"]["logs"])
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "F5 iRule"):
+            self.adapter.run_command_probe(
+                {"command": "set", "event": "HTTP_REQUEST"},
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "at most 64"):
+            self.adapter.run_command_probe(
+                {
+                    "command": "HTTP::host",
+                    "event": "HTTP_REQUEST",
+                    "args": ["x"] * 65,
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "not valid"):
+            self.adapter.run_command_probe(
+                {"command": "HTTP::host", "event": "DNS_REQUEST"},
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_command_probe_reports_profile_gating_without_executing_command(self) -> None:
+        result = self.adapter.run_command_probe(
+            {
+                "command": "DNS::name",
+                "event": "DNS_REQUEST",
+                "profiles": ["TCP"],
+                "state": {"dns": {"qname": "example.com"}},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(result["execution"]["status"], "profile-gated")
+        self.assertEqual(result["execution"]["event"]["reason"], "profile_gate")
+
     def test_common_global_string_and_pool_functions_are_semantic(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -17854,6 +17928,37 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             thread.join(timeout=5)
             server.server_close()
 
+    def test_http_api_exposes_command_workbench(self) -> None:
+        server = self.adapter.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self.adapter._http_handler(Path(self.tcl_lsp_root))
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/command-probes",
+                data=json.dumps(
+                    {
+                        "command": "HTTP::host",
+                        "event": "HTTP_REQUEST",
+                        "profiles": ["TCP", "HTTP"],
+                        "request": {"host": "api.example.com", "uri": "/api"},
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(response.status, 200)
+                payload = json.loads(response.read())
+            self.assertEqual(payload["command"], "HTTP::host")
+            self.assertEqual(payload["execution"]["value"], "api.example.com")
+            self.assertEqual(payload["execution"]["event"]["fired"], True)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_cli_replays_classic_pcap_file(self) -> None:
         capture = _pcap_bytes([
             (5, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
@@ -18040,6 +18145,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         self.assertIn("irule_session_trace", tool_names)
         self.assertIn("irule_catalog", tool_names)
         self.assertIn("irule_probe", tool_names)
+        self.assertIn("irule_command_probe", tool_names)
         capability_payload = responses[4]["result"]["structuredContent"]
         self.assertEqual(capability_payload["chunk"]["offset"], 1498)
         self.assertLessEqual(capability_payload["chunk"]["count"], 2)
@@ -18117,6 +18223,26 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             probed_payload = probed["result"]["structuredContent"]
             self.assertEqual(probed_payload["summary"]["registered_count"], 2)
             self.assertTrue(all(command["registered"] for command in probed_payload["commands"]))
+
+            command_probe = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 11,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_command_probe",
+                        "arguments": {
+                            "command": "HTTP::host",
+                            "event": "HTTP_REQUEST",
+                            "request": {"host": "mcp.example.com"},
+                        },
+                    },
+                }
+            )
+            command_probe_payload = command_probe["result"]["structuredContent"]
+            self.assertEqual(
+                command_probe_payload["execution"]["value"], "mcp.example.com"
+            )
 
             catalog_response = server.handle_message(
                 {

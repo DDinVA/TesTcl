@@ -283,6 +283,9 @@ DEFAULT_MAX_SESSIONS = 32
 DEFAULT_SESSION_IDLE_SECONDS = 1800
 MAX_HTTP_RETRIES = 8
 MAX_HTTP_PROXY_CHAIN_RETRIES = 1
+COMMAND_PROBE_MAX_ARGS = 64
+COMMAND_PROBE_MAX_ARG_BYTES = 16 * 1024
+COMMAND_PROBE_MAX_TOTAL_ARG_BYTES = 64 * 1024
 EVENT_STATE_FIELDS = {
     "connection": {
         "client_addr",
@@ -2715,6 +2718,257 @@ def _build_runtime_probe(
         "chunk": capabilities["chunk"],
         "filter": capabilities["filter"],
         "commands": commands,
+    }
+
+
+def _command_probe_catalog_entry(root: Path, command: Any) -> dict[str, Any]:
+    """Resolve one target-valid F5 command for the command workbench."""
+    if not isinstance(command, str) or not command:
+        raise EmulatorInputError("command probe command must be a non-empty string")
+
+    _load_session_class(root)
+    try:
+        from compiler.registry import REGISTRY
+    except ImportError as exc:  # pragma: no cover - depends on external checkout
+        raise EmulatorInputError(f"could not load tcl-lsp command registry: {exc}") from exc
+
+    if command not in set(_f5_catalog_command_names(REGISTRY)):
+        raise EmulatorInputError(
+            f"command probe requires a command from the pinned F5 catalog: {command}"
+        )
+    spec = REGISTRY.get_any(command)
+    if spec is None:  # pragma: no cover - registry contract guard
+        raise EmulatorInputError(f"catalog command has no specification: {command}")
+    catalog_kind = _catalog_kind(command, spec)
+    if catalog_kind != "f5-irule":
+        raise EmulatorInputError(
+            f"command probe accepts F5 iRule commands only, not {catalog_kind}: {command}"
+        )
+    target_status = _target_status(
+        command,
+        TMOS_17_5_POST_TARGET_COMMANDS,
+        TMOS_17_5_UNAVAILABLE_COMMANDS,
+    )
+    if target_status != "available-in-tmos-17.5":
+        raise EmulatorInputError(
+            f"command is {target_status}: {command}"
+        )
+
+    tcl_dir = root / "tooling" / "irule_test" / "tcl"
+    runtime_status = _capability_status(
+        _mock_proc_name(command),
+        _proc_names(tcl_dir / "command_mocks.tcl"),
+        _proc_names(tcl_dir / "_mock_stubs.tcl"),
+    )
+    requirement = spec.event_requires
+    hover = getattr(spec, "hover", None)
+    return {
+        "name": command,
+        "namespace": command.split("::", 1)[0] if "::" in command else "",
+        "catalog_kind": catalog_kind,
+        "subcommands": sorted(spec.subcommands),
+        "documentation": {
+            "summary": getattr(hover, "summary", "") if hover else "",
+            "synopsis": list(getattr(hover, "synopsis", ()) or ()) if hover else [],
+            "return_value": getattr(hover, "return_value", "") if hover else "",
+            "source": getattr(hover, "source", "") if hover else "",
+        },
+        "pure": bool(spec.pure),
+        "unsafe": bool(spec.unsafe),
+        "runtime_status": runtime_status,
+        "target_status": target_status,
+        "event_requirements": {
+            "profiles": sorted(requirement.profiles) if requirement else [],
+            "also_in": sorted(requirement.also_in) if requirement else [],
+            "transport": requirement.transport if requirement else None,
+            "capability": requirement.capability if requirement else None,
+            "client_side": bool(requirement.client_side) if requirement else False,
+            "server_side": bool(requirement.server_side) if requirement else False,
+            "flow": bool(requirement.flow) if requirement else False,
+            "init_only": bool(requirement.init_only) if requirement else False,
+        },
+    }
+
+
+def _normalise_command_probe_args(value: Any) -> list[str]:
+    """Convert JSON scalar arguments into bounded, substitution-free Tcl words."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise EmulatorInputError("command probe args must be an array of scalar values")
+    if len(value) > COMMAND_PROBE_MAX_ARGS:
+        raise EmulatorInputError(
+            f"command probe accepts at most {COMMAND_PROBE_MAX_ARGS} arguments"
+        )
+
+    result: list[str] = []
+    total_bytes = 0
+    for index, item in enumerate(value):
+        if isinstance(item, bool):
+            text = "1" if item else "0"
+        elif isinstance(item, (str, int, float)):
+            if isinstance(item, float) and not math.isfinite(item):
+                raise EmulatorInputError(
+                    f"command probe arg {index} must be finite"
+                )
+            text = str(item)
+        else:
+            raise EmulatorInputError(
+                f"command probe arg {index} must be a string, number, or boolean"
+            )
+        if "\x00" in text:
+            raise EmulatorInputError(f"command probe arg {index} must not contain NUL")
+        size = len(text.encode("utf-8"))
+        if size > COMMAND_PROBE_MAX_ARG_BYTES:
+            raise EmulatorInputError(
+                f"command probe arg {index} exceeds {COMMAND_PROBE_MAX_ARG_BYTES} UTF-8 bytes"
+            )
+        total_bytes += size
+        if total_bytes > COMMAND_PROBE_MAX_TOTAL_ARG_BYTES:
+            raise EmulatorInputError(
+                "command probe arguments exceed the 64 KiB total limit"
+            )
+        result.append(text)
+    return result
+
+
+def _command_probe_irule(event: str, command: str, args: list[str]) -> str:
+    """Build the fixed event wrapper used by the safe command workbench."""
+    command_words = " ".join([_tcl_quote(command), *(_tcl_quote(arg) for arg in args)])
+    return f"""when {event} {{
+    set ::orch::_testcl_command_probe_rc [catch {{
+        set ::orch::_testcl_command_probe_value [{command_words}]
+    }} ::orch::_testcl_command_probe_error ::orch::_testcl_command_probe_options]
+}}
+"""
+
+
+def _normalise_command_probe_request(
+    root: Path, request: Any
+) -> dict[str, Any]:
+    """Validate a command probe and construct its fixture-only scenario."""
+    if not isinstance(request, dict):
+        raise EmulatorInputError("command probe request must be a JSON object")
+    allowed = {
+        "command",
+        "args",
+        "event",
+        "profiles",
+        "state",
+        "request",
+        "scenario",
+    }
+    unknown = sorted(set(request) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            f"unsupported command probe field(s): {', '.join(unknown)}"
+        )
+
+    command = request.get("command")
+    catalog = _command_probe_catalog_entry(root, command)
+    if "args" in request and request["args"] is None:
+        raise EmulatorInputError("command probe args must be an array when provided")
+    args = _normalise_command_probe_args(request.get("args"))
+
+    event = request.get("event")
+    event_name = _require_string(event, "command probe event")
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", event_name):
+        raise EmulatorInputError(
+            "command probe event must be an uppercase iRule event name"
+        )
+    event_profiles = _load_event_profiles(root)
+    if event_name not in event_profiles:
+        event_status = _target_status(
+            event_name,
+            TMOS_17_5_POST_TARGET_EVENTS,
+            TMOS_17_5_UNAVAILABLE_EVENTS,
+        )
+        if event_status != "available-in-tmos-17.5":
+            raise EmulatorInputError(
+                f"event is {event_status}: {event_name}"
+            )
+        raise EmulatorInputError(f"unknown iRule event: {event_name}")
+
+    _load_session_class(root)
+    try:
+        from compiler.registry import REGISTRY
+        from compiler.registry.namespace_data import event_satisfies, get_event_props
+        from compiler.registry.namespace_models import EventProps
+    except ImportError as exc:  # pragma: no cover - depends on external checkout
+        raise EmulatorInputError(f"could not load tcl-lsp event metadata: {exc}") from exc
+    command_spec = REGISTRY.get_any(command)
+    event_props = get_event_props(event_name)
+    if event_props is None and event_name in TMOS_17_5_EVENT_OVERRIDES:
+        override = TMOS_17_5_EVENT_OVERRIDES[event_name]
+        event_props = EventProps(
+            client_side=override["client_side"],
+            server_side=override["server_side"],
+            transport=override["transport"],
+            implied_profiles=override["implied_profiles"],
+            flow=override["flow"],
+            deprecated=override["deprecated"],
+            common=override["common"],
+        )
+    requirements = command_spec.event_requires if command_spec is not None else None
+    if requirements is not None and event_props is not None and not event_satisfies(
+        event_props, requirements, event_name
+    ):
+        raise EmulatorInputError(
+            f"command {command} is not valid in catalogued event {event_name}"
+        )
+
+    base_scenario = request.get("scenario", {})
+    if not isinstance(base_scenario, dict):
+        raise EmulatorInputError("command probe scenario must be a JSON object")
+    forbidden = sorted(
+        set(base_scenario) & {"irule", "irule_file", "request", "requests", "packets"}
+    )
+    if forbidden:
+        raise EmulatorInputError(
+            "command probe scenario cannot provide " + ", ".join(forbidden)
+        )
+    scenario = dict(base_scenario)
+
+    profiles = request.get("profiles", scenario.get("profiles", DEFAULT_PROFILES))
+    if not isinstance(profiles, list) or not profiles or len(profiles) > 64:
+        raise EmulatorInputError(
+            "command probe profiles must be a non-empty array of at most 64 strings"
+        )
+    if not all(isinstance(profile, str) and profile for profile in profiles):
+        raise EmulatorInputError("command probe profiles must be strings")
+    if any("\x00" in profile or len(profile.encode("utf-8")) > 256 for profile in profiles):
+        raise EmulatorInputError(
+            "command probe profiles must not contain NUL and must be at most 256 UTF-8 bytes"
+        )
+
+    state = request.get("state")
+    http_request = request.get("request")
+    if "state" in request and state is None:
+        raise EmulatorInputError("command probe state must be an object when provided")
+    if "request" in request and http_request is None:
+        raise EmulatorInputError("command probe request must be an object when provided")
+    if "state" in request and "request" in request:
+        raise EmulatorInputError("command probe accepts state or request, not both")
+    if http_request is not None:
+        if event_name not in {"HTTP_REQUEST", "HTTP_RESPONSE"}:
+            raise EmulatorInputError(
+                "command probe request input is supported only for HTTP_REQUEST or HTTP_RESPONSE"
+            )
+        if not isinstance(http_request, dict):
+            raise EmulatorInputError("command probe request must be a JSON object")
+        http_request = _normalise_requests({"request": http_request})[0]
+    _normalise_event(event_name, state)
+    scenario["profiles"] = list(profiles)
+    scenario["irule"] = _command_probe_irule(event_name, command, args)
+    return {
+        "command": command,
+        "args": args,
+        "event": event_name,
+        "profiles": list(profiles),
+        "state": state,
+        "request": http_request,
+        "scenario": scenario,
+        "catalog": catalog,
     }
 
 
@@ -17532,6 +17786,95 @@ class EmulatorSession:
             raise EmulatorInputError("runtime probe returned an unexpected command order")
         return rows
 
+    def _run_command_probe_on_worker(
+        self,
+        session: Any,
+        event_name: str,
+        state: dict[str, dict[str, str]],
+        request: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Execute the generated single-command event and capture its Tcl result."""
+        for variable in (
+            "rc",
+            "value",
+            "error",
+            "options",
+        ):
+            session.eval_tcl(
+                f"set ::orch::_testcl_command_probe_{variable} "
+                f"{_tcl_quote('-1' if variable == 'rc' else '')}"
+            )
+        if request is None:
+            event_result = self._fire_event_on_worker(session, event_name, state)
+        else:
+            request_result = self._run_request_on_worker(session, request)
+            event_result = {
+                "mode": "http-request",
+                "event": event_name,
+                "fired": event_name in request_result.get("events_fired", []),
+                "reason": "request_lifecycle",
+                "result": request_result,
+            }
+        raw_rc = session.eval_tcl("set ::orch::_testcl_command_probe_rc")
+        try:
+            return_code = int(str(raw_rc), 10)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - Tcl contract guard
+            raise EmulatorInputError("command probe returned an invalid Tcl result code") from exc
+
+        if not event_result.get("fired", False):
+            return {
+                "status": "profile-gated",
+                "event": event_result,
+            }
+
+        value = str(session.eval_tcl("set ::orch::_testcl_command_probe_value"))
+        value_base64 = str(
+            session.eval_tcl(
+                "binary encode base64 "
+                "[set ::orch::_testcl_command_probe_value]"
+            )
+        )
+        result: dict[str, Any] = {
+            "status": "ok" if return_code == 0 else "error",
+            "tcl_return_code": return_code,
+            "value": value if return_code == 0 else None,
+            "value_base64": value_base64 if return_code == 0 else None,
+            "value_bytes": len(
+                base64.b64decode(value_base64.encode("ascii"), validate=True)
+            )
+            if return_code == 0
+            else 0,
+            "event": event_result,
+        }
+        if return_code != 0:
+            result["error"] = str(
+                session.eval_tcl("set ::orch::_testcl_command_probe_error")
+            )
+            result["error_options"] = str(
+                session.eval_tcl("set ::orch::_testcl_command_probe_options")
+            )
+        return result
+
+    def run_command_probe(
+        self,
+        event: Any,
+        state: Any = None,
+        request: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run the generated catalog-command event against this session."""
+        event_name, normalised_state = _normalise_event(event, state)
+        if event_name not in self._event_profiles:
+            raise EmulatorInputError(f"unknown iRule event: {event_name}")
+        if request is not None and event_name not in {"HTTP_REQUEST", "HTTP_RESPONSE"}:
+            raise EmulatorInputError(
+                "command probe request input is supported only for HTTP_REQUEST or HTTP_RESPONSE"
+            )
+        return self._call(
+            lambda session: self._run_command_probe_on_worker(
+                session, event_name, normalised_state, request
+            )
+        )
+
     @property
     def event_controls(self) -> list[dict[str, Any]]:
         return [dict(control) for control in self._event_controls]
@@ -22695,6 +23038,35 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_command_probe",
+                "title": "Exercise one iRule command",
+                "description": "Execute one target-valid TMOS 17.5 F5 command with bounded scalar arguments through a generated catalogued event and return its result and event observations.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "command": {"type": "string", "minLength": 1},
+                        "args": {
+                            "type": "array",
+                            "maxItems": COMMAND_PROBE_MAX_ARGS,
+                            "items": {"type": ["string", "number", "boolean"]},
+                        },
+                        "event": {
+                            "type": "string",
+                            "pattern": "^[A-Z][A-Z0-9_]*$",
+                        },
+                        "profiles": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 64,
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                        "state": {"type": "object"},
+                        "request": {"type": "object"},
+                        "scenario": {"type": "object"},
+                    },
+                    ["command", "event"],
+                ),
+            },
+            {
                 "name": "irule_conformance",
                 "title": "Report catalog conformance",
                 "description": "Report static 17.5 catalog coverage for runtime command handlers and packet-to-event adapters.",
@@ -22896,6 +23268,21 @@ class McpProtocolServer:
             }
             return self._tool_success(
                 _build_runtime_probe(self._root, offset, limit, **filters)
+            )
+
+        if name == "irule_command_probe":
+            unknown = sorted(
+                set(args)
+                - {"command", "args", "event", "profiles", "state", "request", "scenario"}
+            )
+            if unknown or "command" not in args or "event" not in args:
+                fields = f": {', '.join(unknown)}" if unknown else ""
+                raise McpProtocolError(
+                    -32602,
+                    f"irule_command_probe requires command and event{fields}",
+                )
+            return self._tool_success(
+                run_command_probe(args, tcl_lsp_root=str(self._root))
             )
 
         if name == "irule_conformance":
@@ -23215,6 +23602,56 @@ def run_scenario(
     }
 
 
+def run_command_probe(
+    request: Any,
+    *,
+    tcl_lsp_root: str | None = None,
+    backend: str = "inprocess",
+) -> dict[str, Any]:
+    """Execute one target-valid F5 command through a generated event wrapper."""
+    if backend != "inprocess":
+        raise EmulatorInputError(
+            "the tmos-17.5 adapter requires the in-process Tcl backend; "
+            "use the repo uv environment with Tcl/Tk support"
+        )
+    root = _find_tcl_lsp_root(tcl_lsp_root)
+    prepared = _normalise_command_probe_request(root, request)
+    session: EmulatorSession | None = None
+    try:
+        session = EmulatorSession(
+            root,
+            prepared["scenario"],
+            allow_irule_file=False,
+            allow_requests=False,
+            allow_packets=False,
+            backend=backend,
+        )
+        execution = session.run_command_probe(
+            prepared["event"], prepared["state"], prepared["request"]
+        )
+        return {
+            "status": "ok",
+            "schema_version": 1,
+            "profile": "tmos-17.5",
+            "tmos_version": TMOS_VERSION,
+            "command": prepared["command"],
+            "args": prepared["args"],
+            "event": prepared["event"],
+            "profiles": prepared["profiles"],
+            "catalog": prepared["catalog"],
+            "registered_events": session.registered_events,
+            "fidelity": session.fidelity,
+            "execution": execution,
+        }
+    except EmulatorInputError:
+        raise
+    except Exception as exc:
+        raise EmulatorInputError(f"command probe failed: {exc}") from exc
+    finally:
+        if session is not None:
+            session.close()
+
+
 def run_pcap_scenario(
     scenario: Any,
     pcap_data: bytes,
@@ -23391,6 +23828,20 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             parsed = urlparse(self.path)
+            if parsed.path == "/v1/command-probes":
+                try:
+                    request = self._read_json()
+                    payload = run_command_probe(request, tcl_lsp_root=str(root))
+                except (
+                    json.JSONDecodeError,
+                    EmulatorInputError,
+                    EmulatorResourceError,
+                    OSError,
+                ) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
             if parsed.path == "/v1/simulations/pcap":
                 try:
                     request = self._read_json()
@@ -23646,6 +24097,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="probe live iRule command registration for one bounded catalog chunk",
     )
+    mode.add_argument(
+        "--command-probe",
+        action="store_true",
+        help="execute one catalogued F5 command from a JSON command-probe request",
+    )
     mode.add_argument("--serve", action="store_true", help="serve the HTTP API instead of reading stdin")
     mode.add_argument(
         "--mcp",
@@ -23678,7 +24134,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         root = _find_tcl_lsp_root(args.tcl_lsp_root)
         if args.pcap and (
-            args.serve or args.mcp or args.capabilities or args.catalog or args.probe or args.conformance
+            args.serve or args.mcp or args.capabilities or args.catalog or args.probe
+            or args.command_probe or args.conformance
         ):
             raise EmulatorInputError(
                 "--pcap can only be used with one-shot scenario execution"
@@ -23719,6 +24176,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.conformance:
             response = _build_conformance(root)
+        elif args.command_probe:
+            if args.scenario == "-":
+                request = json.load(sys.stdin)
+            else:
+                request = json.loads(Path(args.scenario).read_text(encoding="utf-8"))
+            response = run_command_probe(
+                request,
+                tcl_lsp_root=str(root),
+                backend=args.backend,
+            )
         else:
             if args.scenario == "-":
                 scenario = json.load(sys.stdin)

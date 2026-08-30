@@ -45,6 +45,55 @@ and any events reported by the upstream framework. It also includes a
 when a recognized command is backed by a generated stub, has no runtime
 handler, or is gated by the attached profiles.
 
+## Command workbench
+
+Use the command workbench to exercise one target-valid F5 command from the
+pinned TMOS 17.5 catalog without writing a temporary iRule. The workbench
+generates a single event wrapper, quotes every argument as one Tcl word, runs
+it through the normal event lifecycle, and returns the command value together
+with event observations. It accepts F5 iRule commands only; Tcl core and
+Tcllib entries remain available through normal scenario execution.
+
+The HTTP and MCP surfaces accept this request shape. `request` supplies a
+structured HTTP transaction for `HTTP_REQUEST` or `HTTP_RESPONSE`; use
+`state` for other catalogued events. `scenario` is optional and may contain
+fixture configuration such as profiles, pools, data groups, or semantic
+subsystem inputs, but may not contain an iRule, request list, packet list, or
+local file reference.
+
+```json
+{
+  "command": "HTTP::header",
+  "args": ["value", "X-Experiment"],
+  "event": "HTTP_REQUEST",
+  "profiles": ["TCP", "HTTP"],
+  "request": {
+    "method": "GET",
+    "uri": "/health",
+    "host": "api.example.com",
+    "headers": {"X-Experiment": "enabled"}
+  }
+}
+```
+
+Run it from the CLI:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --command-probe <<'JSON'
+{"command":"HTTP::host","event":"HTTP_REQUEST","request":{"host":"api.example.com"}}
+JSON
+```
+
+The same operation is available as `POST /v1/command-probes` and the MCP tool
+`irule_command_probe`. A successful command returns `execution.status` of
+`ok`, the Tcl return code, text and base64 forms of the value, byte length,
+and the event result. A Tcl command error is reported as
+`execution.status: "error"`; a missing required profile is reported as
+`profile-gated`. The workbench is bounded to 64 scalar arguments, 16 KiB per
+argument, and 64 KiB total argument data, and it never exposes arbitrary Tcl
+evaluation.
+
 For a stateful data-plane fixture, keep the simple `pools` member-array format
 and add `backends` keyed by the same `address:port` member values. A backend
 can be `up`, `down`, or `disabled`; down and disabled members are excluded from
