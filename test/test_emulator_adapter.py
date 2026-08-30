@@ -1961,7 +1961,8 @@ when HTTP_REQUEST {
         self.assertNotIn(("QOE", "generated-stub"), queue_buckets)
         self.assertNotIn(("IKE", "generated-stub"), queue_buckets)
         self.assertNotIn(("XML", "generated-stub"), queue_buckets)
-        self.assertEqual(queue["command_count"], 6)
+        self.assertEqual(queue["command_count"], 0)
+        self.assertEqual(queue["buckets"], [])
         self.assertNotIn(("math", "no-runtime-handler"), queue_buckets)
         self.assertGreaterEqual(report["events"]["catalog_count"], 170)
         self.assertEqual(report["events"]["post_target_count"], 7)
@@ -6748,6 +6749,134 @@ when HTTP_REQUEST {
                 },
                 tcl_lsp_root=self.tcl_lsp_root,
             )
+
+    def test_legacy_diagnostic_commands_are_bounded_and_observable(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    set original [LINE::get]
+    LINE::set "rewritten line"
+    check syntax
+    tcpdump -i 0 host 192.0.2.10
+    DIAG::test
+    log local0. "line=$original/[LINE::get] check=[check]"
+}
+""",
+                "requests": [{"uri": "/"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        event_result = result["results"][0]
+        self.assertTrue(
+            any("line=/rewritten line check=syntax" in entry for entry in event_result["logs"])
+        )
+        diagnostics = event_result["semantic"]["diagnostics"]
+        self.assertEqual(diagnostics["check"]["level"], "syntax")
+        self.assertEqual(
+            diagnostics["check"]["accesses"],
+            [
+                {"level": "syntax", "argument_count": 1},
+                {"level": "syntax", "argument_count": 0},
+            ],
+        )
+        self.assertEqual(diagnostics["tcpdump"]["accesses"], [["-i", "0", "host", "192.0.2.10"]])
+        self.assertEqual(diagnostics["diag_test"]["access_count"], 1)
+        self.assertEqual(
+            diagnostics["line"]["accesses"],
+            [
+                {"operation": "get", "value": ""},
+                {"operation": "set", "value": "rewritten line"},
+                {"operation": "get", "value": "rewritten line"},
+            ],
+        )
+        self.assertEqual(
+            {
+                entry["name"]: entry["runtime_status"]
+                for entry in result["fidelity"]["commands"]
+                if entry["name"]
+                in {"accumulate", "check", "tcpdump", "DIAG::test", "LINE::get", "LINE::set"}
+            },
+            {
+                "check": "semantic-mock",
+                "tcpdump": "semantic-mock",
+                "DIAG::test": "semantic-mock",
+                "LINE::get": "semantic-mock",
+                "LINE::set": "semantic-mock",
+            },
+        )
+
+    def test_accumulate_stops_the_current_handler_and_reports_suspension(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+proc stop_here {} { accumulate }
+when HTTP_REQUEST {
+    log local0. before
+    stop_here
+    log local0. after
+}
+""",
+                "requests": [{"uri": "/"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        event_result = result["results"][0]
+        self.assertTrue(any("before" in entry for entry in event_result["logs"]))
+        self.assertFalse(any("after" in entry for entry in event_result["logs"]))
+        self.assertTrue(event_result["semantic"]["diagnostics"]["accumulate"]["pending"])
+        self.assertTrue(event_result["semantic"]["diagnostics"]["accumulate"]["invoked"])
+        self.assertEqual(event_result["semantic"]["diagnostics"]["accumulate"]["count"], 1)
+        self.assertTrue(event_result["suspended"])
+        self.assertEqual(event_result["suspension"], "accumulate")
+
+    def test_accumulate_pending_state_clears_on_the_next_event(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/first"} { accumulate }
+    log local0. reached
+}
+""",
+                "requests": [{"uri": "/first"}, {"uri": "/second"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        first, second = result["results"]
+        self.assertTrue(first["semantic"]["diagnostics"]["accumulate"]["pending"])
+        self.assertTrue(first["suspended"])
+        self.assertFalse(any("reached" in entry for entry in first["logs"]))
+        self.assertFalse(second["semantic"]["diagnostics"]["accumulate"]["pending"])
+        self.assertNotIn("suspended", second)
+        self.assertTrue(any("reached" in entry for entry in second["logs"]))
+
+    def test_legacy_diagnostic_commands_reject_unsafe_inputs(self) -> None:
+        for irule in (
+            "when HTTP_REQUEST { check invalid }",
+            "when HTTP_REQUEST { tcpdump [string repeat x 16385] }",
+            "when HTTP_REQUEST { DIAG::test unexpected }",
+            "when HTTP_REQUEST { LINE::get unexpected }",
+            "when HTTP_REQUEST { LINE::set }",
+            "when HTTP_REQUEST { accumulate unexpected }",
+        ):
+            with self.subTest(irule=irule), self.assertRaises(
+                self.adapter.EmulatorInputError
+            ):
+                self.adapter.run_scenario(
+                    {
+                        "profiles": ["TCP", "HTTP"],
+                        "irule": irule,
+                        "requests": [{"uri": "/"}],
+                    },
+                    tcl_lsp_root=self.tcl_lsp_root,
+                )
 
     def test_outer_priority_orders_handlers_and_exposes_timing_metadata(self) -> None:
         result = self.adapter.run_scenario(

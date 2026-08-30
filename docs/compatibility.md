@@ -82,6 +82,14 @@ argument shapes and emit deterministic connection-scoped intent records in
 256 per connection, and are cleared at connection reset. This is an explicit
 control-flow and observability model: no listener, clone socket, related flow,
 second virtual server, or live forwarding path is created.
+The legacy diagnostic controls are modeled as bounded test observability:
+`check` retains the documented validation level; `tcpdump` records arguments
+without invoking a host capture; `DIAG::test` records no-argument probes; and
+`LINE::get`/`LINE::set` read or update the current stream line. Accesses appear
+under `semantic.diagnostics`. The legacy `accumulate` command preserves Tcl's
+handler-stop behavior and reports `suspended: true` with
+`suspension: "accumulate"`; it does not replay buffered network data or create
+an asynchronous packet source.
 Legacy lookup compatibility is fixture-backed: `cpu usage` accepts the
 documented interval spellings and returns zero unless a scenario-level `cpu`
 map supplies values; `whereis` resolves exact addresses and requested fields

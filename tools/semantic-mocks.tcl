@@ -71,6 +71,19 @@ namespace eval ::itest::semantic {
     variable whereis_accesses {}
     variable pem_dtos_records {}
     variable pem_dtos_accesses {}
+    # Diagnostic/control commands are deliberately observational.  They keep
+    # bounded history for the adapter result without opening sockets,
+    # changing host validation settings, or invoking a host tcpdump process.
+    variable check_level strict
+    variable check_accesses {}
+    variable tcpdump_accesses {}
+    variable diag_test_accesses {}
+    variable line_accesses {}
+    variable accumulate_pending 0
+    variable accumulate_invoked 0
+    variable accumulate_suspended 0
+    variable accumulate_count 0
+    variable accumulate_accesses {}
     # IPFIX templates and destinations are session-scoped, like the static
     # objects an iRule normally keeps in static variables. Messages are
     # connection-scoped and are cleared by ipfix_reset_connection.
@@ -1019,6 +1032,7 @@ namespace eval ::itest::semantic {
     }
 
     namespace eval ::state::stream {
+        variable line ""
         variable match ""
         variable encoding ascii
         variable expression ""
@@ -2094,6 +2108,201 @@ namespace eval ::itest::semantic {
         }
         ::itest::log_decision toplevel pem_dtos [list tac lookup $input]
         return $result
+    }
+
+    proc _diagnostic_text {value field {allow_empty 1}} {
+        if {(!$allow_empty && $value eq "") || [string first "\x00" $value] >= 0 || [string bytelength $value] > 1048576} {
+            error "$field must be at most 1048576 bytes and contain no NUL"
+        }
+        return $value
+    }
+
+    proc diagnostics_reset_connection {} {
+        variable accumulate_pending
+        variable accumulate_invoked
+        variable accumulate_suspended
+        variable accumulate_count
+        variable accumulate_accesses
+        set accumulate_pending 0
+        set accumulate_invoked 0
+        set accumulate_suspended 0
+        set accumulate_count 0
+        set accumulate_accesses {}
+    }
+
+    proc diagnostics_prepare_event {} {
+        variable accumulate_invoked
+        set accumulate_invoked 0
+    }
+
+    proc diagnostics_begin_packet {} {
+        variable accumulate_pending
+        variable accumulate_invoked
+        variable accumulate_suspended
+        set accumulate_pending 0
+        set accumulate_invoked 0
+        set accumulate_suspended 0
+    }
+
+    proc _diagnostics_append {variable_name value} {
+        variable $variable_name
+        set values [set $variable_name]
+        lappend values $value
+        if {[llength $values] > 1024} {
+            set values [lrange $values end-1023 end]
+        }
+        set $variable_name $values
+    }
+
+    proc accumulate_command {args} {
+        variable accumulate_pending
+        variable accumulate_invoked
+        variable accumulate_count
+        if {[llength $args] != 0} {
+            error "accumulate takes no arguments"
+        }
+        set accumulate_pending 1
+        set accumulate_invoked 1
+        incr accumulate_count
+        set event ""
+        if {[info exists ::itest::current_event]} {
+            set event $::itest::current_event
+        }
+        _diagnostics_append accumulate_accesses [list $event $accumulate_count]
+        ::itest::log_decision toplevel accumulate [list $event $accumulate_count]
+        # Use an internal error sentinel so accumulate unwinds helper procs as
+        # well as the direct handler.  The event wrapper below converts this
+        # sentinel into the framework's ordinary handler-stop result.
+        return -code error -errorcode {TESTCL ACCUMULATE} "__TESTCL_ACCUMULATE__"
+    }
+
+    proc accumulate_normalize_result {event_result} {
+        variable accumulate_invoked
+        variable accumulate_suspended
+        if {!$accumulate_invoked} {
+            return $event_result
+        }
+        set fields $event_result
+        if {[llength $fields] != 4 || [lindex $fields 0] ne "fired" ||
+            [lindex $fields 1] ne "1" || [lindex $fields 2] ne "handlers"} {
+            return $event_result
+        }
+        set normalized {}
+        set found 0
+        foreach handler [lindex $fields 3] {
+            set parts $handler
+            set error_index [lsearch -exact $parts error]
+            set code_index [lsearch -exact $parts code]
+            if {$code_index >= 0 && $error_index >= 0 &&
+                [lindex $parts [expr {$code_index + 1}]] eq "1" &&
+                [lindex $parts [expr {$error_index + 1}]] eq "__TESTCL_ACCUMULATE__"} {
+                set priority_index [lsearch -exact $parts priority]
+                set priority [expr {$priority_index >= 0 ? [lindex $parts [expr {$priority_index + 1}]] : 0}]
+                lappend normalized [list priority $priority code 2 result ""]
+                set found 1
+            } else {
+                lappend normalized $handler
+            }
+        }
+        if {!$found} {
+            return $event_result
+        }
+        set accumulate_suspended 1
+        return [list fired 1 handlers $normalized]
+    }
+
+    proc check_command {args} {
+        variable check_level
+        variable check_accesses
+        set levels {none syntax config strict}
+        if {[llength $args] > 1} {
+            error "check accepts an optional validation level"
+        }
+        if {[llength $args] == 1} {
+            set level [string tolower [lindex $args 0]]
+            if {$level ni $levels} {
+                error "check validation level must be none, syntax, config, or strict"
+            }
+            set check_level $level
+        }
+        _diagnostics_append check_accesses [list $check_level [llength $args]]
+        ::itest::log_decision toplevel check [list $check_level [llength $args]]
+        return $check_level
+    }
+
+    proc tcpdump_command {args} {
+        variable tcpdump_accesses
+        if {[llength $args] > 32} {
+            error "tcpdump accepts at most 32 arguments in the emulator"
+        }
+        set total 0
+        foreach value $args {
+            set value [_diagnostic_text $value "tcpdump argument"]
+            incr total [string bytelength $value]
+        }
+        if {$total > 16384} {
+            error "tcpdump arguments exceed the 16384-byte emulator limit"
+        }
+        _diagnostics_append tcpdump_accesses $args
+        ::itest::log_decision toplevel tcpdump $args
+        return ""
+    }
+
+    proc diag_test_command {args} {
+        variable diag_test_accesses
+        if {[llength $args] != 0} {
+            error "DIAG::test takes no arguments"
+        }
+        _diagnostics_append diag_test_accesses {}
+        ::itest::log_decision diag test {}
+        return ""
+    }
+
+    proc line_get_command {args} {
+        variable line_accesses
+        if {[llength $args] != 0} {
+            error "LINE::get takes no arguments"
+        }
+        set value [_diagnostic_text $::state::stream::line "LINE value"]
+        _diagnostics_append line_accesses [list get $value]
+        ::itest::log_decision line get $value
+        return $value
+    }
+
+    proc line_set_command {args} {
+        variable line_accesses
+        if {[llength $args] != 1} {
+            error "LINE::set requires one line value"
+        }
+        set value [_diagnostic_text [lindex $args 0] "LINE::set value"]
+        set ::state::stream::line $value
+        _diagnostics_append line_accesses [list set $value]
+        ::itest::log_decision line set $value
+        return ""
+    }
+
+    proc diagnostics_snapshot {} {
+        variable check_level
+        variable check_accesses
+        variable tcpdump_accesses
+        variable diag_test_accesses
+        variable line_accesses
+        variable accumulate_pending
+        variable accumulate_invoked
+        variable accumulate_suspended
+        variable accumulate_count
+        variable accumulate_accesses
+        return [list \
+            check_level $check_level \
+            check_accesses $check_accesses \
+            tcpdump_accesses $tcpdump_accesses \
+            diag_test_accesses $diag_test_accesses \
+            line_accesses $line_accesses \
+            accumulate_pending $accumulate_pending \
+            accumulate_invoked $accumulate_invoked \
+            accumulate_suspended $accumulate_suspended \
+            accumulate_count $accumulate_count \
+            accumulate_accesses $accumulate_accesses]
     }
 
     proc legacy_fixture_snapshot {} {
@@ -20355,6 +20564,7 @@ namespace eval ::itest::semantic {
     }
 
     proc stream_prepare_event {} {
+        set ::state::stream::line ""
         set ::state::stream::match ""
         set ::state::stream::replacement ""
         set ::state::stream::replacement_requested 0
@@ -20362,6 +20572,7 @@ namespace eval ::itest::semantic {
     }
 
     proc stream_reset_connection {} {
+        set ::state::stream::line ""
         set ::state::stream::match ""
         set ::state::stream::encoding ascii
         set ::state::stream::expression ""
@@ -23977,6 +24188,48 @@ if {[::tmm::_orig_info commands ::itest::cmd::cmd_whereis] ne ""} {
         return [eval [linsert $args 0 ::itest::semantic::whereis_command]]
     }
 }
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_accumulate] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_accumulate ::itest::cmd::_testcl_accumulate_orig
+    proc ::itest::cmd::cmd_accumulate {args} {
+        set code [catch {
+            ::itest::semantic::accumulate_command {*}$args
+        } result options]
+        if {$code != 0} {
+            return -options $options $result
+        }
+        return $result
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_check] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_check ::itest::cmd::_testcl_check_orig
+    proc ::itest::cmd::cmd_check {args} {
+        return [eval [linsert $args 0 ::itest::semantic::check_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::cmd_tcpdump] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::cmd_tcpdump ::itest::cmd::_testcl_tcpdump_orig
+    proc ::itest::cmd::cmd_tcpdump {args} {
+        return [eval [linsert $args 0 ::itest::semantic::tcpdump_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::diag_test] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::diag_test ::itest::cmd::_testcl_diag_test_orig
+    proc ::itest::cmd::diag_test {args} {
+        return [eval [linsert $args 0 ::itest::semantic::diag_test_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::line_get] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::line_get ::itest::cmd::_testcl_line_get_orig
+    proc ::itest::cmd::line_get {args} {
+        return [eval [linsert $args 0 ::itest::semantic::line_get_command]]
+    }
+}
+if {[::tmm::_orig_info commands ::itest::cmd::line_set] ne ""} {
+    ::tmm::_orig_rename ::itest::cmd::line_set ::itest::cmd::_testcl_line_set_orig
+    proc ::itest::cmd::line_set {args} {
+        return [eval [linsert $args 0 ::itest::semantic::line_set_command]]
+    }
+}
 if {[::tmm::_orig_info commands ::itest::cmd::cmd_table] ne ""} {
     ::tmm::_orig_rename ::itest::cmd::cmd_table ::itest::cmd::_testcl_table_orig
     proc ::itest::cmd::cmd_table {args} {
@@ -24184,6 +24437,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
     [::tmm::_orig_info commands ::itest::_testcl_fire_event_orig] eq ""} {
     ::tmm::_orig_rename ::itest::fire_event ::itest::_testcl_fire_event_orig
     proc ::itest::fire_event {event_name} {
+        ::itest::semantic::diagnostics_prepare_event
         set gated [info exists ::itest::semantic::automatic_http_flow]
         set is_request_data [expr {$event_name eq "HTTP_REQUEST_DATA"}]
         set is_response_data [expr {$event_name eq "HTTP_RESPONSE_DATA"}]
@@ -25385,6 +25639,28 @@ foreach {name proc_name} {
     ::itest::register_command $name $proc_name
 }
 
+# The upstream unknown dispatcher uses ``return [eval ...]`` for resolved
+# commands, which intentionally normalises Tcl completion codes.  accumulate
+# is different: its documented behavior is to stop the current handler.  Keep
+# the normal dispatcher for every other command, but preserve the completion
+# options for this one control command.
+if {[::tmm::_orig_info commands ::unknown] ne "" &&
+    [::tmm::_orig_info commands ::itest::cmd::_testcl_unknown_orig] eq ""} {
+    ::tmm::_orig_rename ::unknown ::itest::cmd::_testcl_unknown_orig
+        proc ::unknown {cmd args} {
+            if {$cmd eq "accumulate"} {
+                set code [catch {
+                    uplevel 1 [linsert $args 0 ::itest::semantic::accumulate_command]
+                } result options]
+                if {$code != 0} {
+                    return -options $options $result
+                }
+                return $result
+            }
+            return [uplevel 1 [linsert $args 0 ::itest::cmd::_testcl_unknown_orig $cmd]]
+        }
+}
+
 # The upstream HTTP orchestrator resets per-request state internally. Apply
 # adapter-supplied HTTP/2 metadata immediately before each event so that the
 # metadata survives that reset while direct event calls remain unaffected.
@@ -25397,6 +25673,7 @@ if {[::tmm::_orig_info commands ::itest::semantic::_testcl_fire_event_orig] eq "
             ::itest::semantic::flow_begin_event [lindex $args 0]
         }
         set result [eval [linsert $args 0 ::itest::semantic::_testcl_fire_event_orig]]
+        set result [::itest::semantic::accumulate_normalize_result $result]
         if {[llength $args] > 0} {
             ::itest::semantic::event_errors_record [lindex $args 0] $result
         }

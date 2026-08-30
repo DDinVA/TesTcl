@@ -91,6 +91,18 @@ connection and reset on connection rollover or close. They describe the
 iRule-visible request to clone, listen, relate, or select a resource; the
 emulator does not open sockets, create a second virtual server, or forward
 live traffic as a consequence.
+The legacy diagnostic controls are bounded and observable. [`check`](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/ltm/ltm_rule_command_check.html)
+accepts `none`, `syntax`, `config`, or `strict` and retains the selected level;
+[`tcpdump`](https://clouddocs.f5.com/cli/tmsh-reference/latest/modules/ltm/ltm_rule_command_tcpdump.html)
+records its arguments without starting a host capture; [`DIAG::test`](https://clouddocs.f5.com/cli/tmsh-reference/v16/modules/ltm/ltm_rule_command_DIAG_test.html)
+records an invocation; and [`LINE::get`](https://clouddocs.f5.com/cli/tmsh-reference/v16/modules/ltm/ltm_rule_command_LINE_get.html)
+and [`LINE::set`](https://clouddocs.f5.com/cli/tmsh-reference/v16/modules/ltm/ltm_rule_command_LINE_set.html)
+read and update the current stream line. Their access history is exposed under
+`result.semantic.diagnostics` with bounded arguments and records. The legacy
+[`accumulate`](https://clouddocs.f5.com/api/irules/accumulate.html) command
+stops the current handler and marks the result as `suspended`; it does not
+buffer or replay live packets, so a caller must model any subsequent data event
+explicitly.
 Several legacy lookup commands use caller-supplied deterministic fixtures.
 The [`cpu`](https://clouddocs.f5.com/api/irules/cpu.html) command accepts the
 documented `usage` intervals, returns zero-valued telemetry by default, and

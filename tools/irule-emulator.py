@@ -510,6 +510,7 @@ EVENT_STATE_FIELDS = {
         "pseudo_headers",
     },
     "stream": {
+        "line",
         "match",
         "encoding",
         "expression",
@@ -1386,6 +1387,12 @@ SEMANTIC_MOCK_COMMANDS = {
     "pem_dtos",
     "proc",
     "whereis",
+    "accumulate",
+    "check",
+    "tcpdump",
+    "DIAG::test",
+    "LINE::get",
+    "LINE::set",
     "clone",
     "listen",
     "relate_client",
@@ -3923,6 +3930,115 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "whereis": whereis_accesses,
         "pem_dtos": pem_dtos_accesses,
     }
+    diagnostics_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::diagnostics_snapshot")
+    )
+    if len(diagnostics_parts) != 20 or diagnostics_parts[::2] != [
+        "check_level",
+        "check_accesses",
+        "tcpdump_accesses",
+        "diag_test_accesses",
+        "line_accesses",
+        "accumulate_pending",
+        "accumulate_invoked",
+        "accumulate_suspended",
+        "accumulate_count",
+        "accumulate_accesses",
+    ]:
+        raise EmulatorInputError("invalid diagnostic/control state")
+    check_level = diagnostics_parts[1]
+    if check_level not in {"none", "syntax", "config", "strict"}:
+        raise EmulatorInputError("invalid iRule validation level")
+    check_accesses: list[dict[str, Any]] = []
+    for raw_access in _split_tcl_list(diagnostics_parts[3]):
+        access_parts = _split_tcl_list(raw_access)
+        if len(access_parts) != 2 or access_parts[0] not in {
+            "none", "syntax", "config", "strict"
+        }:
+            raise EmulatorInputError("invalid check access state")
+        try:
+            argument_count = int(access_parts[1])
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid check access state") from None
+        if argument_count not in {0, 1}:
+            raise EmulatorInputError("invalid check access argument count")
+        check_accesses.append({
+            "level": access_parts[0],
+            "argument_count": argument_count,
+        })
+    if len(check_accesses) > 1024:
+        raise EmulatorInputError("too many check access records")
+
+    tcpdump_accesses: list[list[str]] = []
+    for raw_access in _split_tcl_list(diagnostics_parts[5]):
+        args = _split_tcl_list(raw_access)
+        if len(args) > 32 or any(
+            "\x00" in value or len(value.encode("utf-8")) > 1048576
+            for value in args
+        ) or sum(len(value.encode("utf-8")) for value in args) > 16384:
+            raise EmulatorInputError("invalid tcpdump access state")
+        tcpdump_accesses.append(args)
+    if len(tcpdump_accesses) > 1024:
+        raise EmulatorInputError("too many tcpdump access records")
+
+    diag_test_accesses = _split_tcl_list(diagnostics_parts[7])
+    if any(value != "" for value in diag_test_accesses) or len(diag_test_accesses) > 1024:
+        raise EmulatorInputError("invalid DIAG::test access state")
+
+    line_accesses: list[dict[str, str]] = []
+    for raw_access in _split_tcl_list(diagnostics_parts[9]):
+        access_parts = _split_tcl_list(raw_access)
+        if len(access_parts) != 2 or access_parts[0] not in {"get", "set"}:
+            raise EmulatorInputError("invalid LINE access state")
+        value = access_parts[1]
+        if "\x00" in value or len(value.encode("utf-8")) > 1048576:
+            raise EmulatorInputError("invalid LINE access value")
+        line_accesses.append({"operation": access_parts[0], "value": value})
+    if len(line_accesses) > 1024:
+        raise EmulatorInputError("too many LINE access records")
+
+    accumulate_accesses: list[dict[str, Any]] = []
+    previous_accumulate_count = 0
+    for raw_access in _split_tcl_list(diagnostics_parts[19]):
+        access_parts = _split_tcl_list(raw_access)
+        if len(access_parts) != 2:
+            raise EmulatorInputError("invalid accumulate access state")
+        try:
+            count = int(access_parts[1])
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid accumulate access state") from None
+        if count <= previous_accumulate_count or count < 1:
+            raise EmulatorInputError("invalid accumulate access ordinal")
+        previous_accumulate_count = count
+        accumulate_accesses.append({"event": access_parts[0], "count": count})
+    if len(accumulate_accesses) > 1024:
+        raise EmulatorInputError("too many accumulate access records")
+    if any(value not in {"0", "1"} for value in (
+        diagnostics_parts[11], diagnostics_parts[13], diagnostics_parts[15]
+    )):
+        raise EmulatorInputError("invalid accumulate flags")
+    try:
+        accumulate_count = int(diagnostics_parts[17])
+    except (TypeError, ValueError):
+        raise EmulatorInputError("invalid accumulate count") from None
+    if accumulate_count < 0 or accumulate_count < previous_accumulate_count:
+        raise EmulatorInputError("invalid accumulate count")
+    diagnostics = {
+        "check": {
+            "level": check_level,
+            "accesses": check_accesses,
+        },
+        "tcpdump": {"accesses": tcpdump_accesses},
+        "diag_test": {"access_count": len(diag_test_accesses)},
+        "line": {"accesses": line_accesses},
+        "accumulate": {
+            "pending": diagnostics_parts[11] == "1",
+            "invoked": diagnostics_parts[13] == "1",
+            "suspended": diagnostics_parts[15] == "1",
+            "count": accumulate_count,
+            "accesses": accumulate_accesses,
+        },
+    }
     bwc_parts = _split_tcl_list(
         session.eval_tcl("::itest::semantic::bwc_snapshot")
     )
@@ -5459,6 +5575,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "sharedvar": sharedvar_state,
         "traffic": traffic_state,
         "utilities": legacy_utilities,
+        "diagnostics": diagnostics,
         "bwc": bwc,
         "ipfix": ipfix,
         "ilx": ilx,
@@ -13266,6 +13383,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
 
 def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
     """Run an orchestrator request and return enriched HTTP state."""
+    session.eval_tcl("::itest::semantic::diagnostics_begin_packet")
     args: list[str] = []
     for field, option in (
         ("method", "-method"),
@@ -13369,6 +13487,9 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
         "http_log": semantic["http_log"]["records"],
         "http2": _http2_snapshot(session),
     }
+    if semantic["diagnostics"]["accumulate"]["suspended"]:
+        result["suspended"] = True
+        result["suspension"] = "accumulate"
     if lb_failure.get("cause", ""):
         result["lb_failure"] = {
             "cause": lb_failure["cause"],
@@ -13651,6 +13772,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::session_reset")
                 session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
                 session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+                session.eval_tcl("::itest::semantic::diagnostics_reset_connection")
                 session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
                 for procedure, arguments, body in _extract_irule_procedures(
                     self._root, self._prepared_source
@@ -13833,6 +13955,7 @@ class EmulatorSession:
                 session.close_connection()
                 session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
                 session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+                session.eval_tcl("::itest::semantic::diagnostics_reset_connection")
                 session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
                 session.eval_tcl("::itest::semantic::stream_reset_connection")
                 session.eval_tcl("::itest::semantic::route_reset_connection")
@@ -13853,6 +13976,7 @@ class EmulatorSession:
             session.eval_tcl("::state::reset_connection_state")
             session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
             session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+            session.eval_tcl("::itest::semantic::diagnostics_reset_connection")
             session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
             session.eval_tcl("::itest::semantic::lb_reset_connection")
             session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
@@ -14055,6 +14179,7 @@ class EmulatorSession:
             session.eval_tcl("::state::reset_connection_state")
             session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
             session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+            session.eval_tcl("::itest::semantic::diagnostics_reset_connection")
             session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
             session.eval_tcl("::itest::semantic::psm_reset_connection")
             session.eval_tcl("::itest::semantic::ssl_reset_connection")
@@ -14107,6 +14232,7 @@ class EmulatorSession:
             session.close_connection()
             session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
             session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+            session.eval_tcl("::itest::semantic::diagnostics_reset_connection")
             session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
             session.eval_tcl("::itest::semantic::stream_reset_connection")
             session.eval_tcl("::itest::semantic::http_proxy_reset_connection")
@@ -14185,6 +14311,7 @@ class EmulatorSession:
         event_name: str,
         state: dict[str, dict[str, str]],
     ) -> dict[str, Any]:
+        session.eval_tcl("::itest::semantic::diagnostics_begin_packet")
         session.eval_tcl("::itest::semantic::tcp_clear_event_state")
         if "udp" in state:
             session.eval_tcl("::itest::semantic::udp_prepare_event")
@@ -14390,6 +14517,7 @@ class EmulatorSession:
                 "sharedvar": semantic_snapshot["sharedvar"],
                 "traffic": semantic_snapshot["traffic"],
                 "utilities": semantic_snapshot["utilities"],
+                "diagnostics": semantic_snapshot["diagnostics"],
                 "adapt": semantic_snapshot["adapt"],
                 "psm": semantic_snapshot["psm"],
                 "ip": semantic_snapshot["ip"],
@@ -14407,6 +14535,9 @@ class EmulatorSession:
                 "am": semantic_snapshot["am"],
             },
         }
+        if semantic_snapshot["diagnostics"]["accumulate"]["suspended"]:
+            result["suspended"] = True
+            result["suspension"] = "accumulate"
         if mqtt_forwarded is not None:
             result["forwarded"] = mqtt_forwarded
         emissions = self._tcp_emissions(session)
@@ -14428,6 +14559,7 @@ class EmulatorSession:
             if event_name == "CLIENT_ACCEPTED":
                 session.eval_tcl("::itest::semantic::l7check_reset_connection")
                 session.eval_tcl("::itest::semantic::link_reset_connection")
+                session.eval_tcl("::itest::semantic::diagnostics_reset_connection")
                 session.eval_tcl("::itest::semantic::bwc_reset_connection")
                 session.eval_tcl("::itest::semantic::ipfix_reset_connection")
                 session.eval_tcl("::itest::semantic::eca_reset_connection")
@@ -15499,6 +15631,7 @@ class EmulatorSession:
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
         session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+        session.eval_tcl("::itest::semantic::diagnostics_reset_connection")
         session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
         session.eval_tcl("::itest::semantic::mqtt_reset_connection")
         session.eval_tcl("::itest::semantic::sip_reset_connection")
@@ -15596,6 +15729,7 @@ class EmulatorSession:
         session.eval_tcl("::state::reset_connection_state")
         session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
         session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
+        session.eval_tcl("::itest::semantic::diagnostics_reset_connection")
         session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
         session.eval_tcl("::itest::semantic::bigtcp_prepare_connection")
         session.eval_tcl("::itest::semantic::psm_reset_connection")
