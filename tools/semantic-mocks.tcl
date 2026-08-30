@@ -3835,6 +3835,25 @@ namespace eval ::itest::semantic {
         set mqtt_message_replaced 0
     }
 
+    proc mqtt_prepare_event {} {
+        variable mqtt_release_requested
+        variable mqtt_dropped
+        variable mqtt_disconnect_requested
+        variable mqtt_response_requested
+        variable mqtt_response_message
+        variable mqtt_insertions
+        variable mqtt_operations
+        variable mqtt_message_replaced
+        set mqtt_release_requested 0
+        set mqtt_dropped 0
+        set mqtt_disconnect_requested 0
+        set mqtt_response_requested 0
+        set mqtt_response_message {}
+        set mqtt_insertions {}
+        set mqtt_operations {}
+        set mqtt_message_replaced 0
+    }
+
     proc _mqtt_require_event {allowed command_name} {
         if {$::itest::current_event ni $allowed} {
             error "$command_name is not valid during $::itest::current_event"

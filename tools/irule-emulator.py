@@ -9488,8 +9488,10 @@ PACKET_EVENT_ADAPTERS = {
     "WS_SERVER_DATA": "collected WebSocket server frame data",
     "MQTT_CLIENT_INGRESS": "MQTT message received from client",
     "MQTT_CLIENT_DATA": "collected MQTT client PUBLISH payload",
+    "MQTT_CLIENT_EGRESS": "MQTT message sent to client",
     "MQTT_SERVER_INGRESS": "MQTT message received from server",
     "MQTT_SERVER_DATA": "collected MQTT server PUBLISH payload",
+    "MQTT_SERVER_EGRESS": "MQTT message sent to server",
     "MQTT_CLIENT_SHUTDOWN": "MQTT client TCP shutdown",
     "SIP_REQUEST": "SIP client request ingress",
     "SIP_REQUEST_DONE": "SIP request routing completion",
@@ -15585,7 +15587,12 @@ class EmulatorSession:
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         current_packet = _mqtt_packet_from_state(mqtt_state)
         current_wire = _encode_mqtt_message(current_packet)
-        outgoing_side = "server" if event_name.startswith("MQTT_CLIENT_") else "client"
+        outgoing_side = (
+            "client"
+            if event_name in {"MQTT_SERVER_INGRESS", "MQTT_CLIENT_EGRESS"}
+            else "server"
+        )
+        response_side = "client" if event_name.startswith("MQTT_CLIENT_") else "server"
         forwarded = {
             "to": outgoing_side,
             "packet": _mqtt_public_packet(current_packet),
@@ -15604,7 +15611,7 @@ class EmulatorSession:
                 emissions.append(
                     {
                         "kind": "response",
-                        "to": "client" if event_name.startswith("MQTT_CLIENT_") else "server",
+                        "to": response_side,
                         "packet": _mqtt_public_packet(response),
                         "wire_hex": response_wire.hex(),
                     }
@@ -15717,6 +15724,8 @@ class EmulatorSession:
     ) -> dict[str, Any]:
         session.eval_tcl("::itest::semantic::diagnostics_begin_packet")
         session.eval_tcl("::itest::semantic::tcp_clear_event_state")
+        if "mqtt" in state:
+            session.eval_tcl("::itest::semantic::mqtt_prepare_event")
         if "udp" in state:
             session.eval_tcl("::itest::semantic::udp_prepare_event")
         if "sctp" in state:
@@ -15897,6 +15906,8 @@ class EmulatorSession:
                 "MQTT_SERVER_INGRESS",
                 "MQTT_CLIENT_DATA",
                 "MQTT_SERVER_DATA",
+                "MQTT_CLIENT_EGRESS",
+                "MQTT_SERVER_EGRESS",
             }
             and "mqtt" in state
             and state_snapshot.get("mqtt", {}).get("type")
@@ -18276,6 +18287,7 @@ class EmulatorSession:
                     session, ingress_event, self._packet_event_state(packet)
                 )
                 entry["events"].append(ingress_result)
+                last_event_result = ingress_result
                 flags = _split_tcl_list(
                     session.eval_tcl("::itest::semantic::mqtt_flags_snapshot")
                 )
@@ -18315,6 +18327,7 @@ class EmulatorSession:
                                 session, data_event, self._packet_event_state(data_packet)
                             )
                             entry["events"].append(data_result)
+                            last_event_result = data_result
                             data_flags = _split_tcl_list(
                                 session.eval_tcl("::itest::semantic::mqtt_flags_snapshot")
                             )
@@ -18324,6 +18337,32 @@ class EmulatorSession:
                                 entry["drop_reason"] = "message"
                 if message_state.get("disconnect") == "1":
                     entry["disconnect_requested"] = True
+                if not entry.get("dropped"):
+                    egress_event = (
+                        "MQTT_SERVER_EGRESS"
+                        if direction == "client_to_server"
+                        else "MQTT_CLIENT_EGRESS"
+                    )
+                    egress_state = last_event_result.get("state", {})
+                    if not isinstance(egress_state, dict) or "mqtt" not in egress_state:
+                        egress_state = self._packet_event_state(packet)
+                    egress_result = self._fire_event_on_worker(
+                        session, egress_event, egress_state
+                    )
+                    entry["events"].append(egress_result)
+                    egress_flags = _split_tcl_list(
+                        session.eval_tcl("::itest::semantic::mqtt_flags_snapshot")
+                    )
+                    if len(egress_flags) % 2:
+                        raise EmulatorInputError("invalid MQTT egress state")
+                    egress_message_state = dict(
+                        zip(egress_flags[::2], egress_flags[1::2])
+                    )
+                    if egress_message_state.get("dropped") == "1":
+                        entry["dropped"] = True
+                        entry["drop_reason"] = "message"
+                    if egress_message_state.get("disconnect") == "1":
+                        entry["disconnect_requested"] = True
                 continue
 
             if protocol == "sip":

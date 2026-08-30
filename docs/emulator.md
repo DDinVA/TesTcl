@@ -1843,9 +1843,13 @@ would have been found by a production stream filter.
 ```
 MQTT support is pinned to the 17.5-era MQTT 3.1.1 event model: structured
 `CONNECT`, `CONNACK`, `PUBLISH`, subscription, acknowledgement, ping, and
-disconnect packets can drive `MQTT_CLIENT_INGRESS`/`MQTT_SERVER_INGRESS`, while
-`MQTT::collect` on a `PUBLISH` drives the corresponding `*_DATA` event with the
-collected payload. Raw MQTT-over-TCP payloads are decoded after bounded TCP
+disconnect packets can drive client/server ingress and egress events. A
+client-to-server packet fires `MQTT_CLIENT_INGRESS` and then
+`MQTT_SERVER_EGRESS`; a server-to-client packet fires
+`MQTT_SERVER_INGRESS` and then `MQTT_CLIENT_EGRESS`. `MQTT::drop` suppresses
+the corresponding egress event. `MQTT::collect` on a `PUBLISH` drives the
+corresponding `*_DATA` event with the collected payload. Raw MQTT-over-TCP
+payloads are decoded after bounded TCP
 reassembly, including messages split across segments and multiple messages in
 one segment. `MQTT::payload`, `MQTT::drop`, `MQTT::release`, and the common
 MQTT field getters/setters are semantic mocks. `MQTT::will` mutates CONNECT

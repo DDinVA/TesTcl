@@ -247,10 +247,19 @@ CONNECT negotiation, URI rewriting on forwarded bytes, or live downstream
 proxy chaining.
 The TMOS 17.5 REWRITE surface models `REWRITE::enable`, `REWRITE::disable`,
 `REWRITE::payload`, and `REWRITE::post_process`. With the `REWRITE` profile,
-the high-level HTTP lifecycle exposes `REWRITE_REQUEST_DONE` and conditionally
-`REWRITE_RESPONSE_DONE`; payload reads and replacements use byte offsets and
-update an existing `Content-Length` header. It does not implement the full
-REWRITE profile/plugin, APM policy processing, or URL/file rewrite tables.
+the high-level HTTP lifecycle exposes `REWRITE_REQUEST` and
+`REWRITE_RESPONSE` before their corresponding HTTP events, followed by
+`REWRITE_REQUEST_DONE` and conditionally `REWRITE_RESPONSE_DONE`; payload
+reads and replacements use byte offsets and update an existing
+`Content-Length` header. It does not implement the full REWRITE
+profile/plugin, APM policy processing, or URL/file rewrite tables.
+
+The MQTT 3.1.1 packet adapter dispatches target-valid ingress and egress
+events: client-to-server messages flow through `MQTT_CLIENT_INGRESS` and
+`MQTT_SERVER_EGRESS`, while server-to-client messages flow through
+`MQTT_SERVER_INGRESS` and `MQTT_CLIENT_EGRESS`. Ingress/data drops suppress
+the modeled egress event; delivery events expose deterministic forwarded
+message state but do not open message-routing sockets.
 The HTTP control path also captures `HTTP::disable` and fires `HTTP_DISABLED`
 after a request handler, including a bounded `discard` flag and deterministic
 `HTTP::passthrough_reason` values. The control state is reset between

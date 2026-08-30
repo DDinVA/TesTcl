@@ -10265,7 +10265,7 @@ when MQTT_SERVER_INGRESS {
         connack_events = result["trace"][2]["events"]
         self.assertEqual(
             [event["event"] for event in publish_events],
-            ["MQTT_CLIENT_INGRESS", "MQTT_CLIENT_DATA"],
+            ["MQTT_CLIENT_INGRESS", "MQTT_CLIENT_DATA", "MQTT_SERVER_EGRESS"],
         )
         self.assertTrue(
             any("client=sensor-1 type=PUBLISH topic=sensors/temp" in entry for entry in publish_events[0]["logs"])
@@ -10274,13 +10274,54 @@ when MQTT_SERVER_INGRESS {
             any("payload=abc length=3" in entry for entry in publish_events[1]["logs"])
         )
         self.assertEqual(publish_events[1]["state"]["mqtt"]["payload"], "xyz")
+        self.assertEqual(publish_events[2]["forwarded"]["to"], "server")
+        self.assertEqual(publish_events[2]["forwarded"]["packet"]["payload"], "xyz")
         self.assertTrue(connack_events[-1]["fired"])
         self.assertTrue(any("server=CONNACK code=0" in entry for entry in connack_events[-1]["logs"]))
+        self.assertEqual(
+            [event["event"] for event in connack_events],
+            ["MQTT_SERVER_INGRESS"],
+        )
         self.assertTrue(result["trace"][2]["dropped"])
         self.assertEqual(result["trace"][2]["drop_reason"], "message")
         usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
         for command in ("MQTT::collect", "MQTT::payload", "MQTT::release", "MQTT::drop"):
             self.assertEqual(usage[command]["runtime_status"], "semantic-mock")
+
+    def test_mqtt_server_ingress_drives_client_egress_forwarding(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["MQTT"],
+                "irule": (
+                    "when MQTT_SERVER_INGRESS { log local0. \"incoming=[MQTT::type]\" }\n"
+                    "when MQTT_CLIENT_EGRESS { log local0. \"outgoing=[MQTT::type]\" }"
+                ),
+                "packets": [
+                    {
+                        "protocol": "mqtt",
+                        "type": "CONNACK",
+                        "direction": "server_to_client",
+                        "return_code": 0,
+                        "session_present": True,
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        message_events = [
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] in {"MQTT_SERVER_INGRESS", "MQTT_CLIENT_EGRESS"}
+        ]
+        self.assertEqual(
+            [event["event"] for event in message_events],
+            ["MQTT_SERVER_INGRESS", "MQTT_CLIENT_EGRESS"],
+        )
+        self.assertEqual(message_events[0]["forwarded"]["to"], "client")
+        self.assertEqual(message_events[1]["forwarded"]["to"], "client")
+        self.assertEqual(message_events[1]["forwarded"]["packet"]["type"], "CONNACK")
+        self.assertTrue(any("outgoing=CONNACK" in log for log in message_events[1]["logs"]))
 
     def test_raw_mqtt_tcp_reassembly_handles_partial_messages_and_shutdown(self) -> None:
         connect = bytes.fromhex("101400044d5154540402001e000873656e736f722d31")
@@ -10411,7 +10452,11 @@ when MQTT_CLIENT_INGRESS {
             tcl_lsp_root=self.tcl_lsp_root,
         )
 
-        connect_event = result["trace"][0]["events"][-1]
+        connect_event = next(
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] == "MQTT_CLIENT_INGRESS"
+        )
         self.assertEqual(connect_event["event"], "MQTT_CLIENT_INGRESS")
         self.assertEqual(connect_event["forwarded"]["to"], "server")
         self.assertEqual(connect_event["forwarded"]["packet"]["will_flag"], "1")
@@ -10426,6 +10471,14 @@ when MQTT_CLIENT_INGRESS {
         self.assertEqual(connect_event["emissions"][1]["kind"], "response")
         self.assertEqual(connect_event["emissions"][1]["to"], "client")
         self.assertEqual(connect_event["emissions"][1]["packet"]["return_code"], "5")
+        connect_egress = next(
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] == "MQTT_SERVER_EGRESS"
+        )
+        self.assertEqual(connect_egress["event"], "MQTT_SERVER_EGRESS")
+        self.assertEqual(connect_egress["forwarded"]["to"], "server")
+        self.assertEqual(connect_egress["forwarded"]["packet"]["will_topic"], "/devices/will")
 
         publish_event = result["trace"][1]["events"][0]
         self.assertEqual(publish_event["forwarded"]["packet"]["topic"], "rewritten")
@@ -10434,6 +10487,10 @@ when MQTT_CLIENT_INGRESS {
         self.assertEqual(publish_event["forwarded"]["packet"]["packet_id"], "7")
         self.assertEqual(publish_event["forwarded"]["packet"]["dup"], "1")
         self.assertEqual(publish_event["forwarded"]["packet"]["retain"], "1")
+        publish_egress = result["trace"][1]["events"][1]
+        self.assertEqual(publish_egress["event"], "MQTT_SERVER_EGRESS")
+        self.assertEqual(publish_egress["forwarded"]["packet"]["topic"], "rewritten")
+        self.assertEqual(publish_egress["forwarded"]["packet"]["payload"], "changed")
 
         subscribe_event = result["trace"][2]["events"][0]
         self.assertEqual(
@@ -10441,6 +10498,7 @@ when MQTT_CLIENT_INGRESS {
             [["devices/#", "1"], ["alerts", "0"]],
         )
         self.assertEqual(subscribe_event["forwarded"]["packet"]["packet_id"], "9")
+        self.assertEqual(result["trace"][2]["events"][1]["event"], "MQTT_SERVER_EGRESS")
 
         usage = {entry["name"]: entry for entry in result["fidelity"]["commands"]}
         for command in ("MQTT::insert", "MQTT::replace", "MQTT::respond", "MQTT::will"):
