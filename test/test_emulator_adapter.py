@@ -1986,6 +1986,10 @@ when HTTP_REQUEST {
         self.assertIn("PEM_SUBS_SESS_DELETED", packet_adapters)
         self.assertEqual(packet_adapters["FIX_MESSAGE"], "structured FIX message event")
         self.assertEqual(
+            packet_adapters["PROTOCOL_INSPECTION_MATCH"],
+            "protocol inspection match packet",
+        )
+        self.assertEqual(
             packet_adapters["TAP_REQUEST"],
             "structured TAP security-token event",
         )

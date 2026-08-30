@@ -9111,6 +9111,7 @@ PACKET_EVENT_ADAPTERS = {
     "CLIENT_DATA": "client payload (TCP or generic UDP)",
     "ECA_REQUEST_ALLOWED": "injected NTLM/ECA authentication success",
     "ECA_REQUEST_DENIED": "injected NTLM/ECA authentication failure",
+    "PROTOCOL_INSPECTION_MATCH": "protocol inspection match packet",
     "FIX_MESSAGE": "structured FIX message event",
     "SERVER_DATA": "server payload (TCP or generic UDP)",
     "TDS_REQUEST": "structured TDS request message",
