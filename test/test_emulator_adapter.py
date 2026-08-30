@@ -3136,6 +3136,10 @@ when HTTP_REQUEST {
             "ASM_RESPONSE_LOGIN",
             coverage["event_lifecycle"]["target_unmapped_events"],
         )
+        self.assertNotIn(
+            "IN_DOSL7_ATTACK",
+            coverage["event_lifecycle"]["target_unmapped_events"],
+        )
         self.assertEqual(report["commands"]["post_target_count"], 10)
         self.assertEqual(
             report["commands"]["target_catalog_count"],
@@ -8162,6 +8166,19 @@ when HTTP_REQUEST {
             ({"greylist": {"10.0.0.1": {"rate": 101, "timeout": 60}}}, "rate must be an integer"),
             ({"greylist": {"10.0.0.1": {"rate": 10, "timeout": -1}}}, "timeout must be an integer"),
             ({"greylist": {"not-an-ip": {"rate": 10, "timeout": 60}}}, "not a valid IPv4 or IPv6 address"),
+            ({"attack": []}, "dosl7.attack must be an object"),
+            (
+                {"attack": {"enabled": "yes"}},
+                "dosl7.attack.enabled must be a boolean",
+            ),
+            (
+                {"attack": {"enabled": True}},
+                "dosl7.attack.attacker_ip is required when dosl7.attack.enabled is true",
+            ),
+            (
+                {"attack": {"enabled": True, "attacker_ip": "not-an-ip"}},
+                "not a valid IPv4 or IPv6 address",
+            ),
             ({"unknown": True}, "dosl7 unsupported field"),
         )
         for dosl7, message in invalid_cases:
@@ -8170,6 +8187,54 @@ when HTTP_REQUEST {
             with self.subTest(dosl7=dosl7):
                 with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
                     self.adapter.run_scenario(scenario, tcl_lsp_root=self.tcl_lsp_root)
+
+    def test_dosl7_attack_fixture_emits_in_dosl7_attack(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ASM"],
+                "dosl7": {
+                    "attack": {
+                        "enabled": True,
+                        "attacker_ip": "203.0.113.44",
+                        "mitigation": "Source IP-Based Rate Limiting",
+                    }
+                },
+                "irule": (
+                    "when IN_DOSL7_ATTACK { "
+                    'log local0. "attacker=$DOSL7_ATTACKER_IP mitigation=$DOSL7_MITIGATION"; '
+                    "DOSL7::disable }"
+                ),
+                "request": {"uri": "/under-attack"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        item = result["results"][0]
+        self.assertEqual(item["events_fired"], ["HTTP_REQUEST", "IN_DOSL7_ATTACK"])
+        self.assertTrue(
+            any(
+                "attacker=203.0.113.44 mitigation=Source IP-Based Rate Limiting" in entry
+                for entry in item["logs"]
+            )
+        )
+        self.assertFalse(item["semantic"]["dosl7"]["enabled"])
+
+        disabled = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ASM"],
+                "dosl7": {
+                    "enabled": False,
+                    "attack": {
+                        "enabled": True,
+                        "attacker_ip": "203.0.113.44",
+                        "mitigation": "rate-limit",
+                    },
+                },
+                "irule": "when IN_DOSL7_ATTACK { log local0. unexpected }",
+                "request": {"uri": "/clear"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertNotIn("IN_DOSL7_ATTACK", disabled["results"][0]["events_fired"])
 
     def test_dosl7_request_mitigation_override_resets_to_policy_default(self) -> None:
         result = self.adapter.run_scenario(

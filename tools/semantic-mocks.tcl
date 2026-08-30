@@ -292,6 +292,13 @@ namespace eval ::itest::semantic {
     variable dosl7_default_mitigated 0
     variable dosl7_mitigated 0
     variable dosl7_profile_object ""
+    variable dosl7_default_attack_enabled 0
+    variable dosl7_attack_enabled 0
+    variable dosl7_default_attacker_ip ""
+    variable dosl7_attacker_ip ""
+    variable dosl7_default_mitigation ""
+    variable dosl7_mitigation ""
+    variable dosl7_attack_fired 0
     variable dosl7_greylist
     set dosl7_greylist [dict create]
 
@@ -12209,6 +12216,27 @@ namespace eval ::itest::semantic {
         set dosl7_greylist $greylist
     }
 
+    proc dosl7_set_attack {enabled attacker_ip mitigation} {
+        variable dosl7_default_attack_enabled
+        variable dosl7_attack_enabled
+        variable dosl7_default_attacker_ip
+        variable dosl7_attacker_ip
+        variable dosl7_default_mitigation
+        variable dosl7_mitigation
+        if {$enabled ni {0 1}} {
+            error "DOSL7 attack enabled state must be boolean"
+        }
+        if {$enabled && $attacker_ip eq ""} {
+            error "DOSL7 attack attacker IP cannot be empty when enabled"
+        }
+        set dosl7_default_attack_enabled $enabled
+        set dosl7_attack_enabled $enabled
+        set dosl7_default_attacker_ip $attacker_ip
+        set dosl7_attacker_ip $attacker_ip
+        set dosl7_default_mitigation $mitigation
+        set dosl7_mitigation $mitigation
+    }
+
     proc dosl7_reset_connection {} {
         variable dosl7_default_enabled
         variable dosl7_enabled
@@ -12223,6 +12251,13 @@ namespace eval ::itest::semantic {
     proc dosl7_prepare_request {has_override mitigated} {
         variable dosl7_default_mitigated
         variable dosl7_mitigated
+        variable dosl7_default_attack_enabled
+        variable dosl7_attack_enabled
+        variable dosl7_default_attacker_ip
+        variable dosl7_attacker_ip
+        variable dosl7_default_mitigation
+        variable dosl7_mitigation
+        variable dosl7_attack_fired
         if {$has_override ni {0 1} || $mitigated ni {0 1}} {
             error "DOSL7 request mitigation state must be boolean"
         }
@@ -12230,6 +12265,32 @@ namespace eval ::itest::semantic {
             set dosl7_mitigated $mitigated
         } else {
             set dosl7_mitigated $dosl7_default_mitigated
+        }
+        set dosl7_attack_enabled $dosl7_default_attack_enabled
+        set dosl7_attacker_ip $dosl7_default_attacker_ip
+        set dosl7_mitigation $dosl7_default_mitigation
+        set dosl7_attack_fired 0
+        set ::DOSL7_ATTACKER_IP ""
+        set ::DOSL7_MITIGATION ""
+    }
+
+    proc dosl7_auto_attack {} {
+        variable dosl7_enabled
+        variable dosl7_attack_enabled
+        variable dosl7_attacker_ip
+        variable dosl7_mitigation
+        variable dosl7_attack_fired
+        if {![_profile_enabled ASM] && ![_profile_enabled DOSL7] ||
+            !$dosl7_enabled || !$dosl7_attack_enabled || $dosl7_attack_fired} {
+            return
+        }
+        set dosl7_attack_fired 1
+        set ::DOSL7_ATTACKER_IP $dosl7_attacker_ip
+        set ::DOSL7_MITIGATION $dosl7_mitigation
+        if {[info exists ::itest::event_handlers(IN_DOSL7_ATTACK)] &&
+            [llength $::itest::event_handlers(IN_DOSL7_ATTACK)] > 0} {
+            set event_result [::itest::_testcl_fire_event_orig IN_DOSL7_ATTACK]
+            ::itest::semantic::event_errors_record IN_DOSL7_ATTACK $event_result
         }
     }
 
@@ -25744,6 +25805,12 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                     [lsearch -exact $events HTTP_RESPONSE] < 0} {
                     lappend events HTTP_RESPONSE
                 }
+                if {([::itest::semantic::_profile_enabled ASM] ||
+                     [::itest::semantic::_profile_enabled DOSL7]) &&
+                    [lsearch -exact $events IN_DOSL7_ATTACK] >= 0 &&
+                    [lsearch -exact $events HTTP_REQUEST] < 0} {
+                    lappend events HTTP_REQUEST
+                }
             }
             return $events
         }
@@ -25914,6 +25981,10 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             # here, after HTTP_REQUEST has run but before the request can
             # select or connect to an origin server.
             ::itest::semantic::asm_auto_request_events
+            # DOSL7 attack inspection is also a request-side lifecycle.  The
+            # attack fixture supplies the documented global variables to the
+            # handler without pretending to run a rate/detection engine.
+            ::itest::semantic::dosl7_auto_attack
             # Request adaptation completes after HTTP_REQUEST has configured
             # the dynamic context, but before the request proceeds to the
             # serverside path.

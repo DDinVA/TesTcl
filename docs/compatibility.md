@@ -529,6 +529,10 @@ An HTTP request can override the seeded `is_mitigated` result for one
 transaction, including across an internal `HTTP::retry`. The adapter records
 rate and timeout values but does not implement wall-clock expiry, traffic-rate
 measurement, or the ASM/DOS inspection and mitigation engines.
+An enabled `dosl7.attack` fixture emits `IN_DOSL7_ATTACK` during the HTTP
+request lifecycle and exposes `$DOSL7_ATTACKER_IP` and `$DOSL7_MITIGATION` to
+the handler. The event is fixture-driven; no DoS detector or mitigation engine
+is implemented.
 The TMOS 17.5 `ASM::` surface is represented by a deterministic scenario-level
 policy model covering all 25 catalogued commands. It can seed policy identity,
 client identity, login/CAPTCHA state, payload, request and response violations,

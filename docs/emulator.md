@@ -795,6 +795,11 @@ The `DOSL7` policy surface can be seeded with a scenario-level `dosl7` object:
     "mitigated": false,
     "greylist": {
       "10.0.0.1": {"rate": 30, "timeout": 60}
+    },
+    "attack": {
+      "enabled": true,
+      "attacker_ip": "203.0.113.44",
+      "mitigation": "Source IP-Based Rate Limiting"
     }
   },
   "irule": "when HTTP_REQUEST { if {[DOSL7::is_ip_slowdown]} { log local0. slowed } }"
@@ -811,6 +816,10 @@ not advance a wall clock or run a real L7 DoS detection/mitigation engine. An
 HTTP request may include `"dosl7": {"mitigated": true}` or `false` to override
 the seeded mitigation result for that transaction; the override is reused for
 an internal `HTTP::retry` and the next request returns to the scenario default.
+An enabled `dosl7.attack` fixture emits `IN_DOSL7_ATTACK` during the request
+lifecycle and exposes the documented `$DOSL7_ATTACKER_IP` and
+`$DOSL7_MITIGATION` event variables. This is an explicit deterministic attack
+fixture; it does not infer attacks from traffic or run a mitigation engine.
 The `ASM` policy surface can be seeded with deterministic WAF inputs:
 
 ```json

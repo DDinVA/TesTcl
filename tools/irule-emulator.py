@@ -2948,6 +2948,20 @@ def _prepare_irule_source(
     prepared = source
     for start, end, replacement in reversed(replacements):
         prepared = prepared[:start] + replacement + prepared[end:]
+    # BIG-IP exposes these DOSL7 event values as predefined variables.  The
+    # Tcl test loader executes handlers as ordinary global procs, where an
+    # unqualified variable name would otherwise be local to the handler.
+    for variable_name in ("DOSL7_ATTACKER_IP", "DOSL7_MITIGATION"):
+        prepared = re.sub(
+            rf"\$\{{{variable_name}\}}",
+            f"${{{'::' + variable_name}}}",
+            prepared,
+        )
+        prepared = re.sub(
+            rf"(?<![:A-Za-z0-9_])\${variable_name}(?![A-Za-z0-9_])",
+            f"$::{variable_name}",
+            prepared,
+        )
     return prepared, controls
 
 
@@ -7396,10 +7410,15 @@ def _normalise_dosl7(raw: Any) -> dict[str, Any]:
             "profile": "",
             "mitigated": False,
             "greylist": [],
+            "attack": {
+                "enabled": False,
+                "attacker_ip": "",
+                "mitigation": "",
+            },
         }
     if not isinstance(raw, dict):
         raise EmulatorInputError("dosl7 must be an object")
-    allowed = {"enabled", "health", "profile", "mitigated", "greylist"}
+    allowed = {"enabled", "health", "profile", "mitigated", "greylist", "attack"}
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise EmulatorInputError(f"dosl7 unsupported field(s): {', '.join(unknown)}")
@@ -7457,12 +7476,45 @@ def _normalise_dosl7(raw: Any) -> dict[str, Any]:
                 f"dosl7.greylist entry {address!r}.timeout must be an integer from 0 to 2147483647"
             )
         records.append((address, rate, timeout))
+    attack_raw = raw.get("attack", {})
+    if not isinstance(attack_raw, dict):
+        raise EmulatorInputError("dosl7.attack must be an object")
+    unknown_attack = sorted(set(attack_raw) - {"enabled", "attacker_ip", "mitigation"})
+    if unknown_attack:
+        raise EmulatorInputError(
+            "dosl7.attack unsupported field(s): " + ", ".join(unknown_attack)
+        )
+    attack_enabled = attack_raw.get("enabled", False)
+    if not isinstance(attack_enabled, bool):
+        raise EmulatorInputError("dosl7.attack.enabled must be a boolean")
+    attacker_ip = attack_raw.get("attacker_ip", "")
+    if not isinstance(attacker_ip, str) or "\x00" in attacker_ip:
+        raise EmulatorInputError("dosl7.attack.attacker_ip must be a string without NUL")
+    if attacker_ip:
+        try:
+            attacker_ip = str(ipaddress.ip_address(attacker_ip))
+        except ValueError:
+            raise EmulatorInputError(
+                f"dosl7.attack.attacker_ip {attacker_ip!r} is not a valid IPv4 or IPv6 address"
+            ) from None
+    if attack_enabled and not attacker_ip:
+        raise EmulatorInputError(
+            "dosl7.attack.attacker_ip is required when dosl7.attack.enabled is true"
+        )
+    mitigation = attack_raw.get("mitigation", "")
+    if not isinstance(mitigation, str) or "\x00" in mitigation:
+        raise EmulatorInputError("dosl7.attack.mitigation must be a string without NUL")
     return {
         "enabled": enabled,
         "health": health,
         "profile": profile,
         "mitigated": mitigated,
         "greylist": records,
+        "attack": {
+            "enabled": attack_enabled,
+            "attacker_ip": attacker_ip,
+            "mitigation": mitigation,
+        },
     }
 
 
@@ -10228,6 +10280,7 @@ PACKET_EVENT_ADAPTERS = {
     "ASM_REQUEST_BLOCKING": "ASM blocking-response hook",
     "ASM_RESPONSE_LOGIN": "ASM response login outcome",
     "ASM_RESPONSE_VIOLATION": "ASM response violation inspection",
+    "IN_DOSL7_ATTACK": "fixture-driven L7 DoS attack inspection",
     "HTTP_RESPONSE": "HTTP response transaction",
     "ADAPT_RESPONSE_HEADERS": "response adaptation headers from IVS fixture",
     "ADAPT_RESPONSE_RESULT": "response adaptation result from IVS fixture",
@@ -16864,6 +16917,18 @@ class EmulatorSession:
                     f"{_tcl_quote(self._dosl7['profile'])} "
                     f"{_tcl_quote('1' if self._dosl7['mitigated'] else '0')} "
                     f"{_tcl_list(dosl7_flattened)}"
+                )
+                attack = self._dosl7["attack"]
+                session.eval_tcl(
+                    "::itest::semantic::dosl7_set_attack "
+                    + " ".join(
+                        _tcl_quote(value)
+                        for value in (
+                            "1" if attack["enabled"] else "0",
+                            attack["attacker_ip"],
+                            attack["mitigation"],
+                        )
+                    )
                 )
                 _configure_asm(session, self._asm)
                 _configure_botdefense(session, self._botdefense)
