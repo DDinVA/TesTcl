@@ -240,6 +240,7 @@ BACKEND_MAX_MEMBERS = 1024
 BACKEND_MAX_RESPONSES_PER_MEMBER = 64
 BACKEND_MAX_RESPONSE_BODY_BYTES = 2 * 1024 * 1024
 BACKEND_MAX_TOTAL_FIXTURE_BYTES = 64 * 1024 * 1024
+POOL_SELECTION_MODES = frozenset({"first", "round_robin"})
 HTTP_CLASS_RESULTS = frozenset({"selected", "failed"})
 LB_QUEUE_MAX_VALUE = 2**31 - 1
 HTTP_REASON_PHRASES = {
@@ -4881,6 +4882,26 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "match_index": backend_match_index,
         "status": int(backend_values["status"]) if backend_values["status"] else None,
     }
+    pool_selection: list[dict[str, Any]] = []
+    for raw_selection in _split_tcl_list(
+        session.eval_tcl("::itest::semantic::lb_pool_selection_snapshot")
+    ):
+        selection_parts = _split_tcl_list(raw_selection)
+        if len(selection_parts) != 3:
+            raise EmulatorInputError("invalid pool selection state")
+        if selection_parts[1] not in {"first", "round_robin"}:
+            raise EmulatorInputError("invalid pool selection mode")
+        try:
+            selection_cursor = int(selection_parts[2])
+        except (TypeError, ValueError):
+            raise EmulatorInputError("invalid pool selection cursor") from None
+        if selection_cursor < 0:
+            raise EmulatorInputError("invalid pool selection cursor")
+        pool_selection.append({
+            "pool": selection_parts[0],
+            "mode": selection_parts[1],
+            "next_index": selection_cursor,
+        })
     table_entries: list[dict[str, str]] = []
     for raw_entry in _split_tcl_list(session.eval_tcl("::itest::semantic::table_snapshot")):
         parts = _split_tcl_list(raw_entry)
@@ -5700,6 +5721,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "lb": lb_control,
         "lb_events": lb_events,
         "backend": backend,
+        "pool_selection": pool_selection,
         "table": table_entries,
         "psm": psm,
         "http_proxy": {
@@ -6996,6 +7018,37 @@ def _normalise_backends(raw: Any) -> dict[str, dict[str, Any]]:
             )
         backends[member] = {"state": state, "responses": responses}
     return backends
+
+
+def _normalise_pool_modes(raw: Any) -> dict[str, str]:
+    """Normalize optional per-pool selection policies."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("pool_modes must map pool names to selection modes")
+    if len(raw) > BACKEND_MAX_MEMBERS:
+        raise EmulatorInputError(
+            f"pool_modes cannot contain more than {BACKEND_MAX_MEMBERS} pools"
+        )
+    modes: dict[str, str] = {}
+    for raw_name, raw_mode in raw.items():
+        name = _require_string(raw_name, "pool mode pool name")
+        if not name or "\x00" in name or len(name.encode("utf-8")) > 256:
+            raise EmulatorInputError(
+                "pool mode pool names must be non-empty and at most 256 UTF-8 bytes"
+            )
+        if not isinstance(raw_mode, str):
+            raise EmulatorInputError(f"pool_modes.{name} must be a string")
+        mode = raw_mode.lower().replace("-", "_")
+        if mode == "rr":
+            mode = "round_robin"
+        if mode not in POOL_SELECTION_MODES:
+            allowed = ", ".join(sorted(POOL_SELECTION_MODES))
+            raise EmulatorInputError(
+                f"pool_modes.{name} must be one of: {allowed}"
+            )
+        modes[name] = mode
+    return modes
 
 
 def _backend_lookup(
@@ -8895,6 +8948,7 @@ def _normalise_scenario_config(
     list[str],
     dict[str, list[str]],
     dict[str, dict[str, Any]],
+    dict[str, str],
     dict[str, list[dict[str, Any]]],
     list[tuple[str, dict[str, str], str]],
     dict[str, Any],
@@ -8924,6 +8978,7 @@ def _normalise_scenario_config(
         "profiles",
         "pools",
         "backends",
+        "pool_modes",
         "resolvers",
         "datagroups",
         "profile_settings",
@@ -8978,11 +9033,22 @@ def _normalise_scenario_config(
     if require_http and "HTTP" not in profiles:
         raise EmulatorInputError("the first emulator slice requires the HTTP profile")
 
+    pools = _normalise_pools(scenario.get("pools"))
+    backends = _normalise_backends(scenario.get("backends"))
+    pool_modes = _normalise_pool_modes(scenario.get("pool_modes"))
+    unknown_pool_modes = sorted(set(pool_modes) - set(pools))
+    if unknown_pool_modes:
+        names = ", ".join(unknown_pool_modes)
+        raise EmulatorInputError(
+            f"pool_modes references unknown pool(s): {names}"
+        )
+
     return (
         source,
         profiles,
-        _normalise_pools(scenario.get("pools")),
-        _normalise_backends(scenario.get("backends")),
+        pools,
+        backends,
+        pool_modes,
         _normalise_resolvers(scenario.get("resolvers")),
         _normalise_datagroups(scenario.get("datagroups")),
         _normalise_profile_settings(scenario.get("profile_settings")),
@@ -15076,6 +15142,7 @@ class EmulatorSession:
             profiles,
             pools,
             backends,
+            pool_modes,
             resolvers,
             datagroups,
             profile_settings,
@@ -15110,6 +15177,7 @@ class EmulatorSession:
         self._profiles = profiles
         self._pools = pools
         self._backends = backends
+        self._pool_modes = pool_modes
         self._resolvers = resolvers
         self._datagroups = datagroups
         self._profile_settings = profile_settings
@@ -15350,7 +15418,15 @@ class EmulatorSession:
                 ):
                     session.eval_tcl("::itest::semantic::cache_install_flow_hooks")
                 for name, members in self._pools.items():
-                    session.add_pool(name, members)
+                    pool_mode = self._pool_modes.get(name)
+                    if pool_mode is None:
+                        session.add_pool(name, members)
+                    else:
+                        session.eval_tcl(
+                            "::state::lb::add_pool "
+                            f"{_tcl_quote(name)} {_tcl_list(members)} "
+                            f"-lb_mode {_tcl_quote(pool_mode)}"
+                        )
                 for member, fixture in self._backends.items():
                     session.eval_tcl(
                         "::state::lb::set_node_status "

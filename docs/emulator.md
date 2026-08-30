@@ -83,6 +83,21 @@ Each result exposes the applied fixture under
 status/index, and applied status). Fixtures are bounded and deterministic;
 they do not open sockets or perform live health checks.
 
+Set `pool_modes` to opt a pool into deterministic rotation across requests on
+the same emulator session. `first` preserves the legacy behavior and is the
+default; `round_robin` advances a per-pool cursor after each successful member
+selection and skips members whose backend fixture is down or disabled.
+
+```json
+{
+  "pool_modes": {"api_pool": "round_robin"}
+}
+```
+
+The current cursor is visible in `result.semantic.pool_selection` as
+`next_index`. It is session-scoped, so repeated requests can exercise
+keep-alive distribution while a new emulator session starts from index zero.
+
 HTTP requests can model load-balancer causality with bounded per-request inputs.
 `persist_down` supplies the persistence target (`member` is required and `pool`
 is optional); it causes `PERSIST_DOWN` before `LB_SELECTED`. `lb_queue` supplies

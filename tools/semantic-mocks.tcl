@@ -262,6 +262,7 @@ namespace eval ::itest::semantic {
     variable lb_connect_requested 0
     variable lb_prime_requested 0
     variable lb_connlimits
+    variable lb_pool_cursors [dict create]
     variable lb_queue_on 0
     variable lb_queue_queued 0
     variable lb_queue_depth 0
@@ -16571,14 +16572,47 @@ namespace eval ::itest::semantic {
         return up
     }
 
+    proc _pool_selection_mode {pool_name} {
+        if {![info exists ::state::lb::pools($pool_name)]} {
+            return first
+        }
+        set pool_info $::state::lb::pools($pool_name)
+        set mode_index [lsearch -exact $pool_info lb_mode]
+        if {$mode_index >= 0 && $mode_index + 1 < [llength $pool_info]} {
+            set mode [string tolower [lindex $pool_info [expr {$mode_index + 1}]]]
+            if {$mode in {first round_robin}} {
+                return $mode
+            }
+        }
+        return first
+    }
+
     proc _select_available_member {pool_name {exclude_member ""}} {
+        variable lb_pool_cursors
         set ::state::lb::selected 0
         if {![info exists ::state::lb::pools($pool_name)]} {
             return 0
         }
         set pool_info $::state::lb::pools($pool_name)
         set members [lindex $pool_info 1]
-        foreach member $members {
+        set member_count [llength $members]
+        if {$member_count == 0} {
+            set ::state::lb::pool_member ""
+            set ::state::lb::node_addr ""
+            set ::state::lb::node_port 0
+            ::itest::log_decision lb pool_no_available $pool_name
+            return 0
+        }
+        set start 0
+        if {[_pool_selection_mode $pool_name] eq "round_robin" &&
+            [dict exists $lb_pool_cursors $pool_name]} {
+            set start [dict get $lb_pool_cursors $pool_name]
+            if {$start < 0 || $start >= $member_count} {
+                set start 0
+            }
+        }
+        for {set offset 0} {$offset < $member_count} {incr offset} {
+            set member [lindex $members [expr {($start + $offset) % $member_count}]]
             if {$exclude_member ne "" && $member eq $exclude_member} {
                 continue
             }
@@ -16595,6 +16629,10 @@ namespace eval ::itest::semantic {
                 set ::state::lb::node_port 0
             }
             set ::state::lb::selected 1
+            if {[_pool_selection_mode $pool_name] eq "round_robin"} {
+                set selected_index [expr {($start + $offset) % $member_count}]
+                dict set lb_pool_cursors $pool_name [expr {($selected_index + 1) % $member_count}]
+            }
             ::itest::log_decision lb pool_member_select $member
             return 1
         }
@@ -16603,6 +16641,20 @@ namespace eval ::itest::semantic {
         set ::state::lb::node_port 0
         ::itest::log_decision lb pool_no_available $pool_name
         return 0
+    }
+
+    proc lb_pool_selection_snapshot {} {
+        variable lb_pool_cursors
+        set result {}
+        foreach pool_name [lsort [array names ::state::lb::pools]] {
+            set mode [_pool_selection_mode $pool_name]
+            set cursor 0
+            if {[dict exists $lb_pool_cursors $pool_name]} {
+                set cursor [dict get $lb_pool_cursors $pool_name]
+            }
+            lappend result [list $pool_name $mode $cursor]
+        }
+        return $result
     }
 
     proc pool_status_aware {args} {
