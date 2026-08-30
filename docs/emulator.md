@@ -1449,9 +1449,26 @@ mapping that can be configured from `RULE_INIT` or another event:
 }
 ```
 
-Tag retrieval is restricted to `FIX_MESSAGE`; map mutation is available in any
-event. This models rule-visible FIX metadata and mapping state, not a complete
-FIX wire parser or data-group evaluator. See the F5
+Tag retrieval is restricted to `FIX_HEADER` and `FIX_MESSAGE`; map mutation is available in any
+event.
+
+Packet replay accepts a structured `protocol: "fix"` packet with the same
+`fix.tags` and optional `fix.tag_maps` objects. It emits `FIX_HEADER` followed
+by `FIX_MESSAGE` for each packet, preserving tag values across both handlers:
+
+```json
+{
+  "protocol": "fix",
+  "direction": "client_to_server",
+  "fix": {
+    "tags": {"35": "D", "49": "client1", "56": "TARGET", "11": "order-1"}
+  }
+}
+```
+
+The packet adapter consumes supplied parsed tags and does not parse or validate
+FIX wire bytes. This models rule-visible FIX metadata and mapping state, not a
+complete FIX wire parser or data-group evaluator. See the F5
 [`FIX::tag`](https://clouddocs.f5.com/api/irules/FIX__tag.html) reference.
 
 ### FLOWTABLE query inputs

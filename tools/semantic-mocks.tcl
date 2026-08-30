@@ -8601,8 +8601,8 @@ namespace eval ::itest::semantic {
         set operation [lindex $args 0]
         switch -exact -- $operation {
             get {
-                if {$::itest::current_event ne "FIX_MESSAGE"} {
-                    error "FIX::tag get is only valid in FIX_MESSAGE"
+                if {$::itest::current_event ni {FIX_HEADER FIX_MESSAGE}} {
+                    error "FIX::tag get is only valid in FIX_HEADER or FIX_MESSAGE"
                 }
                 if {[llength $args] != 2} {
                     error "FIX::tag get requires a tag"

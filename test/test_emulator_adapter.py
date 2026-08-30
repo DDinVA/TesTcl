@@ -1752,13 +1752,81 @@ when FIX_MESSAGE {
             try:
                 with self.assertRaisesRegex(
                     self.adapter.EmulatorInputError,
-                    "FIX::tag get is only valid in FIX_MESSAGE",
+                    "FIX::tag get is only valid in FIX_HEADER or FIX_MESSAGE",
                 ):
                     invalid.fire_event("CLIENT_ACCEPTED", {"fix": {}})
             finally:
                 invalid.close()
         finally:
             session.close()
+
+    def test_fix_packet_adapter_emits_header_then_message(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "FIX"],
+                "irule": """
+when FIX_HEADER {
+    log local0. "header=[FIX::tag get 49]/[FIX::tag get 35]/[FIX::tag get 56]"
+}
+when FIX_MESSAGE {
+    log local0. "message=[FIX::tag get 11]/[FIX::tag get 55]/[FIX::tag get 54]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "fix",
+                        "direction": "client_to_server",
+                        "fix": {
+                            "tags": {
+                                "8": "FIX.4.4",
+                                "35": "D",
+                                "49": "client1",
+                                "56": "TARGET",
+                                "11": "order-1",
+                                "55": "AAPL",
+                                "54": "1",
+                            }
+                        },
+                        "payload": "8=FIX.4.4|35=D|49=client1|56=TARGET|11=order-1|55=AAPL|54=1|",
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        packet_events = [
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] in {"FIX_HEADER", "FIX_MESSAGE"}
+        ]
+        self.assertEqual(
+            [event["event"] for event in packet_events],
+            ["FIX_HEADER", "FIX_MESSAGE"],
+        )
+        self.assertTrue(all(event["fired"] for event in packet_events))
+        self.assertTrue(
+            any("header=client1/D/TARGET" in log for log in packet_events[0]["logs"])
+        )
+        self.assertTrue(
+            any("message=order-1/AAPL/1" in log for log in packet_events[1]["logs"])
+        )
+        self.assertEqual(
+            packet_events[1]["state"]["fix"]["tags"],
+            '"8" "FIX.4.4" "35" "D" "49" "client1" "56" "TARGET" "11" "order-1" "55" "AAPL" "54" "1"',
+        )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "packet 0 FIX packets require a fix tag object",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["FIX"],
+                    "irule": "when FIX_MESSAGE { return }",
+                    "packets": [{"protocol": "fix"}],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
         session = self.adapter.EmulatorSession(

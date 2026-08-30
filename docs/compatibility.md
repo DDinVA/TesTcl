@@ -649,6 +649,10 @@ retain unresolved IP targets as intent rather than performing ARP or route
 resolution.
 This models iRule-visible state and command validation, not live Ethernet,
 ARP, VLAN, route, QoS, or TMM forwarding behavior.
+The structured `protocol: "fix"` packet adapter emits `FIX_HEADER` and then
+`FIX_MESSAGE` from caller-supplied parsed FIX tags. It does not parse FIX wire
+bytes; direct FIX events and tag-map mutation remain available through the
+event-state API.
 The TMOS 17.5 `SOCKS::allowed`, `SOCKS::destination`, and `SOCKS::version`
 commands are modeled on a structured `SOCKS_REQUEST` state. They support
 version inspection, allow/reject decisions, host and port getters/setters,
