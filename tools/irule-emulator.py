@@ -12678,20 +12678,9 @@ def _wire_fragment_descriptor(
     if network not in {"ipv4", "ipv6"}:
         raise EmulatorInputError("raw wire packets must use IPv4 or IPv6")
     raw_hex = _require_string(raw_packet.get("raw_hex"), f"wire packet {index} raw_hex")
-    flow_id = raw_packet.get("flow_id")
-    if flow_id is not None:
-        flow_id = _require_string(flow_id, f"wire packet {index} flow_id")
-        try:
-            flow_id_bytes = flow_id.encode("utf-8")
-        except UnicodeEncodeError as exc:
-            raise EmulatorInputError(
-                f"wire packet {index} flow_id must be valid UTF-8"
-            ) from exc
-        if not flow_id or "\x00" in flow_id or len(flow_id_bytes) > PACKET_FLOW_ID_MAX_BYTES:
-            raise EmulatorInputError(
-                f"wire packet {index} flow_id must be non-empty, NUL-free, and at most "
-                f"{PACKET_FLOW_ID_MAX_BYTES} UTF-8 bytes"
-            )
+    flow_id = _normalise_flow_id(
+        raw_packet.get("flow_id"), f"wire packet {index} flow_id"
+    )
     try:
         raw = bytes.fromhex(raw_hex)
     except ValueError as exc:
@@ -16237,19 +16226,9 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             "destination": _packet_endpoint(packet.get("destination"), "destination", index),
         }
         if "flow_id" in packet:
-            flow_id = _require_string(packet["flow_id"], f"packet {index} flow_id")
-            try:
-                flow_id_bytes = flow_id.encode("utf-8")
-            except UnicodeEncodeError as exc:
-                raise EmulatorInputError(
-                    f"packet {index} flow_id must be valid UTF-8"
-                ) from exc
-            if not flow_id or "\x00" in flow_id or len(flow_id_bytes) > PACKET_FLOW_ID_MAX_BYTES:
-                raise EmulatorInputError(
-                    f"packet {index} flow_id must be non-empty, NUL-free, and at most "
-                    f"{PACKET_FLOW_ID_MAX_BYTES} UTF-8 bytes"
-                )
-            normalised["flow_id"] = flow_id
+            normalised["flow_id"] = _normalise_flow_id(
+                packet["flow_id"], f"packet {index} flow_id"
+            )
         if protocol == "event":
             event_name, event_state = _normalise_event(
                 packet.get("event"), packet.get("state")
@@ -17655,6 +17634,22 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
     return packets
 
 
+def _normalise_flow_id(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    flow_id = _require_string(value, field)
+    try:
+        flow_id_bytes = flow_id.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise EmulatorInputError(f"{field} must be valid UTF-8") from exc
+    if not flow_id or "\x00" in flow_id or len(flow_id_bytes) > PACKET_FLOW_ID_MAX_BYTES:
+        raise EmulatorInputError(
+            f"{field} must be non-empty, NUL-free, and at most "
+            f"{PACKET_FLOW_ID_MAX_BYTES} UTF-8 bytes"
+        )
+    return flow_id
+
+
 def _packet_flow_key(packet: dict[str, Any]) -> tuple[str, ...]:
     """Return a bounded, direction-independent identity for one packet flow."""
     flow_id = packet.get("flow_id")
@@ -18135,6 +18130,7 @@ class EmulatorSession:
         self._server_connection_open = False
         self._server_connection_id = 0
         self._server_connection_detached = False
+        self._pending_packet_http: dict[str, Any] | None = None
         self._tcp_buffers = {"client": "", "server": ""}
         self._stream_buffers = {"client": b"", "server": b""}
         self._sctp_buffers = {"client": b"", "server": b""}
@@ -20871,6 +20867,7 @@ class EmulatorSession:
         self._connection_open = False
         self._server_connection_open = False
         self._server_connection_detached = False
+        self._pending_packet_http = None
 
     @staticmethod
     def _packet_stream_key(packet: dict[str, Any]) -> tuple[Any, ...]:
@@ -21507,22 +21504,35 @@ class EmulatorSession:
         return packet, len(combined)
 
     def _run_packet_trace_on_worker(
-        self, session: Any, packets: list[dict[str, Any]]
+        self,
+        session: Any,
+        packets: list[dict[str, Any]],
+        *,
+        finalize_http: bool = True,
     ) -> dict[str, Any]:
         previous_packet_trace_active = self._packet_trace_active
         self._packet_trace_active = True
         try:
-            return self._run_packet_trace_body_on_worker(session, packets)
+            return self._run_packet_trace_body_on_worker(
+                session, packets, finalize_http=finalize_http
+            )
         finally:
             self._packet_trace_active = previous_packet_trace_active
 
     def _run_packet_trace_body_on_worker(
-        self, session: Any, packets: list[dict[str, Any]]
+        self,
+        session: Any,
+        packets: list[dict[str, Any]],
+        *,
+        finalize_http: bool = True,
     ) -> dict[str, Any]:
         session.eval_tcl("::itest::semantic::event_errors_reset")
         trace: list[dict[str, Any]] = []
         http_results: list[dict[str, Any]] = []
-        pending_http: tuple[dict[str, Any], int] | None = None
+        pending_http: tuple[dict[str, Any], int | None] | None = None
+        if not finalize_http and self._pending_packet_http is not None:
+            pending_http = (self._pending_packet_http, None)
+            self._pending_packet_http = None
 
         def finish_http(response: dict[str, Any] | None = None, at_index: int | None = None) -> None:
             nonlocal pending_http
@@ -21532,10 +21542,12 @@ class EmulatorSession:
             if response:
                 request.update(response)
             result = self._run_request_on_worker(session, request)
-            trace[trace_index]["http_result"] = result
-            trace[trace_index]["pending"] = False
-            if at_index is not None:
-                trace[trace_index]["completed_at"] = at_index
+            target_trace_index = trace_index if trace_index is not None else at_index
+            if target_trace_index is not None:
+                trace[target_trace_index]["http_result"] = result
+                trace[target_trace_index]["pending"] = False
+                if trace_index is not None and at_index is not None:
+                    trace[target_trace_index]["completed_at"] = at_index
             http_results.append(result)
             pending_http = None
 
@@ -23206,7 +23218,10 @@ class EmulatorSession:
                     )
                     self._close_packet_connection(session)
 
-        finish_http()
+        if finalize_http:
+            finish_http()
+        elif pending_http is not None:
+            self._pending_packet_http = pending_http[0]
         emitted = []
         for packet_entry in trace:
             for event in packet_entry.get("events", []):
@@ -23230,10 +23245,15 @@ class EmulatorSession:
         }
 
     def _run_normalised_packet_trace(
-        self, packets: list[dict[str, Any]]
+        self,
+        packets: list[dict[str, Any]],
+        *,
+        finalize_http: bool = True,
     ) -> dict[str, Any]:
         return self._call(
-            lambda session: self._run_packet_trace_on_worker(session, packets)
+            lambda session: self._run_packet_trace_on_worker(
+                session, packets, finalize_http=finalize_http
+            )
         )
 
     def run_packet_trace(self, packets: Any) -> dict[str, Any]:
@@ -23274,6 +23294,8 @@ def _run_isolated_packet_trace(
     flow_groups: dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]],
     *,
     backend: str,
+    persistent_sessions: dict[tuple[str, ...], EmulatorSession] | None = None,
+    finalize_http: bool = True,
 ) -> dict[str, Any]:
     """Replay multiple packet flows in bounded, independent Tcl contexts."""
     if not flow_groups:
@@ -23305,24 +23327,41 @@ def _run_isolated_packet_trace(
                 return original_indexes[local_index]
             return original_indexes[min(fallback_order, len(original_indexes) - 1)]
 
-        child = EmulatorSession(
-            root,
-            child_scenario,
-            allow_irule_file=True,
-            allow_requests=False,
-            allow_packets=False,
-            backend=backend,
-        )
+        child = None
+        if persistent_sessions is not None:
+            child = persistent_sessions.get(flow_key)
+        if child is None:
+            child = EmulatorSession(
+                root,
+                child_scenario,
+                allow_irule_file=True,
+                allow_requests=False,
+                allow_packets=False,
+                backend=backend,
+            )
+            if persistent_sessions is not None:
+                persistent_sessions[flow_key] = child
+        discard_persistent_child = False
         try:
             local_result = child._run_normalised_packet_trace(
-                [dict(packet) for _, packet in entries]
+                [dict(packet) for _, packet in entries],
+                finalize_http=finalize_http,
             )
             if registered_events is None:
                 registered_events = list(child.registered_events)
                 event_controls = child.event_controls
                 fidelity = child.fidelity
+        except BaseException:
+            discard_persistent_child = persistent_sessions is not None
+            raise
         finally:
-            child.close()
+            if persistent_sessions is None or discard_persistent_child:
+                if (
+                    persistent_sessions is not None
+                    and persistent_sessions.get(flow_key) is child
+                ):
+                    del persistent_sessions[flow_key]
+                child.close()
 
         local_trace = local_result.get("trace", [])
         if not isinstance(local_trace, list):  # pragma: no cover - internal contract guard
@@ -23404,6 +23443,240 @@ def _run_isolated_packet_trace(
     }
 
 
+class _PersistentEmulatorSession:
+    """Keep packet-flow Tcl contexts alive behind a persistent API session."""
+
+    def __init__(self, root: Path, scenario: dict[str, Any], backend: str) -> None:
+        self._root = root
+        self._scenario = dict(scenario)
+        self._backend = backend
+        self._base = EmulatorSession(
+            root,
+            self._scenario,
+            allow_irule_file=False,
+            allow_requests=False,
+            backend=backend,
+        )
+        self._base_flow_key: tuple[str, ...] | None = None
+        self._flow_sessions: dict[tuple[str, ...], EmulatorSession] = {}
+        self._lock = threading.RLock()
+        self._closed = False
+
+    def _state_session(self) -> EmulatorSession:
+        if self._base_flow_key is not None:
+            return self._base
+        if self._flow_sessions:
+            return next(iter(self._flow_sessions.values()))
+        return self._base
+
+    def _active_flow_keys(self) -> set[tuple[str, ...]]:
+        active_keys = set(self._flow_sessions)
+        if self._base_flow_key is not None:
+            active_keys.add(self._base_flow_key)
+        return active_keys
+
+    @property
+    def registered_events(self) -> list[str]:
+        return self._state_session().registered_events
+
+    @property
+    def event_controls(self) -> Any:
+        return self._state_session().event_controls
+
+    @property
+    def fidelity(self) -> dict[str, Any]:
+        return self._state_session().fidelity
+
+    def _ensure_flow_capacity(self, flow_keys: set[tuple[str, ...]]) -> None:
+        active_keys = self._active_flow_keys()
+        new_keys = flow_keys - active_keys
+        if len(active_keys) + len(new_keys) > MAX_PACKET_FLOWS:
+            raise EmulatorInputError(
+                f"persistent packet session cannot retain more than {MAX_PACKET_FLOWS} flows"
+            )
+
+    def _retire_closed_flows(
+        self, flow_groups: dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]]
+    ) -> None:
+        closed_keys = {
+            flow_key
+            for flow_key, entries in flow_groups.items()
+            if any(
+                set(packet.get("flags", [])).intersection({"FIN", "RST"})
+                for _, packet in entries
+            )
+        }
+        for flow_key in closed_keys:
+            session = self._flow_sessions.pop(flow_key, None)
+            if session is not None and session is not self._base:
+                session.close()
+            if self._base_flow_key == flow_key:
+                self._base_flow_key = None
+
+    def run_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        return self._base.run_request(request)
+
+    def fire_event(
+        self, event_name: Any, state: Any = None, flow_id: Any = None
+    ) -> dict[str, Any]:
+        with self._lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
+            created = False
+            if flow_id is None:
+                if len(self._active_flow_keys()) > 1:
+                    raise EmulatorInputError(
+                        "session event requires flow_id when multiple flow contexts exist"
+                    )
+                session = self._state_session()
+            else:
+                normalised_flow_id = _normalise_flow_id(flow_id, "session event flow_id")
+                assert normalised_flow_id is not None
+                flow_key = ("id", normalised_flow_id)
+                session = self._flow_sessions.get(flow_key)
+                if session is None and self._base_flow_key == flow_key:
+                    session = self._base
+                if session is None:
+                    self._ensure_flow_capacity({flow_key})
+                    session = EmulatorSession(
+                        self._root,
+                        self._scenario,
+                        allow_irule_file=True,
+                        allow_requests=False,
+                        allow_packets=False,
+                        backend=self._backend,
+                    )
+                    self._flow_sessions[flow_key] = session
+                    created = True
+            try:
+                return session.fire_event(event_name, state)
+            except BaseException:
+                if created and self._flow_sessions.get(flow_key) is session:
+                    del self._flow_sessions[flow_key]
+                    session.close()
+                raise
+
+    def metadata(self, session_id: str) -> dict[str, Any]:
+        return self._state_session().metadata(session_id)
+
+    def run_packet_trace(self, packets: Any) -> dict[str, Any]:
+        normalised_packets = _normalise_packets(packets)
+        flow_groups: dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]] = {}
+        for index, packet in enumerate(normalised_packets):
+            flow_groups.setdefault(_packet_flow_key(packet), []).append((index, packet))
+        if len(flow_groups) > MAX_PACKET_FLOWS:
+            raise EmulatorInputError(
+                f"packet trace cannot contain more than {MAX_PACKET_FLOWS} flows"
+            )
+        if len(flow_groups) > 1:
+            unbound_events = [
+                index
+                for index, packet in enumerate(normalised_packets)
+                if packet["protocol"] == "event" and "flow_id" not in packet
+            ]
+            if unbound_events:
+                indexes = ", ".join(str(index) for index in unbound_events[:8])
+                if len(unbound_events) > 8:
+                    indexes += ", ..."
+                raise EmulatorInputError(
+                    "synthetic event packets in a multi-flow trace require flow_id "
+                    f"(missing on packet index {indexes})"
+                )
+
+        with self._lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
+            if len(flow_groups) > 1 and _packet_flows_are_interleaved(
+                normalised_packets, flow_groups
+            ):
+                self._ensure_flow_capacity(set(flow_groups))
+                base_flow_key = self._base_flow_key
+                base_in_this_call = (
+                    base_flow_key is not None and base_flow_key in flow_groups
+                )
+                if base_in_this_call:
+                    self._flow_sessions[base_flow_key] = self._base
+                try:
+                    result = _run_isolated_packet_trace(
+                        self._root,
+                        self._scenario,
+                        normalised_packets,
+                        flow_groups,
+                        backend=self._backend,
+                        persistent_sessions=self._flow_sessions,
+                        finalize_http=False,
+                    )
+                    self._retire_closed_flows(flow_groups)
+                    return result
+                except BaseException:
+                    if (
+                        base_in_this_call
+                        and self._flow_sessions.get(base_flow_key) is not self._base
+                    ):
+                        self._base_flow_key = None
+                    raise
+
+            if len(flow_groups) != 1:
+                return self._base._run_normalised_packet_trace(
+                    normalised_packets, finalize_http=False
+                )
+
+            flow_key = next(iter(flow_groups))
+            flow_packets = [packet for _, packet in flow_groups[flow_key]]
+            if self._base_flow_key is None and not self._flow_sessions:
+                self._ensure_flow_capacity({flow_key})
+                self._base_flow_key = flow_key
+                result = self._base._run_normalised_packet_trace(
+                    flow_packets, finalize_http=False
+                )
+                self._retire_closed_flows(flow_groups)
+                return result
+            session = self._flow_sessions.get(flow_key)
+            if session is None and self._base_flow_key == flow_key:
+                session = self._base
+            if session is None:
+                self._ensure_flow_capacity({flow_key})
+                session = EmulatorSession(
+                    self._root,
+                    self._scenario,
+                    allow_irule_file=True,
+                    allow_requests=False,
+                    allow_packets=False,
+                    backend=self._backend,
+                )
+                self._flow_sessions[flow_key] = session
+            try:
+                result = session._run_normalised_packet_trace(
+                    [dict(packet) for packet in flow_packets],
+                    finalize_http=False,
+                )
+                self._retire_closed_flows(flow_groups)
+                return result
+            except BaseException:
+                if self._flow_sessions.get(flow_key) is session:
+                    del self._flow_sessions[flow_key]
+                if session is not self._base:
+                    session.close()
+                elif self._base_flow_key == flow_key:
+                    self._base_flow_key = None
+                raise
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            sessions: list[EmulatorSession] = [self._base]
+            sessions.extend(
+                session
+                for key, session in self._flow_sessions.items()
+                if session is not self._base
+            )
+            self._flow_sessions.clear()
+        for session in sessions:
+            session.close()
+
+
 class EmulatorNotFoundError(KeyError):
     """Raised when a persistent session ID is unknown or expired."""
 
@@ -23413,7 +23686,7 @@ class EmulatorResourceError(RuntimeError):
 
 
 class _SessionRecord:
-    def __init__(self, session: EmulatorSession, last_used: float) -> None:
+    def __init__(self, session: Any, last_used: float) -> None:
         self.session = session
         self.last_used = last_used
         self.active_operations = 0
@@ -23442,7 +23715,7 @@ class SessionManager:
         self._lock = threading.RLock()
 
     def _reap(self) -> None:
-        expired: list[EmulatorSession] = []
+        expired: list[Any] = []
         now = time.monotonic()
         with self._lock:
             for session_id, record in list(self._sessions.items()):
@@ -23457,12 +23730,8 @@ class SessionManager:
         with self._lock:
             if len(self._sessions) >= self._max_sessions:
                 raise EmulatorResourceError("maximum emulator session count reached")
-            session = EmulatorSession(
-                self._root,
-                scenario,
-                allow_irule_file=False,
-                allow_requests=False,
-                backend=self._backend,
+            session = _PersistentEmulatorSession(
+                self._root, scenario, self._backend
             )
             session_id = "ses_" + secrets.token_urlsafe(18)
             while session_id in self._sessions:
@@ -23740,6 +24009,11 @@ class McpProtocolServer:
                         "session_id": {"type": "string", "minLength": 1},
                         "event": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
                         "state": {"type": "object"},
+                        "flow_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": PACKET_FLOW_ID_MAX_BYTES,
+                        },
                     },
                     ["session_id", "event"],
                 ),
@@ -23990,11 +24264,13 @@ class McpProtocolServer:
             )
 
         if name == "irule_session_event":
-            if set(args) - {"session_id", "event", "state"} or "event" not in args:
+            if set(args) - {"session_id", "event", "state", "flow_id"} or "event" not in args:
                 raise McpProtocolError(-32602, "irule_session_event requires session_id and event")
             result = self._manager.execute(
                 session_id,
-                lambda session: session.fire_event(args["event"], args.get("state")),
+                lambda session: session.fire_event(
+                    args["event"], args.get("state"), args.get("flow_id")
+                ),
             )
             metadata = self._manager.metadata(session_id)
             return self._tool_success(
@@ -25451,7 +25727,9 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                             raise EmulatorInputError("session event must be a JSON object")
                         if "event" not in event_request:
                             raise EmulatorInputError("session event requires an event field")
-                        unknown = sorted(set(event_request) - {"event", "state"})
+                        unknown = sorted(
+                            set(event_request) - {"event", "state", "flow_id"}
+                        )
                         if unknown:
                             raise EmulatorInputError(
                                 f"unsupported session event field(s): {', '.join(unknown)}"
@@ -25459,7 +25737,9 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                         result = session_manager.execute(
                             parts[2],
                             lambda session: session.fire_event(
-                                event_request["event"], event_request.get("state")
+                                event_request["event"],
+                                event_request.get("state"),
+                                event_request.get("flow_id"),
                             ),
                         )
                         payload = {

@@ -2324,6 +2324,17 @@ Synthetic `{"protocol":"event"}` records must carry `flow_id` when they are
 combined with another flow; otherwise there is no safe target connection for
 the event. `RULE_INIT` therefore runs once per isolated flow in a multi-flow
 trace.
+
+Persistent sessions created through the HTTP `/v1/sessions` or MCP session
+tools retain these packet-flow contexts between trace calls. For example, an
+HTTP request may be sent in one `/packets` call and its response in a later
+call; use the same explicit `flow_id` on both calls when endpoint metadata is
+not available. Persistent flow contexts are retired after FIN/RST and are
+bounded by the same 64-flow limit.
+Persistent session event injection may also provide the same `flow_id`; an
+event without one is routed to the base context before flow multiplexing, to
+the sole retained flow when exactly one exists, and is rejected when multiple
+flow contexts exist.
 The WebSocket payload-processing controls are also modeled: `WS::payload_ivs`
 records the selected internal virtual server and `WS::payload_processing` tracks
 whether payload protocol processing is enabled or disabled. These are

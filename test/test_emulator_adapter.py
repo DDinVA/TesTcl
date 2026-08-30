@@ -19202,6 +19202,172 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         finally:
             server.close()
 
+    def test_persistent_session_keeps_interleaved_flow_contexts_across_calls(self) -> None:
+        manager = self.adapter.SessionManager(Path(self.tcl_lsp_root), idle_timeout=60)
+        session_id = manager.create(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {
+                    "a_pool": ["10.0.0.10:80"],
+                    "b_pool": ["10.0.0.11:80"],
+                },
+                "irule": (
+                    'when HTTP_REQUEST { if {[HTTP::host] eq "a.example"} '
+                    '{ pool a_pool } else { pool b_pool } }'
+                ),
+            }
+        )
+        try:
+            first = manager.execute(
+                session_id,
+                lambda session: session.run_packet_trace(
+                    [
+                        {
+                            "protocol": "http",
+                            "flow_id": "flow-a",
+                            "direction": "client_to_server",
+                            "source": {"address": "10.0.0.1", "port": 50001},
+                            "destination": {"address": "192.0.2.10", "port": 80},
+                            "host": "a.example",
+                            "uri": "/a",
+                        },
+                        {
+                            "protocol": "http",
+                            "flow_id": "flow-b",
+                            "direction": "client_to_server",
+                            "source": {"address": "10.0.0.2", "port": 50002},
+                            "destination": {"address": "192.0.2.10", "port": 80},
+                            "host": "b.example",
+                            "uri": "/b",
+                        },
+                    ]
+                ),
+            )
+            second = manager.execute(
+                session_id,
+                lambda session: session.run_packet_trace(
+                    [
+                        {
+                            "protocol": "http",
+                            "flow_id": "flow-a",
+                            "direction": "server_to_client",
+                            "source": {"address": "192.0.2.10", "port": 80},
+                            "destination": {"address": "10.0.0.1", "port": 50001},
+                            "status": 200,
+                            "response_body": "a-response",
+                        },
+                        {
+                            "protocol": "http",
+                            "flow_id": "flow-b",
+                            "direction": "server_to_client",
+                            "source": {"address": "192.0.2.10", "port": 80},
+                            "destination": {"address": "10.0.0.2", "port": 50002},
+                            "status": 200,
+                            "response_body": "b-response",
+                        },
+                    ]
+                ),
+            )
+        finally:
+            manager.close(session_id)
+
+        self.assertEqual(first["flow_mode"], "isolated")
+        self.assertEqual(first["results"], [])
+        self.assertEqual([item["pool"] for item in second["results"]], ["a_pool", "b_pool"])
+        self.assertEqual(
+            [item["response"]["body"] for item in second["results"]],
+            ["a-response", "b-response"],
+        )
+
+    def test_persistent_session_routes_events_by_flow_id(self) -> None:
+        manager = self.adapter.SessionManager(Path(self.tcl_lsp_root), idle_timeout=60)
+        session_id = manager.create(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when CLIENT_ACCEPTED { log local0. accepted }",
+            }
+        )
+        packets = [
+            {
+                "protocol": "http",
+                "flow_id": "flow-a",
+                "direction": "client_to_server",
+                "source": {"address": "10.0.0.1", "port": 50001},
+                "destination": {"address": "192.0.2.10", "port": 80},
+                "host": "a.example",
+                "uri": "/a",
+            },
+            {
+                "protocol": "http",
+                "flow_id": "flow-b",
+                "direction": "client_to_server",
+                "source": {"address": "10.0.0.2", "port": 50002},
+                "destination": {"address": "192.0.2.10", "port": 80},
+                "host": "b.example",
+                "uri": "/b",
+            },
+        ]
+        try:
+            manager.execute(session_id, lambda session: session.run_packet_trace(packets))
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "session event requires flow_id",
+            ):
+                manager.execute(
+                    session_id,
+                    lambda session: session.fire_event("CLIENT_ACCEPTED", {}),
+                )
+            routed = manager.execute(
+                session_id,
+                lambda session: session.fire_event(
+                    "CLIENT_ACCEPTED", {}, "flow-a"
+                ),
+            )
+        finally:
+            manager.close(session_id)
+
+        self.assertTrue(routed["fired"])
+
+    def test_persistent_session_rejects_unscoped_events_with_base_and_child(self) -> None:
+        manager = self.adapter.SessionManager(Path(self.tcl_lsp_root), idle_timeout=60)
+        session_id = manager.create(
+            {
+                "profiles": ["TCP"],
+                "irule": "when CLIENT_ACCEPTED { log local0. accepted }",
+            }
+        )
+        try:
+            manager.execute(
+                session_id,
+                lambda session: session.run_packet_trace(
+                    [
+                        {
+                            "protocol": "tcp",
+                            "flow_id": "base-flow",
+                            "direction": "client_to_server",
+                            "source": {"address": "10.0.0.1", "port": 50001},
+                            "destination": {"address": "192.0.2.10", "port": 443},
+                        }
+                    ]
+                ),
+            )
+            manager.execute(
+                session_id,
+                lambda session: session.fire_event(
+                    "CLIENT_ACCEPTED", {}, "child-flow"
+                ),
+            )
+            with self.assertRaisesRegex(
+                self.adapter.EmulatorInputError,
+                "session event requires flow_id",
+            ):
+                manager.execute(
+                    session_id,
+                    lambda session: session.fire_event("CLIENT_ACCEPTED", {}),
+                )
+        finally:
+            manager.close(session_id)
+
     def test_persistent_http_session_preserves_connection_state(self) -> None:
         manager = self.adapter.SessionManager(Path(self.tcl_lsp_root), idle_timeout=60)
         server = self.adapter.ThreadingHTTPServer(
