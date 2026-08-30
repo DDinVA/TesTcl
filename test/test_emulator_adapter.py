@@ -2885,7 +2885,7 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(mismatch["field"], "value")
         self.assertEqual(mismatch["actual"], "api.example.com")
 
-    def test_behavior_packs_cover_dns_tcp_lb_uri_and_stateful_scenarios(self) -> None:
+    def test_behavior_packs_cover_dns_tcp_lb_uri_sip_and_stateful_scenarios(self) -> None:
         expected_counts = {
             "dns-17.5.json": 7,
             "tcp-17.5.json": 6,
@@ -2894,6 +2894,7 @@ when HTTP_RESPONSE_RELEASE {
             "stateful-17.5.json": 2,
             "ssl-tls-17.5.json": 16,
             "udp-datagram-17.5.json": 15,
+            "sip-17.5.json": 28,
         }
         for filename, case_count in expected_counts.items():
             with self.subTest(filename=filename):
@@ -2910,6 +2911,32 @@ when HTTP_RESPONSE_RELEASE {
                     result["summary"],
                     {"case_count": case_count, "passed": case_count, "failed": 0},
                 )
+                if filename == "sip-17.5.json":
+                    self.assertEqual(
+                        {
+                            case["probe"]["command"]
+                            for case in pack["cases"]
+                            if "probe" in case
+                        },
+                        {
+                            "SIP::call_id",
+                            "SIP::discard",
+                            "SIP::from",
+                            "SIP::header",
+                            "SIP::message",
+                            "SIP::method",
+                            "SIP::payload",
+                            "SIP::persist",
+                            "SIP::record-route",
+                            "SIP::respond",
+                            "SIP::response",
+                            "SIP::route",
+                            "SIP::route_status",
+                            "SIP::to",
+                            "SIP::uri",
+                            "SIP::via",
+                        },
+                    )
 
         stateful = json.loads(
             (ROOT / "examples" / "behavior-packs" / "stateful-17.5.json").read_text(
@@ -18189,6 +18216,22 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
                 udp_payload = json.loads(response.read())
             self.assertEqual(udp_payload["status"], "passed")
             self.assertEqual(udp_payload["summary"]["passed"], 15)
+
+            sip_pack = json.loads(
+                (ROOT / "examples" / "behavior-packs" / "sip-17.5.json")
+                .read_text(encoding="utf-8")
+            )
+            sip_request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/behavior-packs",
+                data=json.dumps(sip_pack).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(sip_request) as response:
+                self.assertEqual(response.status, 200)
+                sip_payload = json.loads(response.read())
+            self.assertEqual(sip_payload["status"], "passed")
+            self.assertEqual(sip_payload["summary"]["passed"], 28)
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -18519,6 +18562,26 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             udp_behavior_payload = udp_behavior_pack["result"]["structuredContent"]
             self.assertEqual(udp_behavior_payload["status"], "passed")
             self.assertEqual(udp_behavior_payload["summary"]["case_count"], 15)
+
+            sip_behavior_pack = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 14,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_behavior_pack",
+                        "arguments": {
+                            "pack": json.loads(
+                                (ROOT / "examples" / "behavior-packs" / "sip-17.5.json")
+                                .read_text(encoding="utf-8")
+                            )
+                        },
+                    },
+                }
+            )
+            sip_behavior_payload = sip_behavior_pack["result"]["structuredContent"]
+            self.assertEqual(sip_behavior_payload["status"], "passed")
+            self.assertEqual(sip_behavior_payload["summary"]["case_count"], 28)
 
             catalog_response = server.handle_message(
                 {

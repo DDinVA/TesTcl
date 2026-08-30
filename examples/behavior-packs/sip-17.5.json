@@ -1,0 +1,501 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "sip-17.5",
+  "cases": [
+    {
+      "id": "method",
+      "probe": {
+        "command": "SIP::method",
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "method": "INVITE"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "INVITE"}
+    },
+    {
+      "id": "uri",
+      "probe": {
+        "command": "SIP::uri",
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "uri": "sip:bob@example.com"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "sip:bob@example.com"}
+    },
+    {
+      "id": "call-id",
+      "probe": {
+        "command": "SIP::call_id",
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "headers": "Call-ID call-123"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "call-123"}
+    },
+    {
+      "id": "from",
+      "probe": {
+        "command": "SIP::from",
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "headers": "From {<sip:alice@example.com>;tag=1}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "<sip:alice@example.com>;tag=1"}
+    },
+    {
+      "id": "to",
+      "probe": {
+        "command": "SIP::to",
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "headers": "To {<sip:bob@example.com>}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "<sip:bob@example.com>"}
+    },
+    {
+      "id": "header-value-case-insensitive",
+      "probe": {
+        "command": "SIP::header",
+        "args": ["value", "x-test"],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "headers": "X-Test enabled"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "enabled"}
+    },
+    {
+      "id": "header-count",
+      "probe": {
+        "command": "SIP::header",
+        "args": ["count", "Via"],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "headers": "Via {SIP/2.0/UDP proxy.example.com} Via {SIP/2.0/UDP backup.example.com}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "2"}
+    },
+    {
+      "id": "header-names",
+      "probe": {
+        "command": "SIP::header",
+        "args": ["names"],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "headers": "Via {SIP/2.0/UDP proxy.example.com} Call-ID call-123 X-Test enabled"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "Via Call-ID X-Test"}
+    },
+    {
+      "id": "header-at",
+      "probe": {
+        "command": "SIP::header",
+        "args": ["at", 1],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "headers": "Via {SIP/2.0/UDP proxy.example.com} From {<sip:alice@example.com>}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "From"}
+    },
+    {
+      "id": "via-protocol",
+      "probe": {
+        "command": "SIP::via",
+        "args": ["proto", 0],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "headers": "Via {SIP/2.0/UDP proxy.example.com;branch=z9}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "UDP"}
+    },
+    {
+      "id": "record-route",
+      "probe": {
+        "command": "SIP::record-route",
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "headers": "Record-Route {<sip:proxy.example.com>}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "<sip:proxy.example.com>"}
+    },
+    {
+      "id": "route",
+      "probe": {
+        "command": "SIP::route",
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "headers": "Route {<sip:next.example.com>}"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "<sip:next.example.com>"}
+    },
+    {
+      "id": "route-status",
+      "probe": {
+        "command": "SIP::route_status",
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "route_status": "routed"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "routed"}
+    },
+    {
+      "id": "payload-slice",
+      "probe": {
+        "command": "SIP::payload",
+        "args": [1, 3],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "payload": "hello"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "ell", "value_bytes": 3}
+    },
+    {
+      "id": "payload-length",
+      "probe": {
+        "command": "SIP::payload",
+        "args": ["length"],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "payload": "hello"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "5"}
+    },
+    {
+      "id": "payload-byte-slice",
+      "probe": {
+        "command": "SIP::payload",
+        "args": [2],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "payload": "éa"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value_base64": "w6k=", "value_bytes": 2}
+    },
+    {
+      "id": "message",
+      "probe": {
+        "command": "SIP::message",
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {
+          "sip": {
+            "type": "request",
+            "message": "INVITE sip:bob@example.com SIP/2.0"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "INVITE sip:bob@example.com SIP/2.0"}
+    },
+    {
+      "id": "persist-timeout-default",
+      "probe": {
+        "command": "SIP::persist",
+        "args": ["timeout"],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {"sip": {"type": "request"}}
+      },
+      "expect": {"status": "ok", "value": "0"}
+    },
+    {
+      "id": "persist-key",
+      "probe": {
+        "command": "SIP::persist",
+        "args": ["call-key", 120],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {"sip": {"type": "request"}}
+      },
+      "expect": {"status": "ok", "value": "call-key"}
+    },
+    {
+      "id": "response-code",
+      "probe": {
+        "command": "SIP::response",
+        "args": ["code"],
+        "event": "SIP_RESPONSE",
+        "profiles": ["SIP"],
+        "state": {"sip": {"type": "response", "status": 200}}
+      },
+      "expect": {"status": "ok", "value": "200"}
+    },
+    {
+      "id": "response-phrase",
+      "probe": {
+        "command": "SIP::response",
+        "args": ["phrase"],
+        "event": "SIP_RESPONSE",
+        "profiles": ["SIP"],
+        "state": {"sip": {"type": "response", "status": 200, "phrase": "OK"}}
+      },
+      "expect": {"status": "ok", "value": "OK"}
+    },
+    {
+      "id": "respond",
+      "probe": {
+        "command": "SIP::respond",
+        "args": ["486", "Busy Here", "Reason", "Q.850;cause=17"],
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {"sip": {"type": "request"}}
+      },
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "discard",
+      "probe": {
+        "command": "SIP::discard",
+        "event": "SIP_REQUEST",
+        "profiles": ["SIP"],
+        "state": {"sip": {"type": "request"}}
+      },
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "request-mutation-lifecycle",
+      "scenario": {
+        "profiles": ["SIP"],
+        "irule": "when SIP_REQUEST { SIP::header replace X-Test changed; SIP::uri sip:carol@example.com; SIP::payload insert 5 !; SIP::persist [SIP::call_id] 120 }",
+        "packets": [
+          {
+            "protocol": "sip",
+            "transport": "udp",
+            "direction": "client_to_server",
+            "type": "request",
+            "method": "INVITE",
+            "uri": "sip:bob@example.com",
+            "headers": {
+              "Via": "SIP/2.0/UDP proxy.example.com;branch=z9",
+              "From": "<sip:alice@example.com>;tag=1",
+              "To": "<sip:bob@example.com>",
+              "Call-ID": "call-123",
+              "X-Test": "old"
+            },
+            "payload": "hello"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "SIP_REQUEST"},
+          {"path": ["trace", 0, "events", 3, "event"], "equals": "SIP_REQUEST_SEND"},
+          {"path": ["trace", 0, "events", 4, "event"], "equals": "SIP_REQUEST_DONE"},
+          {"path": ["trace", 0, "events", 4, "state", "sip", "uri"], "equals": "sip:carol@example.com"},
+          {"path": ["trace", 0, "events", 4, "state", "sip", "persist_key"], "equals": "call-123"},
+          {"path": ["trace", 0, "events", 4, "state", "sip", "payload"], "equals": "hello!"},
+          {"path": ["trace", 0, "payload_after"], "equals": "hello!"}
+        ]
+      }
+    },
+    {
+      "id": "request-discard",
+      "scenario": {
+        "profiles": ["SIP"],
+        "irule": "when SIP_REQUEST { if {[SIP::method] eq \"OPTIONS\"} { SIP::discard } }",
+        "packets": [
+          {
+            "protocol": "sip",
+            "transport": "udp",
+            "direction": "client_to_server",
+            "type": "request",
+            "method": "OPTIONS",
+            "uri": "sip:example.com",
+            "headers": {"Call-ID": "discard-1"}
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "discarded"], "equals": true},
+          {"path": ["trace", 0, "drop_reason"], "equals": "message"},
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "SIP_REQUEST"},
+          {"path": ["trace", 0, "events", 2, "state", "sip", "method"], "equals": "OPTIONS"}
+        ]
+      }
+    },
+    {
+      "id": "request-respond",
+      "scenario": {
+        "profiles": ["SIP"],
+        "irule": "when SIP_REQUEST { SIP::respond 486 \"Busy Here\" Reason \"Q.850;cause=17\" }",
+        "packets": [
+          {
+            "protocol": "sip",
+            "transport": "udp",
+            "direction": "client_to_server",
+            "type": "request",
+            "method": "INVITE",
+            "uri": "sip:bob@example.com",
+            "headers": {"Call-ID": "respond-1"}
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "responded"], "equals": true},
+          {"path": ["trace", 0, "response", "status"], "equals": 486},
+          {"path": ["trace", 0, "response", "phrase"], "equals": "Busy Here"},
+          {"path": ["trace", 0, "response", "headers", 0], "equals": ["Reason", "Q.850;cause=17"]},
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "SIP_REQUEST"}
+        ]
+      }
+    },
+    {
+      "id": "tcp-framing-and-rebuild",
+      "scenario": {
+        "profiles": ["SIP"],
+        "irule": "when SIP_REQUEST { SIP::header replace X-Test tcp }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "192.0.2.1", "port": 51000},
+            "destination": {"address": "192.0.2.53", "port": 5060},
+            "flags": ["SYN"]
+          },
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "192.0.2.1", "port": 51000},
+            "destination": {"address": "192.0.2.53", "port": 5060},
+            "flags": ["ACK", "PSH"],
+            "payload": "INVITE sip:bob@example.com SIP/2.0\r\nVia: SIP/2.0/TCP proxy.example.com\r\nCall-ID: raw-1\r\nX-Test: old\r\nContent-Length: 0\r\n"
+          },
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "192.0.2.1", "port": 51000},
+            "destination": {"address": "192.0.2.53", "port": 5060},
+            "flags": ["ACK", "PSH"],
+            "payload": "\r\n"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 1, "buffered"], "equals": true},
+          {"path": ["trace", 2, "protocol"], "equals": "sip"},
+          {"path": ["trace", 2, "direction"], "equals": "client_to_server"},
+          {"path": ["trace", 2, "events", 0, "event"], "equals": "SIP_REQUEST"},
+          {"path": ["trace", 2, "events", 2, "state", "sip", "message"], "equals": "INVITE sip:bob@example.com SIP/2.0\r\nVia: SIP/2.0/TCP proxy.example.com\r\nCall-ID: raw-1\r\nX-Test: tcp\r\nContent-Length: 0\r\n\r\n"},
+          {"path": ["trace", 2, "message_after"], "equals": "INVITE sip:bob@example.com SIP/2.0\r\nVia: SIP/2.0/TCP proxy.example.com\r\nCall-ID: raw-1\r\nX-Test: tcp\r\nContent-Length: 0\r\n\r\n"}
+        ]
+      }
+    },
+    {
+      "id": "response-rewrite",
+      "scenario": {
+        "profiles": ["SIP"],
+        "irule": "when SIP_RESPONSE { SIP::response rewrite 202 Accepted }",
+        "packets": [
+          {
+            "protocol": "sip",
+            "transport": "udp",
+            "direction": "server_to_client",
+            "type": "response",
+            "status": 200,
+            "phrase": "OK",
+            "headers": {
+              "Via": "SIP/2.0/UDP proxy.example.com;branch=z9",
+              "Call-ID": "response-1"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "SIP_RESPONSE"},
+          {"path": ["trace", 0, "events", 3, "event"], "equals": "SIP_RESPONSE_SEND"},
+          {"path": ["trace", 0, "events", 4, "event"], "equals": "SIP_RESPONSE_DONE"},
+          {"path": ["trace", 0, "events", 4, "state", "sip", "status"], "equals": "202"},
+          {"path": ["trace", 0, "events", 4, "state", "sip", "phrase"], "equals": "Accepted"}
+        ]
+      }
+    }
+  ]
+}
