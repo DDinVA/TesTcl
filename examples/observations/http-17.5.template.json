@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "http-17.5-observation-template",
+  "source": "replace-with-bigip-or-vlab-source",
+  "provenance": {
+    "collector": "replace-with-collector-name",
+    "build": "replace-with-tmos-build",
+    "capture_id": "replace-with-capture-id"
+  },
+  "observations": [
+    {
+      "id": "http-host",
+      "operation": "command_probe",
+      "input": {
+        "command": "HTTP::host",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {
+          "host": "api.example.com",
+          "uri": "/health"
+        }
+      },
+      "output": {
+        "execution": {
+          "status": "ok",
+          "value": "replace-with-observed-value"
+        }
+      },
+      "comparisons": [
+        {
+          "label": "HTTP host",
+          "actual_path": ["execution", "value"],
+          "reference_path": ["execution", "value"]
+        }
+      ]
+    }
+  ]
+}

@@ -166,6 +166,60 @@ map only fields whose semantics are intended to be compared. The runner never
 connects to a device and never silently regenerates reference output from the
 emulator.
 
+### Importing external TMOS observations
+
+Use the observation importer as the handoff between a BIG-IP/vLab collector and
+the differential runner. It accepts external output without executing the
+emulator, validates the same TMOS 17.5 operation and comparison contracts, and
+returns a canonical golden-vector pack with bounded scalar provenance:
+
+```json
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "http-capture",
+  "source": "bigip-vlab-17.5.4",
+  "provenance": {
+    "collector": "tmsh-observe-v1",
+    "build": "17.5.4",
+    "capture_id": "capture-001"
+  },
+  "observations": [
+    {
+      "id": "http-host",
+      "operation": "command_probe",
+      "input": {
+        "command": "HTTP::host",
+        "event": "HTTP_REQUEST",
+        "request": {"host": "api.example.com"}
+      },
+      "output": {"value": "api.example.com"},
+      "comparisons": [
+        {
+          "label": "host",
+          "actual_path": ["execution", "value"],
+          "reference_path": ["value"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+The CLI form is:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --import-observations observations.json
+```
+
+The same operation is available as `POST
+/v1/differential-vectors/import` and the MCP tool
+`irule_import_observations`. The response contains `pack`, which can be passed
+unchanged to `--golden-vectors`, `POST /v1/differential-vectors`, or
+`irule_differential_vectors`. Importing never fabricates reference output from
+the emulator; it only normalizes and validates collector-supplied output.
+
 The scenario-capable stateful pack can be run directly with:
 
 ```sh

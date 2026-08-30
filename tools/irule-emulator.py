@@ -296,6 +296,8 @@ GOLDEN_VECTOR_MAX_COMPARISONS = 64
 GOLDEN_VECTOR_MAX_PATH_COMPONENTS = 32
 GOLDEN_VECTOR_MAX_LABEL_BYTES = 256
 GOLDEN_VECTOR_MAX_REPORTED_VALUE_BYTES = 64 * 1024
+OBSERVATION_PROVENANCE_MAX_FIELDS = 16
+OBSERVATION_PROVENANCE_MAX_VALUE_BYTES = 256
 EVENT_STATE_FIELDS = {
     "connection": {
         "client_addr",
@@ -24020,6 +24022,14 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_import_observations",
+                "title": "Import TMOS 17.5 observations",
+                "description": "Validate an external TMOS 17.5 observation pack and normalize it into a golden-vector pack without executing the emulator.",
+                "inputSchema": _mcp_object_schema(
+                    {"pack": {"type": "object"}}, ["pack"]
+                ),
+            },
+            {
                 "name": "irule_conformance",
                 "title": "Report catalog conformance",
                 "description": "Report static 17.5 catalog coverage for runtime command handlers and packet-to-event adapters.",
@@ -24264,6 +24274,15 @@ class McpProtocolServer:
                 )
             return self._tool_success(
                 run_golden_vectors(args["pack"], tcl_lsp_root=str(self._root))
+            )
+
+        if name == "irule_import_observations":
+            if set(args) != {"pack"} or not isinstance(args["pack"], dict):
+                raise McpProtocolError(
+                    -32602, "irule_import_observations requires a pack object"
+                )
+            return self._tool_success(
+                run_observation_import(args["pack"], tcl_lsp_root=str(self._root))
             )
 
         if name == "irule_conformance":
@@ -25157,6 +25176,54 @@ def _golden_values_equal(left: Any, right: Any) -> bool:
     return type(left) is type(right) and left == right
 
 
+def _normalise_observation_provenance(value: Any) -> dict[str, Any]:
+    """Validate bounded scalar provenance supplied by an external collector."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise EmulatorInputError("observation provenance must be a JSON object")
+    if len(value) > OBSERVATION_PROVENANCE_MAX_FIELDS:
+        raise EmulatorInputError(
+            "observation provenance accepts at most "
+            f"{OBSERVATION_PROVENANCE_MAX_FIELDS} fields"
+        )
+    normalised: dict[str, Any] = {}
+    for field, field_value in value.items():
+        if not isinstance(field, str) or not field or "\x00" in field:
+            raise EmulatorInputError(
+                "observation provenance field names must be non-empty NUL-free strings"
+            )
+        try:
+            field_bytes = field.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise EmulatorInputError(
+                "observation provenance field names must be valid UTF-8"
+            ) from exc
+        if len(field_bytes) > GOLDEN_VECTOR_MAX_LABEL_BYTES:
+            raise EmulatorInputError("observation provenance field name is too long")
+        if not isinstance(field_value, (str, int, float, bool, type(None))):
+            raise EmulatorInputError(
+                f"observation provenance field {field!r} must be a scalar"
+            )
+        if isinstance(field_value, float) and not math.isfinite(field_value):
+            raise EmulatorInputError(
+                f"observation provenance field {field!r} must be finite"
+            )
+        if isinstance(field_value, str):
+            try:
+                value_bytes = field_value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise EmulatorInputError(
+                    f"observation provenance field {field!r} must be valid UTF-8"
+                ) from exc
+            if "\x00" in field_value or len(value_bytes) > OBSERVATION_PROVENANCE_MAX_VALUE_BYTES:
+                raise EmulatorInputError(
+                    f"observation provenance field {field!r} is too long or contains NUL"
+                )
+        normalised[field] = field_value
+    return normalised
+
+
 def _normalise_golden_vectors(root: Path, pack: Any) -> dict[str, Any]:
     """Validate an external TMOS 17.5 reference-vector pack atomically."""
     if not isinstance(pack, dict):
@@ -25174,7 +25241,7 @@ def _normalise_golden_vectors(root: Path, pack: Any) -> dict[str, Any]:
         raise EmulatorInputError(
             f"golden vector pack exceeds the {GOLDEN_VECTOR_MAX_BYTES // (1024 * 1024)} MiB limit"
         )
-    allowed = {"schema_version", "profile", "name", "source", "vectors"}
+    allowed = {"schema_version", "profile", "name", "source", "provenance", "vectors"}
     unknown = sorted(set(pack) - allowed)
     if unknown:
         raise EmulatorInputError(
@@ -25206,6 +25273,7 @@ def _normalise_golden_vectors(root: Path, pack: Any) -> dict[str, Any]:
         raise EmulatorInputError("golden vector source must be valid UTF-8") from exc
     if len(source_bytes) > GOLDEN_VECTOR_MAX_NAME_BYTES:
         raise EmulatorInputError("golden vector source is too long")
+    provenance = _normalise_observation_provenance(pack.get("provenance"))
     vectors = pack.get("vectors")
     if not isinstance(vectors, list) or not vectors:
         raise EmulatorInputError("golden vector pack vectors must be a non-empty array")
@@ -25397,7 +25465,114 @@ def _normalise_golden_vectors(root: Path, pack: Any) -> dict[str, Any]:
         "profile": "tmos-17.5",
         "name": name,
         "source": source,
+        "provenance": provenance,
         "vectors": normalised_vectors,
+    }
+
+
+def _normalise_observation_pack(root: Path, pack: Any) -> dict[str, Any]:
+    """Convert an external TMOS observation pack into golden-vector form."""
+    if not isinstance(pack, dict):
+        raise EmulatorInputError("observation pack must be a JSON object")
+    allowed = {
+        "schema_version", "profile", "name", "source", "provenance", "observations"
+    }
+    unknown = sorted(str(field) for field in pack if field not in allowed)
+    if unknown:
+        raise EmulatorInputError(
+            f"unsupported observation pack field(s): {', '.join(unknown)}"
+        )
+    schema_version = pack.get("schema_version", 1)
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version != 1:
+        raise EmulatorInputError("observation pack schema_version must be 1")
+    if pack.get("profile", "tmos-17.5") != "tmos-17.5":
+        raise EmulatorInputError("observation pack profile must be tmos-17.5")
+    name = pack.get("name")
+    if not isinstance(name, str) or not name:
+        raise EmulatorInputError("observation pack name must be a non-empty string")
+    source = pack.get("source")
+    if not isinstance(source, str) or not source or "\x00" in source:
+        raise EmulatorInputError(
+            "observation pack source must be a non-empty NUL-free string"
+        )
+    try:
+        source_bytes = source.encode("utf-8")
+        name_bytes = name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise EmulatorInputError("observation pack name and source must be valid UTF-8") from exc
+    if len(name_bytes) > GOLDEN_VECTOR_MAX_NAME_BYTES or len(source_bytes) > GOLDEN_VECTOR_MAX_NAME_BYTES:
+        raise EmulatorInputError("observation pack name or source is too long")
+    provenance = _normalise_observation_provenance(pack.get("provenance"))
+    observations = pack.get("observations")
+    if not isinstance(observations, list) or not observations:
+        raise EmulatorInputError("observation pack observations must be a non-empty array")
+    if len(observations) > GOLDEN_VECTOR_MAX_CASES:
+        raise EmulatorInputError(
+            f"observation pack accepts at most {GOLDEN_VECTOR_MAX_CASES} observations"
+        )
+
+    vectors: list[dict[str, Any]] = []
+    for index, observation in enumerate(observations):
+        if not isinstance(observation, dict):
+            raise EmulatorInputError(f"observation {index} must be an object")
+        required = {"id", "operation", "input", "output", "comparisons"}
+        unknown_observation = sorted(
+            str(field) for field in observation if field not in required
+        )
+        missing = sorted(field for field in required if field not in observation)
+        if unknown_observation or missing:
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            if unknown_observation:
+                details.append("unsupported " + ", ".join(unknown_observation))
+            raise EmulatorInputError(
+                f"observation {index} fields invalid: {'; '.join(details)}"
+            )
+        vectors.append(
+            {
+                "id": observation["id"],
+                "operation": observation["operation"],
+                "input": observation["input"],
+                "reference": {
+                    "source": source,
+                    "output": observation["output"],
+                },
+                "comparisons": observation["comparisons"],
+            }
+        )
+    return _normalise_golden_vectors(
+        root,
+        {
+            "schema_version": 1,
+            "profile": "tmos-17.5",
+            "name": name,
+            "source": source,
+            "provenance": provenance,
+            "vectors": vectors,
+        },
+    )
+
+
+def run_observation_import(
+    pack: Any,
+    *,
+    tcl_lsp_root: str | None = None,
+) -> dict[str, Any]:
+    """Validate external observations without executing or fabricating output."""
+    root = _find_tcl_lsp_root(tcl_lsp_root)
+    prepared = _normalise_observation_pack(root, pack)
+    return {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "pack": prepared,
+        "summary": {
+            "observation_count": len(prepared["vectors"]),
+            "vector_count": len(prepared["vectors"]),
+            "executed": False,
+        },
     }
 
 
@@ -25508,6 +25683,7 @@ def run_golden_vectors(
         "pack": {
             "name": prepared["name"],
             "source": prepared["source"],
+            "provenance": prepared["provenance"],
             "schema_version": prepared["schema_version"],
             "vector_count": len(rows),
         },
@@ -25752,6 +25928,20 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                 try:
                     pack = self._read_json()
                     payload = run_golden_vectors(pack, tcl_lsp_root=str(root))
+                except (
+                    json.JSONDecodeError,
+                    EmulatorInputError,
+                    EmulatorResourceError,
+                    OSError,
+                ) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
+            if parsed.path == "/v1/differential-vectors/import":
+                try:
+                    pack = self._read_json()
+                    payload = run_observation_import(pack, tcl_lsp_root=str(root))
                 except (
                     json.JSONDecodeError,
                     EmulatorInputError,
@@ -26051,6 +26241,14 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="compare bounded emulator inputs from PATH, or stdin when omitted",
     )
+    mode.add_argument(
+        "--import-observations",
+        nargs="?",
+        const="-",
+        default=None,
+        metavar="PATH",
+        help="validate external TMOS 17.5 observations and emit a golden-vector pack",
+    )
     mode.add_argument("--serve", action="store_true", help="serve the HTTP API instead of reading stdin")
     mode.add_argument(
         "--mcp",
@@ -26083,14 +26281,24 @@ def main(argv: list[str] | None = None) -> int:
     try:
         direct_pack_path = args.behavior_pack if args.behavior_pack not in (None, "-") else None
         direct_golden_path = args.golden_vectors if args.golden_vectors not in (None, "-") else None
-        if args.scenario != "-" and (direct_pack_path is not None or direct_golden_path is not None):
+        direct_observation_path = (
+            args.import_observations
+            if args.import_observations not in (None, "-")
+            else None
+        )
+        if args.scenario != "-" and (
+            direct_pack_path is not None
+            or direct_golden_path is not None
+            or direct_observation_path is not None
+        ):
             raise EmulatorInputError(
                 "use either --scenario PATH or a direct pack path, not both"
             )
         root = _find_tcl_lsp_root(args.tcl_lsp_root)
         if args.pcap and (
             args.serve or args.mcp or args.capabilities or args.catalog or args.probe
-            or args.command_probe or args.behavior_pack or args.golden_vectors or args.conformance
+            or args.command_probe or args.behavior_pack or args.golden_vectors
+            or args.import_observations or args.conformance
         ):
             raise EmulatorInputError(
                 "--pcap can only be used with one-shot scenario execution"
@@ -26163,6 +26371,17 @@ def main(argv: list[str] | None = None) -> int:
                 tcl_lsp_root=str(root),
                 backend=args.backend,
             )
+        elif args.import_observations is not None:
+            pack_path = (
+                args.import_observations
+                if args.import_observations != "-"
+                else args.scenario
+            )
+            if pack_path == "-":
+                pack = json.load(sys.stdin)
+            else:
+                pack = json.loads(Path(pack_path).read_text(encoding="utf-8"))
+            response = run_observation_import(pack, tcl_lsp_root=str(root))
         else:
             if args.scenario == "-":
                 scenario = json.load(sys.stdin)

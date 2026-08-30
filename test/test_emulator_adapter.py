@@ -3196,6 +3196,74 @@ when HTTP_RESPONSE_RELEASE {
                 invalid, tcl_lsp_root=self.tcl_lsp_root
             )
 
+    def test_observation_import_normalises_external_pack_without_execution(self) -> None:
+        observation_pack = {
+            "schema_version": 1,
+            "profile": "tmos-17.5",
+            "name": "captured-http-observations",
+            "source": "bigip-vlab-17.5.4",
+            "provenance": {
+                "collector": "tmsh-observe-v1",
+                "build": "17.5.4",
+                "capture_id": "capture-001",
+            },
+            "observations": [
+                {
+                    "id": "http-host",
+                    "operation": "command_probe",
+                    "input": {
+                        "command": "HTTP::host",
+                        "event": "HTTP_REQUEST",
+                        "profiles": ["TCP", "HTTP"],
+                        "request": {"host": "api.example.com", "uri": "/health"},
+                    },
+                    "output": {
+                        "execution": {
+                            "status": "ok",
+                            "value": "api.example.com",
+                        }
+                    },
+                    "comparisons": [
+                        {
+                            "label": "host",
+                            "actual_path": ["execution", "value"],
+                            "reference_path": ["execution", "value"],
+                        }
+                    ],
+                }
+            ],
+        }
+        imported = self.adapter.run_observation_import(
+            observation_pack, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(imported["status"], "ok")
+        self.assertEqual(imported["summary"]["executed"], False)
+        canonical = imported["pack"]
+        self.assertEqual(canonical["provenance"]["capture_id"], "capture-001")
+        self.assertEqual(
+            canonical["vectors"][0]["reference"]["source"], "bigip-vlab-17.5.4"
+        )
+
+        replay = self.adapter.run_golden_vectors(
+            canonical, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(replay["status"], "passed")
+        self.assertEqual(replay["pack"]["provenance"]["build"], "17.5.4")
+
+        nested_provenance = dict(observation_pack)
+        nested_provenance["provenance"] = {"tags": ["http"]}
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "must be a scalar"):
+            self.adapter.run_observation_import(
+                nested_provenance, tcl_lsp_root=self.tcl_lsp_root
+            )
+
+        wrong_profile = dict(observation_pack)
+        wrong_profile["profile"] = "tmos-16.1"
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "profile"):
+            self.adapter.run_observation_import(
+                wrong_profile, tcl_lsp_root=self.tcl_lsp_root
+            )
+
     def test_behavior_packs_cover_dns_tcp_lb_uri_sip_and_stateful_scenarios(self) -> None:
         expected_counts = {
             "dns-17.5.json": 7,
@@ -18700,6 +18768,55 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             thread.join(timeout=5)
             server.server_close()
 
+    def test_http_api_imports_external_observations(self) -> None:
+        observation_pack = {
+            "name": "http-capture",
+            "source": "bigip-vlab-17.5.4",
+            "provenance": {"capture_id": "http-001"},
+            "observations": [
+                {
+                    "id": "host",
+                    "operation": "command_probe",
+                    "input": {
+                        "command": "HTTP::host",
+                        "event": "HTTP_REQUEST",
+                        "request": {"host": "api.example.com"},
+                    },
+                    "output": {"value": "api.example.com"},
+                    "comparisons": [
+                        {
+                            "label": "host",
+                            "actual_path": ["execution", "value"],
+                            "reference_path": ["value"],
+                        }
+                    ],
+                }
+            ],
+        }
+        server = self.adapter.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self.adapter._http_handler(Path(self.tcl_lsp_root))
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/differential-vectors/import",
+                data=json.dumps(observation_pack).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(response.status, 200)
+                payload = json.loads(response.read())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["summary"]["executed"], False)
+            self.assertEqual(payload["pack"]["vectors"][0]["id"], "host")
+            self.assertEqual(payload["pack"]["provenance"]["capture_id"], "http-001")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_cli_replays_classic_pcap_file(self) -> None:
         capture = _pcap_bytes([
             (5, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
@@ -18753,6 +18870,52 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["status"], "passed")
         self.assertEqual(payload["summary"]["vector_count"], 3)
+
+    def test_cli_imports_observation_pack_path_form(self) -> None:
+        observation_pack = {
+            "name": "cli-observation",
+            "source": "bigip-vlab-17.5.4",
+            "observations": [
+                {
+                    "id": "host",
+                    "operation": "command_probe",
+                    "input": {
+                        "command": "HTTP::host",
+                        "event": "HTTP_REQUEST",
+                        "request": {"host": "cli.example.com"},
+                    },
+                    "output": {"value": "cli.example.com"},
+                    "comparisons": [
+                        {
+                            "label": "host",
+                            "actual_path": ["execution", "value"],
+                            "reference_path": ["value"],
+                        }
+                    ],
+                }
+            ],
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as observation_file:
+            json.dump(observation_pack, observation_file)
+            observation_file.flush()
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ADAPTER_PATH),
+                    "--import-observations",
+                    observation_file.name,
+                    "--tcl-lsp-root",
+                    self.tcl_lsp_root,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["summary"]["executed"], False)
+        self.assertEqual(payload["pack"]["vectors"][0]["id"], "host")
 
     def test_input_contract_rejects_wrong_profile_and_unknown_fields(self) -> None:
         base = {"irule": "when HTTP_REQUEST { pool api_pool }"}
@@ -18908,6 +19071,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         self.assertIn("irule_command_probe", tool_names)
         self.assertIn("irule_behavior_pack", tool_names)
         self.assertIn("irule_differential_vectors", tool_names)
+        self.assertIn("irule_import_observations", tool_names)
         capability_payload = responses[4]["result"]["structuredContent"]
         self.assertEqual(capability_payload["chunk"]["offset"], 1498)
         self.assertLessEqual(capability_payload["chunk"]["count"], 2)
@@ -19045,6 +19209,46 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             golden_payload = golden_vectors["result"]["structuredContent"]
             self.assertEqual(golden_payload["status"], "passed")
             self.assertEqual(golden_payload["summary"]["vector_count"], 3)
+
+            imported_observations = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 14,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_import_observations",
+                        "arguments": {
+                            "pack": {
+                                "name": "mcp-observation",
+                                "source": "bigip-vlab-17.5.4",
+                                "observations": [
+                                    {
+                                        "id": "host",
+                                        "operation": "command_probe",
+                                        "input": {
+                                            "command": "HTTP::host",
+                                            "event": "HTTP_REQUEST",
+                                            "request": {"host": "mcp.example.com"},
+                                        },
+                                        "output": {"value": "mcp.example.com"},
+                                        "comparisons": [
+                                            {
+                                                "label": "host",
+                                                "actual_path": ["execution", "value"],
+                                                "reference_path": ["value"],
+                                            }
+                                        ],
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                }
+            )
+            imported_payload = imported_observations["result"]["structuredContent"]
+            self.assertEqual(imported_payload["status"], "ok")
+            self.assertEqual(imported_payload["summary"]["executed"], False)
+            self.assertEqual(imported_payload["pack"]["vectors"][0]["id"], "host")
 
             udp_behavior_pack = server.handle_message(
                 {
