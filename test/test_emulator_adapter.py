@@ -11119,6 +11119,63 @@ when CLIENTSSL_CLIENTCERT {
         self.assertTrue(event["fired"])
         self.assertTrue(any("count=2 cn=client.example.com" in entry for entry in event["logs"]))
 
+    def test_raw_tls_certificate_handshake_reassembles_across_tcp_segments(self) -> None:
+        _, der = _valid_client_certificate()
+        payload = _tls_certificate_payload(der, der)
+        split_at = 13
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "CLIENTSSL"],
+                "irule": """
+when CLIENTSSL_CLIENTCERT {
+    set cert [SSL::cert 0]
+    log local0. "count=[SSL::cert count] cn=[X509::subject $cert commonName]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "network": "ipv4",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "192.0.2.20",
+                            "192.0.2.10",
+                            51000,
+                            443,
+                            0x10,
+                            payload[:split_at],
+                            sequence=1000,
+                        ),
+                    },
+                    {
+                        "protocol": "wire",
+                        "direction": "client_to_server",
+                        "network": "ipv4",
+                        "raw_hex": _raw_ipv4_tcp_hex(
+                            "192.0.2.20",
+                            "192.0.2.10",
+                            51000,
+                            443,
+                            0x10,
+                            payload[split_at:],
+                            sequence=1000 + split_at,
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        events = [
+            event
+            for entry in result["trace"]
+            for event in entry["events"]
+            if event["event"] == "CLIENTSSL_CLIENTCERT"
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]["fired"])
+        self.assertTrue(any("count=2 cn=client.example.com" in entry for entry in events[0]["logs"]))
+
     def test_packet_trace_exposes_directional_tcp_payload_and_mutations(self) -> None:
         result = self.adapter.run_scenario(
             {

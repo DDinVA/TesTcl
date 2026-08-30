@@ -11120,71 +11120,95 @@ def _tls_certificate_list(
     return certificates or None
 
 
-def _decode_tls_payload(payload: bytes, direction: str) -> dict[str, Any] | None:
+def _decode_tls_payload(
+    payload: bytes, direction: str
+) -> tuple[dict[str, Any], int] | None:
+    """Decode the first complete TLS record/handshake from a TCP stream."""
     if len(payload) < 5 or payload[0] not in {20, 21, 22, 23}:
         return None
-    record_length = int.from_bytes(payload[3:5], "big")
-    if len(payload) < 5 + record_length:
-        return None
-    record = payload[5 : 5 + record_length]
-    if payload[0] == 23:
-        packet_type = "client_data" if direction == "client_to_server" else "server_data"
-        return {"protocol": "tls", "direction": direction, "type": packet_type}
-    if payload[0] != 22 or len(record) < 4:
-        return None
-    handshake_type = record[0]
-    packet_types = {
-        ("client_to_server", 1): "client_hello",
-        ("server_to_client", 2): "server_hello",
-        ("client_to_server", 11): "client_cert",
-        ("server_to_client", 11): "server_cert",
-    }
-    packet_type = packet_types.get((direction, handshake_type))
-    if packet_type is None:
-        if handshake_type == 20:
-            packet_type = "handshake" if direction == "client_to_server" else "server_handshake"
-        else:
+
+    cursor = 0
+    handshake_bytes = b""
+    while cursor + 5 <= len(payload):
+        record_type = payload[cursor]
+        if record_type not in {20, 21, 22, 23}:
             return None
-    result: dict[str, Any] = {
-        "protocol": "tls",
-        "direction": direction,
-        "type": packet_type,
-    }
-    if handshake_type == 11:  # Certificate
-        certificate_body = record[4:]
-        certificates = _tls_certificate_list(certificate_body, tls13=False)
-        if certificates is None:
-            certificates = _tls_certificate_list(certificate_body, tls13=True)
-        if certificates:
-            result["cert_der"] = certificates[0].hex()
-            result["cert_count"] = len(certificates)
-            _normalise_tls_certificate_bytes(result, 0)
-    if handshake_type == 1 and len(record) >= 4 + 2 + 32 + 1:
-        body = record[4:]
-        cursor = 2 + 32
-        session_length = body[cursor]
-        cursor += 1 + session_length
-        if cursor + 2 <= len(body):
-            cipher_length = int.from_bytes(body[cursor : cursor + 2], "big")
-            cursor += 2 + cipher_length
-        if cursor < len(body):
-            compression_length = body[cursor]
-            cursor += 1 + compression_length
-        if cursor + 2 <= len(body):
-            extensions_length = int.from_bytes(body[cursor : cursor + 2], "big")
-            cursor += 2
-            extensions_end = min(cursor + extensions_length, len(body))
-            while cursor + 4 <= extensions_end:
-                extension_type = int.from_bytes(body[cursor : cursor + 2], "big")
-                extension_length = int.from_bytes(body[cursor + 2 : cursor + 4], "big")
-                cursor += 4
-                extension = body[cursor : cursor + extension_length]
-                cursor += extension_length
-                if extension_type == 0 and len(extension) >= 5:
-                    name_length = int.from_bytes(extension[3:5], "big")
-                    result["sni"] = _decode_wire_text(extension[5 : 5 + name_length])
-                    break
-    return result
+        record_length = int.from_bytes(payload[cursor + 3 : cursor + 5], "big")
+        record_end = cursor + 5 + record_length
+        if record_end > len(payload):
+            return None
+        record = payload[cursor + 5 : record_end]
+        cursor = record_end
+        if record_type == 23:
+            packet_type = "client_data" if direction == "client_to_server" else "server_data"
+            return (
+                {"protocol": "tls", "direction": direction, "type": packet_type},
+                cursor,
+            )
+        if record_type != 22:
+            continue
+        handshake_bytes += record
+        if len(handshake_bytes) < 4:
+            continue
+        handshake_length = int.from_bytes(handshake_bytes[1:4], "big")
+        handshake_end = 4 + handshake_length
+        if len(handshake_bytes) < handshake_end:
+            continue
+        handshake_type = handshake_bytes[0]
+        handshake_record = handshake_bytes[:handshake_end]
+        packet_types = {
+            ("client_to_server", 1): "client_hello",
+            ("server_to_client", 2): "server_hello",
+            ("client_to_server", 11): "client_cert",
+            ("server_to_client", 11): "server_cert",
+        }
+        packet_type = packet_types.get((direction, handshake_type))
+        if packet_type is None:
+            if handshake_type == 20:
+                packet_type = "handshake" if direction == "client_to_server" else "server_handshake"
+            else:
+                return None
+        result: dict[str, Any] = {
+            "protocol": "tls",
+            "direction": direction,
+            "type": packet_type,
+        }
+        if handshake_type == 11:  # Certificate
+            certificate_body = handshake_record[4:]
+            certificates = _tls_certificate_list(certificate_body, tls13=False)
+            if certificates is None:
+                certificates = _tls_certificate_list(certificate_body, tls13=True)
+            if certificates:
+                result["cert_der"] = certificates[0].hex()
+                result["cert_count"] = len(certificates)
+                _normalise_tls_certificate_bytes(result, 0)
+        if handshake_type == 1 and len(handshake_record) >= 4 + 2 + 32 + 1:
+            body = handshake_record[4:]
+            hello_cursor = 2 + 32
+            session_length = body[hello_cursor]
+            hello_cursor += 1 + session_length
+            if hello_cursor + 2 <= len(body):
+                cipher_length = int.from_bytes(body[hello_cursor : hello_cursor + 2], "big")
+                hello_cursor += 2 + cipher_length
+            if hello_cursor < len(body):
+                compression_length = body[hello_cursor]
+                hello_cursor += 1 + compression_length
+            if hello_cursor + 2 <= len(body):
+                extensions_length = int.from_bytes(body[hello_cursor : hello_cursor + 2], "big")
+                hello_cursor += 2
+                extensions_end = min(hello_cursor + extensions_length, len(body))
+                while hello_cursor + 4 <= extensions_end:
+                    extension_type = int.from_bytes(body[hello_cursor : hello_cursor + 2], "big")
+                    extension_length = int.from_bytes(body[hello_cursor + 2 : hello_cursor + 4], "big")
+                    hello_cursor += 4
+                    extension = body[hello_cursor : hello_cursor + extension_length]
+                    hello_cursor += extension_length
+                    if extension_type == 0 and len(extension) >= 5:
+                        name_length = int.from_bytes(extension[3:5], "big")
+                        result["sni"] = _decode_wire_text(extension[5 : 5 + name_length])
+                        break
+        return result, cursor
+    return None
 
 
 def _dns_uint(value: Any, field: str, maximum: int) -> int:
@@ -20400,14 +20424,16 @@ class EmulatorSession:
         looks_like_tls = bool(combined) and combined[0] in {20, 21, 22, 23}
         looks_like_http = self._looks_like_http_prefix(combined)
         if looks_like_tls:
-            decoded = _decode_tls_payload(combined, packet["direction"])
-            if decoded is not None:
-                stream.buffer = b""
-                stream.segments.clear()
+            decoded_result = _decode_tls_payload(combined, packet["direction"])
+            if decoded_result is not None:
+                decoded, consumed = decoded_result
+                stream.buffer = combined[consumed:]
+                if not has_gap:
+                    stream.segments.clear()
                 merged = dict(packet)
                 merged.update(decoded)
                 merged.pop("_wire_payload", None)
-                return merged, len(combined)
+                return merged, consumed
         elif looks_like_http:
             decoded_packets: list[dict[str, Any]] = []
             remaining = combined
