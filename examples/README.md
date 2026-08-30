@@ -13,3 +13,8 @@ iRules with priority ordering and a shared pool fixture.
 The `scenarios/live-http-17.5.json` fixture can be served to a real HTTP client
 with `--data-plane`; it includes a deterministic origin response and a rule
 that blocks `/private`.
+
+The `golden-vectors/http-streaming-17.5.json` fixture is a checked-in
+TMOS-17.5 contract for split request bodies, chunked responses, and pipelined
+HTTP/1.x messages. It is not live-device evidence; replace its reference
+outputs with independently captured observations when available.

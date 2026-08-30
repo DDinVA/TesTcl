@@ -190,6 +190,19 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --golden-vectors examples/golden-vectors/http-17.5.json
 ```
 
+The repository also includes
+[`examples/golden-vectors/http-streaming-17.5.json`](../examples/golden-vectors/http-streaming-17.5.json),
+which exercises split `Content-Length` bodies, chunked response bodies, and
+coalesced/pipelined HTTP/1.x messages. Its provenance explicitly identifies it
+as a checked-in adapter contract (`live_device: false`); replace the reference
+outputs with independently captured TMOS 17.5 observations when a device or
+vLab collector is available.
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --golden-vectors examples/golden-vectors/http-streaming-17.5.json
+```
+
 The same operation is available as `POST /v1/differential-vectors` and the MCP
 tool `irule_differential_vectors`. The checked-in fixture demonstrates the
 schema and deterministic adapter contract; it is not presented as a capture

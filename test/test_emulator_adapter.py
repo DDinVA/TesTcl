@@ -3947,6 +3947,21 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(strict_result["status"], "failed")
         self.assertEqual(strict_result["summary"]["failed"], 1)
 
+    def test_streaming_golden_vector_contracts_cover_http_framing(self) -> None:
+        pack = json.loads(
+            (ROOT / "examples" / "golden-vectors" / "http-streaming-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        result = self.adapter.run_golden_vectors(
+            pack, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(
+            result["summary"], {"vector_count": 3, "passed": 3, "failed": 0}
+        )
+        self.assertEqual(result["analysis"]["comparison_count"], 15)
+        self.assertEqual(result["analysis"]["comparison_failed"], 0)
+
     def test_golden_vectors_replay_pcap_operation_and_validate_reference_paths(self) -> None:
         capture = _pcap_bytes([
             (5, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(
