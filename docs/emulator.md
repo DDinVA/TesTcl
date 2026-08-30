@@ -1491,9 +1491,11 @@ but does not implement a SOCKS handshake, proxy socket, or live connection.
 
 `SDP::field`, `SDP::media`, and `SDP::session_id` are available during SIP
 message events when the `SIP` profile is attached. Supply a bounded structured
-SDP overlay through the event API. `fields` is a Tcl list of repeated
-field/value pairs; `media` is a Tcl list whose entries are dictionaries with
-`type`, `port`, `transport`, `conn`, and `attrs` keys:
+SDP overlay through the event API, or provide a SIP packet with a
+`Content-Type: application/sdp` body and let the adapter derive the overlay.
+`fields` is a Tcl list of repeated field/value pairs; `media` is a Tcl list
+whose entries are dictionaries with `type`, `port`, `transport`, `conn`, and
+`attrs` keys:
 
 ```json
 {
@@ -1512,10 +1514,13 @@ field/value pairs; `media` is a Tcl list whose entries are dictionaries with
 `SDP::field name index value` rewrites an existing occurrence. `SDP::media`
 supports `count`, indexed media dictionaries, `attr`, `type`, `port`,
 `transport`, and `conn`; media ports accept `PORT` or `PORT/COUNT` and are
-bounded to the 0–65535 port range. `SDP::session_id` returns the supplied
-session identifier. This overlay is intentionally separate from the SIP
-payload: it does not yet parse raw SDP bodies or rewrite the serialized SIP
-message.
+bounded to the 0–65535 port range. `SDP::session_id` returns the session ID
+from the `o=` field when raw SDP is parsed, or the supplied identifier for a
+structured overlay. For raw SDP packets, bounded field/connection mutations
+are serialized back into the SIP body and `Content-Length` is recomputed;
+unknown SDP lines are retained. Bodies over 64 KiB, malformed SDP, and
+non-UTF-8 SDP remain opaque rather than being partially parsed. The adapter
+does not implement full RFC 4566 validation or media negotiation.
 
 With the `CACHE` or `WEBACCELERATION` profile, HTTP requests also use a
 deterministic per-session cache model. The adapter derives a cache key from the

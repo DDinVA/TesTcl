@@ -645,8 +645,12 @@ proxy socket, or live destination connection.
 The TMOS 17.5 `SDP::field`, `SDP::media`, and `SDP::session_id` commands are
 modeled on structured SDP state attached to SIP message events. They support
 indexed session-field access, media count/type/port/transport/connection and
-attribute reads, bounded port/connection rewrites, and session-ID lookup. The
-slice does not yet parse SDP from raw SIP payloads or re-encode the SIP body.
+attribute reads, bounded port/connection rewrites, and session-ID lookup.
+SIP packets whose `Content-Type` is `application/sdp` now populate that state
+from bounded UTF-8 SDP bodies and re-encode the supported mutations while
+preserving unmodeled SDP lines. Bodies larger than the SDP state limit,
+malformed bodies, and non-UTF-8 bodies remain opaque SIP payloads; this is not
+a complete RFC 4566 parser or media negotiation engine.
 The `CACHE` and `WEBACCELERATION` profiles add a deterministic per-session
 HTTP cache model covering all 17 catalogued `CACHE::` commands and the
 `CACHE_REQUEST`, `CACHE_RESPONSE`, and `CACHE_UPDATE` events. Cache keys,

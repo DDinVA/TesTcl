@@ -10258,6 +10258,98 @@ when SIP_RESPONSE_DONE { log local0. response-done }
         self.assertTrue(any("via=UDP" in log for log in response_events[0]["logs"]))
         self.assertEqual(response_events[-1]["state"]["sip"]["status"], "202")
 
+    def test_sip_sdp_payload_is_parsed_mutated_and_reencoded(self) -> None:
+        body = (
+            "v=0\r\n"
+            "o=- 2890844526 2890842807 IN IP4 198.51.100.10\r\n"
+            "s=Original session\r\n"
+            "x=vendor-extension\r\n"
+            "t=0 0\r\n"
+            "m=audio 5004 RTP/AVP 0 96\r\n"
+            "c=IN IP4 198.51.100.10\r\n"
+            "b=AS:64\r\n"
+            "a=rtpmap:0 PCMU/8000\r\n"
+        )
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["SIP"],
+                "irule": """
+when SIP_REQUEST {
+    log local0. "sid=[SDP::session_id] name=[SDP::field s] media=[SDP::media count] codec=[SDP::media attr 0 0]"
+    SDP::field s 0 "Rewritten session"
+    SDP::field o 0 "- 3000000000 2890842807 IN IP4 198.51.100.10"
+    SDP::media port 0 6000/2
+    SDP::media conn 0 "IN IP4 203.0.113.20"
+}
+when SIP_REQUEST_SEND {
+    log local0. "sid=[SDP::session_id] name=[SDP::field s] port=[SDP::media port 0]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "direction": "client_to_server",
+                        "type": "request",
+                        "method": "INVITE",
+                        "uri": "sip:bob@example.com",
+                        "headers": {
+                            "Content-Type": "application/sdp; charset=utf-8",
+                            "Call-ID": "sdp-call-1",
+                        },
+                        "payload": body,
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        entry = result["trace"][0]
+        events = entry["events"]
+        sip_events = [event for event in events if event["event"].startswith("SIP_")]
+        self.assertEqual(
+            [event["event"] for event in sip_events],
+            ["SIP_REQUEST", "SIP_REQUEST_SEND", "SIP_REQUEST_DONE"],
+        )
+        self.assertTrue(any("sid=2890844526" in log for log in sip_events[0]["logs"]))
+        self.assertTrue(any("media=1" in log and "codec=rtpmap:0 PCMU/8000" in log for log in sip_events[0]["logs"]))
+        self.assertTrue(any("sid=3000000000 name=Rewritten session port=6000/2" in log for log in sip_events[1]["logs"]))
+        self.assertEqual(sip_events[0]["state"]["sdp"]["session_id"], "3000000000")
+        self.assertIn("Rewritten session", entry["payload_after"])
+        self.assertIn("o=- 3000000000 2890842807", entry["payload_after"])
+        self.assertIn("x=vendor-extension", entry["payload_after"])
+        self.assertIn("b=AS:64", entry["payload_after"])
+        self.assertIn("m=audio 6000/2 RTP/AVP 0 96", entry["payload_after"])
+        self.assertIn("c=IN IP4 203.0.113.20", entry["payload_after"])
+        self.assertIn(
+            f"Content-Length: {len(entry['payload_after'].encode('utf-8'))}",
+            entry["message_after"],
+        )
+        self.assertEqual(entry["wire_hex"], entry["message_after"].encode("utf-8").hex())
+
+    def test_sip_payload_mutation_does_not_get_overwritten_by_stale_sdp_state(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["SIP"],
+                "irule": "when SIP_REQUEST { SIP::payload insert 0 X }",
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "direction": "client_to_server",
+                        "type": "request",
+                        "method": "INVITE",
+                        "uri": "sip:bob@example.com",
+                        "headers": {"Content-Type": "application/sdp"},
+                        "payload": "v=0\r\ns=opaque\r\n",
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        entry = result["trace"][0]
+        self.assertTrue(entry["payload_after"].startswith("Xv=0\r\ns=opaque\r\n"))
+        self.assertNotIn("m=", entry["payload_after"])
+        sip_events = [event for event in entry["events"] if event["event"].startswith("SIP_")]
+        self.assertNotIn("sdp", sip_events[-1]["state"])
+
     def test_sipalg_connection_and_message_controls(self) -> None:
         result = self.adapter.run_scenario(
             {

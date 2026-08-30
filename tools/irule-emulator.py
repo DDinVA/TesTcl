@@ -8974,6 +8974,8 @@ WEBSOCKET_MAX_FRAME_BYTES = STREAM_MAX_BYTES
 MQTT_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 SIP_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 SDP_MAX_STATE_BYTES = 64 * 1024
+SDP_MAX_LINE_BYTES = 4096
+SDP_MAX_MEDIA = 128
 PSC_MAX_STATE_BYTES = 64 * 1024
 DIAMETER_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 RADIUS_MAX_MESSAGE_BYTES = 4096
@@ -11851,6 +11853,316 @@ def _decode_sip_messages(
     return messages, payload[position:]
 
 
+def _sdp_content_type(headers: list[list[str]]) -> bool:
+    """Return whether SIP headers identify an application/sdp body."""
+    return any(
+        _sip_header_matches(name, "Content-Type")
+        and value.split(";", 1)[0].strip().lower() == "application/sdp"
+        for name, value in headers
+    )
+
+
+def _sdp_origin_session_id(fields: list[tuple[str, str]]) -> str:
+    for name, value in fields:
+        if name.lower() != "o":
+            continue
+        parts = value.split()
+        if len(parts) >= 2:
+            return parts[1]
+    return ""
+
+
+def _parse_sdp_payload(
+    payload: bytes, headers: list[list[str]]
+) -> dict[str, Any] | None:
+    """Parse the bounded SDP subset exposed by the existing SDP Tcl commands.
+
+    Invalid or unsupported SDP bodies are deliberately treated as opaque SIP
+    payloads.  This keeps packet replay useful for non-SDP content and avoids
+    turning a malformed application body into an emulator crash.
+    """
+    if not _sdp_content_type(headers) or not payload:
+        return None
+    if len(payload) > SDP_MAX_STATE_BYTES:
+        return None
+    try:
+        body = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if "\x00" in body:
+        return None
+
+    if "\r" in body:
+        if "\r\n" not in body or "\r" in body.replace("\r\n", ""):
+            return None
+        separator = "\r\n"
+        if "\n" in body.replace("\r\n", ""):
+            return None
+    elif "\n" in body:
+        separator = "\n"
+    else:
+        separator = "\r\n"
+    raw_lines = body.split(separator)
+    trailing_separator = bool(raw_lines and raw_lines[-1] == "")
+    if trailing_separator:
+        raw_lines.pop()
+    if not raw_lines or any(not line for line in raw_lines):
+        return None
+
+    parsed_lines: list[tuple[str, str]] = []
+    for line in raw_lines:
+        if len(line.encode("utf-8")) > SDP_MAX_LINE_BYTES:
+            return None
+        if len(line) < 2 or line[1] != "=" or not (
+            "a" <= line[0] <= "z" or "A" <= line[0] <= "Z"
+        ):
+            return None
+        parsed_lines.append((line[0], line[2:]))
+
+    fields: list[tuple[str, str]] = []
+    media: list[dict[str, Any]] = []
+    media_blocks: list[dict[str, Any]] = []
+    current_media: dict[str, Any] | None = None
+    first_media_index = len(parsed_lines)
+    for index, (name, value) in enumerate(parsed_lines):
+        if name.lower() == "m":
+            parts = value.split()
+            if len(parts) < 4 or not re.fullmatch(r"[0-9]+(?:/[0-9]+)?", parts[1]):
+                return None
+            port_parts = parts[1].split("/")
+            try:
+                port = int(port_parts[0])
+                count = int(port_parts[1]) if len(port_parts) == 2 else None
+            except ValueError:
+                return None
+            if not 0 <= port <= 65535 or (
+                count is not None and not 1 <= count <= 65535
+            ):
+                return None
+            if len(media) >= SDP_MAX_MEDIA:
+                return None
+            if current_media is not None:
+                current_media["end"] = index
+            current_media = {
+                "start": index,
+                "end": len(parsed_lines),
+                "m_name": name,
+                "type": parts[0],
+                "port": parts[1],
+                "transport": parts[2],
+                "formats": " ".join(parts[3:]),
+                "conn": "",
+                "attrs": [],
+                "connection_indices": [],
+                "attribute_indices": [],
+            }
+            media.append(current_media)
+            media_blocks.append(current_media)
+            if first_media_index == len(parsed_lines):
+                first_media_index = index
+        elif current_media is None:
+            fields.append((name, value))
+        elif name.lower() == "c":
+            current_media["connection_indices"].append(index)
+            if not current_media["conn"]:
+                current_media["conn"] = value
+        elif name.lower() == "a":
+            current_media["attribute_indices"].append(index)
+            current_media["attrs"].append(value)
+
+    state_media = [
+        {
+            "type": item["type"],
+            "port": item["port"],
+            "transport": item["transport"],
+            "conn": item["conn"],
+            "attrs": list(item["attrs"]),
+        }
+        for item in media
+    ]
+    state = {
+        "session_id": _sdp_origin_session_id(fields),
+        "fields": list(fields),
+        "media": state_media,
+    }
+    return {
+        "original_body": payload,
+        "separator": separator,
+        "trailing_separator": trailing_separator,
+        "lines": list(raw_lines),
+        "session_indices": list(range(first_media_index)),
+        "fields": list(fields),
+        "media": media_blocks,
+        "state": state,
+    }
+
+
+def _sdp_event_layer(state: dict[str, Any]) -> dict[str, str]:
+    fields: list[str] = []
+    for name, value in state["fields"]:
+        fields.extend((str(name), str(value)))
+    media_values: list[str] = []
+    for media in state["media"]:
+        flattened = [
+            "type", str(media.get("type", "")),
+            "port", str(media.get("port", "")),
+            "transport", str(media.get("transport", "")),
+            "conn", str(media.get("conn", "")),
+            "attrs", _tcl_list_value([str(value) for value in media.get("attrs", [])]),
+        ]
+        media_values.append(_tcl_list_value(flattened))
+    layer = {
+        "session_id": str(state["session_id"]),
+        "fields": _tcl_list_value(fields),
+        "media": _tcl_list_value(media_values),
+    }
+    state_bytes = sum(len(value.encode("utf-8")) for value in layer.values())
+    if state_bytes > SDP_MAX_STATE_BYTES:
+        raise EmulatorInputError(
+            f"event SDP state exceeds {SDP_MAX_STATE_BYTES} bytes"
+        )
+    return layer
+
+
+def _install_sdp_state(session: Any, state: dict[str, Any]) -> None:
+    for field, value in _sdp_event_layer(state).items():
+        session.eval_tcl(
+            f"set ::state::sdp::{field} {_tcl_quote(value)}"
+        )
+
+
+def _sdp_state_from_tcl(session: Any) -> dict[str, Any]:
+    raw_fields = _split_tcl_list(session.eval_tcl("set ::state::sdp::fields"))
+    if len(raw_fields) % 2:
+        raise EmulatorInputError("invalid SDP field state")
+    fields = [
+        (raw_fields[index], raw_fields[index + 1])
+        for index in range(0, len(raw_fields), 2)
+    ]
+    raw_media = _split_tcl_list(session.eval_tcl("set ::state::sdp::media"))
+    media: list[dict[str, Any]] = []
+    for raw_entry in raw_media:
+        values = _split_tcl_list(raw_entry)
+        if len(values) % 2:
+            raise EmulatorInputError("invalid SDP media state")
+        entry = dict(zip(values[::2], values[1::2]))
+        attrs = _split_tcl_list(entry.get("attrs", ""))
+        media.append(
+            {
+                "type": entry.get("type", ""),
+                "port": entry.get("port", ""),
+                "transport": entry.get("transport", ""),
+                "conn": entry.get("conn", ""),
+                "attrs": attrs,
+            }
+        )
+    state = {
+        "session_id": str(session.eval_tcl("set ::state::sdp::session_id")),
+        "fields": fields,
+        "media": media,
+    }
+    _sdp_event_layer(state)
+    return state
+
+
+def _sdp_safe_value(value: Any, field: str) -> str:
+    text = str(value)
+    if "\x00" in text or "\r" in text or "\n" in text:
+        raise EmulatorInputError(f"invalid SDP {field} state")
+    return text
+
+
+def _sdp_serialize(template: dict[str, Any], state: dict[str, Any]) -> bytes:
+    """Apply mutable supported SDP state while retaining unknown SDP lines."""
+    if state == template["state"]:
+        return bytes(template["original_body"])
+    if len(state["fields"]) != len(template["state"]["fields"]):
+        raise EmulatorInputError("SDP field count changed unexpectedly")
+    if len(state["media"]) != len(template["state"]["media"]):
+        raise EmulatorInputError("SDP media count changed unexpectedly")
+
+    lines = template["lines"]
+    session_lines = template["session_indices"]
+    rendered: list[str] = []
+    field_by_line = dict(zip(session_lines, state["fields"]))
+    blocks_by_start = {block["start"]: (block, position) for position, block in enumerate(template["media"])}
+    for index, line in enumerate(lines):
+        if index in field_by_line:
+            name, value = field_by_line[index]
+            if len(name) != 1:
+                raise EmulatorInputError("invalid SDP field state")
+            rendered.append(f"{name}={_sdp_safe_value(value, 'field')}")
+            continue
+        block_info = blocks_by_start.get(index)
+        if block_info is not None:
+            block, media_index = block_info
+            media_state = state["media"][media_index]
+            media_type = _sdp_safe_value(media_state["type"], "media type")
+            media_port = _sdp_safe_value(media_state["port"], "media port")
+            media_transport = _sdp_safe_value(
+                media_state["transport"], "media transport"
+            )
+            m_value = " ".join(
+                (media_type, media_port, media_transport)
+            )
+            if block["formats"]:
+                m_value += " " + block["formats"]
+            rendered.append(f"{block['m_name']}={m_value}")
+            media_conn = _sdp_safe_value(media_state["conn"], "media connection")
+            if not block["connection_indices"] and media_conn:
+                rendered.append(f"c={media_conn}")
+            continue
+        owner = next(
+            (
+                (block, media_index)
+                for media_index, block in enumerate(template["media"])
+                if block["start"] <= index < block["end"]
+            ),
+            None,
+        )
+        if owner is None:
+            rendered.append(line)
+            continue
+        block, media_index = owner
+        media_state = state["media"][media_index]
+        connection_indices = block["connection_indices"]
+        if index in connection_indices:
+            if index == connection_indices[0]:
+                rendered.append(
+                    f"{line[0]}={_sdp_safe_value(media_state['conn'], 'media connection')}"
+                )
+            else:
+                rendered.append(line)
+            continue
+        attribute_indices = block["attribute_indices"]
+        if index in attribute_indices:
+            attribute_position = attribute_indices.index(index)
+            if attribute_position < len(media_state["attrs"]):
+                rendered.append(
+                    f"{line[0]}={_sdp_safe_value(media_state['attrs'][attribute_position], 'media attribute')}"
+                )
+            else:
+                rendered.append(line)
+            if index == block["end"] - 1 and len(media_state["attrs"]) > len(attribute_indices):
+                rendered.extend(
+                    f"a={_sdp_safe_value(value, 'media attribute')}"
+                    for value in media_state["attrs"][len(attribute_indices):]
+                )
+            continue
+        rendered.append(line)
+
+    separator = template["separator"]
+    body = separator.join(rendered)
+    if template["trailing_separator"]:
+        body += separator
+    encoded = body.encode("utf-8")
+    if len(encoded) > SDP_MAX_STATE_BYTES:
+        raise EmulatorInputError(
+            f"serialized SDP body exceeds {SDP_MAX_STATE_BYTES} bytes"
+        )
+    return encoded
+
+
 DIAMETER_AVP_VENDOR_FLAG = 0x80
 DIAMETER_FLAG_REQUEST = 0x80
 DIAMETER_FLAG_PROXIABLE = 0x40
@@ -13765,6 +14077,12 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                         f"packet {index} SIP encoder produced an incomplete message"
                     )
                 normalised.update(parsed)
+            sdp_template = _parse_sdp_payload(
+                normalised.get("_sip_payload", b""),
+                normalised.get("headers", []),
+            )
+            if sdp_template is not None:
+                normalised["_sdp_template"] = sdp_template
         if protocol == "rtsp":
             if "body" in packet and "payload" in packet:
                 raise EmulatorInputError(
@@ -15129,11 +15447,95 @@ class EmulatorSession:
                 raise EmulatorInputError("MQTT operation state is invalid")
         return forwarded, emissions
 
+    @staticmethod
+    def _sip_tcl_bytes(session: Any, field: str) -> bytes:
+        encoded = session.eval_tcl(
+            f"binary encode hex $::state::sip::{field}"
+        )
+        try:
+            return bytes.fromhex(str(encoded))
+        except ValueError as exc:  # pragma: no cover - Tcl binary contract guard
+            raise EmulatorInputError(f"invalid SIP {field} state") from exc
+
+    @staticmethod
+    def _sip_tcl_headers(session: Any) -> list[list[str]]:
+        values = _split_tcl_list(session.eval_tcl("set ::state::sip::headers"))
+        if len(values) % 2:
+            raise EmulatorInputError("invalid SIP header state")
+        return [
+            [values[index], values[index + 1]]
+            for index in range(0, len(values), 2)
+        ]
+
+    @classmethod
+    def _sync_sip_sdp_state(
+        cls, session: Any, packet: dict[str, Any]
+    ) -> None:
+        """Synchronize mutable SDP state with the SIP payload and message."""
+        current_payload = cls._sip_tcl_bytes(session, "payload")
+        headers = cls._sip_tcl_headers(session)
+        template = packet.get("_sdp_template")
+        if not _sdp_content_type(headers):
+            if isinstance(template, dict):
+                session.eval_tcl("::itest::semantic::sdp_reset_connection")
+                packet.pop("_sdp_template", None)
+            packet["_sip_payload"] = current_payload
+            packet["payload"] = _decode_wire_text(current_payload)
+            return
+
+        payload_changed = current_payload != packet.get("_sip_payload", b"")
+        if not isinstance(template, dict) or payload_changed:
+            parsed = _parse_sdp_payload(current_payload, headers)
+            if parsed is None:
+                session.eval_tcl("::itest::semantic::sdp_reset_connection")
+                packet.pop("_sdp_template", None)
+                packet["_sip_payload"] = current_payload
+                packet["payload"] = _decode_wire_text(current_payload)
+                return
+            packet["_sdp_template"] = parsed
+            _install_sdp_state(session, parsed["state"])
+            session.eval_tcl("::itest::semantic::sip_rebuild_message")
+            packet["_sip_payload"] = current_payload
+            packet["payload"] = _decode_wire_text(current_payload)
+            return
+
+        state = _sdp_state_from_tcl(session)
+        if any(name.lower() == "o" for name, _ in state["fields"]):
+            derived_session_id = _sdp_origin_session_id(state["fields"])
+            if state["session_id"] != derived_session_id:
+                state["session_id"] = derived_session_id
+                session.eval_tcl(
+                    f"set ::state::sdp::session_id "
+                    f"{_tcl_quote(derived_session_id)}"
+                )
+        rendered_payload = _sdp_serialize(template, state)
+        if rendered_payload != current_payload:
+            payload_hex = rendered_payload.hex()
+            session.eval_tcl(
+                "set ::state::sip::payload [binary format H* "
+                f"{_tcl_quote(payload_hex)}]"
+            )
+            session.eval_tcl("::itest::semantic::sip_rebuild_message")
+            current_payload = rendered_payload
+        packet["_sip_payload"] = current_payload
+        packet["payload"] = _decode_wire_text(current_payload)
+
+    @classmethod
+    def _sip_output_from_tcl(cls, session: Any) -> dict[str, Any]:
+        payload = cls._sip_tcl_bytes(session, "payload")
+        message = cls._sip_tcl_bytes(session, "message")
+        return {
+            "payload_after": _decode_wire_text(payload),
+            "message_after": _decode_wire_text(message),
+            "wire_hex": message.hex(),
+        }
+
     def _fire_event_on_worker(
         self,
         session: Any,
         event_name: str,
         state: dict[str, dict[str, str]],
+        packet: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         session.eval_tcl("::itest::semantic::diagnostics_begin_packet")
         session.eval_tcl("::itest::semantic::tcp_clear_event_state")
@@ -15269,6 +15671,8 @@ class EmulatorSession:
             )
         if "sip" in state:
             session.eval_tcl("::itest::semantic::sip_rebuild_message")
+            if packet is not None:
+                self._sync_sip_sdp_state(session, packet)
         if "diameter" in state:
             session.eval_tcl("::itest::semantic::diameter_rebuild_message")
         if "radius" in state:
@@ -15278,6 +15682,12 @@ class EmulatorSession:
         fired_events = _split_tcl_list(session.eval_tcl("::itest::get_fired_events"))
         state_snapshot: dict[str, dict[str, Any]] = {}
         snapshot_layers = list(state)
+        if (
+            packet is not None
+            and isinstance(packet.get("_sdp_template"), dict)
+            and "sdp" not in snapshot_layers
+        ):
+            snapshot_layers.append("sdp")
         if self._route_visible and "route" not in state:
             snapshot_layers.append("route")
         for layer in snapshot_layers:
@@ -15906,6 +16316,9 @@ class EmulatorSession:
             sip_state["message"] = message
             sip_state["message_length"] = str(len(wire_message))
             state["sip"] = sip_state
+            sdp_template = packet.get("_sdp_template")
+            if isinstance(sdp_template, dict):
+                state["sdp"] = _sdp_event_layer(sdp_template["state"])
         elif protocol == "diameter":
             diameter_state: dict[str, str] = {}
             for field in EVENT_STATE_FIELDS["diameter"]:
@@ -16038,6 +16451,8 @@ class EmulatorSession:
                 sip_state[field] = raw
             else:
                 sip_state[field] = raw
+        if isinstance(packet.get("_sdp_template"), dict):
+            state["sdp"] = _sdp_event_layer(_sdp_state_from_tcl(session))
         return state
 
     def _current_diameter_event_state(
@@ -17724,12 +18139,17 @@ class EmulatorSession:
             if protocol == "sip":
                 self._activate_packet_connection(session, packet, entry["events"])
                 session.eval_tcl("::itest::semantic::sip_prepare_message")
+                # SDP is message-scoped even when the SIP connection is reused.
+                session.eval_tcl("::itest::semantic::sdp_reset_connection")
                 is_request = packet.get("type") == "request"
                 ingress_event = "SIP_REQUEST" if is_request else "SIP_RESPONSE"
                 send_event = "SIP_REQUEST_SEND" if is_request else "SIP_RESPONSE_SEND"
                 done_event = "SIP_REQUEST_DONE" if is_request else "SIP_RESPONSE_DONE"
                 ingress_result = self._fire_event_on_worker(
-                    session, ingress_event, self._packet_event_state(packet)
+                    session,
+                    ingress_event,
+                    self._packet_event_state(packet),
+                    packet=packet,
                 )
                 entry["events"].append(ingress_result)
                 raw_flags = _split_tcl_list(
@@ -17765,7 +18185,10 @@ class EmulatorSession:
                         }
                     else:
                         send_result = self._fire_event_on_worker(
-                            session, send_event, self._current_sip_event_state(session, packet)
+                            session,
+                            send_event,
+                            self._current_sip_event_state(session, packet),
+                            packet=packet,
                         )
                         entry["events"].append(send_result)
                         raw_flags = _split_tcl_list(
@@ -17783,8 +18206,10 @@ class EmulatorSession:
                                     session,
                                     done_event,
                                     self._current_sip_event_state(session, packet),
+                                    packet=packet,
                                 )
                             )
+                entry.update(self._sip_output_from_tcl(session))
                 continue
 
             if protocol == "diameter":
