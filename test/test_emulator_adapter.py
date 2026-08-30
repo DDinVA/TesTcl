@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import base64
 import hashlib
+import http.client
 import io
 import ipaddress
 import json
@@ -18783,6 +18784,97 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             server.shutdown()
             thread.join(timeout=5)
             server.server_close()
+
+    def test_live_http_data_plane_runs_persistent_real_client_requests(self) -> None:
+        scenario = {
+            "profiles": ["TCP", "HTTP"],
+            "irule": """
+when HTTP_REQUEST {
+    HTTP::header insert X-Rule-Path [HTTP::path]
+    if {[HTTP::uri] eq "/blocked"} {
+        HTTP::respond 403 content denied
+    }
+}
+when HTTP_RESPONSE {
+    HTTP::header insert X-Request-Number [HTTP::request_num]
+}
+""",
+            "live_origin": {
+                "status": 200,
+                "headers": {"X-Origin": "fixture"},
+                "body": "origin-body",
+            },
+        }
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
+        try:
+            connection.request("GET", "/one", headers={"Host": "live.example"})
+            first = connection.getresponse()
+            self.assertEqual(first.status, 200)
+            self.assertEqual(first.read(), b"origin-body")
+            self.assertEqual(first.getheader("X-Origin"), "fixture")
+            self.assertEqual(first.getheader("X-Request-Number"), "1")
+
+            connection.request("GET", "/two", headers={"Host": "live.example"})
+            second = connection.getresponse()
+            self.assertEqual(second.status, 200)
+            self.assertEqual(second.read(), b"origin-body")
+            self.assertEqual(second.getheader("X-Request-Number"), "2")
+
+            connection.request("HEAD", "/two", headers={"Host": "live.example"})
+            head = connection.getresponse()
+            self.assertEqual(head.status, 200)
+            self.assertEqual(head.read(), b"")
+            self.assertEqual(head.getheader("Content-Length"), str(len(b"origin-body")))
+
+            connection.request("GET", "/blocked", headers={"Host": "live.example"})
+            blocked = connection.getresponse()
+            self.assertEqual(blocked.status, 403)
+            self.assertEqual(blocked.read(), b"denied")
+        finally:
+            connection.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+
+    def test_live_http_data_plane_validates_origin_and_request_limits(self) -> None:
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "unsupported live_origin field"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {"irule": "", "live_origin": {"unexpected": True}},
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "live_origin.status"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {"irule": "", "live_origin": {"status": 700}},
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorResourceError, "live_origin.body exceeds"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "irule": "",
+                    "live_origin": {
+                        "body": "x" * (2 * 1024 * 1024 + 1),
+                    },
+                },
+            )
 
     def test_http_api_exposes_runtime_registration_probe(self) -> None:
         server = self.adapter.ThreadingHTTPServer(

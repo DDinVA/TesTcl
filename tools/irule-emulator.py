@@ -52,6 +52,7 @@ except ModuleNotFoundError:  # test modules load this script by absolute path
 
 TMOS_VERSION = "17.5"
 MAX_IRULE_SOURCES = 64
+LIVE_HTTP_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 ADAPT_FIXTURE_RESULTS = frozenset({"noop", "modified", "response", "error"})
 ADAPT_FIXTURE_RESULT_ALIASES = {
     "noop": "noop",
@@ -25955,6 +25956,252 @@ def _api_error_status(error: Exception) -> int:
     return 400
 
 
+def _normalise_live_http_scenario(
+    raw: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split a live data-plane scenario from its deterministic origin reply."""
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("data-plane scenario must be a JSON object")
+    if any(field in raw for field in ("request", "requests", "packets")):
+        raise EmulatorInputError(
+            "data-plane scenario cannot contain request, requests, or packets"
+        )
+    scenario = dict(raw)
+    origin = scenario.pop("live_origin", {})
+    if origin is None:
+        origin = {}
+    if not isinstance(origin, dict):
+        raise EmulatorInputError("live_origin must be an object")
+    unknown = sorted(set(origin) - {"status", "headers", "body"})
+    if unknown:
+        raise EmulatorInputError(
+            "unsupported live_origin field(s): " + ", ".join(unknown)
+        )
+    status = origin.get("status", 200)
+    if isinstance(status, bool) or not isinstance(status, int) or not 200 <= status <= 599:
+        raise EmulatorInputError("live_origin.status must be an integer from 200 to 599")
+    headers = origin.get("headers", {})
+    if not isinstance(headers, dict) or not all(
+        isinstance(name, str)
+        and bool(name)
+        and not any(character in name for character in "\r\n\x00")
+        and isinstance(value, str)
+        and not any(character in value for character in "\r\n\x00")
+        for name, value in headers.items()
+    ):
+        raise EmulatorInputError("live_origin.headers must be an object of strings")
+    body = origin.get("body", "")
+    if not isinstance(body, str) or "\x00" in body:
+        raise EmulatorInputError("live_origin.body must be a string")
+    if len(body.encode("utf-8")) > LIVE_HTTP_MAX_REQUEST_BYTES:
+        raise EmulatorResourceError(
+            "live_origin.body exceeds the 2 MiB limit"
+        )
+    return scenario, {
+        "response_status": status,
+        "response_headers": dict(headers),
+        "response_body": body,
+    }
+
+
+def _live_http_handler(
+    root: Path,
+    scenario: dict[str, Any],
+    origin_defaults: dict[str, Any],
+    manager: "SessionManager",
+) -> type[BaseHTTPRequestHandler]:
+    """Build a small real-client HTTP adapter over persistent iRule sessions."""
+
+    class LiveEmulatorHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        server_version = "testcl-irule-data-plane/1"
+
+        def setup(self) -> None:  # noqa: D401 - BaseHTTPRequestHandler API
+            super().setup()
+            self._live_session_id: str | None = None
+
+        def finish(self) -> None:  # noqa: D401 - BaseHTTPRequestHandler API
+            session_id = self._live_session_id
+            if session_id is not None:
+                self._live_session_id = None
+                try:
+                    manager.close(session_id)
+                except EmulatorNotFoundError:
+                    pass
+            super().finish()
+
+        def log_message(self, format: str, *args: Any) -> None:
+            print(f"{self.address_string()} - {format % args}", file=sys.stderr)
+
+        def _send_live_error(self, status: int, message: str) -> None:
+            body = (message + "\n").encode("utf-8", errors="replace")
+            self.close_connection = True
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _read_live_body(self) -> bytes:
+            transfer_encoding = self.headers.get("Transfer-Encoding", "")
+            if transfer_encoding and transfer_encoding.lower() != "identity":
+                raise EmulatorInputError(
+                    "live data plane requires Content-Length and does not decode chunked requests"
+                )
+            length_header = self.headers.get("Content-Length")
+            if length_header is None:
+                return b""
+            try:
+                length = int(length_header, 10)
+            except ValueError as exc:
+                raise EmulatorInputError("Content-Length must be a valid integer") from exc
+            if length < 0:
+                raise EmulatorInputError("Content-Length must not be negative")
+            if length > LIVE_HTTP_MAX_REQUEST_BYTES:
+                raise EmulatorResourceError("request body exceeds the 2 MiB limit")
+            body = self.rfile.read(length)
+            if len(body) != length:
+                raise EmulatorInputError("request body ended before Content-Length")
+            return body
+
+        def _handle_live_request(self) -> None:
+            try:
+                if self.headers.get("Expect", "").lower() == "100-continue":
+                    self.send_response_only(100)
+                    self.end_headers()
+                body = self._read_live_body()
+                if self._live_session_id is None:
+                    self._live_session_id = manager.create(scenario)
+                request: dict[str, Any] = {
+                    "method": self.command,
+                    "uri": self.path,
+                    "host": self.headers.get("Host", ""),
+                    "headers": dict(self.headers.items()),
+                    "body": body.decode("utf-8", errors="replace"),
+                    **origin_defaults,
+                }
+                result = manager.execute(
+                    self._live_session_id,
+                    lambda session: session.run_request(request),
+                )
+                response = result.get("response", {})
+                status = response.get("status", 500)
+                if isinstance(status, bool) or not isinstance(status, int) or not 200 <= status <= 599:
+                    raise EmulatorInputError("emulator returned an invalid HTTP status")
+                response_headers = response.get("headers", {})
+                if not isinstance(response_headers, dict):
+                    raise EmulatorInputError("emulator returned invalid HTTP headers")
+                response_body = response.get("body", "")
+                if not isinstance(response_body, str):
+                    raise EmulatorInputError("emulator returned an invalid HTTP body")
+                body_bytes = response_body.encode("utf-8")
+                no_wire_body = (
+                    self.command.upper() == "HEAD"
+                    or status in {204, 304}
+                    or 100 <= status < 200
+                )
+                wire_body = b"" if no_wire_body else body_bytes
+                close_connection = (
+                    result.get("connection_state") == "closing"
+                    or result.get("http_close") is True
+                )
+                self.close_connection = close_connection
+                reason = response.get("reason", "")
+                self.send_response(status, reason if isinstance(reason, str) else "")
+                explicit_length: str | None = None
+                for name, value in response_headers.items():
+                    if (
+                        not isinstance(name, str)
+                        or not name
+                        or not isinstance(value, str)
+                        or any(character in name + value for character in "\r\n\x00")
+                    ):
+                        raise EmulatorInputError("emulator returned an unsafe HTTP header")
+                    lower_name = name.lower()
+                    if lower_name == "content-length":
+                        if value.isdigit():
+                            explicit_length = value
+                    if lower_name in {
+                        "connection",
+                        "content-length",
+                        "keep-alive",
+                        "proxy-connection",
+                        "transfer-encoding",
+                        "upgrade",
+                    }:
+                        continue
+                    self.send_header(name, value)
+                if (
+                    self.command.upper() == "HEAD"
+                    and explicit_length not in {None, "0"}
+                ):
+                    content_length = explicit_length
+                else:
+                    # A HEAD response advertises the length of the body a
+                    # corresponding GET would have sent. The Tcl bridge may
+                    # expose its internal no-wire-body length as zero, so
+                    # derive that metadata from the modeled body here.
+                    content_length = str(
+                        len(body_bytes) if self.command.upper() == "HEAD" else len(wire_body)
+                    )
+                self.send_header("Content-Length", content_length)
+                if close_connection:
+                    self.send_header("Connection", "close")
+                self.end_headers()
+                if wire_body:
+                    self.wfile.write(wire_body)
+            except (EmulatorInputError, EmulatorNotFoundError, EmulatorResourceError) as exc:
+                self._send_live_error(_api_error_status(exc), str(exc))
+            except (UnicodeError, OSError) as exc:
+                self._send_live_error(400, str(exc))
+
+        def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            self._handle_live_request()
+
+        def do_HEAD(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            self._handle_live_request()
+
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            self._handle_live_request()
+
+        def do_PUT(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            self._handle_live_request()
+
+        def do_PATCH(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            self._handle_live_request()
+
+        def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            self._handle_live_request()
+
+        def do_OPTIONS(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            self._handle_live_request()
+
+    return LiveEmulatorHandler
+
+
+def _data_plane_server(
+    root: Path,
+    host: str,
+    port: int,
+    raw_scenario: Any,
+) -> tuple[ThreadingHTTPServer, "SessionManager"]:
+    if not 0 <= port <= 65535:
+        raise EmulatorInputError("data-plane port must be between 0 and 65535")
+    scenario, origin_defaults = _normalise_live_http_scenario(raw_scenario)
+    manager = SessionManager(root, max_sessions=128)
+    try:
+        server = ThreadingHTTPServer(
+            (host, port),
+            _live_http_handler(root, scenario, origin_defaults, manager),
+        )
+    except BaseException:
+        manager.close_all()
+        raise
+    server.daemon_threads = True
+    return server, manager
+
+
 def _http_handler(root: Path, manager: SessionManager | None = None) -> type[BaseHTTPRequestHandler]:
     session_manager = manager if manager is not None else SessionManager(root)
 
@@ -26341,19 +26588,77 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
     return EmulatorHandler
 
 
-def serve(root: Path, host: str, port: int) -> None:
+def serve(
+    root: Path,
+    host: str,
+    port: int,
+    *,
+    data_plane_scenario: Any | None = None,
+    data_plane_host: str = "127.0.0.1",
+    data_plane_port: int = 18080,
+) -> None:
     if not 1 <= port <= 65535:
         raise EmulatorInputError("port must be between 1 and 65535")
     session_manager = SessionManager(root)
-    server = ThreadingHTTPServer((host, port), _http_handler(root, session_manager))
-    print(f"testcl emulator listening on http://{host}:{port}", file=sys.stderr)
+    server: ThreadingHTTPServer | None = None
+    data_plane_server: ThreadingHTTPServer | None = None
+    data_plane_manager: SessionManager | None = None
+    data_plane_thread: threading.Thread | None = None
+    try:
+        if data_plane_scenario is not None:
+            if data_plane_host == host and data_plane_port == port:
+                raise EmulatorInputError(
+                    "API and data-plane listeners must use different host/port pairs"
+                )
+            data_plane_server, data_plane_manager = _data_plane_server(
+                root,
+                data_plane_host,
+                data_plane_port,
+                data_plane_scenario,
+            )
+            data_plane_thread = threading.Thread(
+                target=data_plane_server.serve_forever,
+                name="testcl-http-data-plane",
+                daemon=True,
+            )
+            data_plane_thread.start()
+            print(
+                "testcl data plane listening on "
+                f"http://{data_plane_host}:{data_plane_server.server_port}",
+                file=sys.stderr,
+            )
+        server = ThreadingHTTPServer((host, port), _http_handler(root, session_manager))
+        print(f"testcl emulator listening on http://{host}:{port}", file=sys.stderr)
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if server is not None:
+            server.server_close()
+        session_manager.close_all()
+        if data_plane_server is not None:
+            data_plane_server.shutdown()
+            if data_plane_thread is not None:
+                data_plane_thread.join(timeout=5)
+            data_plane_server.server_close()
+        if data_plane_manager is not None:
+            data_plane_manager.close_all()
+
+
+def serve_data_plane(root: Path, host: str, port: int, scenario: Any) -> None:
+    """Run only the optional real-client HTTP data plane."""
+    server, manager = _data_plane_server(root, host, port, scenario)
+    print(
+        f"testcl data plane listening on http://{host}:{server.server_port}",
+        file=sys.stderr,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
-        session_manager.close_all()
+        manager.close_all()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26421,6 +26726,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     mode.add_argument("--serve", action="store_true", help="serve the HTTP API instead of reading stdin")
     mode.add_argument(
+        "--data-plane",
+        action="store_true",
+        help="serve a real-client HTTP data plane using the scenario",
+    )
+    mode.add_argument(
         "--mcp",
         action="store_true",
         help="serve the emulator tools over newline-delimited MCP JSON-RPC on stdin/stdout",
@@ -26440,6 +26750,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--host", default="127.0.0.1", help="HTTP API bind address")
     parser.add_argument("--port", type=int, default=8080, help="HTTP API bind port")
+    parser.add_argument(
+        "--data-plane-scenario",
+        help="scenario path for an additional live HTTP data plane with --serve",
+    )
+    parser.add_argument(
+        "--data-plane-host",
+        default="127.0.0.1",
+        help="live HTTP data-plane bind address when combined with --serve",
+    )
+    parser.add_argument(
+        "--data-plane-port",
+        type=int,
+        default=18080,
+        help="live HTTP data-plane bind port when combined with --serve",
+    )
     parser.add_argument(
         "--backend",
         choices=("inprocess",),
@@ -26466,7 +26791,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         root = _find_tcl_lsp_root(args.tcl_lsp_root)
         if args.pcap and (
-            args.serve or args.mcp or args.capabilities or args.catalog or args.probe
+            args.serve or args.data_plane or args.mcp or args.capabilities or args.catalog or args.probe
             or args.command_probe or args.behavior_pack or args.golden_vectors
             or args.import_observations or args.conformance
         ):
@@ -26475,8 +26800,35 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.catalog and args.offset != 0:
             raise EmulatorInputError("--offset cannot be used with --catalog")
+        if args.data_plane_scenario is not None and not args.serve:
+            raise EmulatorInputError("--data-plane-scenario requires --serve")
+        if args.data_plane:
+            if args.data_plane_scenario is not None:
+                raise EmulatorInputError(
+                    "use --scenario with --data-plane, not --data-plane-scenario"
+                )
+            if args.scenario == "-":
+                live_scenario = json.load(sys.stdin)
+            else:
+                live_scenario = json.loads(
+                    Path(args.scenario).read_text(encoding="utf-8")
+                )
+            serve_data_plane(root, args.host, args.port, live_scenario)
+            return 0
         if args.serve:
-            serve(root, args.host, args.port)
+            live_scenario = None
+            if args.data_plane_scenario is not None:
+                live_scenario = json.loads(
+                    Path(args.data_plane_scenario).read_text(encoding="utf-8")
+                )
+            serve(
+                root,
+                args.host,
+                args.port,
+                data_plane_scenario=live_scenario,
+                data_plane_host=args.data_plane_host,
+                data_plane_port=args.data_plane_port,
+            )
             return 0
         if args.mcp:
             serve_mcp(root)

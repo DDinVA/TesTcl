@@ -45,6 +45,33 @@ and any events reported by the upstream framework. It also includes a
 when a recognized command is backed by a generated stub, has no runtime
 handler, or is gated by the attached profiles.
 
+## Real-client HTTP data plane
+
+For an end-to-end smoke test, run the optional data plane against a scenario
+file. It accepts real HTTP/1.x clients, keeps one emulator session per TCP
+connection, and returns the modeled response produced by the iRule and the
+deterministic `live_origin` fixture:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --data-plane --host 127.0.0.1 --port 18080 \
+  --scenario examples/scenarios/live-http-17.5.json
+curl -i http://127.0.0.1:18080/health
+```
+
+The fixture uses `live_origin` with optional `status`, `headers`, and `body`
+fields. Actual request fields are supplied by the client; origin fields are
+defaults that the iRule may inspect or replace with `HTTP::respond` or
+`HTTP::redirect`. Request bodies are limited to 2 MiB, chunked request bodies
+are rejected explicitly, and response hop-by-hop headers are normalized by the
+listener. This is a deterministic HTTP data-plane adapter, not a TLS listener,
+kernel TCP stack, or live upstream proxy.
+
+The API and data plane can run together by starting the normal API with
+`--serve --data-plane-scenario PATH`; the API remains on `--host/--port`, while
+the data plane defaults to `127.0.0.1:18080` and can be changed with
+`--data-plane-host` and `--data-plane-port`.
+
 ## Command workbench
 
 Use the command workbench to exercise one target-valid F5 command from the

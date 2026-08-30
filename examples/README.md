@@ -9,3 +9,7 @@ resulting golden-vector pack.
 
 The `scenarios/multi-irule-17.5.json` fixture demonstrates multiple attached
 iRules with priority ordering and a shared pool fixture.
+
+The `scenarios/live-http-17.5.json` fixture can be served to a real HTTP client
+with `--data-plane`; it includes a deterministic origin response and a rule
+that blocks `/private`.
