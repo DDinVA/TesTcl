@@ -11608,14 +11608,12 @@ def _decode_http_payload(
 
 def _decode_http_request_head(
     payload: bytes,
-) -> tuple[dict[str, Any], int, int] | None:
+) -> tuple[dict[str, Any], int, int, str] | None:
     """Decode an HTTP request head without consuming its message body.
 
-    This is deliberately narrower than ``_decode_http_payload``: staged
-    request processing currently uses an explicit decimal Content-Length so
-    the adapter can know exactly where the request body ends and where a
-    pipelined request may begin. Chunked requests continue through the
-    complete-message path until their framing can be decoded safely.
+    The final field identifies the body framing mode. A chunked body uses
+    ``-1`` for its length because its wire boundary is discovered by the
+    terminating zero chunk and optional trailers.
     """
     separator = payload.find(b"\r\n\r\n")
     separator_length = 4
@@ -11644,7 +11642,19 @@ def _decode_http_request_head(
     if transfer_encoding and "chunked" in {
         token.strip() for token in transfer_encoding.split(",")
     }:
-        return None
+        body_start = separator + separator_length
+        return (
+            {
+                "protocol": "http",
+                "direction": "client_to_server",
+                "method": request_match.group(1),
+                "uri": request_match.group(2),
+                "headers": headers,
+            },
+            body_start,
+            -1,
+            "chunked",
+        )
     content_length = _http_header_value(headers, "content-length")
     if not content_length:
         body_length = 0
@@ -11665,13 +11675,14 @@ def _decode_http_request_head(
         },
         body_start,
         body_length,
+        "content-length",
     )
 
 
 def _decode_http_response_head(
     payload: bytes,
     request_method: str | None,
-) -> tuple[dict[str, Any], int, int] | None:
+) -> tuple[dict[str, Any], int, int, str] | None:
     """Decode an HTTP response head and its explicit body length."""
     separator = payload.find(b"\r\n\r\n")
     separator_length = 4
@@ -11710,7 +11721,18 @@ def _decode_http_response_head(
     if transfer_encoding and "chunked" in {
         token.strip() for token in transfer_encoding.split(",")
     }:
-        return None
+        body_start = separator + separator_length
+        return (
+            {
+                "protocol": "http",
+                "direction": "server_to_client",
+                "status": status,
+                "response_headers": headers,
+            },
+            body_start,
+            -1,
+            "chunked",
+        )
     content_length = _http_header_value(headers, "content-length")
     if not content_length:
         body_length = 0
@@ -11730,6 +11752,7 @@ def _decode_http_response_head(
         },
         body_start,
         body_length,
+        "content-length",
     )
 
 
@@ -18903,17 +18926,15 @@ class EmulatorSession:
     def _start_staged_http_request_on_worker(
         self, session: Any, request: dict[str, Any]
     ) -> dict[str, Any]:
-        """Run only the header-visible portion of one raw HTTP request."""
-        if "body" in request:
-            raise EmulatorInputError(
-                "staged HTTP header request cannot include a request body"
-            )
+        """Run one raw HTTP request through the HTTP_REQUEST boundary."""
         request_number = self._connection_request_number + 1
         session.eval_tcl(
             f"set ::itest::semantic::http_request_number {request_number}"
         )
         kwargs = _request_kwargs(request)
-        self._prepare_http_attempt_on_worker(session)
+        self._prepare_http_attempt_on_worker(
+            session, body=str(request.get("body", ""))
+        )
         session.eval_tcl("set ::itest::semantic::automatic_http_flow 1")
         try:
             result = _run_request_with_state(
@@ -18951,24 +18972,80 @@ class EmulatorSession:
         }
         return result
 
+    def _deliver_staged_http_chunked_body_on_worker(
+        self,
+        session: Any,
+        staged: dict[str, Any],
+        wire_chunk: bytes,
+        *,
+        response: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Accumulate chunked wire bytes and dispatch one decoded body."""
+        wire_key = "response_wire_body" if response else "wire_body"
+        wire_body = bytearray(staged.get(wire_key, b""))
+        if len(wire_body) + len(wire_chunk) > STREAM_MAX_BYTES:
+            raise EmulatorInputError(
+                f"staged HTTP chunked body exceeds {STREAM_MAX_BYTES // (1024 * 1024)} MiB"
+            )
+        wire_body.extend(wire_chunk)
+        staged[wire_key] = wire_body
+        decoded = _decode_chunked_body(bytes(wire_body), 0)
+        if decoded is None:
+            return []
+        body, consumed = decoded
+        if consumed > len(wire_body):
+            raise EmulatorInputError(
+                "HTTP chunked decoder returned an invalid body boundary"
+            )
+        if response:
+            staged["response_body"] = bytearray()
+            staged["response_expected"] = len(body)
+            staged["response_collect_offset"] = 0
+            staged["chunked_response_complete"] = True
+        else:
+            staged["body"] = bytearray()
+            staged["expected"] = len(body)
+            staged["collect_offset"] = 0
+            staged["chunked_complete"] = True
+        return self._deliver_staged_http_body_on_worker(
+            session,
+            staged,
+            body,
+            response=response,
+        )
+
     def _deliver_staged_http_body_on_worker(
         self,
         session: Any,
         staged: dict[str, Any],
         body_chunk: bytes,
+        *,
+        response: bool = False,
     ) -> list[dict[str, Any]]:
-        """Deliver raw request bytes through any armed HTTP collection window."""
-        body = bytearray(staged["body"])
-        expected = int(staged["expected"])
+        """Deliver decoded body bytes through an armed collection window."""
+        body_key = "response_body" if response else "body"
+        expected_key = "response_expected" if response else "expected"
+        collect_requested_key = (
+            "response_collect_requested" if response else "collect_requested"
+        )
+        collect_offset_key = "response_collect_offset" if response else "collect_offset"
+        collect_length_key = "response_collect_length" if response else "collect_length"
+        body = bytearray(staged[body_key])
+        expected = int(staged[expected_key])
         if len(body) + len(body_chunk) > expected:
-            raise EmulatorInputError("staged HTTP request body exceeds Content-Length")
+            message = (
+                "staged HTTP response body exceeds its decoded length"
+                if response
+                else "staged HTTP request body exceeds its decoded length"
+            )
+            raise EmulatorInputError(message)
         body.extend(body_chunk)
-        staged["body"] = body
+        staged[body_key] = body
         event_results: list[dict[str, Any]] = []
 
-        while staged.get("collect_requested"):
-            offset = int(staged.get("collect_offset", 0))
-            collect_length = int(staged.get("collect_length", 0))
+        while staged.get(collect_requested_key):
+            offset = int(staged.get(collect_offset_key, 0))
+            collect_length = int(staged.get(collect_length_key, 0))
             available = len(body) - offset
             if available < (collect_length if collect_length > 0 else expected - offset):
                 break
@@ -18978,70 +19055,85 @@ class EmulatorSession:
                 else len(body)
             )
             collected = bytes(body[offset:window_end])
+            payload_namespace = "response" if response else "request"
             session.eval_tcl(
-                "set ::state::http::request::payload "
+                f"set ::state::http::{payload_namespace}::payload "
                 + _tcl_quote(_decode_wire_text(collected))
             )
             session.eval_tcl(
-                f"set ::state::http::request::payload_length {len(collected)}"
+                f"set ::state::http::{payload_namespace}::payload_length {len(collected)}"
             )
             # A collection window is consumed before HTTP_REQUEST_DATA. A
             # rule that calls HTTP::collect again from the data handler will
             # re-arm it explicitly and is handled on the next loop pass.
-            session.eval_tcl("set ::state::http::collect_request 0")
-            session.eval_tcl("set ::state::http::collect_request_length 0")
+            collect_state_key = (
+                "collect_response" if response else "collect_request"
+            )
+            collect_length_state_key = (
+                "collect_response_length"
+                if response
+                else "collect_request_length"
+            )
+            session.eval_tcl(f"set ::state::http::{collect_state_key} 0")
+            session.eval_tcl(f"set ::state::http::{collect_length_state_key} 0")
             decisions_before = len(session.get_decisions())
             logs_before = len(session.get_logs())
-            event_result = self._fire_event_on_worker(
-                session, "HTTP_REQUEST_DATA", {}
-            )
+            data_event_name = "HTTP_RESPONSE_DATA" if response else "HTTP_REQUEST_DATA"
+            event_result = self._fire_event_on_worker(session, data_event_name, {})
             event_results.append(event_result)
-            staged.setdefault("data_events", []).append("HTTP_REQUEST_DATA")
-            staged.setdefault("decisions", []).extend(
+            event_key = "response_events" if response else "data_events"
+            decisions_key = "response_decisions" if response else "decisions"
+            logs_key = "response_logs" if response else "logs"
+            staged.setdefault(event_key, []).append(data_event_name)
+            staged.setdefault(decisions_key, []).extend(
                 list(session.get_decisions()[decisions_before:])
             )
-            staged.setdefault("logs", []).extend(session.get_logs()[logs_before:])
+            staged.setdefault(logs_key, []).extend(session.get_logs()[logs_before:])
 
-            mutated = session.eval_tcl("set ::state::http::request::payload")
+            mutated = session.eval_tcl(
+                f"set ::state::http::{payload_namespace}::payload"
+            )
             mutated_bytes = str(mutated).encode("utf-8")
             body[offset:window_end] = mutated_bytes
             if len(body) > expected:
                 raise EmulatorInputError(
-                    "HTTP_REQUEST_DATA changed the body beyond Content-Length"
+                    "HTTP data handler changed the body beyond its declared length"
                 )
-            staged["collect_offset"] = offset + len(mutated_bytes)
-            if session.eval_tcl("set ::state::http::collect_request") == "1":
+            staged[collect_offset_key] = offset + len(mutated_bytes)
+            if session.eval_tcl(f"set ::state::http::{collect_state_key}") == "1":
                 try:
-                    staged["collect_length"] = max(
+                    staged[collect_length_key] = max(
                         0,
                         int(
                             session.eval_tcl(
-                                "set ::state::http::collect_request_length"
+                                f"set ::state::http::{collect_length_state_key}"
                             )
                         ),
                     )
                 except (TypeError, ValueError):
                     raise EmulatorInputError(
-                        "invalid re-armed HTTP request collection length"
+                        "invalid re-armed HTTP collection length"
                     ) from None
-                staged["collect_requested"] = True
+                staged[collect_requested_key] = True
                 continue
-            staged["collect_requested"] = False
+            staged[collect_requested_key] = False
             if _http_release_snapshot(session).get("requested", "0") == "1":
-                staged["released"] = True
+                release_key = "response_released" if response else "released"
+                staged[release_key] = True
                 release_decisions_before = len(session.get_decisions())
                 release_logs_before = len(session.get_logs())
+                release_event_name = (
+                    "HTTP_RESPONSE_RELEASE" if response else "HTTP_REQUEST_RELEASE"
+                )
                 release_result = self._fire_event_on_worker(
-                    session, "HTTP_REQUEST_RELEASE", {}
+                    session, release_event_name, {}
                 )
                 event_results.append(release_result)
-                staged.setdefault("data_events", []).append(
-                    "HTTP_REQUEST_RELEASE"
-                )
-                staged.setdefault("decisions", []).extend(
+                staged.setdefault(event_key, []).append(release_event_name)
+                staged.setdefault(decisions_key, []).extend(
                     list(session.get_decisions()[release_decisions_before:])
                 )
-                staged.setdefault("logs", []).extend(
+                staged.setdefault(logs_key, []).extend(
                     session.get_logs()[release_logs_before:]
                 )
             break
@@ -21897,6 +21989,8 @@ class EmulatorSession:
         request_method: str | None = None,
         staged_http_body_remaining: int | None = None,
         staged_http_body_direction: str = "client_to_server",
+        staged_http_body_mode: str | None = None,
+        staged_http_body_prefix_length: int = 0,
         stage_http_request: bool = False,
         stage_http_response: bool = False,
     ) -> tuple[dict[str, Any] | None, int]:
@@ -22094,6 +22188,33 @@ class EmulatorSession:
             if not has_gap:
                 stream.segments.clear()
             return self._http2_tcp_packet(packet, combined), len(combined)
+        if staged_http_body_mode == "chunked":
+            prefix_length = max(0, min(staged_http_body_prefix_length, len(combined)))
+            decoded_chunked = _decode_chunked_body(combined, 0)
+            if decoded_chunked is None:
+                body_chunk = combined[prefix_length:]
+                stream.buffer = combined
+            else:
+                _, consumed = decoded_chunked
+                if consumed < prefix_length:
+                    raise EmulatorInputError(
+                        "staged HTTP chunked body regressed during reassembly"
+                    )
+                body_chunk = combined[prefix_length:consumed]
+                stream.buffer = combined[consumed:]
+            if not has_gap:
+                stream.segments.clear()
+            if body_chunk:
+                staged_packet = dict(packet)
+                staged_packet["protocol"] = "http"
+                staged_packet["_http_stage_data"] = body_chunk
+                staged_packet["_http_stage_mode"] = "chunked"
+                staged_packet["_http_stage_complete"] = decoded_chunked is not None
+                staged_packet["payload"] = _decode_wire_text(body_chunk)
+                return staged_packet, len(body_chunk)
+            if has_gap:
+                return None, stream.buffered_bytes
+            return None, 0
         if staged_http_body_remaining is not None:
             if packet["direction"] != staged_http_body_direction:
                 raise EmulatorInputError(
@@ -22284,11 +22405,21 @@ class EmulatorSession:
             if stage_http_request and packet["direction"] == "client_to_server":
                 staged_head = _decode_http_request_head(combined)
                 if staged_head is not None:
-                    head_packet, body_start, body_length = staged_head
-                    if body_length > 0:
+                    head_packet, body_start, body_length, body_mode = staged_head
+                    if body_length > 0 or body_mode == "chunked":
                         body_available = combined[body_start:]
-                        body_chunk = body_available[:body_length]
-                        stream.buffer = body_available[len(body_chunk) :]
+                        if body_mode == "chunked":
+                            decoded_chunked = _decode_chunked_body(body_available, 0)
+                            if decoded_chunked is None:
+                                body_chunk = body_available
+                                stream.buffer = body_available
+                            else:
+                                _, consumed = decoded_chunked
+                                body_chunk = body_available[:consumed]
+                                stream.buffer = body_available[consumed:]
+                        else:
+                            body_chunk = body_available[:body_length]
+                            stream.buffer = body_available[len(body_chunk) :]
                         if not has_gap:
                             stream.segments.clear()
                         staged_packet = dict(packet)
@@ -22296,16 +22427,27 @@ class EmulatorSession:
                         staged_packet.pop("_wire_payload", None)
                         staged_packet["_http_partial"] = True
                         staged_packet["_http_body_expected"] = body_length
+                        staged_packet["_http_body_mode"] = body_mode
                         staged_packet["_http_body_chunk"] = body_chunk
                         return staged_packet, body_start + len(body_chunk)
             if stage_http_response and packet["direction"] == "server_to_client":
                 staged_head = _decode_http_response_head(combined, request_method)
                 if staged_head is not None:
-                    head_packet, body_start, body_length = staged_head
-                    if body_length > 0:
+                    head_packet, body_start, body_length, body_mode = staged_head
+                    if body_length > 0 or body_mode == "chunked":
                         body_available = combined[body_start:]
-                        body_chunk = body_available[:body_length]
-                        stream.buffer = body_available[len(body_chunk) :]
+                        if body_mode == "chunked":
+                            decoded_chunked = _decode_chunked_body(body_available, 0)
+                            if decoded_chunked is None:
+                                body_chunk = body_available
+                                stream.buffer = body_available
+                            else:
+                                _, consumed = decoded_chunked
+                                body_chunk = body_available[:consumed]
+                                stream.buffer = body_available[consumed:]
+                        else:
+                            body_chunk = body_available[:body_length]
+                            stream.buffer = body_available[len(body_chunk) :]
                         if not has_gap:
                             stream.segments.clear()
                         staged_packet = dict(packet)
@@ -22313,6 +22455,7 @@ class EmulatorSession:
                         staged_packet.pop("_wire_payload", None)
                         staged_packet["_http_partial_response"] = True
                         staged_packet["_http_response_expected"] = body_length
+                        staged_packet["_http_response_mode"] = body_mode
                         staged_packet["_http_response_chunk"] = body_chunk
                         return staged_packet, body_start + len(body_chunk)
             decoded_packets: list[dict[str, Any]] = []
@@ -22415,6 +22558,20 @@ class EmulatorSession:
             nonlocal pending_http, staged_http
             if pending_http is None:
                 return
+            if staged_http is not None:
+                if staged_http.get("body_mode") == "chunked" and not staged_http.get(
+                    "chunked_complete"
+                ):
+                    raise EmulatorInputError(
+                        "incomplete staged HTTP request chunked body"
+                    )
+                if (
+                    staged_http.get("response_body_mode") == "chunked"
+                    and not staged_http.get("chunked_response_complete")
+                ):
+                    raise EmulatorInputError(
+                        "incomplete staged HTTP response chunked body"
+                    )
             request, trace_index = pending_http
             if response:
                 request.update(response)
@@ -22468,29 +22625,52 @@ class EmulatorSession:
                     pending_request_method = pending_http[0].get("method")
                 staged_body_remaining = None
                 staged_body_direction = "client_to_server"
+                staged_body_mode = None
+                staged_body_prefix_length = 0
                 stage_http_response = False
+                request_body_complete = staged_http is None
+                if staged_http is not None:
+                    request_body_mode = staged_http.get("body_mode")
+                    if request_body_mode == "chunked":
+                        request_body_complete = bool(
+                            staged_http.get("chunked_complete")
+                        )
+                    else:
+                        request_body_complete = len(staged_http["body"]) >= int(
+                            staged_http["expected"]
+                        )
                 if (
                     staged_http is not None
                     and original_packet["direction"] == "client_to_server"
                 ):
-                    staged_body_remaining = max(
-                        0,
-                        int(staged_http["expected"])
-                        - len(staged_http["body"]),
-                    )
+                    staged_body_mode = staged_http.get("body_mode")
+                    if staged_body_mode == "chunked":
+                        staged_body_prefix_length = len(staged_http["wire_body"])
+                    else:
+                        staged_body_remaining = max(
+                            0,
+                            int(staged_http["expected"])
+                            - len(staged_http["body"]),
+                        )
                 elif (
                     staged_http is not None
                     and staged_http.get("response_started")
                     and original_packet["direction"] == "server_to_client"
                 ):
-                    staged_body_remaining = max(
-                        0,
-                        int(staged_http["response_expected"])
-                        - len(staged_http["response_body"]),
-                    )
+                    staged_body_mode = staged_http.get("response_body_mode")
+                    if staged_body_mode == "chunked":
+                        staged_body_prefix_length = len(
+                            staged_http["response_wire_body"]
+                        )
+                    else:
+                        staged_body_remaining = max(
+                            0,
+                            int(staged_http["response_expected"])
+                            - len(staged_http["response_body"]),
+                        )
                     staged_body_direction = "server_to_client"
                 elif (
-                    staged_http is not None
+                    request_body_complete
                     and original_packet["direction"] == "server_to_client"
                     and pending_http is not None
                 ):
@@ -22503,6 +22683,8 @@ class EmulatorSession:
                     request_method=pending_request_method,
                     staged_http_body_remaining=staged_body_remaining,
                     staged_http_body_direction=staged_body_direction,
+                    staged_http_body_mode=staged_body_mode,
+                    staged_http_body_prefix_length=staged_body_prefix_length,
                     stage_http_request=(
                         pending_http is None
                         and staged_http is None
@@ -22782,15 +22964,25 @@ class EmulatorSession:
                             raise EmulatorInputError(
                                 "staged HTTP body chunk is not binary"
                             )
-                        entry["events"].extend(
-                            self._deliver_staged_http_body_on_worker(
-                                session, staged_http, bytes(body_chunk)
+                        if staged_http.get("body_mode") == "chunked":
+                            entry["events"].extend(
+                                self._deliver_staged_http_chunked_body_on_worker(
+                                    session, staged_http, bytes(body_chunk)
+                                )
                             )
-                        )
+                        else:
+                            entry["events"].extend(
+                                self._deliver_staged_http_body_on_worker(
+                                    session, staged_http, bytes(body_chunk)
+                                )
+                            )
                         entry["staged_body_bytes"] = len(body_chunk)
                         entry["staged_body_received"] = len(staged_http["body"])
                         entry["staged_body_expected"] = staged_http["expected"]
-                        if len(staged_http["body"]) >= staged_http["expected"]:
+                        if staged_http.get("chunked_complete") or (
+                            staged_http.get("body_mode") != "chunked"
+                            and len(staged_http["body"]) >= staged_http["expected"]
+                        ):
                             entry["staged_complete"] = True
                         continue
                     if packet.get("_http_partial"):
@@ -22812,11 +23004,17 @@ class EmulatorSession:
                         stage_result = self._start_staged_http_request_on_worker(
                             session, request
                         )
+                        body_mode = packet.get("_http_body_mode", "content-length")
                         staged_http = {
                             "request": request,
                             "initial_result": stage_result,
-                            "expected": int(packet["_http_body_expected"]),
+                            "body_mode": body_mode,
+                            "expected": max(
+                                0,
+                                int(packet["_http_body_expected"]),
+                            ),
                             "body": bytearray(),
+                            "wire_body": bytearray(),
                             "collect_requested": bool(
                                 stage_result["staged"]["collect_requested"]
                             ),
@@ -22840,18 +23038,25 @@ class EmulatorSession:
                         }
                         body_chunk = packet.get("_http_body_chunk", b"")
                         if body_chunk:
-                            entry["events"].extend(
-                                self._deliver_staged_http_body_on_worker(
-                                    session, staged_http, body_chunk
+                            if body_mode == "chunked":
+                                entry["events"].extend(
+                                    self._deliver_staged_http_chunked_body_on_worker(
+                                        session, staged_http, body_chunk
+                                    )
                                 )
-                            )
+                            else:
+                                entry["events"].extend(
+                                    self._deliver_staged_http_body_on_worker(
+                                        session, staged_http, body_chunk
+                                    )
+                                )
                             entry["staged_body_bytes"] = len(body_chunk)
                             entry["staged_body_received"] = len(
                                 staged_http["body"]
                             )
-                            entry["staged_body_expected"] = staged_http[
-                                "expected"
-                            ]
+                            entry["staged_body_expected"] = staged_http["expected"]
+                            if staged_http.get("chunked_complete"):
+                                entry["staged_complete"] = True
                         continue
                     finish_http()
                     request: dict[str, Any] = {
@@ -22884,11 +23089,21 @@ class EmulatorSession:
                             raise EmulatorInputError(
                                 "staged HTTP response body chunk is not binary"
                             )
-                        entry["events"].extend(
-                            self._deliver_staged_http_response_body_on_worker(
-                                session, staged_http, bytes(body_chunk)
+                        if staged_http.get("response_body_mode") == "chunked":
+                            entry["events"].extend(
+                                self._deliver_staged_http_chunked_body_on_worker(
+                                    session,
+                                    staged_http,
+                                    bytes(body_chunk),
+                                    response=True,
+                                )
                             )
-                        )
+                        else:
+                            entry["events"].extend(
+                                self._deliver_staged_http_response_body_on_worker(
+                                    session, staged_http, bytes(body_chunk)
+                                )
+                            )
                         entry["staged_response_body_bytes"] = len(body_chunk)
                         entry["staged_response_body_received"] = len(
                             staged_http["response_body"]
@@ -22896,20 +23111,56 @@ class EmulatorSession:
                         entry["staged_response_body_expected"] = staged_http[
                             "response_expected"
                         ]
-                        if len(staged_http["response_body"]) >= staged_http[
-                            "response_expected"
-                        ]:
+                        if staged_http.get("chunked_response_complete") or (
+                            staged_http.get("response_body_mode") != "chunked"
+                            and len(staged_http["response_body"])
+                            >= staged_http["response_expected"]
+                        ):
                             entry["staged_response_complete"] = True
                             finish_http(at_index=index)
                         continue
                     if packet.get("_http_partial_response"):
-                        if staged_http is None or pending_http is None:
+                        if pending_http is None:
                             entry["ignored"] = "HTTP response has no staged request"
                             continue
+                        if staged_http is None:
+                            request = dict(pending_http[0])
+                            stage_result = self._start_staged_http_request_on_worker(
+                                session, request
+                            )
+                            body_bytes = str(request.get("body", "")).encode("utf-8")
+                            staged_http = {
+                                "request": request,
+                                "initial_result": stage_result,
+                                "body_mode": "content-length",
+                                "expected": len(body_bytes),
+                                "body": bytearray(),
+                                "wire_body": bytearray(),
+                                "collect_requested": bool(
+                                    stage_result["staged"]["collect_requested"]
+                                ),
+                                "collect_length": int(
+                                    stage_result["staged"]["collect_length"]
+                                ),
+                                "collect_offset": 0,
+                                "events": list(stage_result.get("events_fired", [])),
+                                "decisions": list(stage_result.get("decisions", [])),
+                                "logs": list(stage_result.get("logs", [])),
+                                "data_events": [],
+                            }
+                            if body_bytes:
+                                self._deliver_staged_http_body_on_worker(
+                                    session, staged_http, body_bytes
+                                )
                         response_headers = packet.get("response_headers", {})
+                        response_body_mode = packet.get(
+                            "_http_response_mode", "content-length"
+                        )
                         staged_http["response_expected"] = int(
                             packet["_http_response_expected"]
                         )
+                        staged_http["response_body_mode"] = response_body_mode
+                        staged_http["response_wire_body"] = bytearray()
                         response_head = {
                             "response_status": int(packet.get("status", 200)),
                             "response_headers": response_headers,
@@ -22932,11 +23183,21 @@ class EmulatorSession:
                         }
                         response_chunk = packet.get("_http_response_chunk", b"")
                         if response_chunk:
-                            entry["events"].extend(
-                                self._deliver_staged_http_response_body_on_worker(
-                                    session, staged_http, response_chunk
+                            if response_body_mode == "chunked":
+                                entry["events"].extend(
+                                    self._deliver_staged_http_chunked_body_on_worker(
+                                        session,
+                                        staged_http,
+                                        response_chunk,
+                                        response=True,
+                                    )
                                 )
-                            )
+                            else:
+                                entry["events"].extend(
+                                    self._deliver_staged_http_response_body_on_worker(
+                                        session, staged_http, response_chunk
+                                    )
+                                )
                             entry["staged_response_body_bytes"] = len(
                                 response_chunk
                             )
@@ -22946,9 +23207,11 @@ class EmulatorSession:
                             entry["staged_response_body_expected"] = staged_http[
                                 "response_expected"
                             ]
-                            if len(staged_http["response_body"]) >= staged_http[
-                                "response_expected"
-                            ]:
+                            if staged_http.get("chunked_response_complete") or (
+                                staged_http.get("response_body_mode") != "chunked"
+                                and len(staged_http["response_body"])
+                                >= staged_http["response_expected"]
+                            ):
                                 entry["staged_response_complete"] = True
                                 finish_http(at_index=index)
                         continue

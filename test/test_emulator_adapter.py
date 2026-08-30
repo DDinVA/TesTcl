@@ -915,6 +915,127 @@ when HTTP_RESPONSE_DATA {
         self.assertTrue(any("response-data=xyz12" in entry for entry in transaction["logs"]))
         self.assertEqual(metadata["request_count"], 1)
 
+    def test_raw_http_stages_chunked_request_body_across_packets(self) -> None:
+        crlf = "\r\n"
+        source = {"address": "10.0.0.1", "port": 50005}
+        destination = {"address": "192.0.2.10", "port": 80}
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST { HTTP::collect 9 }
+when HTTP_REQUEST_DATA {
+    log local0. "chunked-request=[HTTP::payload]"
+    HTTP::release
+}
+when HTTP_RESPONSE { log local0. "status=[HTTP::status]" }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": source,
+                        "destination": destination,
+                        "payload": (
+                            "POST /chunked HTTP/1.1"
+                            + crlf
+                            + "Host: app.example"
+                            + crlf
+                            + "Transfer-Encoding: chunked"
+                            + crlf
+                            + crlf
+                            + "4\r\nWi"
+                        ),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": source,
+                        "destination": destination,
+                        "payload": "ki\r\n5\r\npedia\r\n",
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": source,
+                        "destination": destination,
+                        "payload": "0\r\n\r\n",
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": destination,
+                        "destination": source,
+                        "payload": "HTTP/1.1 200 OK" + crlf + "Content-Length: 0" + crlf + crlf,
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        transaction = result["results"][0]
+        self.assertEqual(transaction["request"]["body"], "Wikipedia")
+        self.assertIn("HTTP_REQUEST_DATA", transaction["events_fired"])
+        self.assertTrue(any("chunked-request=Wikipedia" in entry for entry in transaction["logs"]))
+        self.assertEqual(result["trace"][0]["http_stage"]["phase"], "HTTP_REQUEST")
+        self.assertEqual(result["trace"][2]["staged_complete"], True)
+
+    def test_raw_http_stages_chunked_response_without_request_body_staging(self) -> None:
+        crlf = "\r\n"
+        source = {"address": "10.0.0.1", "port": 50006}
+        destination = {"address": "192.0.2.10", "port": 80}
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST { log local0. "path=[HTTP::path]" }
+when HTTP_RESPONSE {
+    HTTP::collect 5
+    log local0. "response-head=[HTTP::status]"
+}
+when HTTP_RESPONSE_DATA {
+    log local0. "chunked-response=[HTTP::payload]"
+    HTTP::release
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": source,
+                        "destination": destination,
+                        "payload": "GET /chunked HTTP/1.1" + crlf + "Host: app.example" + crlf + crlf,
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": destination,
+                        "destination": source,
+                        "payload": (
+                            "HTTP/1.1 200 OK"
+                            + crlf
+                            + "Transfer-Encoding: chunked"
+                            + crlf
+                            + crlf
+                            + "5\r\nhel"
+                        ),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": destination,
+                        "destination": source,
+                        "payload": "lo\r\n0\r\n\r\n",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        transaction = result["results"][0]
+        self.assertEqual(transaction["response"]["body"], "hello")
+        self.assertIn("HTTP_RESPONSE_DATA", transaction["events_fired"])
+        self.assertTrue(any("chunked-response=hello" in entry for entry in transaction["logs"]))
+        self.assertEqual(result["trace"][1]["http_stage"]["phase"], "HTTP_RESPONSE")
+
     def test_packet_flow_count_is_bounded_before_child_sessions_start(self) -> None:
         packets = [
             {
