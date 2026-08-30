@@ -266,6 +266,11 @@ deterministic `HTTP::reject_reason` values `iRule` and `1`, mark the request as
 rejected, and close the emulated client connection. The post-abort model is
 intentionally bounded to the reason accessor; malformed-wire and other
 filter-generated reject causes are not simulated.
+With the `HTTP_PROXY_CONNECT` profile, an enabled proxy request fires
+`HTTP_PROXY_REQUEST` before `HTTP_REQUEST`, and mutations to `HTTP::uri` or
+`HTTP::proxy` carry into the normal request handler. Downstream
+`HTTP_PROXY_CONNECT` and `HTTP_PROXY_RESPONSE` exchanges remain explicit event
+inputs rather than live proxy negotiation.
 The TMOS 17.5 HTML surface models `HTML::comment`, `HTML::disable`,
 `HTML::enable`, `HTML::encode`, and `HTML::tag`. With the HTML profile and
 `HTML::enable` in `HTTP_RESPONSE`, the adapter scans the uncompressed response

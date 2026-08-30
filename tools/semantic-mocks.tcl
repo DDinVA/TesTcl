@@ -24659,6 +24659,15 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                     [lsearch -exact $events LB_SELECTED] < 0} {
                     lappend events LB_SELECTED
                 }
+                # The upstream request runner only traverses events listed by
+                # the rule loader.  An explicit-proxy rule may register only
+                # HTTP_PROXY_REQUEST, but the proxy event is part of the
+                # HTTP_REQUEST lifecycle and must still be reached.
+                if {[::itest::semantic::_profile_enabled HTTP_PROXY_CONNECT] &&
+                    [lsearch -exact $events HTTP_PROXY_REQUEST] >= 0 &&
+                    [lsearch -exact $events HTTP_REQUEST] < 0} {
+                    lappend events HTTP_REQUEST
+                }
             }
             return $events
         }
@@ -24705,6 +24714,17 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             } else {
                 set ::state::http::collect_response 0
             }
+        }
+        # An explicit HTTP proxy profile observes the proxy-form request
+        # before the normal HTTP_REQUEST handler.  Run the proxy event through
+        # the original dispatcher so mutations to HTTP::uri and HTTP::proxy
+        # remain visible to the following HTTP_REQUEST event.
+        if {$gated && $event_name eq "HTTP_REQUEST" &&
+            [::itest::semantic::_profile_enabled HTTP_PROXY_CONNECT] &&
+            $::itest::semantic::http_proxy_enabled &&
+            [lsearch -exact [::itest::registered_events] HTTP_PROXY_REQUEST] >= 0} {
+            set proxy_result [::itest::_testcl_fire_event_orig HTTP_PROXY_REQUEST]
+            ::itest::semantic::event_errors_record HTTP_PROXY_REQUEST $proxy_result
         }
         if {$event_name eq "CLIENT_ACCEPTED"} {
             ::itest::semantic::lb_reset_connection

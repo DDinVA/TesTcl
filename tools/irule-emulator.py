@@ -9285,6 +9285,7 @@ PACKET_EVENT_ADAPTERS = {
     "HTTP_CLASS_SELECTED": "supplied HTTP class selection outcome",
     "HTTP_CLASS_FAILED": "supplied HTTP class selection failure",
     "HTTP_DISABLED": "HTTP::disable control outcome",
+    "HTTP_PROXY_REQUEST": "explicit HTTP proxy request ingress",
     "HTTP_REJECT": "rule-caused HTTP abort",
     "HTTP_REQUEST_DATA": "collected HTTP request body",
     "HTTP_REQUEST_SEND": "HTTP request serverside send",

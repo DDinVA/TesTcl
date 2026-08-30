@@ -439,6 +439,68 @@ when HTTP_REJECT { log local0. [HTTP::reject_reason invalid] }
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+    def test_http_proxy_profile_runs_proxy_request_before_http_request(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "HTTP_PROXY_CONNECT"],
+                "irule": """
+when HTTP_PROXY_REQUEST {
+    log local0. "proxy=[HTTP::uri] enabled=[HTTP::proxy]"
+    HTTP::uri /rewritten
+    HTTP::proxy disable
+}
+when HTTP_REQUEST {
+    log local0. "request=[HTTP::uri] enabled=[HTTP::proxy]"
+}
+""",
+                "requests": [{"uri": "http://origin.example/path"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request = result["results"][0]
+        events = request["events_fired"]
+        self.assertLess(events.index("HTTP_PROXY_REQUEST"), events.index("HTTP_REQUEST"))
+        self.assertTrue(any("proxy=http://origin.example/path enabled=1" in entry for entry in request["logs"]))
+        self.assertTrue(any("request=/rewritten enabled=0" in entry for entry in request["logs"]))
+        self.assertFalse(request["semantic"]["http_proxy"]["enabled"])
+
+        ordinary = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_PROXY_REQUEST { log local0. should-not-fire }",
+                "requests": [{"uri": "/ordinary"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertNotIn("HTTP_PROXY_REQUEST", ordinary["results"][0]["events_fired"])
+
+        disabled_proxy = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "HTTP_PROXY_CONNECT"],
+                "http_proxy": {"enabled": False},
+                "irule": "when HTTP_PROXY_REQUEST { log local0. should-not-fire } when HTTP_REQUEST { log local0. normal-request }",
+                "requests": [{"uri": "http://origin.example/disabled"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertNotIn("HTTP_PROXY_REQUEST", disabled_proxy["results"][0]["events_fired"])
+        self.assertIn("HTTP_REQUEST", disabled_proxy["results"][0]["events_fired"])
+
+        packet_result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "HTTP_PROXY_CONNECT"],
+                "irule": "when HTTP_PROXY_REQUEST { log local0. packet-proxy }",
+                "packets": [
+                    {"protocol": "http", "uri": "http://origin.example/", "method": "GET"},
+                    {"protocol": "http", "direction": "server_to_client", "status": 200},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        packet_http_result = packet_result["trace"][0]["http_result"]
+        self.assertIn("HTTP_PROXY_REQUEST", packet_http_result["events_fired"])
+        self.assertTrue(any("packet-proxy" in entry for entry in packet_http_result["logs"]))
+
     def test_acl_action_and_eval_model_l4_and_l7_decisions(self) -> None:
         action_session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -2231,6 +2293,10 @@ when HTTP_REQUEST {
         self.assertEqual(
             packet_adapters["HTTP_REJECT"],
             "rule-caused HTTP abort",
+        )
+        self.assertEqual(
+            packet_adapters["HTTP_PROXY_REQUEST"],
+            "explicit HTTP proxy request ingress",
         )
         for event_name in (
             "FLOW_INIT",

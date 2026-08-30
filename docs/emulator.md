@@ -394,6 +394,12 @@ deterministic Tcl list `{address port route-domain}`. If `resolved` is false,
 values. `HTTP::proxy chain retry` records intent in semantic state; the
 adapter does not perform DNS, proxy CONNECT negotiation, URI rewriting on
 forwarded bytes, or live downstream proxy chaining.
+When the `HTTP_PROXY_CONNECT` profile is attached and the proxy remains
+enabled, the high-level HTTP lifecycle fires `HTTP_PROXY_REQUEST` before
+`HTTP_REQUEST`; URI and proxy-control mutations made by the proxy handler are
+visible to the normal request handler. `HTTP_PROXY_CONNECT` and
+`HTTP_PROXY_RESPONSE` remain explicitly injectable events because the adapter
+does not synthesize a downstream proxy connection.
 
 The REWRITE layer is available when the `REWRITE` profile is attached. The
 high-level HTTP flow fires `REWRITE_REQUEST_DONE` after request processing. A
