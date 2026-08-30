@@ -109,6 +109,24 @@ def _valid_client_certificate() -> tuple[str, bytes]:
     return pem, der
 
 
+def _tls_certificate_payload(
+    der: bytes, *chain: bytes, tls13: bool = False
+) -> bytes:
+    certificate_entries = b"".join(
+        len(certificate).to_bytes(3, "big")
+        + certificate
+        + (b"\x00\x00" if tls13 else b"")
+        for certificate in (der, *chain)
+    )
+    certificate_body = (
+        (bytes([0]) if tls13 else b"")
+        + len(certificate_entries).to_bytes(3, "big")
+        + certificate_entries
+    )
+    handshake = b"\x0b" + len(certificate_body).to_bytes(3, "big") + certificate_body
+    return b"\x16\x03\x03" + len(handshake).to_bytes(2, "big") + handshake
+
+
 def _http2_frame(frame_type: int, flags: int, stream_id: int, payload: bytes = b"") -> bytes:
     return (
         len(payload).to_bytes(3, "big")
@@ -11023,6 +11041,83 @@ when CLIENTSSL_CLIENTCERT {
         self.assertEqual(normalised["cert_subject"], "C=US,O=Example Org,CN=client.example.com")
         self.assertEqual(normalised["cert_hash"], expected_hash)
         self.assertEqual(normalised["cert_version"], 3)
+
+    def test_raw_tls_certificate_record_populates_x509_state(self) -> None:
+        _, der = _valid_client_certificate()
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "CLIENTSSL"],
+                "irule": """
+when CLIENTSSL_CLIENTCERT {
+    set cert [SSL::cert 0]
+    log local0. "count=[SSL::cert count] cn=[X509::subject $cert commonName] hash=[X509::hash $cert]"
+}
+""",
+                "packets": [{
+                    "protocol": "wire",
+                    "direction": "client_to_server",
+                    "network": "ipv4",
+                    "raw_hex": _raw_ipv4_tcp_hex(
+                        "192.0.2.20",
+                        "192.0.2.10",
+                        51000,
+                        443,
+                        0x10,
+                        _tls_certificate_payload(der, der),
+                    ),
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        event = next(
+            item
+            for item in result["trace"][0]["events"]
+            if item["event"] == "CLIENTSSL_CLIENTCERT"
+        )
+        expected_hash = ":".join(
+            f"{byte:02X}"
+            for byte in hashlib.md5(der, usedforsecurity=False).digest()
+        )
+        self.assertTrue(event["fired"])
+        self.assertTrue(any("count=2 cn=client.example.com" in entry for entry in event["logs"]))
+        self.assertTrue(any(f"hash={expected_hash}" in entry for entry in event["logs"]))
+
+    def test_raw_tls13_certificate_record_populates_x509_state(self) -> None:
+        _, der = _valid_client_certificate()
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "CLIENTSSL"],
+                "irule": """
+when CLIENTSSL_CLIENTCERT {
+    set cert [SSL::cert 0]
+    log local0. "count=[SSL::cert count] cn=[X509::subject $cert commonName]"
+}
+""",
+                "packets": [{
+                    "protocol": "wire",
+                    "direction": "client_to_server",
+                    "network": "ipv4",
+                    "raw_hex": _raw_ipv4_tcp_hex(
+                        "192.0.2.20",
+                        "192.0.2.10",
+                        51000,
+                        443,
+                        0x10,
+                        _tls_certificate_payload(der, der, tls13=True),
+                    ),
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        event = next(
+            item
+            for item in result["trace"][0]["events"]
+            if item["event"] == "CLIENTSSL_CLIENTCERT"
+        )
+        self.assertTrue(event["fired"])
+        self.assertTrue(any("count=2 cn=client.example.com" in entry for entry in event["logs"]))
 
     def test_packet_trace_exposes_directional_tcp_payload_and_mutations(self) -> None:
         result = self.adapter.run_scenario(

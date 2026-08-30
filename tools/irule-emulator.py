@@ -3423,6 +3423,12 @@ def _tcl_quote(value: str) -> str:
         .replace("\r", "\\r")
         .replace("\t", "\\t")
     )
+    escaped = "".join(
+        f"\\u{ord(character):04x}"
+        if ord(character) < 0x20 or ord(character) == 0x7F
+        else character
+        for character in escaped
+    )
     return f'"{escaped}"'
 
 
@@ -11075,6 +11081,45 @@ def _decode_http_payload(
     }, consumed
 
 
+def _tls_certificate_list(
+    body: bytes, *, tls13: bool
+) -> list[bytes] | None:
+    """Decode a TLS Certificate handshake body without validating the chain."""
+    offset = 0
+    if tls13:
+        if not body:
+            return None
+        context_length = body[0]
+        offset = 1 + context_length
+    if offset + 3 > len(body):
+        return None
+    list_length = int.from_bytes(body[offset : offset + 3], "big")
+    list_start = offset + 3
+    list_end = list_start + list_length
+    if list_end != len(body):
+        return None
+    certificates: list[bytes] = []
+    cursor = list_start
+    while cursor < list_end:
+        if cursor + 3 > list_end:
+            return None
+        certificate_length = int.from_bytes(body[cursor : cursor + 3], "big")
+        cursor += 3
+        certificate_end = cursor + certificate_length
+        if certificate_length == 0 or certificate_end > list_end:
+            return None
+        certificates.append(body[cursor:certificate_end])
+        cursor = certificate_end
+        if tls13:
+            if cursor + 2 > list_end:
+                return None
+            extensions_length = int.from_bytes(body[cursor : cursor + 2], "big")
+            cursor += 2 + extensions_length
+            if cursor > list_end:
+                return None
+    return certificates or None
+
+
 def _decode_tls_payload(payload: bytes, direction: str) -> dict[str, Any] | None:
     if len(payload) < 5 or payload[0] not in {20, 21, 22, 23}:
         return None
@@ -11105,6 +11150,15 @@ def _decode_tls_payload(payload: bytes, direction: str) -> dict[str, Any] | None
         "direction": direction,
         "type": packet_type,
     }
+    if handshake_type == 11:  # Certificate
+        certificate_body = record[4:]
+        certificates = _tls_certificate_list(certificate_body, tls13=False)
+        if certificates is None:
+            certificates = _tls_certificate_list(certificate_body, tls13=True)
+        if certificates:
+            result["cert_der"] = certificates[0].hex()
+            result["cert_count"] = len(certificates)
+            _normalise_tls_certificate_bytes(result, 0)
     if handshake_type == 1 and len(record) >= 4 + 2 + 32 + 1:
         body = record[4:]
         cursor = 2 + 32
@@ -18219,10 +18273,19 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::fix_prepare_event")
         if event_name == "HTTP_REQUEST":
             session.eval_tcl("::itest::semantic::websso_prepare_request")
-        def install_state_layer(layer: str, values: dict[str, str]) -> None:
+        def install_state_layer(layer: str, values: dict[str, Any]) -> None:
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
-                if layer in {"websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "l7check", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "rtsp", "cache", "datagram", "tls_client", "tls_server"} and field in {"payload", "message", "authenticator"}:
+                binary_fields = (
+                    field in {"payload", "message", "authenticator"}
+                    and layer in {
+                        "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp",
+                        "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "l7check",
+                        *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification",
+                        "category", "rtsp", "cache", "datagram", "tls_client", "tls_server",
+                    }
+                )
+                if binary_fields:
                     # Structured packet payloads are JSON text at the API
                     # boundary, but WS::payload offsets are wire-byte based.
                     # Install UTF-8 bytes as a Tcl byte array so the
@@ -18448,8 +18511,8 @@ class EmulatorSession:
         )
 
     @staticmethod
-    def _packet_connection_state(packet: dict[str, Any]) -> dict[str, str]:
-        connection: dict[str, str] = {}
+    def _packet_connection_state(packet: dict[str, Any]) -> dict[str, Any]:
+        connection: dict[str, Any] = {}
         source = packet["source"]
         destination = packet["destination"]
         direction = packet["direction"]
@@ -18483,7 +18546,13 @@ class EmulatorSession:
             connection.update(
                 {"protocol": "6" if transport == "tcp" else "17", "transport": transport}
             )
-        if "payload" in packet:
+        # A raw TLS record is already decoded into the TLS layer. Do not copy
+        # its opaque record bytes into the generic connection string state;
+        # the Tcl bridge transports that layer as text and cannot safely carry
+        # arbitrary certificate-handshake bytes there.
+        if "payload" in packet and not (
+            protocol == "tls" and "_wire_length" in packet
+        ):
             payload_key = "client_payload" if direction == "client_to_server" else "server_payload"
             connection[payload_key] = packet["payload"]
         for field in ("ttl", "tos"):

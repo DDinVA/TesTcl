@@ -2581,8 +2581,11 @@ For structured TLS packet traces, `SSL::collect` holds a `CLIENTSSL_DATA` or
 returns a bounded prefix to the modeled stream. The adapter intentionally
 accepts structured plaintext rather than decrypting TLS records. Certificate,
 secret, and cipher values are deterministic packet input; the emulator does
-not perform a TLS handshake, certificate validation, key exchange, or
-cryptographic renegotiation.
+not perform a TLS handshake, certificate-chain validation, key exchange, or
+cryptographic renegotiation. For raw TCP/PCAP TLS Certificate handshake
+records, the adapter extracts the first certificate's DER bytes and feeds them
+into the same X.509 inspection path; encrypted application records remain
+opaque.
 
 ```json
 {
