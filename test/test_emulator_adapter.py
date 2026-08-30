@@ -915,6 +915,79 @@ when HTTP_RESPONSE_DATA {
         self.assertTrue(any("response-data=xyz12" in entry for entry in transaction["logs"]))
         self.assertEqual(metadata["request_count"], 1)
 
+    def test_raw_http_deferred_tail_survives_persistent_trace_calls(self) -> None:
+        crlf = "\r\n"
+        manager = self.adapter.SessionManager(Path(self.tcl_lsp_root), idle_timeout=60)
+        session_id = manager.create(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { log local0. \"request=[HTTP::path]\" }",
+            }
+        )
+        source = {"address": "10.0.0.1", "port": 50011}
+        destination = {"address": "192.0.2.10", "port": 80}
+        try:
+            first = manager.execute(
+                session_id,
+                lambda session: session.run_packet_trace(
+                    [
+                        {
+                            "protocol": "tcp",
+                            "direction": "client_to_server",
+                            "source": source,
+                            "destination": destination,
+                            "payload": (
+                                "POST /first HTTP/1.1"
+                                + crlf
+                                + "Host: app.example"
+                                + crlf
+                                + "Content-Length: 3"
+                                + crlf
+                                + crlf
+                                + "abc"
+                                + "GET /second HTTP/1.1"
+                                + crlf
+                                + "Host: app.example"
+                                + crlf
+                                + crlf
+                            ),
+                        }
+                    ]
+                ),
+            )
+            second = manager.execute(
+                session_id,
+                lambda session: session.run_packet_trace(
+                    [
+                        {
+                            "protocol": "tcp",
+                            "direction": "server_to_client",
+                            "source": destination,
+                            "destination": source,
+                            "payload": "HTTP/1.1 200 OK" + crlf + "Content-Length: 0" + crlf + crlf,
+                        },
+                        {
+                            "protocol": "tcp",
+                            "direction": "server_to_client",
+                            "source": destination,
+                            "destination": source,
+                            "payload": "HTTP/1.1 204 No Content" + crlf + crlf,
+                        },
+                    ]
+                ),
+            )
+            metadata = manager.metadata(session_id)
+        finally:
+            manager.close(session_id)
+
+        self.assertEqual(first["results"], [])
+        self.assertEqual(
+            [transaction["request"]["uri"] for transaction in second["results"]],
+            ["/first", "/second"],
+        )
+        self.assertEqual(second["results"][1]["response"]["status"], 204)
+        self.assertEqual(metadata["request_count"], 2)
+
     def test_raw_http_stages_chunked_request_body_across_packets(self) -> None:
         crlf = "\r\n"
         source = {"address": "10.0.0.1", "port": 50005}
@@ -1034,7 +1107,317 @@ when HTTP_RESPONSE_DATA {
         self.assertEqual(transaction["response"]["body"], "hello")
         self.assertIn("HTTP_RESPONSE_DATA", transaction["events_fired"])
         self.assertTrue(any("chunked-response=hello" in entry for entry in transaction["logs"]))
-        self.assertEqual(result["trace"][1]["http_stage"]["phase"], "HTTP_RESPONSE")
+
+    def test_raw_http_replays_pipelined_request_after_staged_body(self) -> None:
+        crlf = "\r\n"
+        source = {"address": "10.0.0.1", "port": 50007}
+        destination = {"address": "192.0.2.10", "port": 80}
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::path] eq "/first"} {
+        HTTP::collect 3
+    }
+    log local0. "request=[HTTP::path]"
+}
+when HTTP_REQUEST_DATA {
+    log local0. "request-data=[HTTP::payload]"
+    HTTP::release
+}
+when HTTP_RESPONSE { log local0. "response=[HTTP::status]" }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": source,
+                        "destination": destination,
+                        "payload": (
+                            "POST /first HTTP/1.1"
+                            + crlf
+                            + "Host: app.example"
+                            + crlf
+                            + "Content-Length: 3"
+                            + crlf
+                            + crlf
+                            + "abc"
+                            + "GET /second HTTP/1.1"
+                            + crlf
+                            + "Host: app.example"
+                            + crlf
+                            + crlf
+                        ),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": destination,
+                        "destination": source,
+                        "payload": "HTTP/1.1 200 OK" + crlf + "Content-Length: 0" + crlf + crlf,
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": destination,
+                        "destination": source,
+                        "payload": "HTTP/1.1 204 No Content" + crlf + crlf,
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(
+            [transaction["request"]["uri"] for transaction in result["results"]],
+            ["/first", "/second"],
+        )
+        self.assertEqual(result["results"][0]["request"]["body"], "abc")
+        self.assertEqual(result["results"][1]["response"]["status"], 204)
+        self.assertFalse(any(entry.get("buffered") for entry in result["trace"]))
+        self.assertTrue(any("request=/second" in log for log in result["results"][1]["logs"]))
+
+    def test_raw_http_defers_next_request_in_a_later_segment(self) -> None:
+        crlf = "\r\n"
+        source = {"address": "10.0.0.1", "port": 50012}
+        destination = {"address": "192.0.2.10", "port": 80}
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::path] eq "/first"} { HTTP::collect 3 }
+    log local0. "request=[HTTP::path]"
+}
+when HTTP_REQUEST_DATA { HTTP::release }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": source,
+                        "destination": destination,
+                        "payload": (
+                            "POST /first HTTP/1.1"
+                            + crlf
+                            + "Host: app.example"
+                            + crlf
+                            + "Content-Length: 3"
+                            + crlf
+                            + crlf
+                            + "abc"
+                        ),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": source,
+                        "destination": destination,
+                        "payload": (
+                            "GET /second HTTP/1.1"
+                            + crlf
+                            + "Host: app.example"
+                            + crlf
+                            + crlf
+                        ),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": destination,
+                        "destination": source,
+                        "payload": "HTTP/1.1 200 OK" + crlf + "Content-Length: 0" + crlf + crlf,
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": destination,
+                        "destination": source,
+                        "payload": "HTTP/1.1 204 No Content" + crlf + crlf,
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertTrue(result["trace"][1]["buffered"])
+        self.assertEqual(
+            [transaction["request"]["uri"] for transaction in result["results"]],
+            ["/first", "/second"],
+        )
+        self.assertEqual(result["results"][1]["response"]["status"], 204)
+
+    def test_raw_http_replays_chunked_request_tail_after_staged_body(self) -> None:
+        crlf = "\r\n"
+        source = {"address": "10.0.0.1", "port": 50008}
+        destination = {"address": "192.0.2.10", "port": 80}
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::path] eq "/first"} { HTTP::collect 4 }
+    log local0. "request=[HTTP::path]"
+}
+when HTTP_REQUEST_DATA { log local0. "request-data=[HTTP::payload]"; HTTP::release }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": source,
+                        "destination": destination,
+                        "payload": (
+                            "POST /first HTTP/1.1"
+                            + crlf
+                            + "Host: app.example"
+                            + crlf
+                            + "Transfer-Encoding: chunked"
+                            + crlf
+                            + crlf
+                            + "4\r\nWiki\r\n0\r\n\r\n"
+                            + "GET /second HTTP/1.1"
+                            + crlf
+                            + "Host: app.example"
+                            + crlf
+                            + crlf
+                        ),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": destination,
+                        "destination": source,
+                        "payload": "HTTP/1.1 200 OK" + crlf + "Content-Length: 0" + crlf + crlf,
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": destination,
+                        "destination": source,
+                        "payload": "HTTP/1.1 204 No Content" + crlf + crlf,
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(
+            [transaction["request"]["uri"] for transaction in result["results"]],
+            ["/first", "/second"],
+        )
+        self.assertEqual(result["results"][0]["request"]["body"], "Wiki")
+        self.assertTrue(any("request-data=Wiki" in log for log in result["results"][0]["logs"]))
+
+    def test_raw_http_finalization_replays_deferred_request_tail(self) -> None:
+        crlf = "\r\n"
+        source = {"address": "10.0.0.1", "port": 50009}
+        destination = {"address": "192.0.2.10", "port": 80}
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { log local0. \"request=[HTTP::path]\" }",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": source,
+                        "destination": destination,
+                        "payload": (
+                            "POST /first HTTP/1.1"
+                            + crlf
+                            + "Host: app.example"
+                            + crlf
+                            + "Content-Length: 3"
+                            + crlf
+                            + crlf
+                            + "abc"
+                            + "GET /second HTTP/1.1"
+                            + crlf
+                            + "Host: app.example"
+                            + crlf
+                            + crlf
+                        ),
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(
+            [transaction["request"]["uri"] for transaction in result["results"]],
+            ["/first", "/second"],
+        )
+        self.assertEqual(result["results"][0]["request"]["body"], "abc")
+        self.assertEqual(result["results"][1]["request"]["body"], "")
+
+    def test_raw_http_replays_staged_response_tail_after_pipelined_request(self) -> None:
+        crlf = "\r\n"
+        source = {"address": "10.0.0.1", "port": 50010}
+        destination = {"address": "192.0.2.10", "port": 80}
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::path] eq "/first"} { HTTP::collect 3 }
+}
+when HTTP_REQUEST_DATA { HTTP::release }
+when HTTP_RESPONSE { if {[HTTP::status] == 200} { HTTP::collect 5 } }
+when HTTP_RESPONSE_DATA { log local0. "response-data=[HTTP::payload]"; HTTP::release }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": source,
+                        "destination": destination,
+                        "payload": (
+                            "POST /first HTTP/1.1"
+                            + crlf
+                            + "Host: app.example"
+                            + crlf
+                            + "Content-Length: 3"
+                            + crlf
+                            + crlf
+                            + "abc"
+                            + "GET /second HTTP/1.1"
+                            + crlf
+                            + "Host: app.example"
+                            + crlf
+                            + crlf
+                        ),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": destination,
+                        "destination": source,
+                        "payload": (
+                            "HTTP/1.1 200 OK"
+                            + crlf
+                            + "Content-Length: 5"
+                            + crlf
+                            + crlf
+                            + "hello"
+                            + "HTTP/1.1 204 No Content"
+                            + crlf
+                            + crlf
+                        ),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(
+            [transaction["request"]["uri"] for transaction in result["results"]],
+            ["/first", "/second"],
+        )
+        self.assertEqual(result["results"][0]["response"]["body"], "hello")
+        self.assertEqual(result["results"][1]["response"]["status"], 204)
+        self.assertTrue(any("response-data=hello" in log for log in result["results"][0]["logs"]))
 
     def test_packet_flow_count_is_bounded_before_child_sessions_start(self) -> None:
         packets = [

@@ -3052,8 +3052,12 @@ behavior applies to `HTTP_RESPONSE`, `HTTP_RESPONSE_DATA`, and
 `HTTP_RESPONSE_RELEASE`. Chunk extensions are accepted and trailer fields are
 validated but are not exposed as application payload. Staged state survives
 persistent session trace calls, so a TCP segment split is not treated as a new
-transaction. Other response bodies without a usable framing boundary continue
-through the complete-message decoder and are not staged by this path.
+transaction. If a staged message shares a TCP segment with the next HTTP
+message, the adapter defers that tail until the current transaction completes,
+then replays one message at a time; this preserves request/response ordering
+for bounded HTTP/1.x pipelining and also survives persistent trace calls. Other
+response bodies without a usable framing boundary continue through the
+complete-message decoder and are not staged by this path.
 
 WebSocket packets use `protocol: "websocket"`. Upgrade requests require
 `type: "request"`, `direction: "client_to_server"`, and `headers`; upgrade

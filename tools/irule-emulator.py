@@ -18450,6 +18450,9 @@ class EmulatorSession:
         self._server_connection_detached = False
         self._pending_packet_http: dict[str, Any] | None = None
         self._staged_packet_http: dict[str, Any] | None = None
+        self._deferred_packet_http_tails: dict[
+            tuple[Any, ...], dict[str, Any]
+        ] = {}
         self._tcp_buffers = {"client": "", "server": ""}
         self._stream_buffers = {"client": b"", "server": b""}
         self._sctp_buffers = {"client": b"", "server": b""}
@@ -21762,6 +21765,7 @@ class EmulatorSession:
         self._server_connection_detached = False
         self._pending_packet_http = None
         self._staged_packet_http = None
+        self._deferred_packet_http_tails.clear()
 
     @staticmethod
     def _packet_stream_key(packet: dict[str, Any]) -> tuple[Any, ...]:
@@ -21991,6 +21995,7 @@ class EmulatorSession:
         staged_http_body_direction: str = "client_to_server",
         staged_http_body_mode: str | None = None,
         staged_http_body_prefix_length: int = 0,
+        defer_http_tail: bool = False,
         stage_http_request: bool = False,
         stage_http_response: bool = False,
     ) -> tuple[dict[str, Any] | None, int]:
@@ -22188,6 +22193,32 @@ class EmulatorSession:
             if not has_gap:
                 stream.segments.clear()
             return self._http2_tcp_packet(packet, combined), len(combined)
+        if defer_http_tail:
+            # A staged HTTP body may be followed by another request or
+            # response in the same TCP stream. Keep reassembling those bytes
+            # without decoding them until the current HTTP transaction has
+            # completed; decoding them early would associate the next
+            # response with the wrong request.
+            stream.buffer = combined
+            if not has_gap:
+                stream.segments.clear()
+            if stream.buffered_bytes > STREAM_MAX_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"packet stream exceeds the {STREAM_MAX_BYTES // (1024 * 1024)} MiB limit"
+                )
+            return None, stream.buffered_bytes
+
+        def attach_staged_remainder(
+            staged_packet: dict[str, Any], remainder: bytes = b""
+        ) -> dict[str, Any]:
+            if remainder:
+                staged_packet["_http_staged_remainder"] = remainder
+                staged_packet["_http_staged_remainder_request_method"] = (
+                    request_method or ""
+                )
+            return staged_packet
+
         if staged_http_body_mode == "chunked":
             prefix_length = max(0, min(staged_http_body_prefix_length, len(combined)))
             decoded_chunked = _decode_chunked_body(combined, 0)
@@ -22211,7 +22242,8 @@ class EmulatorSession:
                 staged_packet["_http_stage_mode"] = "chunked"
                 staged_packet["_http_stage_complete"] = decoded_chunked is not None
                 staged_packet["payload"] = _decode_wire_text(body_chunk)
-                return staged_packet, len(body_chunk)
+                remainder = stream.buffer if decoded_chunked is not None else b""
+                return attach_staged_remainder(staged_packet, remainder), len(body_chunk)
             if has_gap:
                 return None, stream.buffered_bytes
             return None, 0
@@ -22230,7 +22262,7 @@ class EmulatorSession:
                 staged_packet["_http_stage_data"] = body_chunk
                 staged_packet["_http_stage_direction"] = staged_http_body_direction
                 staged_packet["payload"] = _decode_wire_text(body_chunk)
-                return staged_packet, len(body_chunk)
+                return attach_staged_remainder(staged_packet, stream.buffer), len(body_chunk)
             if has_gap:
                 return None, stream.buffered_bytes
             return None, 0
@@ -22429,7 +22461,17 @@ class EmulatorSession:
                         staged_packet["_http_body_expected"] = body_length
                         staged_packet["_http_body_mode"] = body_mode
                         staged_packet["_http_body_chunk"] = body_chunk
-                        return staged_packet, body_start + len(body_chunk)
+                        remainder = (
+                            stream.buffer
+                            if (
+                                (body_mode == "chunked" and decoded_chunked is not None)
+                                or (body_mode != "chunked" and len(body_chunk) >= body_length)
+                            )
+                            else b""
+                        )
+                        return attach_staged_remainder(
+                            staged_packet, remainder
+                        ), body_start + len(body_chunk)
             if stage_http_response and packet["direction"] == "server_to_client":
                 staged_head = _decode_http_response_head(combined, request_method)
                 if staged_head is not None:
@@ -22457,7 +22499,17 @@ class EmulatorSession:
                         staged_packet["_http_response_expected"] = body_length
                         staged_packet["_http_response_mode"] = body_mode
                         staged_packet["_http_response_chunk"] = body_chunk
-                        return staged_packet, body_start + len(body_chunk)
+                        remainder = (
+                            stream.buffer
+                            if (
+                                (body_mode == "chunked" and decoded_chunked is not None)
+                                or (body_mode != "chunked" and len(body_chunk) >= body_length)
+                            )
+                            else b""
+                        )
+                        return attach_staged_remainder(
+                            staged_packet, remainder
+                        ), body_start + len(body_chunk)
             decoded_packets: list[dict[str, Any]] = []
             remaining = combined
             consumed_total = 0
@@ -22550,6 +22602,7 @@ class EmulatorSession:
         http_results: list[dict[str, Any]] = []
         pending_http: tuple[dict[str, Any], int | None] | None = None
         staged_http = self._staged_packet_http
+        deferred_http_tails = self._deferred_packet_http_tails
         if not finalize_http and self._pending_packet_http is not None:
             pending_http = (self._pending_packet_http, None)
             self._pending_packet_http = None
@@ -22591,6 +22644,7 @@ class EmulatorSession:
             pending_http = None
             staged_http = None
             self._staged_packet_http = None
+            schedule_deferred_http_tail()
 
         def finish_packet_connection(packet: dict[str, Any], entry: dict[str, Any], at_index: int) -> None:
             """Apply FIN/RST lifecycle events before a protocol branch returns."""
@@ -22611,9 +22665,174 @@ class EmulatorSession:
 
         packet_queue = list(enumerate(packets))
         queue_index = 0
-        while queue_index < len(packet_queue):
+
+        def ensure_deferred_http_tail(
+            packet: dict[str, Any], index: int, stream_key: tuple[Any, ...]
+        ) -> None:
+            if stream_key in deferred_http_tails:
+                return
+            template: dict[str, Any] = {
+                "protocol": "tcp",
+                "direction": packet["direction"],
+                "source": dict(packet["source"]),
+                "destination": dict(packet["destination"]),
+            }
+            if "timestamp" in packet:
+                template["timestamp"] = packet["timestamp"]
+            stream = self._packet_streams.get(stream_key)
+            initial_wire = b"" if stream is None else stream.buffer
+            deferred_http_tails[stream_key] = {
+                "stream_key": stream_key,
+                "direction": packet["direction"],
+                "request_method": "",
+                "origin_index": index,
+                "template": template,
+                "wire": bytearray(initial_wire),
+            }
+
+        def remember_staged_http_tail(packet: dict[str, Any], index: int) -> None:
+            wire_tail = packet.pop("_http_staged_remainder", None)
+            if not wire_tail:
+                return
+            if not isinstance(wire_tail, (bytes, bytearray)):
+                raise EmulatorInputError("staged HTTP remainder is not binary")
+            stream_key = self._packet_stream_key(packet)
+            ensure_deferred_http_tail(packet, index, stream_key)
+            record = deferred_http_tails[stream_key]
+            record["request_method"] = packet.pop(
+                "_http_staged_remainder_request_method", ""
+            )
+            stream = self._packet_streams.get(stream_key)
+            if stream is None:
+                raise EmulatorInputError("deferred HTTP stream state is missing")
+            stream.buffer = bytes(wire_tail)
+            record["wire"] = bytearray(stream.buffer)
+
+        def materialize_deferred_http_message(
+            stream_key: tuple[Any, ...],
+        ) -> dict[str, Any] | None:
+            deferred_http_tail = deferred_http_tails.get(stream_key)
+            if deferred_http_tail is None:
+                return None
+            stream = self._packet_streams.get(stream_key)
+            if stream is None:
+                raise EmulatorInputError("deferred HTTP stream state is missing")
+            wire = bytes(stream.buffer)
+            if not wire:
+                deferred_http_tails.pop(stream_key, None)
+                return None
+            direction = deferred_http_tail["direction"]
+            request_method = deferred_http_tail.get("request_method") or None
+            decoded_result = _decode_http_payload(
+                wire,
+                direction,
+                request_method=request_method,
+            )
+            if decoded_result is None:
+                deferred_http_tail["wire"] = bytearray(wire)
+                return None
+            decoded, consumed = decoded_result
+            if consumed <= 0 or consumed > len(wire):
+                raise EmulatorInputError(
+                    "deferred HTTP decoder returned an invalid frame length"
+                )
+            message = wire[:consumed]
+            materialized = dict(deferred_http_tail["template"])
+            materialized.update(decoded)
+            materialized["_synthetic_deferred"] = True
+            materialized["_deferred_stream_key"] = stream_key
+
+            if direction == "client_to_server" and "HTTP_REQUEST" in self._registered_events:
+                staged_head = _decode_http_request_head(message)
+                if staged_head is not None:
+                    head_packet, body_start, body_length, body_mode = staged_head
+                    if body_length > 0 or body_mode == "chunked":
+                        materialized = dict(deferred_http_tail["template"])
+                        materialized.update(head_packet)
+                        materialized["_http_partial"] = True
+                        materialized["_http_body_expected"] = body_length
+                        materialized["_http_body_mode"] = body_mode
+                        materialized["_http_body_chunk"] = message[body_start:]
+                        materialized["_synthetic_deferred"] = True
+            elif direction == "server_to_client" and "HTTP_RESPONSE" in self._registered_events:
+                staged_head = _decode_http_response_head(message, request_method)
+                if staged_head is not None:
+                    head_packet, body_start, body_length, body_mode = staged_head
+                    if body_length > 0 or body_mode == "chunked":
+                        materialized = dict(deferred_http_tail["template"])
+                        materialized.update(head_packet)
+                        materialized["_http_partial_response"] = True
+                        materialized["_http_response_expected"] = body_length
+                        materialized["_http_response_mode"] = body_mode
+                        materialized["_http_response_chunk"] = message[body_start:]
+                        materialized["_synthetic_deferred"] = True
+
+            stream.buffer = wire[consumed:]
+            if not stream.buffer:
+                deferred_http_tails.pop(stream_key, None)
+            else:
+                deferred_http_tail["wire"] = bytearray(stream.buffer)
+            return materialized
+
+        def schedule_deferred_http_tail() -> None:
+            preferred_direction = (
+                "client_to_server" if pending_http is None else "server_to_client"
+            )
+            candidates = [
+                (key, record)
+                for key, record in deferred_http_tails.items()
+                if record["direction"] == preferred_direction
+                and not record.get("scheduled")
+            ]
+            if not candidates:
+                return
+            stream_key, deferred_http_tail = candidates[0]
+            if (
+                deferred_http_tail["direction"] == "server_to_client"
+                and pending_http is not None
+            ):
+                deferred_http_tail["request_method"] = pending_http[0].get(
+                    "method", ""
+                )
+            origin_index = deferred_http_tail.get("origin_index", 0)
+            deferred_packet = materialize_deferred_http_message(stream_key)
+            if deferred_packet is None:
+                return
+            if stream_key in deferred_http_tails:
+                deferred_http_tails[stream_key]["scheduled"] = True
+            packet_queue[queue_index:queue_index] = [
+                (origin_index, deferred_packet)
+            ]
+
+        while True:
+            if queue_index < len(packet_queue):
+                schedule_deferred_http_tail()
+            if queue_index >= len(packet_queue):
+                if not finalize_http:
+                    break
+                if pending_http is not None:
+                    # A response tail may already be buffered for the active
+                    # request. Replay it before finalizing that request with
+                    # an implicit empty response.
+                    schedule_deferred_http_tail()
+                    if queue_index < len(packet_queue):
+                        continue
+                    # Finalization closes the current transaction first. If
+                    # its TCP stream contained a complete deferred message,
+                    # finish_http() queues that message immediately below.
+                    finish_http()
+                    continue
+                if deferred_http_tails:
+                    schedule_deferred_http_tail()
+                    if queue_index < len(packet_queue):
+                        continue
+                break
             index, original_packet = packet_queue[queue_index]
             queue_index += 1
+            if original_packet.get("_synthetic_deferred"):
+                stream_key = original_packet.pop("_deferred_stream_key", None)
+                if stream_key is not None and stream_key in deferred_http_tails:
+                    deferred_http_tails[stream_key]["scheduled"] = False
             if original_packet["protocol"] == "event":
                 packet = original_packet
                 buffered_bytes = 0
@@ -22628,6 +22847,7 @@ class EmulatorSession:
                 staged_body_mode = None
                 staged_body_prefix_length = 0
                 stage_http_response = False
+                defer_http_tail = False
                 request_body_complete = staged_http is None
                 if staged_http is not None:
                     request_body_mode = staged_http.get("body_mode")
@@ -22640,18 +22860,43 @@ class EmulatorSession:
                             staged_http["expected"]
                         )
                 if (
+                    original_packet.get("protocol") == "tcp"
+                    and original_packet["direction"] == "client_to_server"
+                    and pending_http is not None
+                    and request_body_complete
+                    and bool(
+                        original_packet.get("_wire_payload")
+                        or original_packet.get("payload")
+                    )
+                    and not original_packet.get("_synthetic_deferred")
+                ):
+                    stream_key = self._packet_stream_key(original_packet)
+                    ensure_deferred_http_tail(original_packet, index, stream_key)
+                if original_packet.get("protocol") == "tcp":
+                    defer_http_tail = (
+                        self._packet_stream_key(original_packet) in deferred_http_tails
+                        and not original_packet.get("_synthetic_deferred")
+                    )
+                if (
                     staged_http is not None
                     and original_packet["direction"] == "client_to_server"
                 ):
                     staged_body_mode = staged_http.get("body_mode")
                     if staged_body_mode == "chunked":
-                        staged_body_prefix_length = len(staged_http["wire_body"])
+                        if not staged_http.get("chunked_complete"):
+                            staged_body_prefix_length = len(staged_http["wire_body"])
+                        else:
+                            staged_body_mode = None
                     else:
-                        staged_body_remaining = max(
+                        remaining = max(
                             0,
                             int(staged_http["expected"])
                             - len(staged_http["body"]),
                         )
+                        if remaining > 0:
+                            staged_body_remaining = remaining
+                        else:
+                            staged_body_mode = None
                 elif (
                     staged_http is not None
                     and staged_http.get("response_started")
@@ -22659,15 +22904,22 @@ class EmulatorSession:
                 ):
                     staged_body_mode = staged_http.get("response_body_mode")
                     if staged_body_mode == "chunked":
-                        staged_body_prefix_length = len(
-                            staged_http["response_wire_body"]
-                        )
+                        if not staged_http.get("chunked_response_complete"):
+                            staged_body_prefix_length = len(
+                                staged_http["response_wire_body"]
+                            )
+                        else:
+                            staged_body_mode = None
                     else:
-                        staged_body_remaining = max(
+                        remaining = max(
                             0,
                             int(staged_http["response_expected"])
                             - len(staged_http["response_body"]),
                         )
+                        if remaining > 0:
+                            staged_body_remaining = remaining
+                        else:
+                            staged_body_mode = None
                     staged_body_direction = "server_to_client"
                 elif (
                     request_body_complete
@@ -22685,6 +22937,7 @@ class EmulatorSession:
                     staged_http_body_direction=staged_body_direction,
                     staged_http_body_mode=staged_body_mode,
                     staged_http_body_prefix_length=staged_body_prefix_length,
+                    defer_http_tail=defer_http_tail,
                     stage_http_request=(
                         pending_http is None
                         and staged_http is None
@@ -22693,6 +22946,7 @@ class EmulatorSession:
                     stage_http_response=stage_http_response,
                 )
             if packet is not None:
+                remember_staged_http_tail(packet, index)
                 coalesced_packets = packet.pop("_coalesced_packets", [])
                 if coalesced_packets:
                     synthetic_packets = []
@@ -24568,9 +24822,7 @@ class EmulatorSession:
                     )
                     self._close_packet_connection(session)
 
-        if finalize_http:
-            finish_http()
-        elif pending_http is not None:
+        if not finalize_http and pending_http is not None:
             self._pending_packet_http = pending_http[0]
             self._staged_packet_http = staged_http
         emitted = []
