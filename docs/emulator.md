@@ -1752,6 +1752,12 @@ JSON request bodies at 2 MiB, and does not expose arbitrary Tcl evaluation.
 The HTTP API accepts inline `irule` text only; use the CLI's `irule_file` field
 when a rule must be loaded from a local file.
 
+The conformance response includes a machine-readable `coverage` matrix. It
+separates complete catalog ingestion from partial command behavior and event
+lifecycle coverage, and reports target-only behavioral, placeholder, unhandled,
+and unmapped counts. These are inventory dimensions, not a fidelity score:
+generated stubs are recognized commands, not claims of BIG-IP semantics.
+
 Raw classic PCAP or pcapng replay is available at `POST /v1/simulations/pcap`.
 The request contains an inline `scenario` and a base64-encoded `pcap_base64`
 value:

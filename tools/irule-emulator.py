@@ -2665,6 +2665,27 @@ def _build_conformance(root: Path) -> dict[str, Any]:
         }
         for (namespace, status), names in sorted(implementation_buckets.items())
     ]
+    target_command_names = [
+        name
+        for name in status_map
+        if name not in TMOS_17_5_POST_TARGET_COMMANDS
+        and name not in TMOS_17_5_UNAVAILABLE_COMMANDS
+    ]
+    target_runtime_counts = {
+        status: sum(status_map[name] == status for name in target_command_names)
+        for status in sorted(RUNTIME_STATUS_VALUES)
+    }
+    target_unmapped_events = [
+        name
+        for name in event_names
+        if name not in PACKET_EVENT_ADAPTERS
+        and name not in TMOS_17_5_POST_TARGET_EVENTS
+        and name not in TMOS_17_5_UNAVAILABLE_EVENTS
+    ]
+    behavioral_command_count = sum(
+        target_runtime_counts[status]
+        for status in ("handwritten-mock", "semantic-mock")
+    )
     return {
         "status": "ok",
         "schema_version": 1,
@@ -2712,6 +2733,33 @@ def _build_conformance(root: Path) -> dict[str, Any]:
                 for name in supported_events
             ],
             "unmapped_events": [name for name in event_names if name not in PACKET_EVENT_ADAPTERS],
+        },
+        "coverage": {
+            "command_catalog": {
+                "status": "complete",
+                "catalog_count": len(status_map),
+                "target_count": len(target_command_names),
+            },
+            "command_behavior": {
+                "status": "partial",
+                "target_runtime_status_counts": target_runtime_counts,
+                "behavioral_count": behavioral_command_count,
+                "placeholder_count": target_runtime_counts["generated-stub"],
+                "unhandled_count": target_runtime_counts["no-runtime-handler"],
+            },
+            "event_catalog": {
+                "status": "complete",
+                "catalog_count": len(event_names),
+                "target_count": len(event_names)
+                - len(post_target_events)
+                - len(unavailable_events),
+            },
+            "event_lifecycle": {
+                "status": "partial",
+                "target_adapter_count": len(supported_events),
+                "target_unmapped_count": len(target_unmapped_events),
+                "target_unmapped_events": target_unmapped_events,
+            },
         },
         "interpretation": (
             "This is static catalog-to-runtime coverage. It is not a claim that "

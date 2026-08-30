@@ -118,6 +118,9 @@ Diameter ingress, egress, and retransmission events. Its routing, retry,
 retransmission, persistence, and capability-exchange commands are modeled as
 deterministic test state rather than a complete Diameter peer or TMM
 route/persistence implementation.
+The conformance response also includes a coverage matrix that keeps complete
+catalog ingestion distinct from partial command behavior and event lifecycle
+coverage; it is an inventory report, not a fidelity score.
 Structured traces also accept a synthetic `event` record containing a
 catalogued event name and the same validated state layers accepted by the
 session-event API. This provides deterministic coverage for event sequences

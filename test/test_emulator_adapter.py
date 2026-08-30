@@ -3110,6 +3110,25 @@ when HTTP_REQUEST {
 
         self.assertEqual(report["profile"], "tmos-17.5")
         self.assertGreaterEqual(report["commands"]["catalog_count"], 1400)
+        coverage = report["coverage"]
+        self.assertEqual(coverage["command_catalog"]["status"], "complete")
+        self.assertEqual(
+            coverage["command_catalog"]["target_count"],
+            report["commands"]["target_catalog_count"],
+        )
+        self.assertEqual(coverage["command_behavior"]["status"], "partial")
+        self.assertEqual(
+            coverage["command_behavior"]["behavioral_count"],
+            coverage["command_behavior"]["target_runtime_status_counts"]["handwritten-mock"]
+            + coverage["command_behavior"]["target_runtime_status_counts"]["semantic-mock"],
+        )
+        self.assertEqual(coverage["event_catalog"]["status"], "complete")
+        self.assertEqual(coverage["event_lifecycle"]["status"], "partial")
+        self.assertEqual(
+            coverage["event_lifecycle"]["target_adapter_count"],
+            report["events"]["packet_adapter_count"],
+        )
+        self.assertIn("ASM_RESPONSE_VIOLATION", coverage["event_lifecycle"]["target_unmapped_events"])
         self.assertEqual(report["commands"]["post_target_count"], 10)
         self.assertEqual(
             report["commands"]["target_catalog_count"],
