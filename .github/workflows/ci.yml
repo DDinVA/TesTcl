@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [master, release, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TCL_LSP_COMMIT: cad24955f16953c2443902efd83d9f7f95d9b648
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out TesTcl
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.12.6
+          enable-cache: true
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Install Tcl/Tk runtime
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes tcl tk
+
+      - name: Check out pinned tcl-lsp
+        env:
+          TCL_LSP_ROOT: ${{ runner.temp }}/tcl-lsp
+        run: |
+          git clone --quiet https://github.com/bitwisecook/tcl-lsp.git "$TCL_LSP_ROOT"
+          git -C "$TCL_LSP_ROOT" checkout --quiet --detach "$TCL_LSP_COMMIT"
+
+      - name: Install Python dependencies
+        run: uv sync --python 3.13 --dev
+
+      - name: Run Python integration suite
+        env:
+          TCL_LSP_ROOT: ${{ runner.temp }}/tcl-lsp
+        run: uv run --python 3.13 pytest -q
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out TesTcl
+        uses: actions/checkout@v4
+
+      - name: Build the portable emulator image
+        run: docker build --build-arg TCL_LSP_COMMIT="$TCL_LSP_COMMIT" -f Dockerfile.emulator -t testcl-irule-emulator:ci .
