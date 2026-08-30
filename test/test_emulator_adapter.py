@@ -2002,6 +2002,14 @@ when HTTP_REQUEST {
             "HTTP response transaction release phase",
         )
         for event_name in (
+            "FLOW_INIT",
+            "HTTP_REQUEST_DATA",
+            "HTTP_REQUEST_SEND",
+            "HTTP_RESPONSE_DATA",
+            "HTML_TAG_MATCHED",
+            "REWRITE_REQUEST_DONE",
+            "SA_PICKED",
+            "SERVER_CONNECTED",
             "WS_REQUEST",
             "WS_RESPONSE",
             "WS_CLIENT_FRAME",
@@ -7659,6 +7667,65 @@ when HTTP_REQUEST {
         self.assertIn("CLIENTSSL_CLIENTHELLO", events)
         self.assertIn("CLIENTSSL_HANDSHAKE", events)
         self.assertIn("CLIENT_CLOSED", events)
+
+    def test_packet_http_lifecycle_covers_collection_rewrite_and_html_events(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "REWRITE", "HTML"],
+                "irule": """
+when HTTP_REQUEST { HTTP::collect 3 }
+when REWRITE_REQUEST_DONE { log local0. rewrite-request }
+when HTTP_REQUEST_DATA {
+    log local0. "request-data=[HTTP::payload]"
+    HTTP::release
+}
+when HTTP_REQUEST_SEND { log local0. request-send }
+when HTTP_RESPONSE {
+    HTTP::collect 2
+    HTML::enable
+}
+when HTML_TAG_MATCHED { log local0. html-tag }
+when HTTP_RESPONSE_DATA {
+    log local0. "response-data=[HTTP::payload]"
+    HTTP::release
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "http",
+                        "direction": "client_to_server",
+                        "method": "POST",
+                        "uri": "/submit",
+                        "body": "abc",
+                    },
+                    {
+                        "protocol": "http",
+                        "direction": "server_to_client",
+                        "status": 200,
+                        "response_headers": {
+                            "Content-Length": "15",
+                            "Content-Type": "text/html",
+                        },
+                        "response_body": "<html>ok</html>",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        transaction = result["results"][0]
+        events = transaction["events_fired"]
+        for event in (
+            "HTTP_REQUEST_DATA",
+            "REWRITE_REQUEST_DONE",
+            "HTTP_REQUEST_SEND",
+            "HTTP_RESPONSE_DATA",
+            "HTML_TAG_MATCHED",
+        ):
+            self.assertIn(event, events)
+        self.assertLess(events.index("HTTP_REQUEST_DATA"), events.index("HTTP_REQUEST_SEND"))
+        self.assertTrue(any("request-data=abc" in log for log in transaction["logs"]))
+        self.assertTrue(any("html-tag" in log for log in transaction["logs"]))
+        self.assertTrue(any("response-data=<html>ok</html>" in log for log in transaction["logs"]))
 
     def test_packet_trace_fires_rule_init_once_across_connections(self) -> None:
         result = self.adapter.run_scenario(
