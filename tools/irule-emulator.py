@@ -265,6 +265,7 @@ HTTP_REASON_PHRASES = {
 DEFAULT_MAX_SESSIONS = 32
 DEFAULT_SESSION_IDLE_SECONDS = 1800
 MAX_HTTP_RETRIES = 8
+MAX_HTTP_PROXY_CHAIN_RETRIES = 1
 EVENT_STATE_FIELDS = {
     "connection": {
         "client_addr",
@@ -3354,26 +3355,51 @@ def _configure_http_proxy(session: Any, proxy_config: dict[str, Any]) -> None:
         "::itest::semantic::http_proxy_configure "
         + " ".join(_tcl_quote(value) for value in values)
     )
-    response = chain["response"]
-    response_values = (
-        "1" if response is not None else "0",
-        str(response["status"] if response is not None else 200),
-        response["reason"] if response is not None else "",
-        _tcl_list(
+    if not chain["responses_explicit"]:
+        response = chain["response"]
+        response_values = (
+            "1" if response is not None else "0",
+            str(response["status"] if response is not None else 200),
+            response["reason"] if response is not None else "",
+            _tcl_list(
+                [
+                    item
+                    for name, value in (response["headers"] if response is not None else {}).items()
+                    for item in (name, value)
+                ]
+            ),
+            response["body"] if response is not None else "",
+        )
+        session.eval_tcl(
+            "::itest::semantic::http_proxy_chain_response_configure "
+            + " ".join(
+                value if index == 3 else _tcl_quote(value)
+                for index, value in enumerate(response_values)
+            )
+        )
+        return
+    response_records = []
+    for response in chain["responses"]:
+        response_headers = _tcl_list(
             [
                 item
-                for name, value in (response["headers"] if response is not None else {}).items()
+                for name, value in response["headers"].items()
                 for item in (name, value)
             ]
-        ),
-        response["body"] if response is not None else "",
-    )
-    session.eval_tcl(
-        "::itest::semantic::http_proxy_chain_response_configure "
-        + " ".join(
-            value if index == 3 else _tcl_quote(value)
-            for index, value in enumerate(response_values)
         )
+        response_records.append(
+            "{" + " ".join(
+                (
+                    _tcl_quote(str(response["status"])),
+                    _tcl_quote(response["reason"]),
+                    response_headers,
+                    _tcl_quote(response["body"]),
+                )
+            ) + "}"
+        )
+    session.eval_tcl(
+        "::itest::semantic::http_proxy_chain_responses_configure "
+        + "{" + " ".join(response_records) + "}"
     )
 
 
@@ -4855,12 +4881,13 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "iptuple", "chain_enabled", "chain_host", "chain_port",
         "chain_retry_requested", "chain_response_enabled", "chain_response_status",
         "chain_response_reason", "chain_response_headers", "chain_response_body",
+        "chain_response_index", "chain_retry_count", "chain_failed",
     }
     if set(http_proxy_values) != expected_http_proxy_fields:
         raise EmulatorInputError("invalid HTTP proxy state fields")
     http_proxy_bool_fields = {
         "enabled", "uri_rewrite", "resolved", "chain_enabled",
-        "chain_retry_requested", "chain_response_enabled",
+        "chain_retry_requested", "chain_response_enabled", "chain_failed",
     }
     if any(
         http_proxy_values[name] not in {"0", "1"}
@@ -4868,7 +4895,10 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
     ):
         raise EmulatorInputError("invalid HTTP proxy boolean state")
     http_proxy_ints: dict[str, int] = {}
-    for name in ("port", "rtdom", "chain_port", "chain_response_status"):
+    for name in (
+        "port", "rtdom", "chain_port", "chain_response_status",
+        "chain_response_index", "chain_retry_count",
+    ):
         try:
             value = int(http_proxy_values[name])
         except (KeyError, TypeError, ValueError):
@@ -5647,6 +5677,9 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             "chain_port": http_proxy_ints["chain_port"],
             "chain_retry_requested": http_proxy_values["chain_retry_requested"] == "1",
             "chain_response": chain_response,
+            "chain_response_index": http_proxy_ints["chain_response_index"],
+            "chain_retry_count": http_proxy_ints["chain_retry_count"],
+            "chain_failed": http_proxy_values["chain_failed"] == "1",
         },
         "rewrite": {
             "enabled": rewrite_values["enabled"] == "1",
@@ -7658,7 +7691,9 @@ def _normalise_http_proxy(raw: Any) -> dict[str, Any]:
     chain_raw = raw.get("chain", {})
     if not isinstance(chain_raw, dict):
         raise EmulatorInputError("http_proxy.chain must be an object")
-    unknown_chain = sorted(set(chain_raw) - {"enabled", "host", "port", "response"})
+    unknown_chain = sorted(
+        set(chain_raw) - {"enabled", "host", "port", "response", "responses"}
+    )
     if unknown_chain:
         raise EmulatorInputError(
             "http_proxy.chain unsupported field(s): " + ", ".join(unknown_chain)
@@ -7681,27 +7716,25 @@ def _normalise_http_proxy(raw: Any) -> dict[str, Any]:
             "http_proxy.chain.port must be an integer from 0 to 65535"
         )
 
-    response_raw = chain_raw.get("response")
-    response: dict[str, Any] | None = None
-    if response_raw is not None:
-        if not isinstance(response_raw, dict):
-            raise EmulatorInputError("http_proxy.chain.response must be an object")
-        unknown_response = sorted(set(response_raw) - {"status", "headers", "body"})
+    def normalise_response(raw_response: Any, field: str) -> dict[str, Any]:
+        if not isinstance(raw_response, dict):
+            raise EmulatorInputError(f"{field} must be an object")
+        unknown_response = sorted(set(raw_response) - {"status", "headers", "body"})
         if unknown_response:
             raise EmulatorInputError(
-                "http_proxy.chain.response unsupported field(s): "
+                f"{field} unsupported field(s): "
                 + ", ".join(unknown_response)
             )
-        response_status = response_raw.get("status", 200)
+        response_status = raw_response.get("status", 200)
         if (
             isinstance(response_status, bool)
             or not isinstance(response_status, int)
             or not 100 <= response_status <= 999
         ):
             raise EmulatorInputError(
-                "http_proxy.chain.response.status must be an integer from 100 to 999"
+                f"{field}.status must be an integer from 100 to 999"
             )
-        response_headers = response_raw.get("headers", {})
+        response_headers = raw_response.get("headers", {})
         if not isinstance(response_headers, dict) or not all(
             isinstance(name, str)
             and isinstance(value, str)
@@ -7710,23 +7743,52 @@ def _normalise_http_proxy(raw: Any) -> dict[str, Any]:
             for name, value in response_headers.items()
         ):
             raise EmulatorInputError(
-                "http_proxy.chain.response.headers must be an object of strings without NUL"
+                f"{field}.headers must be an object of strings without NUL"
             )
-        response_body = response_raw.get("body", "")
+        response_body = raw_response.get("body", "")
         if not isinstance(response_body, str) or "\x00" in response_body:
             raise EmulatorInputError(
-                "http_proxy.chain.response.body must be a string without NUL"
+                f"{field}.body must be a string without NUL"
             )
         if len(response_body.encode("utf-8")) > STREAM_MAX_BYTES:
             raise EmulatorInputError(
-                "http_proxy.chain.response.body exceeds the 2 MiB limit"
+                f"{field}.body exceeds the 2 MiB limit"
             )
-        response = {
+        return {
             "status": response_status,
             "reason": HTTP_REASON_PHRASES.get(response_status, ""),
             "headers": dict(response_headers),
             "body": response_body,
         }
+
+    has_single_response = "response" in chain_raw
+    has_response_sequence = "responses" in chain_raw
+    if has_single_response and has_response_sequence:
+        raise EmulatorInputError(
+            "http_proxy.chain accepts response or responses, not both"
+        )
+    responses: list[dict[str, Any]] = []
+    if has_single_response:
+        response_raw = chain_raw["response"]
+        if response_raw is not None:
+            responses.append(
+                normalise_response(response_raw, "http_proxy.chain.response")
+            )
+    elif has_response_sequence:
+        response_raw = chain_raw["responses"]
+        if not isinstance(response_raw, list) or not response_raw:
+            raise EmulatorInputError(
+                "http_proxy.chain.responses must be a non-empty array"
+            )
+        if len(response_raw) > MAX_HTTP_PROXY_CHAIN_RETRIES + 1:
+            raise EmulatorInputError(
+                "http_proxy.chain.responses must contain at most "
+                f"{MAX_HTTP_PROXY_CHAIN_RETRIES + 1} entries"
+            )
+        responses = [
+            normalise_response(item, f"http_proxy.chain.responses[{index}]")
+            for index, item in enumerate(response_raw)
+        ]
 
     return {
         "enabled": boolean("enabled", True),
@@ -7740,7 +7802,9 @@ def _normalise_http_proxy(raw: Any) -> dict[str, Any]:
             "enabled": chain_enabled,
             "host": chain_host,
             "port": chain_port,
-            "response": response,
+            "response": responses[0] if len(responses) == 1 else None,
+            "responses": responses,
+            "responses_explicit": has_response_sequence,
         },
     }
 

@@ -413,13 +413,33 @@ downstream sockets. A bounded chained-proxy response can be supplied under
 }
 ```
 
-When the `HTTP_PROXY_CONNECT` profile is attached, the proxy remains enabled,
-and the chain remains enabled after `HTTP_PROXY_REQUEST`, the adapter fires a
-registered `HTTP_PROXY_CONNECT` handler followed by a registered
-`HTTP_PROXY_RESPONSE` handler when that fixture is present. The response
-handler can inspect `HTTP::status`, `HTTP::response`, `HTTP::header`, and
-`HTTP::payload`; `HTTP::proxy chain retry` records the documented retry intent
-but does not open a socket or replay the downstream negotiation.
+The single `response` form is a compatibility fixture: it fires one
+`HTTP_PROXY_RESPONSE` event and records `HTTP::proxy chain retry` without
+inventing a second response. For deterministic negotiation tests, use the
+`responses` array to provide the ordered proxy responses instead:
+
+```json
+{
+  "http_proxy": {
+    "chain": {
+      "responses": [
+        {"status": 407, "headers": {"Proxy-Authenticate": "Basic realm=proxy"}},
+        {"status": 200, "headers": {"X-Proxy": "ready"}, "body": "tunnel-ready"}
+      ]
+    }
+  }
+}
+```
+
+With `responses`, the adapter advances only when the response handler calls
+`HTTP::proxy chain retry`, and permits at most one retry per request. A
+successful next response allows `HTTP_REQUEST` to run; an unretried or
+exhausted non-200 response closes the emulated connection and marks
+`http_proxy.chain_failed`. The semantic snapshot also exposes
+`chain_response_index` and `chain_retry_count`. The response handler can
+inspect `HTTP::status`, `HTTP::response`, `HTTP::header`, and
+`HTTP::payload`; this remains a deterministic event/replay model rather than
+live downstream negotiation.
 When the `HTTP_PROXY_CONNECT` profile is attached and the proxy remains
 enabled, the high-level HTTP lifecycle fires `HTTP_PROXY_REQUEST` before the
 chain events and `HTTP_REQUEST`; URI and proxy-control mutations made by the

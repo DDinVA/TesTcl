@@ -599,6 +599,18 @@ when HTTP_REQUEST {
         for invalid_proxy in (
             {"chain": {"response": {"status": 99}}},
             {"chain": {"response": {"unsupported": True}}},
+            {"chain": {"responses": []}},
+            {
+                "chain": {
+                    "response": {"status": 407},
+                    "responses": [{"status": 200}],
+                }
+            },
+            {
+                "chain": {
+                    "responses": [{"status": 407}, {"status": 200}, {"status": 200}],
+                }
+            },
         ):
             with self.assertRaises(self.adapter.EmulatorInputError):
                 self.adapter.run_scenario(
@@ -610,6 +622,107 @@ when HTTP_REQUEST {
                     },
                     tcl_lsp_root=self.tcl_lsp_root,
                 )
+
+    def test_http_proxy_chain_response_sequence_retries_once_and_bounds_failure(self) -> None:
+        success = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "HTTP_PROXY_CONNECT"],
+                "http_proxy": {
+                    "chain": {
+                        "responses": [
+                            {
+                                "status": 407,
+                                "headers": {"Proxy-Authenticate": "Basic realm=\"edge\""},
+                                "body": "proxy-auth-required",
+                            },
+                            {
+                                "status": 200,
+                                "headers": {"X-Proxy": "chain-ready"},
+                                "body": "tunnel-ready",
+                            },
+                        ]
+                    }
+                },
+                "irule": """
+when HTTP_PROXY_CONNECT { log local0. "connect=[HTTP::proxy chain host]" }
+when HTTP_PROXY_RESPONSE {
+    log local0. "proxy-status=[HTTP::status] body=[HTTP::payload]"
+    HTTP::proxy chain retry
+}
+when HTTP_REQUEST { log local0. "origin-request=[HTTP::uri]" }
+""",
+                "requests": [{"uri": "http://origin.example/retry"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        successful_request = success["results"][0]
+        self.assertEqual(
+            successful_request["events_fired"].count("HTTP_PROXY_CONNECT"), 2
+        )
+        self.assertEqual(
+            successful_request["events_fired"].count("HTTP_PROXY_RESPONSE"), 2
+        )
+        self.assertIn("HTTP_REQUEST", successful_request["events_fired"])
+        self.assertTrue(any("proxy-status=407" in entry for entry in successful_request["logs"]))
+        self.assertTrue(any("proxy-status=200" in entry for entry in successful_request["logs"]))
+        self.assertEqual(successful_request["semantic"]["http_proxy"]["chain_response_index"], 1)
+        self.assertEqual(successful_request["semantic"]["http_proxy"]["chain_retry_count"], 1)
+        self.assertFalse(successful_request["semantic"]["http_proxy"]["chain_failed"])
+        self.assertEqual(
+            successful_request["semantic"]["http_proxy"]["chain_response"]["status"], 200
+        )
+
+        exhausted = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "HTTP_PROXY_CONNECT"],
+                "http_proxy": {
+                    "chain": {"responses": [{"status": 407}, {"status": 407}]}
+                },
+                "irule": """
+when HTTP_PROXY_RESPONSE { log local0. retry; HTTP::proxy chain retry }
+when HTTP_REQUEST { log local0. should-not-run }
+""",
+                "requests": [{"uri": "http://origin.example/exhausted"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        exhausted_request = exhausted["results"][0]
+        self.assertNotIn("HTTP_REQUEST", exhausted_request["events_fired"])
+        self.assertEqual(exhausted_request["connection_state"], "closing")
+        self.assertTrue(exhausted_request["semantic"]["http_proxy"]["chain_failed"])
+        self.assertEqual(exhausted_request["semantic"]["http_proxy"]["chain_retry_count"], 1)
+
+        no_handler = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "HTTP_PROXY_CONNECT"],
+                "http_proxy": {"chain": {"responses": [{"status": 407}]}},
+                "irule": "when HTTP_REQUEST { log local0. should-not-run }",
+                "requests": [{"uri": "http://origin.example/no-handler"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(no_handler["results"][0]["connection_state"], "closing")
+        self.assertTrue(no_handler["results"][0]["semantic"]["http_proxy"]["chain_failed"])
+
+        disabled = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "HTTP_PROXY_CONNECT"],
+                "http_proxy": {
+                    "chain": {"responses": [{"status": 407}, {"status": 200}]}
+                },
+                "irule": """
+when HTTP_PROXY_RESPONSE { HTTP::proxy chain disable; HTTP::proxy chain retry }
+when HTTP_REQUEST { log local0. origin-after-disable }
+""",
+                "requests": [{"uri": "http://origin.example/disabled-retry"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        disabled_request = disabled["results"][0]
+        self.assertEqual(disabled_request["events_fired"].count("HTTP_PROXY_RESPONSE"), 1)
+        self.assertIn("HTTP_REQUEST", disabled_request["events_fired"])
+        self.assertFalse(disabled_request["semantic"]["http_proxy"]["chain_failed"])
+        self.assertEqual(disabled_request["semantic"]["http_proxy"]["chain_retry_count"], 0)
 
     def test_acl_action_and_eval_model_l4_and_l7_decisions(self) -> None:
         action_session = self.adapter.EmulatorSession(
@@ -13265,6 +13378,9 @@ when HTTP_REQUEST {
                 "chain_port": 8081,
                 "chain_retry_requested": True,
                 "chain_response": None,
+                "chain_response_index": 0,
+                "chain_retry_count": 0,
+                "chain_failed": False,
             },
         )
         self.assertEqual(second["semantic"]["http_proxy"]["enabled"], True)
