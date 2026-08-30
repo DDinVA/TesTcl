@@ -19441,6 +19441,14 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         }
         session_id = ""
         try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/"
+            ) as workbench_response:
+                workbench = workbench_response.read().decode("utf-8")
+                self.assertEqual(workbench_response.status, 200)
+                self.assertIn("TMOS 17.5 iRule workbench", workbench)
+                self.assertIn("/v1/sessions", workbench)
+
             status, conformance = request_json("/v1/conformance")
             self.assertEqual(status, 200)
             self.assertGreaterEqual(conformance["commands"]["catalog_count"], 1400)

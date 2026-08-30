@@ -2046,6 +2046,11 @@ The service exposes `GET /healthz`, `GET /v1/capabilities`,
 JSON request bodies at 2 MiB, and does not expose arbitrary Tcl evaluation.
 The HTTP API accepts inline `irule` text only; use the CLI's `irule_file` field
 when a rule must be loaded from a local file.
+`GET /` (also available as `/workbench`) serves a dependency-free browser
+workbench for the same localhost API. It creates persistent sessions, sends
+high-level requests, injects events, replays packet arrays, and searches the
+full catalog. The page is served from the repository and makes no external
+network requests.
 
 The conformance response includes a machine-readable `coverage` matrix. It
 separates complete catalog ingestion from partial command behavior and event

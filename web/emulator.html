@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TesTcl · TMOS 17.5 iRule workbench</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101419;
+      --panel: #171d24;
+      --panel-2: #1e2731;
+      --text: #e7edf3;
+      --muted: #9ba9b7;
+      --accent: #68d391;
+      --accent-2: #63b3ed;
+      --danger: #fc8181;
+      --border: #334250;
+      --code: #0b1015;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 1rem;
+      justify-content: space-between;
+      padding: 1rem 1.25rem;
+    }
+    h1, h2 { margin: 0; }
+    h1 { font-size: 1.15rem; letter-spacing: .01em; }
+    h2 { font-size: .95rem; margin-bottom: .75rem; }
+    main {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin: 0 auto;
+      max-width: 1500px;
+      padding: 1rem;
+    }
+    .wide { grid-column: 1 / -1; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      min-width: 0;
+      padding: 1rem;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: .6rem; }
+    .row > label { flex: 1 1 12rem; }
+    label { color: var(--muted); display: block; font-size: .8rem; }
+    input, textarea, button {
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      font: inherit;
+    }
+    input, textarea {
+      background: var(--code);
+      color: var(--text);
+      display: block;
+      margin-top: .3rem;
+      padding: .55rem .65rem;
+      width: 100%;
+    }
+    textarea { min-height: 7rem; resize: vertical; }
+    #irule, #packets, #event-state, #scenario-extra { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    #irule { min-height: 14rem; }
+    #packets { min-height: 15rem; }
+    #event-state { min-height: 8rem; }
+    #output {
+      background: var(--code);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      margin: 0;
+      max-height: 36rem;
+      min-height: 12rem;
+      overflow: auto;
+      padding: .8rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    button {
+      background: var(--panel-2);
+      color: var(--text);
+      cursor: pointer;
+      padding: .5rem .75rem;
+    }
+    button:hover { border-color: var(--accent-2); }
+    button.primary { background: #1e4635; border-color: #2f855a; }
+    button.danger { border-color: #9b2c2c; color: #fed7d7; }
+    .status { color: var(--muted); }
+    .status.ok { color: var(--accent); }
+    .status.error { color: var(--danger); }
+    .session-id { color: var(--accent-2); font-family: ui-monospace, monospace; }
+    .hint { color: var(--muted); font-size: .8rem; margin: .55rem 0 0; }
+    .catalog-controls { align-items: end; display: flex; gap: .75rem; }
+    .catalog-controls label { flex: 1; }
+    #catalog-table { border-collapse: collapse; margin-top: .75rem; width: 100%; }
+    #catalog-table th, #catalog-table td { border-bottom: 1px solid var(--border); padding: .45rem; text-align: left; }
+    #catalog-table th { color: var(--muted); font-size: .75rem; font-weight: 600; }
+    #catalog-table td:first-child { font-family: ui-monospace, monospace; }
+    .badge { border: 1px solid var(--border); border-radius: 999px; color: var(--muted); padding: .12rem .4rem; white-space: nowrap; }
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; }
+      .wide { grid-column: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>TesTcl · TMOS 17.5 iRule workbench</h1>
+    <div id="health" class="status">checking emulator…</div>
+  </header>
+  <main>
+    <section class="panel wide">
+      <h2>Scenario</h2>
+      <label>iRule source
+        <textarea id="irule">when HTTP_REQUEST {
+  if {[HTTP::host] eq "api.example.com"} {
+    pool api_pool
+  } else {
+    HTTP::respond 403 content "unknown host"
+  }
+}
+
+when HTTP_RESPONSE {
+  HTTP::header replace X-TesTcl yes
+}</textarea>
+      </label>
+      <div class="row" style="margin-top:.7rem">
+        <label>Profiles (comma-separated)
+          <input id="profiles" value="TCP,HTTP">
+        </label>
+        <label>Additional scenario JSON
+          <textarea id="scenario-extra">{
+  "pools": {"api_pool": ["10.0.0.10:80"]}
+}</textarea>
+        </label>
+      </div>
+      <div class="row" style="margin-top:.7rem">
+        <button id="create" class="primary">Create session</button>
+        <button id="inspect">Inspect session</button>
+        <button id="close" class="danger">Close session</button>
+        <span id="session-status" class="status">No session</span>
+      </div>
+      <p class="hint">Sessions are local to this emulator process. Use an explicit flow ID when mixing concurrent flows or APIs.</p>
+    </section>
+
+    <section class="panel">
+      <h2>HTTP request</h2>
+      <div class="row">
+        <label>Method<input id="method" value="GET"></label>
+        <label>Host<input id="host" value="api.example.com"></label>
+        <label>URI<input id="uri" value="/"></label>
+        <label>Flow ID<input id="request-flow" value="flow-a"></label>
+      </div>
+      <div class="row" style="margin-top:.6rem">
+        <label>Request body<input id="body" value=""></label>
+        <label>Response body<input id="response-body" value="ok"></label>
+        <label>Response status<input id="response-status" type="number" value="200"></label>
+      </div>
+      <button id="send-request" class="primary" style="margin-top:.7rem">Send request</button>
+    </section>
+
+    <section class="panel">
+      <h2>Event injection</h2>
+      <div class="row">
+        <label>Event<input id="event-name" value="CLIENT_ACCEPTED"></label>
+        <label>Flow ID<input id="event-flow" value="flow-a"></label>
+      </div>
+      <label style="margin-top:.6rem">State JSON
+        <textarea id="event-state">{}</textarea>
+      </label>
+      <button id="fire-event" style="margin-top:.7rem">Fire event</button>
+    </section>
+
+    <section class="panel wide">
+      <h2>Packet trace</h2>
+      <label>Packets JSON array
+        <textarea id="packets">[
+  {
+    "protocol": "http",
+    "flow_id": "flow-a",
+    "direction": "client_to_server",
+    "source": {"address": "10.0.0.1", "port": 50001},
+    "destination": {"address": "192.0.2.10", "port": 80},
+    "host": "api.example.com",
+    "uri": "/health"
+  }
+]</textarea>
+      </label>
+      <button id="send-packets" style="margin-top:.7rem">Replay packets</button>
+    </section>
+
+    <section class="panel wide">
+      <h2>17.5 catalog</h2>
+      <div class="catalog-controls">
+        <label>Filter commands<input id="catalog-filter" placeholder="HTTP::, TLS::, persist, …"></label>
+        <button id="load-catalog">Load catalog</button>
+      </div>
+      <p id="catalog-summary" class="hint">Catalog not loaded.</p>
+      <table id="catalog-table" hidden>
+        <thead><tr><th>Command</th><th>Runtime</th><th>Target</th><th>Summary</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="panel wide">
+      <h2>Output</h2>
+      <pre id="output">Responses will appear here.</pre>
+    </section>
+  </main>
+  <script>
+    "use strict";
+    let sessionId = null;
+    let catalogCommands = [];
+
+    const $ = (id) => document.getElementById(id);
+    const output = (value) => {
+      $("output").textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    };
+    const jsonValue = (id, fallback) => {
+      const raw = $(id).value.trim();
+      if (!raw) return fallback;
+      try { return JSON.parse(raw); }
+      catch (error) { throw new Error(`${id} must be valid JSON: ${error.message}`); }
+    };
+    const request = async (path, options = {}) => {
+      const response = await fetch(path, {headers: {"Content-Type": "application/json"}, ...options});
+      const text = await response.text();
+      let data;
+      try { data = JSON.parse(text); } catch (_) { data = text; }
+      if (!response.ok) throw new Error(typeof data === "string" ? data : (data.error || `HTTP ${response.status}`));
+      return data;
+    };
+    const withSession = (callback) => {
+      if (!sessionId) { output("Create a session first."); return; }
+      Promise.resolve().then(callback).catch((error) => output(`Error: ${error.message}`));
+    };
+    const flow = (id) => $(id).value.trim();
+    const setSessionStatus = (text, className = "status") => {
+      $("session-status").textContent = text;
+      $("session-status").className = className;
+    };
+    const scenario = () => {
+      const extras = jsonValue("scenario-extra", {});
+      if (!extras || Array.isArray(extras) || typeof extras !== "object") {
+        throw new Error("Additional scenario JSON must be an object");
+      }
+      return {
+        ...extras,
+        irule: $("irule").value,
+        profiles: $("profiles").value.split(",").map((item) => item.trim()).filter(Boolean),
+      };
+    };
+    const createSession = () => {
+      Promise.resolve().then(async () => {
+        const data = await request("/v1/sessions", {method: "POST", body: JSON.stringify(scenario())});
+        sessionId = data.session_id;
+        setSessionStatus(`Session ${sessionId}`, "status ok");
+        output(data);
+      }).catch((error) => { setSessionStatus(error.message, "status error"); output(`Error: ${error.message}`); });
+    };
+    $("create").addEventListener("click", createSession);
+    $("inspect").addEventListener("click", () => withSession(async () => output(await request(`/v1/sessions/${encodeURIComponent(sessionId)}`))));
+    $("close").addEventListener("click", () => withSession(async () => {
+      const data = await request(`/v1/sessions/${encodeURIComponent(sessionId)}`, {method: "DELETE"});
+      sessionId = null;
+      setSessionStatus("No session");
+      output(data);
+    }));
+    $("send-request").addEventListener("click", () => withSession(async () => {
+      const payload = {
+        method: $("method").value,
+        host: $("host").value,
+        uri: $("uri").value,
+        body: $("body").value,
+        response_body: $("response-body").value,
+        response_status: Number($("response-status").value),
+      };
+      const id = flow("request-flow");
+      if (id) payload.flow_id = id;
+      output(await request(`/v1/sessions/${encodeURIComponent(sessionId)}/requests`, {method: "POST", body: JSON.stringify(payload)}));
+    }));
+    $("fire-event").addEventListener("click", () => withSession(async () => {
+      const payload = {event: $("event-name").value, state: jsonValue("event-state", {})};
+      const id = flow("event-flow");
+      if (id) payload.flow_id = id;
+      output(await request(`/v1/sessions/${encodeURIComponent(sessionId)}/events`, {method: "POST", body: JSON.stringify(payload)}));
+    }));
+    $("send-packets").addEventListener("click", () => withSession(async () => {
+      output(await request(`/v1/sessions/${encodeURIComponent(sessionId)}/packets`, {method: "POST", body: JSON.stringify({packets: jsonValue("packets", [])})}));
+    }));
+    const renderCatalog = () => {
+      const needle = $("catalog-filter").value.trim().toLowerCase();
+      const rows = catalogCommands.filter((item) => !needle || `${item.name} ${item.documentation.summary}`.toLowerCase().includes(needle)).slice(0, 250);
+      const body = $("catalog-table").querySelector("tbody");
+      body.replaceChildren();
+      for (const item of rows) {
+        const tr = document.createElement("tr");
+        for (const value of [item.name, item.runtime_status, item.target_status, item.documentation.summary || "—"]) {
+          const td = document.createElement("td");
+          td.textContent = value;
+          tr.appendChild(td);
+        }
+        body.appendChild(tr);
+      }
+      $("catalog-table").hidden = rows.length === 0;
+      $("catalog-summary").textContent = `${rows.length} shown · ${catalogCommands.length} commands loaded`;
+    };
+    $("catalog-filter").addEventListener("input", renderCatalog);
+    $("load-catalog").addEventListener("click", () => {
+      Promise.resolve().then(async () => {
+        const data = await request("/v1/catalog?chunk_size=1000");
+        catalogCommands = data.chunks.flatMap((chunk) => chunk.commands);
+        renderCatalog();
+      }).catch((error) => output(`Error: ${error.message}`));
+    });
+    request("/healthz").then((data) => { $("health").textContent = `online · ${data.profile}`; $("health").className = "status ok"; }).catch((error) => { $("health").textContent = error.message; $("health").className = "status error"; });
+  </script>
+</body>
+</html>

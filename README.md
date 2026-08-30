@@ -19,6 +19,10 @@ in `tcl-lsp`, see [docs/emulator.md](docs/emulator.md). The emulator is pinned
 to BIG-IP/TMOS 17.5 and is separate from the original Tcl unit-test API.
 Local emulator commands use the repo-local uv environment; initialize it with
 `uv sync --python 3.13`.
+When the emulator is started with `--serve`, open `http://127.0.0.1:8080/` for
+the dependency-free browser workbench. It can create a session, run HTTP
+requests, inject events, replay packet arrays, and search the complete 17.5
+catalog through the same local API.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:

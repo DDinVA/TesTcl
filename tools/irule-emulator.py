@@ -25588,6 +25588,19 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[s
     handler.wfile.write(body)
 
 
+def _html_response(handler: BaseHTTPRequestHandler, status: int, body: bytes) -> None:
+    handler.send_response(status)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header(
+        "Content-Security-Policy",
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'",
+    )
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 def _api_error_status(error: Exception) -> int:
     if isinstance(error, EmulatorNotFoundError):
         return 404
@@ -25625,6 +25638,17 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
 
         def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             parsed = urlparse(self.path)
+            if parsed.path in {"/", "/workbench"}:
+                workbench_path = (
+                    Path(__file__).resolve().parent.parent / "web" / "emulator.html"
+                )
+                try:
+                    workbench = workbench_path.read_bytes()
+                except OSError as exc:
+                    self._error(EmulatorInputError(f"could not load workbench: {exc}"))
+                    return
+                _html_response(self, 200, workbench)
+                return
             if parsed.path == "/healthz":
                 _json_response(self, 200, {"status": "ok", "profile": "tmos-17.5"})
                 return
