@@ -8975,6 +8975,7 @@ PACKET_EVENT_ADAPTERS = {
     "CLIENT_ACCEPTED": "connection start (TCP or generic UDP)",
     "CLIENT_CLOSED": "tcp FIN/RST from client",
     "SERVER_CLOSED": "tcp FIN/RST from server",
+    "SERVER_INIT": "first server-side flow initialization",
     "CLIENT_DATA": "client payload (TCP or generic UDP)",
     "ECA_REQUEST_ALLOWED": "injected NTLM/ECA authentication success",
     "ECA_REQUEST_DENIED": "injected NTLM/ECA authentication failure",
@@ -15641,6 +15642,22 @@ class EmulatorSession:
             command += f" {_tcl_quote(str(packet['hops']))}"
         session.eval_tcl(command)
 
+    def _activate_packet_server_connection(
+        self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
+    ) -> None:
+        """Emit the server-side initialization and connection lifecycle once."""
+        if self._server_connection_open:
+            return
+        self._configure_packet_connection(session, packet)
+        connection_state = {"connection": self._packet_connection_state(packet)}
+        events.append(
+            self._fire_event_on_worker(session, "SERVER_INIT", connection_state)
+        )
+        events.append(
+            self._fire_event_on_worker(session, "SERVER_CONNECTED", connection_state)
+        )
+        self._server_connection_open = True
+
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
@@ -16853,15 +16870,7 @@ class EmulatorSession:
             if protocol == "diameter":
                 self._activate_packet_connection(session, packet, entry["events"])
                 if direction == "server_to_client" and not self._server_connection_open:
-                    self._configure_packet_connection(session, packet)
-                    entry["events"].append(
-                        self._fire_event_on_worker(
-                            session,
-                            "SERVER_CONNECTED",
-                            {"connection": self._packet_connection_state(packet)},
-                        )
-                    )
-                    self._server_connection_open = True
+                    self._activate_packet_server_connection(session, packet, entry["events"])
                 session.eval_tcl("::itest::semantic::diameter_prepare_message")
                 event_name = (
                     "DIAMETER_INGRESS"
@@ -16936,15 +16945,7 @@ class EmulatorSession:
             if protocol == "gtp":
                 self._activate_packet_connection(session, packet, entry["events"])
                 if direction == "server_to_client" and not self._server_connection_open:
-                    self._configure_packet_connection(session, packet)
-                    entry["events"].append(
-                        self._fire_event_on_worker(
-                            session,
-                            "SERVER_CONNECTED",
-                            {"connection": self._packet_connection_state(packet)},
-                        )
-                    )
-                    self._server_connection_open = True
+                    self._activate_packet_server_connection(session, packet, entry["events"])
                 session.eval_tcl("::itest::semantic::gtp_prepare_message")
                 endpoints = {
                     packet.get("source", {}).get("port"),
@@ -16972,15 +16973,7 @@ class EmulatorSession:
             if protocol == "mr":
                 self._activate_packet_connection(session, packet, entry["events"])
                 if direction == "server_to_client" and not self._server_connection_open:
-                    self._configure_packet_connection(session, packet)
-                    entry["events"].append(
-                        self._fire_event_on_worker(
-                            session,
-                            "SERVER_CONNECTED",
-                            {"connection": self._packet_connection_state(packet)},
-                        )
-                    )
-                    self._server_connection_open = True
+                    self._activate_packet_server_connection(session, packet, entry["events"])
                 session.eval_tcl("::itest::semantic::mr_prepare_message")
                 ingress_event = "MR_INGRESS" if direction == "client_to_server" else "MR_EGRESS"
                 entry["events"].append(
@@ -17146,15 +17139,7 @@ class EmulatorSession:
                     and self._connection_open
                     and not self._server_connection_open
                 ):
-                    self._configure_packet_connection(session, packet)
-                    entry["events"].append(
-                        self._fire_event_on_worker(
-                            session,
-                            "SERVER_CONNECTED",
-                            {"connection": self._packet_connection_state(packet)},
-                        )
-                    )
-                    self._server_connection_open = True
+                    self._activate_packet_server_connection(session, packet, entry["events"])
             elif protocol == "dns":
                 event_name = "DNS_REQUEST" if direction == "client_to_server" else "DNS_RESPONSE"
                 event_result = self._fire_event_on_worker(
@@ -17219,15 +17204,7 @@ class EmulatorSession:
                 if entry.get("dropped"):
                     continue
                 if direction == "server_to_client" and not self._server_connection_open:
-                    self._configure_packet_connection(session, packet)
-                    entry["events"].append(
-                        self._fire_event_on_worker(
-                            session,
-                            "SERVER_CONNECTED",
-                            {"connection": self._packet_connection_state(packet)},
-                        )
-                    )
-                    self._server_connection_open = True
+                    self._activate_packet_server_connection(session, packet, entry["events"])
                 event_name = "CLIENT_DATA" if direction == "client_to_server" else "SERVER_DATA"
                 event_result = self._fire_event_on_worker(
                     session, event_name, self._packet_event_state(packet)
@@ -17386,15 +17363,7 @@ class EmulatorSession:
             elif protocol in STARTTLS_PROTOCOLS:
                 self._activate_packet_connection(session, packet, entry["events"])
                 if direction == "server_to_client" and not self._server_connection_open:
-                    self._configure_packet_connection(session, packet)
-                    entry["events"].append(
-                        self._fire_event_on_worker(
-                            session,
-                            "SERVER_CONNECTED",
-                            {"connection": self._packet_connection_state(packet)},
-                        )
-                    )
-                    self._server_connection_open = True
+                    self._activate_packet_server_connection(session, packet, entry["events"])
                 if session.eval_tcl(f"set ::state::{protocol}::enabled") == "0":
                     entry["ignored"] = f"{protocol.upper()} processing is disabled"
                     entry["disabled"] = True
@@ -17431,15 +17400,7 @@ class EmulatorSession:
                     entry["ignored"] = "FTP processing is disabled"
                     continue
                 if direction == "server_to_client" and not self._server_connection_open:
-                    self._configure_packet_connection(session, packet)
-                    entry["events"].append(
-                        self._fire_event_on_worker(
-                            session,
-                            "SERVER_CONNECTED",
-                            {"connection": self._packet_connection_state(packet)},
-                        )
-                    )
-                    self._server_connection_open = True
+                    self._activate_packet_server_connection(session, packet, entry["events"])
                 event_name = "CLIENT_DATA" if direction == "client_to_server" else "SERVER_DATA"
                 event_result = self._fire_event_on_worker(
                     session, event_name, self._packet_event_state(packet)
@@ -17501,15 +17462,7 @@ class EmulatorSession:
                         }
                     )
                 if direction == "server_to_client" and not self._server_connection_open:
-                    self._configure_packet_connection(session, packet)
-                    entry["events"].append(
-                        self._fire_event_on_worker(
-                            session,
-                            "SERVER_CONNECTED",
-                            {"connection": self._packet_connection_state(packet)},
-                        )
-                    )
-                    self._server_connection_open = True
+                    self._activate_packet_server_connection(session, packet, entry["events"])
                 side = "client" if direction == "client_to_server" else "server"
                 wire_payload = packet.get("_wire_payload")
                 if not isinstance(wire_payload, (bytes, bytearray)):
@@ -17626,15 +17579,7 @@ class EmulatorSession:
                 if entry.get("dropped"):
                     continue
                 if direction == "server_to_client" and not self._server_connection_open:
-                    self._configure_packet_connection(session, packet)
-                    entry["events"].append(
-                        self._fire_event_on_worker(
-                            session,
-                            "SERVER_CONNECTED",
-                            {"connection": self._packet_connection_state(packet)},
-                        )
-                    )
-                    self._server_connection_open = True
+                    self._activate_packet_server_connection(session, packet, entry["events"])
                 event_name = "CLIENT_DATA" if direction == "client_to_server" else "SERVER_DATA"
                 event_result = self._fire_event_on_worker(
                     session, event_name, self._packet_event_state(packet)

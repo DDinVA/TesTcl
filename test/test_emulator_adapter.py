@@ -2663,6 +2663,41 @@ when CLIENT_DATA {
         self.assertNotIn("18 relay-id", data["state"]["dhcpv6"]["options"])
         self.assertTrue(result["trace"][0]["dropped"])
 
+    def test_packet_server_lifecycle_fires_init_before_connected(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when SERVER_INIT { log local0. init }
+when SERVER_CONNECTED { log local0. connected }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "flags": ["SYN"],
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "flags": ["SYN", "ACK"],
+                        "source": {"address": "192.0.2.10", "port": 443},
+                        "destination": {"address": "10.0.0.5", "port": 51000},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        events = [event["event"] for event in result["trace"][1]["events"]]
+        self.assertEqual(events[:2], ["SERVER_INIT", "SERVER_CONNECTED"])
+        logs = [log for event in result["trace"][1]["events"] for log in event["logs"]]
+        self.assertTrue(any("init" in log for log in logs))
+        self.assertTrue(any("connected" in log for log in logs))
+        self.assertIn("SERVER_INIT", result["fidelity"]["events"])
+
     def test_ftp_packet_controls_and_connection_lifecycle(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -7661,14 +7696,16 @@ when SERVER_DATA {
         )
 
         client_event = result["trace"][1]["events"][0]
-        server_connected = result["trace"][2]["events"][0]
-        server_event = result["trace"][2]["events"][1]
+        server_init = result["trace"][2]["events"][0]
+        server_connected = result["trace"][2]["events"][1]
+        server_event = result["trace"][2]["events"][2]
         self.assertEqual(client_event["event"], "CLIENT_DATA")
         self.assertTrue(
             any("client=client-data length=11 offset=11" in entry for entry in client_event["logs"])
         )
         self.assertIn("tcp payload_replace", str(client_event["decisions"]))
         self.assertEqual(server_event["event"], "SERVER_DATA")
+        self.assertEqual(server_init["event"], "SERVER_INIT")
         self.assertEqual(server_connected["event"], "SERVER_CONNECTED")
         self.assertTrue(
             any("server=server-data length=11" in entry for entry in server_event["logs"])
@@ -8745,8 +8782,12 @@ when SERVER_DATA { log local0. "server=[TCP::payload]" }
         )
 
         client_event = result["trace"][1]["events"][0]
-        server_event = result["trace"][2]["events"][1]
+        server_init = result["trace"][2]["events"][0]
+        server_connected = result["trace"][2]["events"][1]
+        server_event = result["trace"][2]["events"][2]
         self.assertEqual(client_event["event"], "CLIENT_DATA")
+        self.assertEqual(server_init["event"], "SERVER_INIT")
+        self.assertEqual(server_connected["event"], "SERVER_CONNECTED")
         self.assertEqual(server_event["event"], "SERVER_DATA")
         self.assertTrue(any("server=pong" in entry for entry in server_event["logs"]))
         self.assertEqual(result["emitted"][0]["side"], "server")

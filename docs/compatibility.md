@@ -133,6 +133,10 @@ maximum match size, connection enable/disable, and one-shot replacement intent
 are deterministic state; the adapter does not scan/reassemble raw stream
 matches, enforce the production buffer/connection lifecycle, or rewrite wire
 payloads.
+For structured TCP and protocol traces, the first server-side packet emits
+`SERVER_INIT` before `SERVER_CONNECTED`; both are emitted once per emulated
+server connection. The adapter does not synthesize server SYN retransmits,
+connection timers, or an upstream socket.
 The WebSocket payload-processing controls `WS::payload_ivs` and
 `WS::payload_processing` are modeled as connection-scoped state on the existing
 structured WebSocket upgrade/frame adapter. They record the requested IVS and
