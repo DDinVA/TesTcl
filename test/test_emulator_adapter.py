@@ -3125,6 +3125,34 @@ when HTTP_REQUEST {
             for item in report["events"]["packet_adapter_events"]
         }
         self.assertEqual(
+            {name: packet_adapters[name] for name in (
+                "ACCESS_SESSION_STARTED",
+                "ACCESS_SESSION_CLOSED",
+                "ACCESS_POLICY_AGENT_EVENT",
+                "ACCESS_PER_REQUEST_AGENT_EVENT",
+                "ACCESS_POLICY_COMPLETED",
+                "ACCESS_ACL_ALLOWED",
+                "ACCESS_ACL_DENIED",
+                "BOTDEFENSE_REQUEST",
+                "BOTDEFENSE_ACTION",
+                "ANTIFRAUD_LOGIN",
+                "ANTIFRAUD_ALERT",
+            )},
+            {
+                "ACCESS_SESSION_STARTED": "ACCESS session start from client connection",
+                "ACCESS_SESSION_CLOSED": "ACCESS session close from client connection",
+                "ACCESS_POLICY_AGENT_EVENT": "ACCESS policy agent lifecycle event",
+                "ACCESS_PER_REQUEST_AGENT_EVENT": "ACCESS per-request agent lifecycle event",
+                "ACCESS_POLICY_COMPLETED": "ACCESS policy completion after HTTP request",
+                "ACCESS_ACL_ALLOWED": "ACCESS allow decision after load-balancer selection",
+                "ACCESS_ACL_DENIED": "ACCESS deny decision after load-balancer selection",
+                "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",
+                "BOTDEFENSE_ACTION": "Bot Defense action from HTTP request",
+                "ANTIFRAUD_LOGIN": "Anti-Fraud login inspection from HTTP request",
+                "ANTIFRAUD_ALERT": "Anti-Fraud alert from HTTP request",
+            },
+        )
+        self.assertEqual(
             packet_adapters["ASM_REQUEST_VIOLATION"],
             "ASM request violation inspection",
         )
@@ -5522,6 +5550,59 @@ when HTTP_RESPONSE_DATA {
         self.assertEqual(snapshots[3]["violations"], [])
         self.assertEqual(snapshots[3]["payload"], "seed")
         self.assertEqual(snapshots[4]["payload"], "")
+
+    def test_http_access_lifecycle_events_follow_policy_and_connection_state(self) -> None:
+        allowed = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ACCESS"],
+                "access": {"acl_result": "Allow"},
+                "irule": (
+                    "when ACCESS_SESSION_STARTED { log local0. started }\n"
+                    "when ACCESS_POLICY_AGENT_EVENT { log local0. agent }\n"
+                    "when ACCESS_PER_REQUEST_AGENT_EVENT { log local0. perrequest }\n"
+                    "when ACCESS_POLICY_COMPLETED { log local0. completed }\n"
+                    "when ACCESS_ACL_ALLOWED { log local0. allowed }\n"
+                    "when ACCESS_SESSION_CLOSED { log local0. closed }\n"
+                    "when HTTP_REQUEST { log local0. request }"
+                ),
+                "request": {"uri": "/", "close_after": True},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            allowed["results"][0]["events_fired"],
+            [
+                "CLIENT_ACCEPTED",
+                "ACCESS_SESSION_STARTED",
+                "ACCESS_POLICY_AGENT_EVENT",
+                "HTTP_REQUEST",
+                "ACCESS_PER_REQUEST_AGENT_EVENT",
+                "ACCESS_POLICY_COMPLETED",
+                "LB_SELECTED",
+                "ACCESS_ACL_ALLOWED",
+                "CLIENT_CLOSED",
+                "ACCESS_SESSION_CLOSED",
+            ],
+        )
+        self.assertTrue(any("started" in log for log in allowed["results"][0]["logs"]))
+
+        denied = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ACCESS"],
+                "access": {"acl_result": "Reject"},
+                "irule": (
+                    "when ACCESS_ACL_DENIED { log local0. denied }\n"
+                    "when HTTP_REQUEST { log local0. request }"
+                ),
+                "request": {"uri": "/"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertIn(
+            "ACCESS_ACL_DENIED",
+            denied["results"][0]["events_fired"],
+        )
+        self.assertTrue(any("denied" in log for log in denied["results"][0]["logs"]))
 
     def test_http_asm_request_events_follow_violation_and_blocking_state(self) -> None:
         result = self.adapter.run_scenario(

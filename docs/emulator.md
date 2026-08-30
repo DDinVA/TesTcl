@@ -1774,6 +1774,12 @@ minutes of inactivity and the default service permits 32 concurrent sessions.
 The service has no authentication layer; keep the default loopback binding or
 put an authenticated proxy in front of any non-local deployment.
 
+The HTTP lifecycle also exposes the modeled ACCESS session, policy-agent,
+per-request-agent, policy-completion, ACL, and session-close events, plus the
+profile-gated Bot Defense and Anti-Fraud request events. These transitions use
+bounded scenario fixtures and existing deterministic policy state; they are
+not claims of live policy evaluation or production security-service behavior.
+
 ```sh
 SESSION=$(curl -sS -X POST -H 'Content-Type: application/json' \
   --data '{"irule":"when HTTP_REQUEST { pool api_pool }", "pools":{"api_pool":["10.0.0.1:80"]}}' \
