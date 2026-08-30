@@ -824,6 +824,14 @@ inputs reset between requests; connection-scoped enable/disable and policy
 overrides reset at a new connection. This is a deterministic policy model,
 not a WAF inspection, signature-matching, CAPTCHA service, or attack-detection
 engine.
+With the `ASM` profile attached, an enabled HTTP request also runs the bounded
+ASM request lifecycle: `ASM_REQUEST_VIOLATION` is emitted when seeded or
+rule-created violations exist, followed by `ASM_REQUEST_DONE`; the
+`ASM_REQUEST_BLOCKING` hook is emitted only if the request is still `Blocked`
+after the done handlers. This lets a rule use `ASM::unblock` to suppress the
+blocking hook, and the result's `semantic.asm` snapshot includes the final
+handler mutations. The lifecycle is fixture-driven and does not implement WAF
+inspection, production enforcement, or ASM response events.
 The `BOTDEFENSE` policy surface can be seeded with deterministic client and
 decision results:
 

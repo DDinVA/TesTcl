@@ -533,6 +533,14 @@ recorded in request semantic state. Request inputs reset between transactions,
 while connection overrides reset when a new connection begins. The model does
 not perform WAF signature matching, request inspection, CAPTCHA validation,
 threat-campaign detection, or production ASM enforcement.
+When the `ASM` profile is attached and remains enabled for an HTTP request, the
+adapter emits `ASM_REQUEST_VIOLATION` when the bounded fixture has violations,
+then `ASM_REQUEST_DONE`, and finally `ASM_REQUEST_BLOCKING` only when violations
+remain blocked after the `ASM_REQUEST_DONE` handlers run. An `ASM::unblock`
+action therefore suppresses the blocking hook, and the returned semantic
+snapshot reflects mutations made by those handlers. This is a deterministic
+request lifecycle for rule testing; it does not add a WAF inspection engine,
+blocking response generator, or ASM response-event pipeline.
 The TMOS 17.5 `BOTDEFENSE::` surface is represented by a deterministic policy
 model covering all 25 catalogued commands. Scenario inputs can seed action,
 client and bot classification, anomalies/categories, CAPTCHA/cookie state,

@@ -3120,6 +3120,22 @@ when HTTP_REQUEST {
         self.assertIn("JSON::parse", report["commands"]["post_target_commands"])
         self.assertNotIn("IKE_AUTH", report["events"]["unmapped_events"])
         self.assertIn("IKE_AUTH", report["source"]["event_overrides"])
+        packet_adapters = {
+            item["name"]: item["adapter"]
+            for item in report["events"]["packet_adapter_events"]
+        }
+        self.assertEqual(
+            packet_adapters["ASM_REQUEST_VIOLATION"],
+            "ASM request violation inspection",
+        )
+        self.assertEqual(
+            packet_adapters["ASM_REQUEST_DONE"],
+            "ASM request inspection completion",
+        )
+        self.assertEqual(
+            packet_adapters["ASM_REQUEST_BLOCKING"],
+            "ASM blocking-response hook",
+        )
         queue = report["commands"]["implementation_queue"]
         self.assertEqual(queue["candidate_statuses"], ["generated-stub", "no-runtime-handler"])
         queue_buckets = {
@@ -5506,6 +5522,60 @@ when HTTP_RESPONSE_DATA {
         self.assertEqual(snapshots[3]["violations"], [])
         self.assertEqual(snapshots[3]["payload"], "seed")
         self.assertEqual(snapshots[4]["payload"], "")
+
+    def test_http_asm_request_events_follow_violation_and_blocking_state(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ASM"],
+                "asm": {
+                    "policy": "/Common/waf",
+                    "status": "Blocked",
+                    "severity": "Critical",
+                    "support_id": "support-1",
+                    "violations": [
+                        {
+                            "name": "VIOLATION_ATTACK",
+                            "attack_type": "SQL-INJECTION",
+                            "rating": "Critical",
+                            "details": {"parameter": "id"},
+                        }
+                    ],
+                },
+                "irule": (
+                    "when ASM_REQUEST_VIOLATION { "
+                    "log local0. \"violation=[ASM::violation count]/[ASM::status]\" }\n"
+                    "when ASM_REQUEST_DONE { "
+                    "log local0. \"done=[ASM::status]/[ASM::support_id]\"; "
+                    "ASM::unblock }\n"
+                    "when ASM_REQUEST_BLOCKING { log local0. should-not-run }"
+                ),
+                "request": {"uri": "/blocked", "body": "id=1"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        self.assertEqual(
+            item["events_fired"],
+            ["ASM_REQUEST_VIOLATION", "ASM_REQUEST_DONE"],
+        )
+        self.assertTrue(any("violation=1/Blocked" in log for log in item["logs"]))
+        self.assertTrue(any("done=Blocked/support-1" in log for log in item["logs"]))
+        self.assertFalse(any("should-not-run" in log for log in item["logs"]))
+        self.assertEqual(item["semantic"]["asm"]["status"], "Alarm")
+
+        clear = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ASM"],
+                "irule": "when ASM_REQUEST_DONE { log local0. clear }",
+                "request": {"uri": "/clear"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(
+            clear["results"][0]["events_fired"],
+            ["ASM_REQUEST_DONE"],
+        )
 
     def test_asm_input_validation_rejects_unsafe_or_ambiguous_values(self) -> None:
         base = {

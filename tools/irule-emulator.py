@@ -10017,6 +10017,9 @@ PACKET_EVENT_ADAPTERS = {
     "HTTP_REQUEST_DATA": "collected HTTP request body",
     "HTTP_REQUEST_SEND": "HTTP request serverside send",
     "HTTP_REQUEST_RELEASE": "HTTP request transaction release phase",
+    "ASM_REQUEST_VIOLATION": "ASM request violation inspection",
+    "ASM_REQUEST_DONE": "ASM request inspection completion",
+    "ASM_REQUEST_BLOCKING": "ASM blocking-response hook",
     "HTTP_RESPONSE": "HTTP response transaction",
     "HTTP_RESPONSE_DATA": "collected HTTP response body",
     "HTTP_RESPONSE_CONTINUE": "raw HTTP 100 Continue response",
@@ -16873,6 +16876,54 @@ class EmulatorSession:
                     missing.append(item)
             return missing + list(existing)
 
+        def append_asm_event(request_result: dict[str, Any], event_name: str) -> None:
+            decisions_before = len(session.get_decisions())
+            logs_before = len(session.get_logs())
+            errors_before = len(_event_error_snapshot(session))
+            event_result = self._fire_event_on_worker(session, event_name, {})
+            request_result["events_fired"].extend(
+                event_result.get("events_fired", [])
+            )
+            request_result["decisions"].extend(
+                session.get_decisions()[decisions_before:]
+            )
+            request_result["logs"].extend(session.get_logs()[logs_before:])
+            errors = _event_error_snapshot(session)
+            if len(errors) > errors_before:
+                first_error = errors[errors_before]
+                self._close_packet_connection(session)
+                self._connection_request_number = 0
+                raise EmulatorInputError(
+                    "iRule handler error in {}: {}".format(
+                        first_error["event"], first_error["message"]
+                    )
+                )
+
+        def append_asm_request_events(request_result: dict[str, Any]) -> None:
+            if "ASM" not in {str(profile).upper() for profile in self._profiles}:
+                return
+            if session.eval_tcl("set ::itest::semantic::asm_enabled") != "1":
+                return
+            try:
+                violation_count = int(
+                    session.eval_tcl("::itest::semantic::asm_violation count")
+                )
+            except (TypeError, ValueError):
+                raise EmulatorInputError("invalid ASM violation count") from None
+            if violation_count < 0:
+                raise EmulatorInputError("invalid ASM violation count")
+            if violation_count:
+                append_asm_event(request_result, "ASM_REQUEST_VIOLATION")
+            append_asm_event(request_result, "ASM_REQUEST_DONE")
+            # ASM_REQUEST_DONE may change the disposition (for example via
+            # ASM::unblock), so inspect the mutable state before blocking.
+            if (
+                violation_count
+                and session.eval_tcl("::itest::semantic::asm_status") == "Blocked"
+            ):
+                append_asm_event(request_result, "ASM_REQUEST_BLOCKING")
+            request_result["semantic"]["asm"] = _semantic_snapshot(session)["asm"]
+
         result: dict[str, Any]
         try:
             while True:
@@ -17077,6 +17128,8 @@ class EmulatorSession:
                             first_error["event"], first_error["message"]
                         )
                     )
+
+                append_asm_request_events(result)
 
                 decision_history.extend(result.get("decisions", []))
                 log_history.extend(result.get("logs", []))
