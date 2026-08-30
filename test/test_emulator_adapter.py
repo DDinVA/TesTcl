@@ -946,6 +946,116 @@ when PCP_RESPONSE {
         finally:
             session.close()
 
+    def test_pcp_packet_adapter_dispatches_request_and_response(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["PCP"],
+                "irule": """
+when PCP_REQUEST {
+    PCP::reject 7
+    log local0. "request=[PCP::request opcode]/[PCP::request client-addr]/[PCP::request internal-port]"
+}
+when PCP_RESPONSE {
+    log local0. "response=[PCP::response opcode]/[PCP::response result]/[PCP::response assigned-ext-port]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "pcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.10", "port": 40000},
+                        "destination": {"address": "192.0.2.20", "port": 5351},
+                        "pcp": {
+                            "version": 2,
+                            "opcode": "map",
+                            "lifetime": 3600,
+                            "protocol": "tcp",
+                            "internal_port": 22,
+                            "prefer_failure": True,
+                            "client_addr": "192.0.2.10",
+                            "suggested_ext_port": 40000,
+                            "suggested_ext_addr": "0.0.0.0",
+                        },
+                    },
+                    {
+                        "protocol": "pcp",
+                        "direction": "server_to_client",
+                        "source": {"address": "192.0.2.20", "port": 5351},
+                        "destination": {"address": "192.0.2.10", "port": 40000},
+                        "pcp": {
+                            "version": 2,
+                            "opcode": "map",
+                            "lifetime": 1800,
+                            "protocol": "tcp",
+                            "internal_port": 22,
+                            "client_addr": "192.0.2.10",
+                            "result": 0,
+                            "assigned_ext_port": 40000,
+                            "assigned_ext_addr": "198.51.100.20",
+                        },
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        request, response = result["trace"]
+        request_events = [event for event in request["events"] if event["event"] == "PCP_REQUEST"]
+        response_events = [event for event in response["events"] if event["event"] == "PCP_RESPONSE"]
+        self.assertEqual(len(request_events), 1)
+        self.assertEqual(len(response_events), 1)
+        self.assertTrue(request["rejected"])
+        self.assertEqual(request["reject_result"], 7)
+        self.assertEqual(request_events[0]["state"]["pcp"]["rejected"], "1")
+        self.assertEqual(response_events[0]["state"]["pcp"]["rejected"], "0")
+        self.assertTrue(any(
+            "request=map/192.0.2.10/22" in entry for entry in request_events[0]["logs"]
+        ))
+        self.assertTrue(any(
+            "response=map/0/40000" in entry for entry in response_events[0]["logs"]
+        ))
+
+    def test_pcp_packet_adapter_validates_directional_fields_and_addresses(self) -> None:
+        base = {
+            "profiles": ["PCP"],
+            "irule": "when PCP_REQUEST { log local0. ok }",
+            "packets": [
+                {
+                    "protocol": "pcp",
+                    "direction": "client_to_server",
+                    "pcp": {},
+                }
+            ],
+        }
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "packet 0 pcp.third_party_int_addr must be a valid IPv4 or IPv6 address",
+        ):
+            invalid_address = json.loads(json.dumps(base))
+            invalid_address["packets"][0]["pcp"] = {"third_party_int_addr": "not-an-ip"}
+            self.adapter.run_scenario(invalid_address, tcl_lsp_root=self.tcl_lsp_root)
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            r"packet 0 pcp unsupported field\(s\): prefer_failure",
+        ):
+            response_field = json.loads(json.dumps(base))
+            response_field["packets"][0].update(
+                {
+                    "direction": "server_to_client",
+                    "pcp": {"prefer_failure": True},
+                }
+            )
+            self.adapter.run_scenario(response_field, tcl_lsp_root=self.tcl_lsp_root)
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "packet 0 PCP packets require a pcp object",
+        ):
+            missing_object = json.loads(json.dumps(base))
+            del missing_object["packets"][0]["pcp"]
+            self.adapter.run_scenario(missing_object, tcl_lsp_root=self.tcl_lsp_root)
+
     def test_psc_subscriber_identity_policy_address_and_attribute_state(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),

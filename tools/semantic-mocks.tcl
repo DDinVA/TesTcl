@@ -6722,6 +6722,10 @@ namespace eval ::itest::semantic {
         }
     }
 
+    proc pcp_prepare_event {} {
+        pcp_reset_connection
+    }
+
     proc _pcp_require_event {command_name expected_event} {
         if {$::itest::current_event ne $expected_event} {
             error "$command_name is not valid in $::itest::current_event"

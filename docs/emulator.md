@@ -1234,9 +1234,14 @@ documented read-only field accessors and `PCP::reject`:
 
 Map-only fields return `NA` on announce or peer operations, matching the
 documented command behavior. `PCP::reject RESULT_CODE` records a deterministic
-rejection for a request and validates the result code from 0 through 255. This
-slice does not parse PCP wire payloads, perform proxying, allocate mappings, or
-emit a packet-level PCP adapter; those remain separate emulator work.
+rejection for a request and validates the result code from 0 through 255.
+
+Packet traces can use `protocol: "pcp"` with the same nested `pcp` object. A
+client-to-server packet fires `PCP_REQUEST`; a server-to-client packet fires
+`PCP_RESPONSE`. The adapter validates bounded numeric/address fields, derives a
+missing client address from the packet endpoint, and reports `PCP::reject` in
+the packet result. It is a structured fixture adapter: it does not yet decode
+raw PCP wire payloads, perform proxying, allocate mappings, or emulate NAT.
 
 ### PSC subscriber/session state
 

@@ -9522,7 +9522,7 @@ STREAM_EXPRESSION_MAX_BYTES = 64 * 1024
 STREAM_MAX_EXPRESSION_PAIRS = 128
 CATEGORY_RESULT_MAX_ITEMS = 128
 CATEGORY_RESULT_MAX_BYTES = 64 * 1024
-PACKET_PROTOCOLS = {"event", "tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "socks", "diameter", "radius", "mr", "gtp", "rtsp", "tds", "qoe", "l7check", "fix", "wire"}
+PACKET_PROTOCOLS = {"event", "tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "socks", "diameter", "radius", "mr", "gtp", "rtsp", "tds", "qoe", "l7check", "fix", "pcp", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -9552,6 +9552,7 @@ PACKET_PROTOCOL_FIELDS = {
         "payload_hex",
     },
     "udp": set(),
+    "pcp": {"pcp"},
     "sctp": {
         "payload_hex",
         "ppi",
@@ -9979,6 +9980,8 @@ PACKET_EVENT_ADAPTERS = {
     "RADIUS_AAA_AUTH_RESPONSE": "RADIUS authentication response",
     "RADIUS_AAA_ACCT_REQUEST": "RADIUS accounting request",
     "RADIUS_AAA_ACCT_RESPONSE": "RADIUS accounting response",
+    "PCP_REQUEST": "structured PCP request packet",
+    "PCP_RESPONSE": "structured PCP response packet",
     "MR_INGRESS": "Message Routing Framework ingress",
     "MR_EGRESS": "Message Routing Framework egress",
     "MR_FAILED": "Message Routing Framework route failure",
@@ -11429,6 +11432,159 @@ def _packet_bool(value: Any, field: str) -> str:
     if isinstance(value, str) and value.lower() in {"0", "1", "false", "true"}:
         return "1" if value.lower() in {"1", "true"} else "0"
     raise EmulatorInputError(f"{field} must be a boolean or 0/1")
+
+
+PCP_REQUEST_PACKET_FIELDS = frozenset(
+    {
+        "version",
+        "opcode",
+        "lifetime",
+        "protocol",
+        "internal_port",
+        "prefer_failure",
+        "client_addr",
+        "third_party",
+        "third_party_int_addr",
+        "suggested_ext_port",
+        "suggested_ext_addr",
+    }
+)
+PCP_RESPONSE_PACKET_FIELDS = frozenset(
+    {
+        "version",
+        "opcode",
+        "lifetime",
+        "protocol",
+        "internal_port",
+        "client_addr",
+        "result",
+        "assigned_ext_port",
+        "assigned_ext_addr",
+    }
+)
+PCP_OPCODE_NAMES = {0: "announce", 1: "map", 2: "peer"}
+PCP_PROTOCOL_NAMES = {6: "tcp", 17: "udp"}
+
+
+def _pcp_uint(value: Any, field: str, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise EmulatorInputError(f"{field} must be an integer")
+    if isinstance(value, int):
+        parsed = value
+    elif (
+        isinstance(value, str)
+        and len(value) <= 32
+        and re.fullmatch(r"[0-9]+", value)
+    ):
+        parsed = int(value, 10)
+    else:
+        raise EmulatorInputError(f"{field} must be an integer")
+    if not 0 <= parsed <= maximum:
+        raise EmulatorInputError(f"{field} must be between 0 and {maximum}")
+    return parsed
+
+
+def _pcp_address(value: Any, field: str) -> str:
+    text = _require_string(value, field)
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError as exc:
+        raise EmulatorInputError(f"{field} must be a valid IPv4 or IPv6 address") from exc
+
+
+def _normalise_pcp_packet(
+    value: Any,
+    field: str,
+    direction: str,
+    source: dict[str, Any],
+    destination: dict[str, Any],
+) -> dict[str, str]:
+    """Validate one structured PCP request or response packet."""
+    if not isinstance(value, dict):
+        raise EmulatorInputError(f"{field} must be an object")
+    if any(not isinstance(key, str) for key in value):
+        raise EmulatorInputError(f"{field} field names must be strings")
+    allowed = (
+        PCP_REQUEST_PACKET_FIELDS
+        if direction == "client_to_server"
+        else PCP_RESPONSE_PACKET_FIELDS
+    )
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            f"{field} unsupported field(s): {', '.join(unknown)}"
+        )
+    client_endpoint = source if direction == "client_to_server" else destination
+    client_addr = str(client_endpoint.get("address", "0.0.0.0"))
+    try:
+        client_addr = str(ipaddress.ip_address(client_addr))
+    except ValueError:
+        client_addr = "0.0.0.0"
+
+    result: dict[str, str] = {
+        "version": str(_pcp_uint(value.get("version", 2), f"{field}.version", 255)),
+        "opcode": "map",
+        "lifetime": str(_pcp_uint(value.get("lifetime", 0), f"{field}.lifetime", 0xFFFF_FFFF)),
+        "protocol": "tcp",
+        "internal_port": "0",
+        "client_addr": client_addr,
+    }
+    opcode = value.get("opcode", "map")
+    if isinstance(opcode, bool):
+        raise EmulatorInputError(f"{field}.opcode must be announce, map, peer, or an integer")
+    if isinstance(opcode, int) or (isinstance(opcode, str) and opcode.isdigit()):
+        opcode_number = _pcp_uint(opcode, f"{field}.opcode", 255)
+        result["opcode"] = PCP_OPCODE_NAMES.get(opcode_number, str(opcode_number))
+    elif isinstance(opcode, str) and opcode.lower() in {"announce", "map", "peer"}:
+        result["opcode"] = opcode.lower()
+    else:
+        raise EmulatorInputError(f"{field}.opcode must be announce, map, peer, or an integer")
+    protocol = value.get("protocol", "tcp")
+    if isinstance(protocol, bool):
+        raise EmulatorInputError(f"{field}.protocol must be tcp, udp, or an integer")
+    if isinstance(protocol, int) or (isinstance(protocol, str) and protocol.isdigit()):
+        protocol_number = _pcp_uint(protocol, f"{field}.protocol", 255)
+        result["protocol"] = PCP_PROTOCOL_NAMES.get(protocol_number, str(protocol_number))
+    elif isinstance(protocol, str) and protocol.lower() in {"tcp", "udp"}:
+        result["protocol"] = protocol.lower()
+    else:
+        raise EmulatorInputError(f"{field}.protocol must be tcp, udp, or an integer")
+
+    for name in ("internal_port", "suggested_ext_port", "assigned_ext_port"):
+        if name in value:
+            result[name] = str(_pcp_uint(value[name], f"{field}.{name}", 65535))
+    if direction == "client_to_server":
+        result.update(
+            {
+                "prefer_failure": _packet_bool(
+                    value.get("prefer_failure", False), f"{field}.prefer_failure"
+                ),
+                "third_party": _packet_bool(
+                    value.get("third_party", False), f"{field}.third_party"
+                ),
+                "third_party_int_addr": _pcp_address(
+                    value.get("third_party_int_addr", "0.0.0.0"),
+                    f"{field}.third_party_int_addr",
+                ),
+                "suggested_ext_addr": _pcp_address(
+                    value.get("suggested_ext_addr", "0.0.0.0"),
+                    f"{field}.suggested_ext_addr",
+                ),
+            }
+        )
+    else:
+        result.update(
+            {
+                "result": str(_pcp_uint(value.get("result", 0), f"{field}.result", 255)),
+                "assigned_ext_addr": _pcp_address(
+                    value.get("assigned_ext_addr", "0.0.0.0"),
+                    f"{field}.assigned_ext_addr",
+                ),
+            }
+        )
+    if "client_addr" in value:
+        result["client_addr"] = _pcp_address(value["client_addr"], f"{field}.client_addr")
+    return result
 
 
 DATAGRAM_METADATA_FIELDS = frozenset(
@@ -14377,6 +14533,14 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             elif protocol == "gtp" and field == "ies":
                 normalised[field] = _gtp_normalise_ies(packet[field])
                 normalised["_gtp_ies"] = normalised[field]
+            elif protocol == "pcp" and field == "pcp":
+                normalised[field] = _normalise_pcp_packet(
+                    packet[field],
+                    f"packet {index} pcp",
+                    direction,
+                    normalised["source"],
+                    normalised["destination"],
+                )
             elif protocol == "gtp" and field in {"message_hex", "payload_hex"}:
                 normalised[field] = _require_string(
                     packet[field], f"packet {index} {field}"
@@ -14484,6 +14648,11 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             raise EmulatorInputError(
                 f"packet {index} FIX packets require a fix tag object"
             )
+        if protocol == "pcp":
+            if "pcp" not in normalised:
+                raise EmulatorInputError(
+                    f"packet {index} PCP packets require a pcp object"
+                )
         if protocol == "protocol_inspection":
             if direction != "client_to_server":
                 raise EmulatorInputError(
@@ -16340,6 +16509,8 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::dhcp_prepare_event")
         if event_name in {"TDS_REQUEST", "TDS_RESPONSE"}:
             session.eval_tcl("::itest::semantic::tds_prepare_event")
+        if event_name in {"PCP_REQUEST", "PCP_RESPONSE"}:
+            session.eval_tcl("::itest::semantic::pcp_prepare_event")
         if event_name == "IKE_AUTH":
             session.eval_tcl("::itest::semantic::ike_reset_event")
         if "ftp" in state:
@@ -16658,7 +16829,7 @@ class EmulatorSession:
             connection.update({"protocol": "6", "transport": "tcp"})
         elif protocol == "sctp":
             connection.update({"protocol": "132", "transport": "sctp"})
-        elif protocol in {"udp", "dns", "radius", "dhcpv4", "dhcpv6"}:
+        elif protocol in {"udp", "dns", "radius", "dhcpv4", "dhcpv6", "pcp"}:
             connection.update({"protocol": "17", "transport": "udp"})
         elif protocol == "gtp":
             endpoints = {
@@ -16689,7 +16860,7 @@ class EmulatorSession:
         inferred_version = 6 if any(":" in address for address in addresses) else 4
         protocol = (
             17
-            if packet["protocol"] in {"udp", "dns", "radius", "dhcpv4", "dhcpv6"}
+            if packet["protocol"] in {"udp", "dns", "radius", "dhcpv4", "dhcpv6", "pcp"}
             or (packet["protocol"] == "sip" and packet.get("transport", "tcp") == "udp")
             else 6
             if packet["protocol"] in {
@@ -16932,6 +17103,11 @@ class EmulatorSession:
             state["qoe"] = {
                 field: _packet_scalar(value, f"qoe.{field}")
                 for field, value in packet["qoe"].items()
+            }
+        elif protocol == "pcp":
+            state["pcp"] = {
+                field: _packet_scalar(value, f"pcp.{field}")
+                for field, value in packet["pcp"].items()
             }
         elif protocol == "l7check":
             l7check_state: dict[str, Any] = {}
@@ -17650,7 +17826,7 @@ class EmulatorSession:
 
     def _configure_packet_connection(self, session: Any, packet: dict[str, Any]) -> None:
         """Make packet endpoints visible to the upstream HTTP orchestrator."""
-        if packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp", "ftp", "icap", "socks", "qoe", "l7check", "fix", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}:
+        if packet["protocol"] not in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp", "ftp", "icap", "socks", "qoe", "l7check", "fix", "pcp", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"}:
             return
         source = packet["source"]
         destination = packet["destination"]
@@ -17756,7 +17932,7 @@ class EmulatorSession:
     def _activate_packet_connection(
         self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
     ) -> None:
-        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "socks", "qoe", "l7check", "fix", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
+        if self._connection_open or packet["protocol"] not in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "socks", "qoe", "l7check", "fix", "pcp", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "websocket", "mqtt", "sip", "diameter", "mr", "gtp", "rtsp"}:
             return
         self._configure_packet_connection(session, packet)
         session.eval_tcl("::itest::semantic::ws_reset_connection")
@@ -17839,7 +18015,7 @@ class EmulatorSession:
         )
         accepted_state = (
             self._packet_event_state(packet)
-            if packet["protocol"] in {"udp", "sctp", "dhcpv4", "dhcpv6"} or packet_has_tcp_layer
+            if packet["protocol"] in {"udp", "sctp", "dhcpv4", "dhcpv6", "pcp"} or packet_has_tcp_layer
             else {"connection": self._packet_connection_state(packet)}
         )
         if any(str(profile).upper() == "FLOW" for profile in self._profiles):
@@ -18648,6 +18824,7 @@ class EmulatorSession:
                 "forward_proxy_cert_status",
                 "qname",
                 "qtype",
+                "pcp",
                 "frame_type",
                 "fin",
                 "masked",
@@ -19214,6 +19391,24 @@ class EmulatorSession:
                         session, event_name, self._packet_event_state(packet)
                     )
                 )
+                continue
+
+            if protocol == "pcp":
+                self._activate_packet_connection(session, packet, entry["events"])
+                event_name = (
+                    "PCP_REQUEST"
+                    if direction == "client_to_server"
+                    else "PCP_RESPONSE"
+                )
+                event_result = self._fire_event_on_worker(
+                    session, event_name, self._packet_event_state(packet)
+                )
+                entry["events"].append(event_result)
+                pcp_state = event_result.get("state", {}).get("pcp", {})
+                if pcp_state.get("rejected") in {"1", "true"}:
+                    entry["rejected"] = True
+                    entry["reject_result"] = int(pcp_state.get("reject_result", "0"))
+                finish_packet_connection(packet, entry, index)
                 continue
 
             if protocol == "gtp":
