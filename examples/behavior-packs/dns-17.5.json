@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "dns-17.5",
+  "cases": [
+    {
+      "id": "question-name",
+      "probe": {
+        "command": "DNS::question",
+        "args": ["name"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com", "qtype": "A", "qclass": "IN"}}
+      },
+      "expect": {"status": "ok", "value": "example.com", "value_bytes": 11}
+    },
+    {
+      "id": "question-type",
+      "probe": {
+        "command": "DNS::question",
+        "args": ["type"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qtype": "AAAA"}}
+      },
+      "expect": {"status": "ok", "value": "AAAA"}
+    },
+    {
+      "id": "question-class",
+      "probe": {
+        "command": "DNS::question",
+        "args": ["class"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qclass": "IN"}}
+      },
+      "expect": {"status": "ok", "value": "IN"}
+    },
+    {
+      "id": "rcode-name",
+      "probe": {
+        "command": "DNS::header",
+        "args": ["rcode"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"rcode": "NXDOMAIN"}}
+      },
+      "expect": {"status": "ok", "value": "NXDOMAIN"}
+    },
+    {
+      "id": "packet-type",
+      "probe": {
+        "command": "DNS::ptype",
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com", "qr": 0}}
+      },
+      "expect": {"status": "ok", "value": "QUESTION"}
+    },
+    {
+      "id": "wideip-membership",
+      "probe": {
+        "command": "DNS::is_wideip",
+        "args": ["example.com"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"wideips": "example.com other.test"}}
+      },
+      "expect": {"status": "ok", "value": "1"}
+    },
+    {
+      "id": "tsig-exists",
+      "probe": {
+        "command": "DNS::tsig",
+        "args": ["exists"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"tsig_present": 1}}
+      },
+      "expect": {"status": "ok", "value": "1"}
+    }
+  ]
+}

@@ -2885,6 +2885,54 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(mismatch["field"], "value")
         self.assertEqual(mismatch["actual"], "api.example.com")
 
+    def test_behavior_packs_cover_dns_tcp_lb_uri_and_stateful_scenarios(self) -> None:
+        expected_counts = {
+            "dns-17.5.json": 7,
+            "tcp-17.5.json": 6,
+            "lb-17.5.json": 5,
+            "uri-17.5.json": 8,
+            "stateful-17.5.json": 2,
+        }
+        for filename, case_count in expected_counts.items():
+            with self.subTest(filename=filename):
+                pack = json.loads(
+                    (ROOT / "examples" / "behavior-packs" / filename).read_text(
+                        encoding="utf-8"
+                    )
+                )
+                result = self.adapter.run_behavior_pack(
+                    pack, tcl_lsp_root=self.tcl_lsp_root
+                )
+                self.assertEqual(result["status"], "passed")
+                self.assertEqual(
+                    result["summary"],
+                    {"case_count": case_count, "passed": case_count, "failed": 0},
+                )
+
+        stateful = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "stateful-17.5.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        stateful["cases"][1]["expect"]["assertions"][2]["equals"] = "wrong"
+        failed = self.adapter.run_behavior_pack(
+            stateful, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["summary"]["failed"], 1)
+        self.assertEqual(
+            failed["cases"][1]["mismatches"][0]["path"],
+            ["results", 1, "semantic", "table", 0, "value"],
+        )
+        stateful["cases"][0]["expect"]["assertions"][0]["path"] = [
+            "results", 99, "status"
+        ]
+        missing_path = self.adapter.run_behavior_pack(
+            stateful, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(missing_path["status"], "failed")
+        self.assertIn("path not found", missing_path["cases"][0]["mismatches"][0]["error"])
+
     def test_behavior_pack_validation_is_bounded_and_atomic(self) -> None:
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "schema_version"):
             self.adapter.run_behavior_pack(
@@ -2909,6 +2957,81 @@ when HTTP_RESPONSE_RELEASE {
                     "cases": [
                         {"id": str(index), "probe": {"command": "HTTP::host", "event": "HTTP_REQUEST"}, "expect": {"status": "ok"}}
                         for index in range(257)
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "inline irule only"):
+            self.adapter.run_behavior_pack(
+                {
+                    "name": "file-scenario",
+                    "cases": [
+                        {
+                            "id": "file",
+                            "scenario": {
+                                "irule_file": "./missing.irule",
+                                "profiles": ["TCP", "HTTP"],
+                                "requests": [{"uri": "/"}],
+                            },
+                            "expect": {
+                                "status": "ok",
+                                "assertions": [
+                                    {"path": ["status"], "equals": "ok"}
+                                ],
+                            },
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "exceeds 65536"):
+            self.adapter.run_behavior_pack(
+                {
+                    "name": "large-assertion",
+                    "cases": [
+                        {
+                            "id": "large",
+                            "scenario": {
+                                "irule": "when HTTP_REQUEST { log local0. ok }",
+                                "profiles": ["TCP", "HTTP"],
+                                "requests": [{"uri": "/"}],
+                            },
+                            "expect": {
+                                "status": "ok",
+                                "assertions": [
+                                    {"path": ["status"], "equals": "x" * 65537}
+                                ],
+                            },
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "packets and requests"):
+            self.adapter.run_behavior_pack(
+                {
+                    "name": "mixed-inputs",
+                    "cases": [
+                        {
+                            "id": "mixed",
+                            "scenario": {
+                                "irule": "when HTTP_REQUEST { log local0. ok }",
+                                "profiles": ["TCP", "HTTP"],
+                                "requests": [{"uri": "/"}],
+                                "packets": [
+                                    {
+                                        "protocol": "event",
+                                        "event": "CLIENT_ACCEPTED",
+                                    }
+                                ],
+                            },
+                            "expect": {
+                                "status": "ok",
+                                "assertions": [
+                                    {"path": ["status"], "equals": "ok"}
+                                ],
+                            },
+                        }
                     ],
                 },
                 tcl_lsp_root=self.tcl_lsp_root,
@@ -18032,6 +18155,22 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
                 payload = json.loads(response.read())
             self.assertEqual(payload["status"], "passed")
             self.assertEqual(payload["summary"]["passed"], 9)
+
+            stateful = json.loads(
+                (ROOT / "examples" / "behavior-packs" / "stateful-17.5.json")
+                .read_text(encoding="utf-8")
+            )
+            stateful_request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/behavior-packs",
+                data=json.dumps(stateful).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(stateful_request) as response:
+                self.assertEqual(response.status, 200)
+                stateful_payload = json.loads(response.read())
+            self.assertEqual(stateful_payload["status"], "passed")
+            self.assertEqual(stateful_payload["summary"]["passed"], 2)
         finally:
             server.shutdown()
             thread.join(timeout=5)

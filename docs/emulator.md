@@ -97,12 +97,17 @@ evaluation.
 ### Catalog behavior packs
 
 Behavior packs turn catalog entries into checked-in, reproducible contracts.
-Each case contains an `id`, one `probe` accepted by the command workbench,
-and an `expect` object. Supported expectations are exact `status`, `value`,
-`value_base64`, `value_bytes`, `tcl_return_code`, and `event_fired` values,
-plus an `error_contains` substring assertion. Packs are limited to 256 cases;
-each case is normalized before execution, and a malformed case prevents the
-pack from running.
+Each case contains an `id`, exactly one operation, and an `expect` object.
+`probe` operations exercise one catalog command with the bounded command
+workbench. `scenario` operations run an inline iRule against a bounded request
+or packet sequence and assert exact values through JSON paths. Scenario packs
+accept inline `irule` source only; they cannot read a local `irule_file`.
+Probe expectations support exact `status`, `value`, `value_base64`,
+`value_bytes`, `tcl_return_code`, and `event_fired` values, plus an
+`error_contains` substring assertion. Scenario expectations contain one to 64
+bounded `{path, equals}` assertions. Packs are limited to 256 cases; every
+case is normalized before execution, and a malformed case prevents the pack
+from running.
 
 The repository includes
 [`examples/behavior-packs/http-core-17.5.json`](../examples/behavior-packs/http-core-17.5.json),
@@ -116,10 +121,18 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 
 The command exits non-zero when a case fails and prints every mismatch without
 discarding the passing cases. The same runner is available as
-`POST /v1/behavior-packs` and the MCP tool `irule_behavior_pack`. Packs are
-fixture-only: they cannot provide an iRule source, local file, request list,
-or packet trace. This makes a catalog chunk plus its behavior pack a portable
-implementation checkpoint for adding higher-fidelity semantic mocks.
+`POST /v1/behavior-packs` and the MCP tool `irule_behavior_pack`. The checked-in
+packs cover HTTP, DNS, TCP, load-balancing, URI, and stateful session/table
+contracts for the pinned 17.5 profile. A catalog chunk plus its behavior pack
+is a portable implementation checkpoint for adding higher-fidelity semantic
+mocks.
+
+The scenario-capable stateful pack can be run directly with:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/stateful-17.5.json
+```
 
 For a stateful data-plane fixture, keep the simple `pools` member-array format
 and add `backends` keyed by the same `address:port` member values. A backend

@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "uri-17.5",
+  "cases": [
+    {
+      "id": "path",
+      "probe": {
+        "command": "URI::path",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "https://api.example.com:8443/a/b?x=1&y=two", "host": "api.example.com"}
+      },
+      "expect": {"status": "ok", "value": "/a/b"}
+    },
+    {
+      "id": "query",
+      "probe": {
+        "command": "URI::query",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "https://api.example.com:8443/a/b?x=1&y=two", "host": "api.example.com"}
+      },
+      "expect": {"status": "ok", "value": "x=1&y=two"}
+    },
+    {
+      "id": "host",
+      "probe": {
+        "command": "URI::host",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "https://api.example.com:8443/a/b?x=1", "host": "api.example.com"}
+      },
+      "expect": {"status": "ok", "value": "api.example.com"}
+    },
+    {
+      "id": "protocol",
+      "probe": {
+        "command": "URI::protocol",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "https://api.example.com:8443/a/b", "host": "api.example.com"}
+      },
+      "expect": {"status": "ok", "value": "https"}
+    },
+    {
+      "id": "port",
+      "probe": {
+        "command": "URI::port",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "https://api.example.com:8443/a/b", "host": "api.example.com"}
+      },
+      "expect": {"status": "ok", "value": "8443"}
+    },
+    {
+      "id": "basename",
+      "probe": {
+        "command": "URI::basename",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "https://api.example.com:8443/a/b", "host": "api.example.com"}
+      },
+      "expect": {"status": "ok", "value": "b"}
+    },
+    {
+      "id": "encode-component",
+      "probe": {
+        "command": "URI::encode_component",
+        "args": ["a b/c"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "/"}
+      },
+      "expect": {"status": "ok", "value": "a%20b%2Fc"}
+    },
+    {
+      "id": "decode",
+      "probe": {
+        "command": "URI::decode",
+        "args": ["a%20b"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "/"}
+      },
+      "expect": {"status": "ok", "value": "a b"}
+    }
+  ]
+}

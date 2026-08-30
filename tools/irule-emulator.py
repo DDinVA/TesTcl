@@ -288,6 +288,7 @@ COMMAND_PROBE_MAX_ARG_BYTES = 16 * 1024
 COMMAND_PROBE_MAX_TOTAL_ARG_BYTES = 64 * 1024
 BEHAVIOR_PACK_MAX_CASES = 256
 BEHAVIOR_PACK_MAX_NAME_BYTES = 256
+BEHAVIOR_PACK_MAX_BYTES = 2 * 1024 * 1024
 EVENT_STATE_FIELDS = {
     "connection": {
         "client_addr",
@@ -23671,10 +23672,140 @@ def run_command_probe(
             session.close()
 
 
+def _normalise_behavior_expectation(
+    case_id: str, expect: Any
+) -> dict[str, Any]:
+    """Validate scalar command-probe expectations."""
+    if not isinstance(expect, dict):
+        raise EmulatorInputError(f"behavior pack case {case_id!r} expect must be an object")
+    expect_allowed = {
+        "status",
+        "value",
+        "value_base64",
+        "value_bytes",
+        "tcl_return_code",
+        "event_fired",
+        "error_contains",
+    }
+    unknown = sorted(set(expect) - expect_allowed)
+    if unknown:
+        raise EmulatorInputError(
+            f"behavior pack case {case_id!r} has unsupported expectation field(s): "
+            + ", ".join(unknown)
+        )
+    if expect.get("status") not in {"ok", "error", "profile-gated"}:
+        raise EmulatorInputError(
+            f"behavior pack case {case_id!r} expect.status must be ok, error, or profile-gated"
+        )
+    for field in ("value", "value_base64", "error_contains"):
+        if field in expect and not isinstance(expect[field], str):
+            raise EmulatorInputError(
+                f"behavior pack case {case_id!r} expect.{field} must be a string"
+            )
+    for field in ("value_bytes", "tcl_return_code"):
+        if field in expect and (
+            isinstance(expect[field], bool) or not isinstance(expect[field], int)
+        ):
+            raise EmulatorInputError(
+                f"behavior pack case {case_id!r} expect.{field} must be an integer"
+            )
+    if "value_bytes" in expect and expect["value_bytes"] < 0:
+        raise EmulatorInputError(
+            f"behavior pack case {case_id!r} expect.value_bytes must be non-negative"
+        )
+    if "event_fired" in expect and not isinstance(expect["event_fired"], bool):
+        raise EmulatorInputError(
+            f"behavior pack case {case_id!r} expect.event_fired must be a boolean"
+        )
+    return dict(expect)
+
+
+def _normalise_behavior_scenario_expectation(
+    case_id: str, expect: Any
+) -> dict[str, Any]:
+    """Validate bounded JSON-path assertions for a full scenario result."""
+    if not isinstance(expect, dict):
+        raise EmulatorInputError(f"behavior pack case {case_id!r} expect must be an object")
+    unknown = sorted(set(expect) - {"status", "assertions"})
+    if unknown:
+        raise EmulatorInputError(
+            f"behavior pack case {case_id!r} has unsupported scenario expectation field(s): "
+            + ", ".join(unknown)
+        )
+    if expect.get("status") != "ok":
+        raise EmulatorInputError(
+            f"behavior pack case {case_id!r} scenario expect.status must be ok"
+        )
+    assertions = expect.get("assertions")
+    if not isinstance(assertions, list) or not assertions:
+        raise EmulatorInputError(
+            f"behavior pack case {case_id!r} scenario assertions must be a non-empty array"
+        )
+    if len(assertions) > 64:
+        raise EmulatorInputError(
+            f"behavior pack case {case_id!r} cannot contain more than 64 assertions"
+        )
+    normalised: list[dict[str, Any]] = []
+    for index, assertion in enumerate(assertions):
+        if not isinstance(assertion, dict) or set(assertion) != {"path", "equals"}:
+            raise EmulatorInputError(
+                f"behavior pack case {case_id!r} assertion {index} must contain only path and equals"
+            )
+        path = assertion["path"]
+        if not isinstance(path, list) or not path or len(path) > 32:
+            raise EmulatorInputError(
+                f"behavior pack case {case_id!r} assertion {index} path must contain 1 to 32 components"
+            )
+        for component in path:
+            if isinstance(component, bool) or not isinstance(component, (str, int)):
+                raise EmulatorInputError(
+                    f"behavior pack case {case_id!r} assertion {index} path components must be strings or integers"
+                )
+            if isinstance(component, int) and component < 0:
+                raise EmulatorInputError(
+                    f"behavior pack case {case_id!r} assertion {index} path indexes must be non-negative"
+                )
+            if isinstance(component, str) and (not component or "\x00" in component):
+                raise EmulatorInputError(
+                    f"behavior pack case {case_id!r} assertion {index} path keys must be non-empty and NUL-free"
+                )
+        equals = assertion["equals"]
+        try:
+            equals_bytes = len(
+                json.dumps(
+                    equals,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise EmulatorInputError(
+                f"behavior pack case {case_id!r} assertion {index} equals must be JSON-compatible"
+            ) from exc
+        if equals_bytes > 64 * 1024:
+            raise EmulatorInputError(
+                f"behavior pack case {case_id!r} assertion {index} equals exceeds 65536 UTF-8 bytes"
+            )
+        normalised.append({"path": list(path), "equals": equals})
+    return {"status": "ok", "assertions": normalised}
+
+
 def _normalise_behavior_pack(root: Path, pack: Any) -> dict[str, Any]:
     """Validate a catalog behavior pack before any case is executed."""
     if not isinstance(pack, dict):
         raise EmulatorInputError("behavior pack must be a JSON object")
+    try:
+        pack_bytes = len(
+            json.dumps(pack, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            .encode("utf-8")
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise EmulatorInputError("behavior pack must contain only JSON-compatible values") from exc
+    if pack_bytes > BEHAVIOR_PACK_MAX_BYTES:
+        raise EmulatorInputError(
+            f"behavior pack exceeds the {BEHAVIOR_PACK_MAX_BYTES // (1024 * 1024)} MiB limit"
+        )
     allowed = {"schema_version", "profile", "name", "cases"}
     unknown = sorted(set(pack) - allowed)
     if unknown:
@@ -23711,7 +23842,7 @@ def _normalise_behavior_pack(root: Path, pack: Any) -> dict[str, Any]:
     for index, case in enumerate(cases):
         if not isinstance(case, dict):
             raise EmulatorInputError(f"behavior pack case {index} must be an object")
-        case_allowed = {"id", "probe", "expect"}
+        case_allowed = {"id", "probe", "scenario", "expect"}
         case_unknown = sorted(set(case) - case_allowed)
         if case_unknown:
             raise EmulatorInputError(
@@ -23737,60 +23868,53 @@ def _normalise_behavior_pack(root: Path, pack: Any) -> dict[str, Any]:
             raise EmulatorInputError(f"behavior pack contains duplicate case id {case_id!r}")
         seen_ids.add(case_id)
 
-        probe = case.get("probe")
-        if not isinstance(probe, dict):
-            raise EmulatorInputError(f"behavior pack case {case_id!r} probe must be an object")
-        expect = case.get("expect")
-        if not isinstance(expect, dict):
-            raise EmulatorInputError(f"behavior pack case {case_id!r} expect must be an object")
-        expect_allowed = {
-            "status",
-            "value",
-            "value_base64",
-            "value_bytes",
-            "tcl_return_code",
-            "event_fired",
-            "error_contains",
-        }
-        expect_unknown = sorted(set(expect) - expect_allowed)
-        if expect_unknown:
+        has_probe = "probe" in case
+        has_scenario = "scenario" in case
+        if has_probe == has_scenario:
             raise EmulatorInputError(
-                f"behavior pack case {case_id!r} has unsupported expectation field(s): "
-                + ", ".join(expect_unknown)
+                f"behavior pack case {case_id!r} must contain exactly one of probe or scenario"
             )
-        expected_status = expect.get("status")
-        if expected_status not in {"ok", "error", "profile-gated"}:
+        if has_probe:
+            probe = case["probe"]
+            if not isinstance(probe, dict):
+                raise EmulatorInputError(f"behavior pack case {case_id!r} probe must be an object")
+            _normalise_command_probe_request(root, probe)
+            normalised_cases.append(
+                {
+                    "id": case_id,
+                    "kind": "probe",
+                    "probe": dict(probe),
+                    "expect": _normalise_behavior_expectation(case_id, case.get("expect")),
+                }
+            )
+            continue
+
+        scenario = case["scenario"]
+        if not isinstance(scenario, dict):
             raise EmulatorInputError(
-                f"behavior pack case {case_id!r} expect.status must be ok, error, or profile-gated"
+                f"behavior pack case {case_id!r} scenario must be an object"
             )
-        for field in ("value", "value_base64", "error_contains"):
-            if field in expect and not isinstance(expect[field], str):
-                raise EmulatorInputError(
-                    f"behavior pack case {case_id!r} expect.{field} must be a string"
-                )
-        for field in ("value_bytes", "tcl_return_code"):
-            if field in expect and (
-                isinstance(expect[field], bool) or not isinstance(expect[field], int)
-            ):
-                raise EmulatorInputError(
-                    f"behavior pack case {case_id!r} expect.{field} must be an integer"
-                )
-        if "value_bytes" in expect and expect["value_bytes"] < 0:
+        if "packets" in scenario and any(
+            field in scenario for field in ("request", "requests")
+        ):
             raise EmulatorInputError(
-                f"behavior pack case {case_id!r} expect.value_bytes must be non-negative"
+                f"behavior pack case {case_id!r} scenario cannot contain packets and requests"
             )
-        if "event_fired" in expect and not isinstance(expect["event_fired"], bool):
-            raise EmulatorInputError(
-                f"behavior pack case {case_id!r} expect.event_fired must be a boolean"
-            )
-        # Normalize the probe now so malformed cases fail before a preceding
-        # case can mutate any external state or consume interpreter resources.
-        _normalise_command_probe_request(root, probe)
+        _normalise_scenario_config(
+            scenario,
+            allow_irule_file=False,
+            allow_requests=True,
+            allow_packets=True,
+            require_http=False,
+        )
         normalised_cases.append(
             {
                 "id": case_id,
-                "probe": dict(probe),
-                "expect": dict(expect),
+                "kind": "scenario",
+                "scenario": dict(scenario),
+                "expect": _normalise_behavior_scenario_expectation(
+                    case_id, case.get("expect")
+                ),
             }
         )
     return {
@@ -23836,6 +23960,49 @@ def _behavior_case_mismatches(
     return mismatches
 
 
+def _behavior_json_path(result: Any, path: list[str | int]) -> Any:
+    """Resolve a bounded JSON path without evaluating user-provided syntax."""
+    current = result
+    for component in path:
+        if isinstance(component, str):
+            if not isinstance(current, dict) or component not in current:
+                raise KeyError(component)
+            current = current[component]
+        else:
+            if not isinstance(current, list) or component >= len(current):
+                raise IndexError(component)
+            current = current[component]
+    return current
+
+
+def _scenario_behavior_observations(
+    expected: dict[str, Any], result: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    observations: list[dict[str, Any]] = []
+    mismatches: list[dict[str, Any]] = []
+    for assertion in expected["assertions"]:
+        path = assertion["path"]
+        try:
+            actual = _behavior_json_path(result, path)
+        except (KeyError, IndexError, TypeError) as exc:
+            observations.append({"path": path, "actual": None})
+            mismatches.append(
+                {
+                    "path": path,
+                    "expected": assertion["equals"],
+                    "actual": None,
+                    "error": f"path not found: {exc}",
+                }
+            )
+            continue
+        observations.append({"path": path, "actual": actual})
+        if actual != assertion["equals"]:
+            mismatches.append(
+                {"path": path, "expected": assertion["equals"], "actual": actual}
+            )
+    return observations, mismatches
+
+
 def run_behavior_pack(
     pack: Any,
     *,
@@ -23853,32 +24020,55 @@ def run_behavior_pack(
     rows: list[dict[str, Any]] = []
     passed = 0
     for case in prepared["cases"]:
-        try:
-            result = run_command_probe(
-                case["probe"],
-                tcl_lsp_root=str(root),
-                backend=backend,
-            )
-            actual = _command_probe_observation(result)
-        except EmulatorInputError as exc:
-            # A valid pack can still encounter a runtime/fixture problem as
-            # the semantic layer evolves. Keep the other cases observable and
-            # make the failure explicit instead of tearing down the report.
-            actual = {"status": "runner-error", "error": str(exc)}
-        mismatches = _behavior_case_mismatches(case["expect"], actual)
-        if not mismatches:
-            passed += 1
-        rows.append(
-            {
+        if case["kind"] == "probe":
+            try:
+                result = run_command_probe(
+                    case["probe"],
+                    tcl_lsp_root=str(root),
+                    backend=backend,
+                )
+                actual = _command_probe_observation(result)
+            except EmulatorInputError as exc:
+                # A valid pack can still encounter a runtime/fixture problem
+                # as the semantic layer evolves. Keep the other cases
+                # observable instead of tearing down the report.
+                actual = {"status": "runner-error", "error": str(exc)}
+            mismatches = _behavior_case_mismatches(case["expect"], actual)
+            row = {
                 "id": case["id"],
+                "kind": "probe",
                 "command": case["probe"].get("command"),
                 "event": case["probe"].get("event"),
                 "expected": case["expect"],
                 "actual": actual,
-                "status": "passed" if not mismatches else "failed",
-                "mismatches": mismatches,
             }
-        )
+        else:
+            try:
+                result = run_scenario(
+                    case["scenario"],
+                    tcl_lsp_root=str(root),
+                    backend=backend,
+                )
+                assertions, mismatches = _scenario_behavior_observations(
+                    case["expect"], result
+                )
+                actual = {"status": result.get("status"), "assertions": assertions}
+            except (EmulatorInputError, KeyError, IndexError, TypeError) as exc:
+                actual = {"status": "runner-error", "error": str(exc)}
+                mismatches = [
+                    {"field": "status", "expected": "ok", "actual": actual["status"]}
+                ]
+            row = {
+                "id": case["id"],
+                "kind": "scenario",
+                "expected": case["expect"],
+                "actual": actual,
+            }
+        if not mismatches:
+            passed += 1
+        row["status"] = "passed" if not mismatches else "failed"
+        row["mismatches"] = mismatches
+        rows.append(row)
     failed = len(rows) - passed
     return {
         "status": "passed" if failed == 0 else "failed",

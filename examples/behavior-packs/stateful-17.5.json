@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "stateful-17.5",
+  "cases": [
+    {
+      "id": "session-round-trip",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST { if {[HTTP::uri] eq \"/write\"} { session add uie client-key session-value } elseif {[HTTP::uri] eq \"/read\"} { HTTP::header insert X-Session [session lookup uie client-key] } }",
+        "requests": [
+          {"uri": "/write"},
+          {"uri": "/read"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "session", "count"], "equals": 1},
+          {"path": ["results", 1, "request", "headers", "x-session"], "equals": "session-value"},
+          {"path": ["results", 1, "semantic", "session", "records", 0, "data"], "equals": "session-value"}
+        ]
+      }
+    },
+    {
+      "id": "table-round-trip",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST { if {[HTTP::uri] eq \"/write\"} { table set -subtable counters visits 1 60 60 } elseif {[HTTP::uri] eq \"/read\"} { HTTP::header insert X-Visits [table lookup -subtable counters visits] } }",
+        "requests": [
+          {"uri": "/write"},
+          {"uri": "/read"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 1, "request", "headers", "x-visits"], "equals": "1"},
+          {"path": ["results", 1, "semantic", "table", 0, "subtable"], "equals": "counters"},
+          {"path": ["results", 1, "semantic", "table", 0, "value"], "equals": "1"}
+        ]
+      }
+    }
+  ]
+}
