@@ -637,6 +637,284 @@ when HTTP_REQUEST {
         self.assertEqual(packets[0]["flow_id"], "raw-a")
         self.assertEqual(packets[0]["protocol"], "tcp")
 
+    def test_raw_http_stages_request_data_after_headers(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    log local0. "headers=[HTTP::path]"
+    HTTP::collect 6
+}
+when HTTP_REQUEST_DATA {
+    log local0. "data=[HTTP::payload]"
+    HTTP::release
+}
+when HTTP_RESPONSE {
+    log local0. "response=[HTTP::status]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.1", "port": 50001},
+                        "destination": {"address": "192.0.2.10", "port": 80},
+                        "payload": (
+                            "POST /upload HTTP/1.1\r\n"
+                            "Host: app.example\r\n"
+                            "Content-Length: 6\r\n\r\n"
+                            "abc"
+                        ),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.1", "port": 50001},
+                        "destination": {"address": "192.0.2.10", "port": 80},
+                        "payload": "def",
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": {"address": "192.0.2.10", "port": 80},
+                        "destination": {"address": "10.0.0.1", "port": 50001},
+                        "payload": "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        transaction = result["results"][0]
+        self.assertEqual(transaction["request"]["body"], "abcdef")
+        self.assertEqual(
+            transaction["events_fired"],
+            [
+                "RULE_INIT",
+                "CLIENT_ACCEPTED",
+                "HTTP_REQUEST",
+                "HTTP_REQUEST_DATA",
+                "HTTP_REQUEST_RELEASE",
+                "HTTP_RESPONSE",
+            ],
+        )
+        self.assertTrue(any("headers=/upload" in entry for entry in transaction["logs"]))
+        self.assertTrue(any("data=abcdef" in entry for entry in transaction["logs"]))
+        self.assertTrue(any("response=200" in entry for entry in transaction["logs"]))
+        self.assertEqual(result["trace"][0]["http_stage"]["phase"], "HTTP_REQUEST")
+        self.assertEqual(result["trace"][1]["staged_body_received"], 6)
+
+    def test_raw_http_staging_preserves_request_pool_selection(self) -> None:
+        crlf = "\r\n"
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {"upload_pool": ["10.0.0.10:80"]},
+                "irule": """
+when HTTP_REQUEST { pool upload_pool; HTTP::collect 3 }
+when HTTP_REQUEST_DATA { HTTP::release }
+when HTTP_RESPONSE { log local0. "pool=[LB::server pool]" }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.1", "port": 50002},
+                        "destination": {"address": "192.0.2.10", "port": 80},
+                        "payload": (
+                            "POST /upload HTTP/1.1"
+                            + crlf
+                            + "Host: app.example"
+                            + crlf
+                            + "Content-Length: 3"
+                            + crlf
+                            + crlf
+                            + "abc"
+                        ),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": {"address": "192.0.2.10", "port": 80},
+                        "destination": {"address": "10.0.0.1", "port": 50002},
+                        "payload": "HTTP/1.1 200 OK" + crlf + "Content-Length: 0" + crlf + crlf,
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        transaction = result["results"][0]
+        self.assertEqual(transaction["pool"], "upload_pool")
+        self.assertTrue(any("pool=upload_pool" in entry for entry in transaction["logs"]))
+
+    def test_raw_http_stages_response_data_after_response_headers(self) -> None:
+        crlf = "\r\n"
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST { HTTP::collect 3 }
+when HTTP_REQUEST_DATA { HTTP::release }
+when HTTP_RESPONSE {
+    log local0. "response-head=[HTTP::payload]"
+    HTTP::collect 5
+}
+when HTTP_RESPONSE_DATA {
+    log local0. "response-data=[HTTP::payload]"
+    HTTP::release
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.1", "port": 50003},
+                        "destination": {"address": "192.0.2.10", "port": 80},
+                        "payload": (
+                            "POST /upload HTTP/1.1"
+                            + crlf
+                            + "Host: app.example"
+                            + crlf
+                            + "Content-Length: 3"
+                            + crlf
+                            + crlf
+                            + "abc"
+                        ),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": {"address": "192.0.2.10", "port": 80},
+                        "destination": {"address": "10.0.0.1", "port": 50003},
+                        "payload": "HTTP/1.1 200 OK" + crlf + "Content-Length: 5" + crlf + crlf + "xy",
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": {"address": "192.0.2.10", "port": 80},
+                        "destination": {"address": "10.0.0.1", "port": 50003},
+                        "payload": "z12",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        transaction = result["results"][0]
+        self.assertEqual(transaction["response"]["body"], "xyz12")
+        self.assertIn("HTTP_RESPONSE", transaction["events_fired"])
+        self.assertIn("HTTP_RESPONSE_DATA", transaction["events_fired"])
+        self.assertIn("HTTP_RESPONSE_RELEASE", transaction["events_fired"])
+        self.assertTrue(
+            any("response-head=" in entry for entry in transaction["logs"])
+        )
+        self.assertTrue(
+            any("response-data=xyz12" in entry for entry in transaction["logs"])
+        )
+        self.assertEqual(result["trace"][1]["http_stage"]["phase"], "HTTP_RESPONSE")
+        self.assertEqual(result["trace"][2]["staged_response_body_received"], 5)
+
+    def test_raw_http_staging_survives_persistent_trace_calls(self) -> None:
+        crlf = "\r\n"
+        manager = self.adapter.SessionManager(Path(self.tcl_lsp_root), idle_timeout=60)
+        session_id = manager.create(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    log local0. "request=[HTTP::path]"
+    HTTP::collect 6
+}
+when HTTP_REQUEST_DATA {
+    log local0. "request-data=[HTTP::payload]"
+    HTTP::release
+}
+when HTTP_RESPONSE {
+    log local0. "response=[HTTP::status]"
+    HTTP::collect 5
+}
+when HTTP_RESPONSE_DATA {
+    log local0. "response-data=[HTTP::payload]"
+    HTTP::release
+}
+""",
+            }
+        )
+        source = {"address": "10.0.0.1", "port": 50004}
+        destination = {"address": "192.0.2.10", "port": 80}
+        try:
+            first = manager.execute(
+                session_id,
+                lambda session: session.run_packet_trace(
+                    [
+                        {
+                            "protocol": "tcp",
+                            "direction": "client_to_server",
+                            "source": source,
+                            "destination": destination,
+                            "payload": (
+                                "POST /persistent HTTP/1.1"
+                                + crlf
+                                + "Host: app.example"
+                                + crlf
+                                + "Content-Length: 6"
+                                + crlf
+                                + crlf
+                                + "abc"
+                            ),
+                        }
+                    ]
+                ),
+            )
+            second = manager.execute(
+                session_id,
+                lambda session: session.run_packet_trace(
+                    [
+                        {
+                            "protocol": "tcp",
+                            "direction": "client_to_server",
+                            "source": source,
+                            "destination": destination,
+                            "payload": "def",
+                        },
+                        {
+                            "protocol": "tcp",
+                            "direction": "server_to_client",
+                            "source": destination,
+                            "destination": source,
+                            "payload": (
+                                "HTTP/1.1 200 OK"
+                                + crlf
+                                + "Content-Length: 5"
+                                + crlf
+                                + crlf
+                                + "xy"
+                            ),
+                        },
+                        {
+                            "protocol": "tcp",
+                            "direction": "server_to_client",
+                            "source": destination,
+                            "destination": source,
+                            "payload": "z12",
+                        },
+                    ]
+                ),
+            )
+            metadata = manager.metadata(session_id)
+        finally:
+            manager.close(session_id)
+
+        self.assertEqual(first["results"], [])
+        self.assertEqual(len(second["results"]), 1)
+        transaction = second["results"][0]
+        self.assertEqual(transaction["request"]["body"], "abcdef")
+        self.assertEqual(transaction["response"]["body"], "xyz12")
+        self.assertIn("HTTP_REQUEST_DATA", transaction["events_fired"])
+        self.assertIn("HTTP_RESPONSE_DATA", transaction["events_fired"])
+        self.assertTrue(any("request-data=abcdef" in entry for entry in transaction["logs"]))
+        self.assertTrue(any("response-data=xyz12" in entry for entry in transaction["logs"]))
+        self.assertEqual(metadata["request_count"], 1)
+
     def test_packet_flow_count_is_bounded_before_child_sessions_start(self) -> None:
         packets = [
             {

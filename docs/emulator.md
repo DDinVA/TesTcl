@@ -3042,6 +3042,17 @@ frame fires `HTTP_RESPONSE_CONTINUE` without completing the pending request,
 so a later final response supplies the transaction result. Other non-final
 1xx frames remain interim in the packet trace.
 
+When raw HTTP/1.x packets carry an explicit decimal `Content-Length`, the
+adapter can stage the request and response lifecycles at wire boundaries. A
+header packet runs `HTTP_REQUEST`; subsequent body bytes are held until the
+declared length is available, then `HTTP_REQUEST_DATA` and
+`HTTP_REQUEST_RELEASE` run according to the rule's collection calls. The same
+behavior applies to `HTTP_RESPONSE`, `HTTP_RESPONSE_DATA`, and
+`HTTP_RESPONSE_RELEASE`. Staged state survives persistent session trace calls,
+so a TCP segment split is not treated as a new transaction. Chunked transfer
+encoding and other response bodies without a usable `Content-Length` continue
+through the complete-message decoder and are not staged by this path.
+
 WebSocket packets use `protocol: "websocket"`. Upgrade requests require
 `type: "request"`, `direction: "client_to_server"`, and `headers`; upgrade
 responses use `type: "response"`, `direction: "server_to_client"`, and
