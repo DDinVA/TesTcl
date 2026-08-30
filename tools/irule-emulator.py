@@ -10026,6 +10026,8 @@ PACKET_EVENT_ADAPTERS = {
     "ACCESS_POLICY_COMPLETED": "ACCESS policy completion after HTTP request",
     "ACCESS_ACL_ALLOWED": "ACCESS allow decision after load-balancer selection",
     "ACCESS_ACL_DENIED": "ACCESS deny decision after load-balancer selection",
+    "ACCESS_SAML_AUTHN": "ACCESS SAML authentication fixture after policy",
+    "ACCESS_SAML_ASSERTION": "ACCESS SAML assertion fixture after policy",
     "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",
     "BOTDEFENSE_ACTION": "Bot Defense action from HTTP request",
     "ANTIFRAUD_LOGIN": "Anti-Fraud login inspection from HTTP request",
