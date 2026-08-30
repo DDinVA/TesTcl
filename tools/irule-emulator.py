@@ -3270,6 +3270,14 @@ def _configure_asm(session: Any, asm: dict[str, Any]) -> None:
     session.eval_tcl("::itest::semantic::asm_prepare_request 0 \"\"")
 
 
+def _configure_avr(session: Any, avr: dict[str, bool]) -> None:
+    """Install the deterministic AVR CSPM injection event fixture."""
+    session.eval_tcl(
+        "::itest::semantic::avr_configure "
+        f"{_tcl_quote('1' if avr['cspm_injection'] else '0')}"
+    )
+
+
 def _configure_adapt(session: Any, adapt: dict[str, str]) -> None:
     """Install deterministic request/response adaptation IVS results."""
     for side in ("request", "response"):
@@ -5323,6 +5331,16 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         name: value
         for name, value in zip(cache_parts[::2], cache_parts[1::2])
     }
+    avr_parts = _split_tcl_list(session.eval_tcl("::itest::semantic::avr_snapshot"))
+    if len(avr_parts) != 6 or avr_parts[::2] != [
+        "enabled",
+        "cspm_injection_enabled",
+        "log_requested",
+    ]:
+        raise EmulatorInputError("invalid AVR state")
+    avr_values = dict(zip(avr_parts[::2], avr_parts[1::2]))
+    if any(avr_values[field] not in {"0", "1"} for field in avr_values):
+        raise EmulatorInputError("invalid AVR boolean state")
     profile_settings: dict[str, dict[str, str]] = {}
     for raw_setting in _split_tcl_list(
         session.eval_tcl("::itest::semantic::profile_settings_snapshot")
@@ -5935,6 +5953,11 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         },
         "cache": cache,
         "profile_settings": profile_settings,
+        "avr": {
+            "enabled": avr_values["enabled"] == "1",
+            "cspm_injection_enabled": avr_values["cspm_injection_enabled"] == "1",
+            "log_requested": avr_values["log_requested"] == "1",
+        },
         "asm": {
             "enabled": asm_values["enabled"] == "1",
             "policy": asm_values["policy"],
@@ -7416,6 +7439,21 @@ def _normalise_adapt(raw: Any) -> dict[str, str]:
             )
         results[side] = canonical
     return results
+
+
+def _normalise_avr(raw: Any) -> dict[str, bool]:
+    """Normalize the optional AVR CSPM injection lifecycle fixture."""
+    if raw is None:
+        return {"cspm_injection": False}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("avr must be an object")
+    unknown = sorted(set(raw) - {"cspm_injection"})
+    if unknown:
+        raise EmulatorInputError("avr unsupported field(s): " + ", ".join(unknown))
+    enabled = raw.get("cspm_injection", False)
+    if not isinstance(enabled, bool):
+        raise EmulatorInputError("avr.cspm_injection must be a boolean")
+    return {"cspm_injection": enabled}
 
 
 def _normalise_dosl7(raw: Any) -> dict[str, Any]:
@@ -9322,6 +9360,7 @@ def _normalise_scenario_config(
     dict[str, str],
     dict[str, Any],
     dict[str, Any],
+    dict[str, bool],
     dict[str, str],
     dict[str, bool],
     dict[str, Any],
@@ -9354,6 +9393,7 @@ def _normalise_scenario_config(
         "datagroups",
         "profile_settings",
         "adapt",
+        "avr",
         "dosl7",
         "asm",
         "botdefense",
@@ -9427,6 +9467,7 @@ def _normalise_scenario_config(
         _normalise_datagroups(scenario.get("datagroups")),
         _normalise_profile_settings(scenario.get("profile_settings")),
         _normalise_adapt(scenario.get("adapt")),
+        _normalise_avr(scenario.get("avr")),
         _normalise_dosl7(scenario.get("dosl7")),
         _normalise_asm(scenario.get("asm")),
         _normalise_botdefense(scenario.get("botdefense")),
@@ -10332,6 +10373,7 @@ PACKET_EVENT_ADAPTERS = {
     "ACCESS_SAML_SLO_RESP": "ACCESS SAML logout response fixture after policy",
     "ACCESS2_POLICY_EXPRESSION_EVAL": "ACCESS2 policy-expression procedure fixture after policy",
     "EPI_NA_CHECK_HTTP_REQUEST": "Endpoint Inspector special status request",
+    "AVR_CSPM_INJECTION": "AVR CSPM response injection opportunity",
     "PING_REQUEST_READY": "PingAccess policy request ready before release",
     "PING_RESPONSE_READY": "PingAccess policy response ready for mutation",
     "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",
@@ -16748,6 +16790,7 @@ class EmulatorSession:
             datagroups,
             profile_settings,
             adapt,
+            avr,
             dosl7,
             asm,
             botdefense,
@@ -16786,6 +16829,7 @@ class EmulatorSession:
         self._datagroups = datagroups
         self._profile_settings = profile_settings
         self._adapt = adapt
+        self._avr = avr
         self._dosl7 = dosl7
         self._asm = asm
         self._botdefense = botdefense
@@ -17003,6 +17047,7 @@ class EmulatorSession:
                     )
                 )
                 _configure_asm(session, self._asm)
+                _configure_avr(session, self._avr)
                 _configure_botdefense(session, self._botdefense)
                 _configure_antifraud(session, self._antifraud)
                 _configure_auth(session, self._auth)
@@ -17238,6 +17283,7 @@ class EmulatorSession:
         # not one pair per retry attempt.  Reset them outside the retry loop so
         # an origin retry cannot manufacture a second policy-server exchange.
         session.eval_tcl("::itest::semantic::ping_prepare_request")
+        session.eval_tcl("::itest::semantic::avr_prepare_request")
 
         result: dict[str, Any]
         try:

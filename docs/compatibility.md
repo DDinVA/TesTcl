@@ -633,6 +633,11 @@ events once per modeled HTTP transaction. They are deterministic HTTP
 mutation points after the corresponding base request/response handler; no
 PingAccess policy-server connection is opened, and the fixture flags default
 to disabled and reset for each request.
+The optional `avr.cspm_injection` fixture similarly exposes
+[`AVR_CSPM_INJECTION`](https://clouddocs.f5.com/api/irules/AVR_CSPM_INJECTION.html)
+once after `HTTP_RESPONSE` when an AVR profile is attached. It provides the
+response mutation point and records `AVR::disable_cspm_injection`, but does not
+generate CSPM JavaScript or emulate AVR analytics.
 The global `call` command is modeled for top-level iRule `proc` declarations,
 including optional `-debug`, list-safe argument dispatch, and propagation of
 Tcl procedure return/error codes. It does not evaluate arbitrary top-level

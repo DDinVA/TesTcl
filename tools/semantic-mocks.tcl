@@ -302,6 +302,9 @@ namespace eval ::itest::semantic {
     variable dosl7_greylist
     set dosl7_greylist [dict create]
 
+    variable avr_cspm_injection_fixture 0
+    variable avr_cspm_injection_fired 0
+
     # PingAccess policy-server lifecycle fixtures.  The emulator does not
     # open a policy-server connection; these flags expose the two documented
     # HTTP mutation points once per modeled request transaction.
@@ -8174,9 +8177,49 @@ namespace eval ::itest::semantic {
     }
 
     proc avr_reset_connection {} {
+        variable avr_cspm_injection_fired
         set ::state::avr::enabled 1
         set ::state::avr::cspm_injection_enabled 1
         set ::state::avr::log_requested 0
+        set avr_cspm_injection_fired 0
+    }
+
+    proc avr_configure {cspm_injection} {
+        variable avr_cspm_injection_fixture
+        if {$cspm_injection ni {0 1}} {
+            error "AVR CSPM injection fixture must be boolean"
+        }
+        set avr_cspm_injection_fixture $cspm_injection
+        avr_prepare_request
+    }
+
+    proc avr_prepare_request {} {
+        variable avr_cspm_injection_fired
+        set ::state::avr::cspm_injection_enabled 1
+        set avr_cspm_injection_fired 0
+    }
+
+    proc avr_auto_cspm_event {} {
+        variable avr_cspm_injection_fixture
+        variable avr_cspm_injection_fired
+        if {![_profile_enabled AVR] || !$avr_cspm_injection_fixture ||
+            !$::state::avr::enabled || !$::state::avr::cspm_injection_enabled ||
+            $avr_cspm_injection_fired} {
+            return ""
+        }
+        set avr_cspm_injection_fired 1
+        if {[lsearch -exact [::itest::registered_events] AVR_CSPM_INJECTION] >= 0} {
+            set event_result [::itest::_testcl_fire_event_orig AVR_CSPM_INJECTION]
+            ::itest::semantic::event_errors_record AVR_CSPM_INJECTION $event_result
+        }
+        return AVR_CSPM_INJECTION
+    }
+
+    proc avr_snapshot {} {
+        return [list \
+            enabled $::state::avr::enabled \
+            cspm_injection_enabled $::state::avr::cspm_injection_enabled \
+            log_requested $::state::avr::log_requested]
     }
 
     proc avr_no_args {command_name args} {
@@ -25783,6 +25826,7 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_header] ne ""} {
             HTTP_RESPONSE_CONTINUE HTTP_PROXY_RESPONSE
             ADAPT_RESPONSE_HEADERS ADAPT_RESPONSE_RESULT
             ASM_RESPONSE_LOGIN ASM_RESPONSE_VIOLATION PING_RESPONSE_READY
+            AVR_CSPM_INJECTION
         }} {
             set previous_event $::itest::current_event
             set ::itest::current_event HTTP_RESPONSE
@@ -25910,6 +25954,11 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                 }
                 if {[::itest::semantic::_profile_enabled ASM] &&
                     [lsearch -exact $events ASM_RESPONSE_LOGIN] >= 0 &&
+                    [lsearch -exact $events HTTP_RESPONSE] < 0} {
+                    lappend events HTTP_RESPONSE
+                }
+                if {[::itest::semantic::_profile_enabled AVR] &&
+                    [lsearch -exact $events AVR_CSPM_INJECTION] >= 0 &&
                     [lsearch -exact $events HTTP_RESPONSE] < 0} {
                     lappend events HTTP_RESPONSE
                 }
@@ -26148,6 +26197,11 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
         } elseif {$gated && $event_name eq "LB_SELECTED"} {
             ::itest::semantic::access_auto_acl
         } elseif {$gated && $event_name eq "HTTP_RESPONSE"} {
+            # AVR CSPM injection is a response payload hook immediately after
+            # the ordinary HTTP_RESPONSE handler.  The fixture controls only
+            # whether the modeled injection opportunity exists; no JavaScript
+            # is generated or inserted by the emulator.
+            ::itest::semantic::avr_auto_cspm_event
             # Response adaptation observes the origin response before the
             # remaining clientside response processing.
             ::itest::semantic::adapt_auto_event response

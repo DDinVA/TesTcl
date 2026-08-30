@@ -1565,6 +1565,24 @@ switches, `AVR::log` as a recorded statistics request, and
 `AVR::disable_cspm_injection` during `AVR_CSPM_INJECTION` or `HTTP_RESPONSE`.
 The `avr` state layer exposes `enabled`, `cspm_injection_enabled`, and
 `log_requested`; it does not generate AVR analytics or JavaScript payloads.
+Set the optional top-level `avr.cspm_injection` fixture to `true` to emit
+`AVR_CSPM_INJECTION` once after the modeled `HTTP_RESPONSE` handler. The event
+is a response mutation point; `AVR::disable_cspm_injection` records the
+iRule-visible opt-out, but the emulator does not synthesize or insert CSPM
+JavaScript:
+
+```json
+{
+  "profiles": ["TCP", "HTTP", "AVR"],
+  "avr": {"cspm_injection": true},
+  "irule": "when AVR_CSPM_INJECTION { AVR::disable_cspm_injection }",
+  "request": {"uri": "/analytics", "response_body": "origin-body"}
+}
+```
+
+The fixture defaults to `false` and resets for each request transaction. See
+the F5 [`AVR_CSPM_INJECTION`](https://clouddocs.f5.com/api/irules/AVR_CSPM_INJECTION.html)
+reference for the production event description.
 
 ### BWC flow controls
 

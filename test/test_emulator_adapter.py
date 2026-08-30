@@ -2173,6 +2173,70 @@ when AVR_CSPM_INJECTION {
         finally:
             session.close()
 
+    def test_avr_cspm_injection_fixture_emits_response_hook(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "AVR"],
+                "avr": {"cspm_injection": True},
+                "irule": (
+                    "when HTTP_RESPONSE { log local0. origin-response }\n"
+                    "when AVR_CSPM_INJECTION { "
+                    "HTTP::header insert X-CSPM-Disabled yes; "
+                    "AVR::disable_cspm_injection; "
+                    "log local0. \"cspm=[HTTP::header X-CSPM-Disabled]\" }"
+                ),
+                "request": {
+                    "uri": "/analytics",
+                    "response_body": "origin-body",
+                    "response_headers": {"X-Origin": "yes"},
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        self.assertEqual(
+            item["events_fired"],
+            ["HTTP_RESPONSE", "AVR_CSPM_INJECTION"],
+        )
+        self.assertEqual(item["response"]["headers"]["x-cspm-disabled"], "yes")
+        self.assertEqual(item["response"]["body"], "origin-body")
+        self.assertEqual(item["semantic"]["avr"]["cspm_injection_enabled"], False)
+        self.assertTrue(any("cspm=yes" in log for log in item["logs"]))
+
+    def test_avr_cspm_injection_fixture_defaults_to_disabled(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "AVR"],
+                "irule": "when AVR_CSPM_INJECTION { log local0. should-not-run }",
+                "request": {"uri": "/analytics"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        self.assertNotIn("AVR_CSPM_INJECTION", item["events_fired"])
+        self.assertFalse(any("should-not-run" in log for log in item["logs"]))
+
+    def test_avr_cspm_injection_fixture_validation_rejects_non_boolean_values(self) -> None:
+        for invalid_avr in (
+            True,
+            {"cspm_injection": 1},
+            {"cspm_injection": "true"},
+            {"unexpected": True},
+        ):
+            with self.subTest(invalid_avr=invalid_avr):
+                with self.assertRaises(self.adapter.EmulatorInputError):
+                    self.adapter.run_scenario(
+                        {
+                            "profiles": ["TCP", "HTTP", "AVR"],
+                            "avr": invalid_avr,
+                            "irule": "when HTTP_RESPONSE { log local0. ok }",
+                            "request": {"uri": "/analytics"},
+                        },
+                        tcl_lsp_root=self.tcl_lsp_root,
+                    )
+
     def test_fix_tag_message_lookup_and_persistent_sender_mapping(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -3149,6 +3213,10 @@ when HTTP_REQUEST {
             coverage["event_lifecycle"]["target_unmapped_events"],
         )
         self.assertNotIn(
+            "AVR_CSPM_INJECTION",
+            coverage["event_lifecycle"]["target_unmapped_events"],
+        )
+        self.assertNotIn(
             "PING_REQUEST_READY",
             coverage["event_lifecycle"]["target_unmapped_events"],
         )
@@ -3193,6 +3261,7 @@ when HTTP_REQUEST {
                 "ACCESS_SAML_SLO_RESP",
                 "ACCESS2_POLICY_EXPRESSION_EVAL",
                 "EPI_NA_CHECK_HTTP_REQUEST",
+                "AVR_CSPM_INJECTION",
                 "PING_REQUEST_READY",
                 "PING_RESPONSE_READY",
                 "BOTDEFENSE_REQUEST",
@@ -3222,6 +3291,7 @@ when HTTP_REQUEST {
                 "ACCESS_SAML_SLO_RESP": "ACCESS SAML logout response fixture after policy",
                 "ACCESS2_POLICY_EXPRESSION_EVAL": "ACCESS2 policy-expression procedure fixture after policy",
                 "EPI_NA_CHECK_HTTP_REQUEST": "Endpoint Inspector special status request",
+                "AVR_CSPM_INJECTION": "AVR CSPM response injection opportunity",
                 "PING_REQUEST_READY": "PingAccess policy request ready before release",
                 "PING_RESPONSE_READY": "PingAccess policy response ready for mutation",
                 "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",
