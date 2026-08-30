@@ -2888,6 +2888,112 @@ namespace eval ::itest::semantic {
         set rewrite_payload_replaced 0
     }
 
+    # ── deterministic upstream backend fixtures ─────────────────────
+    #
+    # The Python adapter owns fixture matching; this Tcl layer applies the
+    # selected member's result at the same point a server-side response would
+    # become available, before HTTP_RESPONSE handlers run.
+
+    proc backend_reset_request {} {
+        variable backend_override_flags
+        namespace eval ::state::http::backend {}
+        set backend_override_flags [list 0 0 0]
+        set ::state::http::backend::active 0
+        set ::state::http::backend::member ""
+        set ::state::http::backend::state ""
+        set ::state::http::backend::matched 0
+        set ::state::http::backend::match_index -1
+        set ::state::http::backend::status ""
+    }
+
+    proc backend_prepare_request {status_override headers_override body_override} {
+        foreach value [list $status_override $headers_override $body_override] {
+            if {$value ni {0 1}} {
+                error "backend response override flags must be 0 or 1"
+            }
+        }
+        variable backend_override_flags
+        set backend_override_flags [list $status_override $headers_override $body_override]
+        set ::state::http::backend::active 0
+        set ::state::http::backend::member ""
+        set ::state::http::backend::state ""
+        set ::state::http::backend::matched 0
+        set ::state::http::backend::match_index -1
+        set ::state::http::backend::status ""
+    }
+
+    proc backend_snapshot {} {
+        return [list \
+            active $::state::http::backend::active \
+            member $::state::http::backend::member \
+            state $::state::http::backend::state \
+            matched $::state::http::backend::matched \
+            match_index $::state::http::backend::match_index \
+            status $::state::http::backend::status]
+    }
+
+    proc backend_flow_hook {} {
+        variable backend_override_flags
+        if {[::tmm::_orig_info commands ::itest::semantic::py_backend_lookup] eq ""} {
+            return
+        }
+        set raw [::itest::semantic::py_backend_lookup \
+            $::state::lb::pool \
+            $::state::lb::pool_member \
+            $::state::http::request::method \
+            $::state::http::request::uri \
+            $::state::http::request::host \
+            $backend_override_flags]
+        if {$raw eq ""} {
+            return
+        }
+        set values [dict create {*}$raw]
+        foreach field {member state matched match_index} {
+            if {[dict exists $values $field]} {
+                set ::state::http::backend::$field [dict get $values $field]
+            }
+        }
+        set ::state::http::backend::active 1
+        if {[dict exists $values status] &&
+            [lindex $backend_override_flags 0] eq "0"} {
+            set ::state::http::response::status [dict get $values status]
+            set ::state::http::backend::status [dict get $values status]
+        }
+        if {[dict exists $values headers] &&
+            [lindex $backend_override_flags 1] eq "0"} {
+            set ::state::http::response::headers {}
+            foreach {name value} [dict get $values headers] {
+                ::state::http::response::header set $name $value
+            }
+        }
+        if {[dict exists $values body] &&
+            [lindex $backend_override_flags 2] eq "0"} {
+            set ::state::http::response::payload [dict get $values body]
+            set ::state::http::response::payload_length \
+                [string bytelength [dict get $values body]]
+        }
+        if {$::state::http::backend::matched eq "1"} {
+            set ::state::http::backend::status $::state::http::response::status
+        }
+    }
+
+    proc backend_install_flow_hook {} {
+        if {[::tmm::_orig_info commands ::itest::semantic::py_backend_lookup] eq ""} {
+            return
+        }
+        set handlers {}
+        if {[info exists ::itest::event_handlers(LB_SELECTED)]} {
+            set handlers $::itest::event_handlers(LB_SELECTED)
+        }
+        foreach handler $handlers {
+            if {[lindex $handler 1] eq "::itest::semantic::backend_flow_hook"} {
+                return
+            }
+        }
+        lappend handlers [list 100001 ::itest::semantic::backend_flow_hook]
+        set ::itest::event_handlers(LB_SELECTED) $handlers
+    }
+
     proc rewrite_prepare_request {} {
         variable rewrite_post_process
         variable rewrite_payload_side

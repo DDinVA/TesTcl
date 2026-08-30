@@ -235,6 +235,11 @@ DEFAULT_PROFILES = ["TCP", "HTTP"]
 LB_FAILURE_CAUSES = frozenset(
     {"no_member", "unreachable", "queue_limit", "connection_timeout"}
 )
+BACKEND_MEMBER_STATES = frozenset({"up", "down", "disabled"})
+BACKEND_MAX_MEMBERS = 1024
+BACKEND_MAX_RESPONSES_PER_MEMBER = 64
+BACKEND_MAX_RESPONSE_BODY_BYTES = 2 * 1024 * 1024
+BACKEND_MAX_TOTAL_FIXTURE_BYTES = 64 * 1024 * 1024
 HTTP_CLASS_RESULTS = frozenset({"selected", "failed"})
 LB_QUEUE_MAX_VALUE = 2**31 - 1
 HTTP_REASON_PHRASES = {
@@ -4844,6 +4849,38 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         name: value
         for name, value in zip(lb_event_parts[::2], lb_event_parts[1::2])
     }
+    backend_parts = _split_tcl_list(
+        session.eval_tcl("::itest::semantic::backend_snapshot")
+    )
+    backend_names = {
+        "active",
+        "member",
+        "state",
+        "matched",
+        "match_index",
+        "status",
+    }
+    if len(backend_parts) != 12 or set(backend_parts[::2]) != backend_names:
+        raise EmulatorInputError("invalid backend fixture state")
+    backend_values = dict(zip(backend_parts[::2], backend_parts[1::2]))
+    if backend_values["active"] not in {"0", "1"} or backend_values["matched"] not in {"0", "1"}:
+        raise EmulatorInputError("invalid backend fixture boolean state")
+    try:
+        backend_match_index = int(backend_values["match_index"])
+    except (TypeError, ValueError):
+        raise EmulatorInputError("invalid backend fixture match index") from None
+    if backend_match_index < -1:
+        raise EmulatorInputError("invalid backend fixture match index")
+    if backend_values["status"] != "" and not backend_values["status"].isdigit():
+        raise EmulatorInputError("invalid backend fixture response status")
+    backend = {
+        "active": backend_values["active"] == "1",
+        "member": backend_values["member"],
+        "state": backend_values["state"],
+        "matched": backend_values["matched"] == "1",
+        "match_index": backend_match_index,
+        "status": int(backend_values["status"]) if backend_values["status"] else None,
+    }
     table_entries: list[dict[str, str]] = []
     for raw_entry in _split_tcl_list(session.eval_tcl("::itest::semantic::table_snapshot")):
         parts = _split_tcl_list(raw_entry)
@@ -5662,6 +5699,7 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
         "lb_status": lb_status,
         "lb": lb_control,
         "lb_events": lb_events,
+        "backend": backend,
         "table": table_entries,
         "psm": psm,
         "http_proxy": {
@@ -6061,6 +6099,58 @@ def _install_runtime_shims(session: Any) -> None:
         raise EmulatorInputError(f"missing adapter semantic mock file: {semantic_path}")
     session.eval_tcl(f"::tmm::_orig_source {_tcl_quote(str(semantic_path))}")
     session.eval_tcl("::itest::semantic::install_lb_causal_chain_steps")
+
+
+def _install_python_backend_helper(
+    session: Any, backends: dict[str, dict[str, Any]]
+) -> None:
+    """Expose bounded upstream fixtures to the Tcl flow at LB selection time."""
+    if not backends:
+        return
+    inner = getattr(session, "_session", None)
+    inprocess = getattr(inner, "_inprocess", None)
+    interpreter = getattr(inprocess, "_interp", None)
+    if interpreter is None or not hasattr(interpreter, "createcommand"):
+        raise EmulatorInputError(
+            "backend response fixtures require the in-process Tcl backend"
+        )
+
+    def backend_callback(*args: str) -> str:
+        if len(args) != 6:
+            raise ValueError("backend lookup requires pool, member, method, uri, host, and override flags")
+        pool, member, method, uri, host, override_flags = args
+        override_parts = _split_tcl_list(override_flags)
+        if len(override_parts) != 3 or any(
+            value not in {"0", "1"} for value in override_parts
+        ):
+            raise ValueError("backend response override flags must contain three 0/1 values")
+        status_override, headers_override, body_override = override_parts
+        lookup = _backend_lookup(backends, pool, member, method, uri, host)
+        if lookup is None:
+            return ""
+        values = [
+            "member", lookup["member"],
+            "state", lookup["state"],
+            "matched", "1" if lookup["matched"] else "0",
+            "match_index", str(lookup["match_index"] if lookup["match_index"] is not None else -1),
+        ]
+        selected = lookup["response"]
+        if selected is not None:
+            if "status" in selected and status_override != "1":
+                values.extend(("status", str(selected["status"])))
+            if "headers" in selected and headers_override != "1":
+                flattened_headers = [
+                    item
+                    for name, value in selected["headers"].items()
+                    for item in (name, value)
+                ]
+                values.extend(("headers", _tcl_list_value(flattened_headers)))
+            if "body" in selected and body_override != "1":
+                values.extend(("body", selected["body"]))
+        return _tcl_list_value(values)
+
+    interpreter.createcommand("::itest::semantic::py_backend_lookup", backend_callback)
+    setattr(session, "_testcl_backend_callback", backend_callback)
 
 
 def _install_python_digest_helper(session: Any) -> None:
@@ -6743,6 +6833,205 @@ def _normalise_pools(raw: Any) -> dict[str, list[str]]:
             raise EmulatorInputError(f"pool {name!r} members must be an array of strings")
         pools[name] = members
     return pools
+
+
+def _normalise_backends(raw: Any) -> dict[str, dict[str, Any]]:
+    """Normalize bounded, deterministic upstream fixtures keyed by member."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError(
+            "backends must be an object mapping pool members to fixtures"
+        )
+    if len(raw) > BACKEND_MAX_MEMBERS:
+        raise EmulatorInputError(
+            f"backends cannot contain more than {BACKEND_MAX_MEMBERS} members"
+        )
+
+    def bounded_text(value: Any, field: str, maximum: int = 4096) -> str:
+        text = _require_string(value, field)
+        if "\x00" in text:
+            raise EmulatorInputError(f"{field} must not contain NUL")
+        try:
+            size = len(text.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise EmulatorInputError(f"{field} must be valid UTF-8") from None
+        if size > maximum:
+            raise EmulatorInputError(f"{field} cannot exceed {maximum} UTF-8 bytes")
+        return text
+
+    def response(value: Any, field: str) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise EmulatorInputError(f"{field} must be an object")
+        allowed = {"match", "status", "headers", "body"}
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise EmulatorInputError(
+                f"{field} unsupported field(s): {', '.join(unknown)}"
+            )
+        if not any(name in value for name in ("status", "headers", "body")):
+            raise EmulatorInputError(
+                f"{field} must provide status, headers, or body"
+            )
+
+        result: dict[str, Any] = {}
+        if "match" in value:
+            match = value["match"]
+            if not isinstance(match, dict):
+                raise EmulatorInputError(f"{field}.match must be an object")
+            match_allowed = {"method", "uri", "path", "host", "pool"}
+            unknown_match = sorted(set(match) - match_allowed)
+            if unknown_match:
+                raise EmulatorInputError(
+                    f"{field}.match unsupported field(s): {', '.join(unknown_match)}"
+                )
+            if "uri" in match and "path" in match:
+                raise EmulatorInputError(
+                    f"{field}.match may contain uri or path, not both"
+                )
+            result["match"] = {
+                name: bounded_text(item, f"{field}.match.{name}")
+                for name, item in match.items()
+            }
+            if "method" in result["match"]:
+                result["match"]["method"] = result["match"]["method"].upper()
+        else:
+            result["match"] = {}
+
+        if "status" in value:
+            status = value["status"]
+            if (
+                isinstance(status, bool)
+                or not isinstance(status, int)
+                or not 100 <= status <= 999
+            ):
+                raise EmulatorInputError(
+                    f"{field}.status must be an integer between 100 and 999"
+                )
+            result["status"] = status
+        if "headers" in value:
+            headers = value["headers"]
+            if not isinstance(headers, dict) or not all(
+                isinstance(name, str) and isinstance(item, str)
+                for name, item in headers.items()
+            ):
+                raise EmulatorInputError(f"{field}.headers must be an object of strings")
+            normalised_headers: dict[str, str] = {}
+            seen_header_names: set[str] = set()
+            for name, item in headers.items():
+                header_name = bounded_text(name, f"{field}.headers name", 256)
+                header_value = bounded_text(item, f"{field}.headers.{header_name}", 8192)
+                if "\r" in header_name or "\n" in header_name:
+                    raise EmulatorInputError(
+                        f"{field}.headers names must not contain newlines"
+                    )
+                if "\r" in header_value or "\n" in header_value:
+                    raise EmulatorInputError(
+                        f"{field}.headers.{header_name} must not contain newlines"
+                    )
+                canonical_name = header_name.lower()
+                if canonical_name in seen_header_names:
+                    raise EmulatorInputError(
+                        f"{field}.headers contains duplicate name {header_name!r}"
+                    )
+                seen_header_names.add(canonical_name)
+                normalised_headers[header_name] = header_value
+            result["headers"] = normalised_headers
+        if "body" in value:
+            body = bounded_text(value["body"], f"{field}.body", BACKEND_MAX_RESPONSE_BODY_BYTES)
+            result["body"] = body
+        return result
+
+    backends: dict[str, dict[str, Any]] = {}
+    total_fixture_bytes = 0
+    for raw_member, definition in raw.items():
+        member = bounded_text(raw_member, "backend member", 512)
+        if not member:
+            raise EmulatorInputError("backend member names must not be empty")
+        if not isinstance(definition, dict):
+            raise EmulatorInputError(f"backends.{member} must be an object")
+        unknown = sorted(set(definition) - {"state", "responses"})
+        if unknown:
+            raise EmulatorInputError(
+                f"backends.{member} unsupported field(s): {', '.join(unknown)}"
+            )
+        state = definition.get("state", "up")
+        if not isinstance(state, str) or state not in BACKEND_MEMBER_STATES:
+            allowed_states = ", ".join(sorted(BACKEND_MEMBER_STATES))
+            raise EmulatorInputError(
+                f"backends.{member}.state must be one of: {allowed_states}"
+            )
+        raw_responses = definition.get("responses", [])
+        if not isinstance(raw_responses, list):
+            raise EmulatorInputError(f"backends.{member}.responses must be an array")
+        if len(raw_responses) > BACKEND_MAX_RESPONSES_PER_MEMBER:
+            raise EmulatorInputError(
+                f"backends.{member}.responses cannot contain more than "
+                f"{BACKEND_MAX_RESPONSES_PER_MEMBER} entries"
+            )
+        responses = [
+            response(item, f"backends.{member}.responses[{index}]")
+            for index, item in enumerate(raw_responses)
+        ]
+        if sum(not item["match"] for item in responses) > 1:
+            raise EmulatorInputError(
+                f"backends.{member}.responses may contain only one default response"
+            )
+        total_fixture_bytes += len(member.encode("utf-8"))
+        for item in responses:
+            total_fixture_bytes += sum(
+                len(str(name).encode("utf-8")) + len(str(value).encode("utf-8"))
+                for name, value in item["match"].items()
+            )
+            total_fixture_bytes += sum(
+                len(str(name).encode("utf-8")) + len(str(value).encode("utf-8"))
+                for name, value in item.get("headers", {}).items()
+            )
+            if "body" in item:
+                total_fixture_bytes += len(item["body"].encode("utf-8"))
+        if total_fixture_bytes > BACKEND_MAX_TOTAL_FIXTURE_BYTES:
+            raise EmulatorInputError(
+                "backends fixture data cannot exceed "
+                f"{BACKEND_MAX_TOTAL_FIXTURE_BYTES} UTF-8 bytes"
+            )
+        backends[member] = {"state": state, "responses": responses}
+    return backends
+
+
+def _backend_lookup(
+    backends: dict[str, dict[str, Any]],
+    pool: str,
+    member: str,
+    method: str,
+    uri: str,
+    host: str,
+) -> dict[str, Any] | None:
+    """Select the first matching response for the chosen upstream member."""
+    fixture = backends.get(member)
+    if fixture is None:
+        return None
+    path = uri.split("?", 1)[0] or "/"
+    values = {
+        "method": method.upper(),
+        "uri": uri,
+        "path": path,
+        "host": host,
+        "pool": pool,
+    }
+    selected: dict[str, Any] | None = None
+    selected_index: int | None = None
+    for index, candidate in enumerate(fixture["responses"]):
+        if all(values[name] == expected for name, expected in candidate["match"].items()):
+            selected = candidate
+            selected_index = index
+            break
+    return {
+        "member": member,
+        "state": fixture["state"],
+        "matched": selected is not None,
+        "match_index": selected_index,
+        "response": selected,
+    }
 
 
 def _normalise_cpu(raw: Any) -> dict[str, str | list[str]]:
@@ -8605,6 +8894,7 @@ def _normalise_scenario_config(
     str,
     list[str],
     dict[str, list[str]],
+    dict[str, dict[str, Any]],
     dict[str, list[dict[str, Any]]],
     list[tuple[str, dict[str, str], str]],
     dict[str, Any],
@@ -8633,6 +8923,7 @@ def _normalise_scenario_config(
         "irule_file",
         "profiles",
         "pools",
+        "backends",
         "resolvers",
         "datagroups",
         "profile_settings",
@@ -8691,6 +8982,7 @@ def _normalise_scenario_config(
         source,
         profiles,
         _normalise_pools(scenario.get("pools")),
+        _normalise_backends(scenario.get("backends")),
         _normalise_resolvers(scenario.get("resolvers")),
         _normalise_datagroups(scenario.get("datagroups")),
         _normalise_profile_settings(scenario.get("profile_settings")),
@@ -14526,6 +14818,14 @@ def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]
     if "response_body" in kwargs:
         args.extend(["-response_payload", _tcl_quote(kwargs["response_body"])])
 
+    session.eval_tcl(
+        "::itest::semantic::backend_prepare_request "
+        + " ".join(
+            _tcl_quote("1" if field in kwargs else "0")
+            for field in ("response_status", "response_headers", "response_body")
+        )
+    )
+
     command = "::orch::{} {}".format(proc_name, " ".join(args))
     body = kwargs.get("body")
     if body is None:
@@ -14775,6 +15075,7 @@ class EmulatorSession:
             source,
             profiles,
             pools,
+            backends,
             resolvers,
             datagroups,
             profile_settings,
@@ -14808,6 +15109,7 @@ class EmulatorSession:
         self._prepared_source, self._event_controls = _prepare_irule_source(root, source)
         self._profiles = profiles
         self._pools = pools
+        self._backends = backends
         self._resolvers = resolvers
         self._datagroups = datagroups
         self._profile_settings = profile_settings
@@ -14923,6 +15225,7 @@ class EmulatorSession:
             )
             with backend_session as session:
                 _install_runtime_shims(session)
+                _install_python_backend_helper(session, self._backends)
                 session.eval_tcl("::itest::semantic::session_reset")
                 session.eval_tcl("::itest::semantic::sharedvar_reset_connection")
                 session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
@@ -14942,6 +15245,8 @@ class EmulatorSession:
                         )
                     )
                 self._registered_events = session.load_irule(self._prepared_source)
+                session.eval_tcl("::itest::semantic::backend_reset_request")
+                session.eval_tcl("::itest::semantic::backend_install_flow_hook")
                 session.eval_tcl("::itest::semantic::lb_reset_connection")
                 session.eval_tcl("::itest::semantic::oneconnect_reset_connection")
                 session.eval_tcl("::itest::semantic::crypto_reset_connection")
@@ -15046,6 +15351,11 @@ class EmulatorSession:
                     session.eval_tcl("::itest::semantic::cache_install_flow_hooks")
                 for name, members in self._pools.items():
                     session.add_pool(name, members)
+                for member, fixture in self._backends.items():
+                    session.eval_tcl(
+                        "::state::lb::set_node_status "
+                        f"{_tcl_quote(member)} {_tcl_quote(fixture['state'])}"
+                    )
                 session.eval_tcl("::itest::semantic::resolver_clear")
                 for name, records in self._resolvers.items():
                     session.eval_tcl(

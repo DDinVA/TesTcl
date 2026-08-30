@@ -16562,6 +16562,103 @@ when HTTP_REQUEST {
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+    def test_backend_fixture_skips_down_member_and_runs_before_http_response(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST { pool api }
+when HTTP_RESPONSE {
+    log local0. "status=[HTTP::status] body=[HTTP::payload] backend=[HTTP::header value X-Backend]"
+}
+""",
+                "pools": {"api": ["10.0.0.1:80", "10.0.0.2:80"]},
+                "backends": {
+                    "10.0.0.1:80": {"state": "down"},
+                    "10.0.0.2:80": {
+                        "state": "up",
+                        "responses": [{
+                            "match": {"path": "/health"},
+                            "status": 200,
+                            "headers": {"X-Backend": "healthy-two"},
+                            "body": "healthy",
+                        }],
+                    },
+                },
+                "requests": [{"uri": "/health"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        result_item = result["results"][0]
+        self.assertEqual(result_item["node"], "10.0.0.2")
+        self.assertEqual(result_item["response"]["status"], 200)
+        self.assertEqual(result_item["response"]["body"], "healthy")
+        self.assertEqual(result_item["response"]["headers"]["x-backend"], "healthy-two")
+        self.assertEqual(result_item["semantic"]["backend"], {
+            "active": True,
+            "member": "10.0.0.2:80",
+            "state": "up",
+            "matched": True,
+            "match_index": 0,
+            "status": 200,
+        })
+        self.assertTrue(any(
+            "status=200 body=healthy backend=healthy-two" in entry
+            for entry in result_item["logs"]
+        ))
+
+    def test_backend_fixture_matches_in_order_and_respects_explicit_response_overrides(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { pool api }",
+                "pools": {"api": ["10.0.0.3:80"]},
+                "backends": {
+                    "10.0.0.3:80": {
+                        "responses": [
+                            {"match": {"path": "/health"}, "status": 204, "body": "first"},
+                            {"status": 418, "body": "default"},
+                        ],
+                    },
+                },
+                "requests": [
+                    {"uri": "/health"},
+                    {"uri": "/other", "response_status": 202},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first, second = result["results"]
+        self.assertEqual(first["response"]["status"], 204)
+        self.assertEqual(first["response"]["body"], "first")
+        self.assertEqual(first["semantic"]["backend"]["match_index"], 0)
+        self.assertEqual(second["response"]["status"], 202)
+        self.assertEqual(second["response"]["body"], "default")
+        self.assertEqual(second["semantic"]["backend"]["match_index"], 1)
+        self.assertEqual(second["semantic"]["backend"]["status"], 202)
+
+    def test_backend_fixture_validation_rejects_ambiguous_or_unsafe_definitions(self) -> None:
+        invalid = (
+            ({"10.0.0.1:80": {"state": "unknown"}}, "state must be one of"),
+            ({"10.0.0.1:80": {"unexpected": True}}, "unsupported field"),
+            ({"10.0.0.1:80": {"responses": [{"body": "a"}, {"body": "b"}]}}, "only one default"),
+            ({"10.0.0.1:80": {"responses": [{"headers": {"X": "bad\nvalue"}}]}}, "must not contain newlines"),
+            ({"10.0.0.1:80": {"responses": [{"headers": {"X": "a", "x": "b"}}]}}, "duplicate name"),
+        )
+        for backends, message in invalid:
+            with self.subTest(backends=backends):
+                with self.assertRaisesRegex(self.adapter.EmulatorInputError, message):
+                    self.adapter.run_scenario(
+                        {
+                            "profiles": ["TCP", "HTTP"],
+                            "irule": "when HTTP_REQUEST { return }",
+                            "pools": {"api": ["10.0.0.1:80"]},
+                            "backends": backends,
+                            "requests": [{"uri": "/"}],
+                        },
+                        tcl_lsp_root=self.tcl_lsp_root,
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

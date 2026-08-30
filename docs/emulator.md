@@ -45,6 +45,44 @@ and any events reported by the upstream framework. It also includes a
 when a recognized command is backed by a generated stub, has no runtime
 handler, or is gated by the attached profiles.
 
+For a stateful data-plane fixture, keep the simple `pools` member-array format
+and add `backends` keyed by the same `address:port` member values. A backend
+can be `up`, `down`, or `disabled`; down and disabled members are excluded from
+pool selection. Its ordered `responses` list matches exact `method`, `uri`,
+`path`, `host`, or `pool` fields, with one optional response lacking `match` as
+the default. The selected response is installed before `HTTP_RESPONSE`, so an
+iRule can inspect or rewrite the fixture just as it would an upstream reply.
+Explicit request `response_status`, `response_headers`, and `response_body`
+fields override only their corresponding fixture fields.
+
+```json
+{
+  "pools": {
+    "api_pool": ["10.0.0.10:80", "10.0.0.11:80"]
+  },
+  "backends": {
+    "10.0.0.10:80": {"state": "down"},
+    "10.0.0.11:80": {
+      "state": "up",
+      "responses": [
+        {
+          "match": {"method": "GET", "path": "/health"},
+          "status": 200,
+          "headers": {"X-Backend": "api-2"},
+          "body": "healthy"
+        },
+        {"status": 503, "body": "no route"}
+      ]
+    }
+  }
+}
+```
+
+Each result exposes the applied fixture under
+`result.semantic.backend` (`active`, selected `member`, health `state`, match
+status/index, and applied status). Fixtures are bounded and deterministic;
+they do not open sockets or perform live health checks.
+
 HTTP requests can model load-balancer causality with bounded per-request inputs.
 `persist_down` supplies the persistence target (`member` is required and `pool`
 is optional); it causes `PERSIST_DOWN` before `LB_SELECTED`. `lb_queue` supplies
