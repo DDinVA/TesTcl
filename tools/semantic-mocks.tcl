@@ -26037,7 +26037,7 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
         }
         if {$gated && $event_name eq "HTTP_REQUEST"} {
             # Endpoint Inspector/Network Access status requests are surfaced
-            # before the ordinary HTTP_REQUEST handler, using the parsed path
+            # after the ordinary HTTP_REQUEST handler, using the parsed path
             # so a query string does not change the internal-event trigger.
             ::itest::semantic::epi_na_auto_event
             # ASM request inspection is a pre-LB lifecycle.  Dispatch it

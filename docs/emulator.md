@@ -1104,7 +1104,7 @@ An automatic HTTP example is:
 
 With the `ACCESS` profile attached, an HTTP request whose path is exactly
 `/my.status.eps`, `/my.status.na`, or `/my.report.na` emits
-`EPI_NA_CHECK_HTTP_REQUEST` before the normal `HTTP_REQUEST` handler. Query
+`EPI_NA_CHECK_HTTP_REQUEST` after the normal `HTTP_REQUEST` handler. Query
 strings do not change the path match. This models the internal event trigger
 documented by F5; it does not implement Endpoint Inspector or Network Access
 status processing.

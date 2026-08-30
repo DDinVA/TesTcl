@@ -13261,6 +13261,10 @@ when ACCESS2_POLICY_EXPRESSION_EVAL {
             ],
             [1, 0, 1, 1],
         )
+        self.assertEqual(
+            result["results"][0]["events_fired"],
+            ["HTTP_REQUEST", "EPI_NA_CHECK_HTTP_REQUEST"],
+        )
         self.assertTrue(any("epi=/my.status.eps" in log for log in result["results"][0]["logs"]))
         self.assertTrue(any("request=/normal" in log for log in result["results"][1]["logs"]))
 
