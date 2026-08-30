@@ -2133,7 +2133,7 @@ curl -X POST -H 'Content-Type: application/json' \
 
 The service exposes `GET /healthz`, `GET /v1/capabilities`,
 `GET /v1/probes`, `GET /v1/conformance`, `POST /v1/simulations`,
-`POST /v1/command-probes`, `POST /v1/behavior-packs`, and
+`POST /v1/analyze`, `POST /v1/command-probes`, `POST /v1/behavior-packs`, and
 `POST /v1/simulations/pcap`. It also supports persistent sessions through
 `POST /v1/sessions`, `GET /v1/sessions/{session_id}`,
 `POST /v1/sessions/{session_id}/requests`,
@@ -2219,6 +2219,30 @@ minutes of inactivity and the default service permits 32 concurrent sessions.
 The service has no authentication layer; keep the default loopback binding or
 put an authenticated proxy in front of any non-local deployment.
 
+### Read-only iRule preflight
+
+`POST /v1/analyze` runs the pinned Tcl-LSP analyser in the `f5-irules` dialect
+and adds TesTcl's static TMOS 17.5 compatibility findings. It never creates a
+Tcl interpreter and never executes the submitted rule. The request accepts an
+inline `irule`, optional attached `profiles`, and optional `include_fidelity`
+(default `true`):
+
+```json
+{
+  "irule": "when HTTP_REQUEST priority 500 { HTTP::header replace X-Test yes }",
+  "profiles": ["TCP", "HTTP"],
+  "include_fidelity": true
+}
+```
+
+The response contains zero-based LSP ranges in `diagnostics`. Entries with
+`source: "tcl-lsp"` are parser/analyser findings; entries with
+`source: "testcl"` and `category: "compatibility"` are TMOS 17.5 target and
+profile checks and may not have a source range. `valid` is false when any
+reported diagnostic has error severity. Source size, line count, line length,
+and diagnostic count are bounded to keep the endpoint suitable for an
+interactive workbench or an AI tool.
+
 The HTTP lifecycle also exposes the modeled ACCESS session, policy-agent,
 per-request-agent, policy-completion, ACL, and session-close events, plus the
 profile-gated Bot Defense and Anti-Fraud request events. These transitions use
@@ -2254,6 +2278,7 @@ After the normal MCP `initialize` and `notifications/initialized` exchange,
 clients can discover these tools with `tools/list`:
 
 - `irule_simulate` runs a bounded one-shot scenario.
+- `irule_analyze` performs read-only Tcl-LSP and TMOS 17.5 compatibility preflight on one inline iRule.
 - `irule_pcap_replay` replays a base64-encoded classic PCAP or pcapng capture through the same
   packet and Tcl event adapters.
 - `irule_capabilities` returns a chunk of the complete 17.5 catalog.

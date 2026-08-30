@@ -19709,6 +19709,103 @@ when HTTP_RESPONSE {
             thread.join(timeout=5)
             server.server_close()
 
+    def test_irule_analysis_reports_tcl_and_tmos_diagnostics(self) -> None:
+        result = self.adapter.run_irule_analysis(
+            {
+                "irule": "when HTTP_REQUEST priority 500 { foo bar }",
+                "profiles": ["TCP", "HTTP"],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(result["profile"], "tmos-17.5")
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["diagnostic_summary"]["errors"], 0)
+        self.assertTrue(
+            any(
+                diagnostic["source"] == "tcl-lsp"
+                and diagnostic["code"] == "W123"
+                for diagnostic in result["diagnostics"]
+            )
+        )
+        compatibility = [
+            diagnostic
+            for diagnostic in result["diagnostics"]
+            if diagnostic["source"] == "testcl"
+        ]
+        self.assertEqual(len(compatibility), 1)
+        self.assertEqual(compatibility[0]["code"], "unknown-command")
+        self.assertIsNone(compatibility[0]["range"])
+
+        incompatible = self.adapter.run_irule_analysis(
+            {"irule": "when JSON_REQUEST priority 500 { return }"},
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertFalse(incompatible["valid"])
+        self.assertTrue(
+            any(
+                diagnostic["code"] == "version-incompatible"
+                and diagnostic["severity"] == "error"
+                for diagnostic in incompatible["diagnostics"]
+            )
+        )
+
+    def test_irule_analysis_enforces_bounded_source_and_fidelity_toggle(self) -> None:
+        result = self.adapter.run_irule_analysis(
+            {
+                "irule": "when HTTP_REQUEST priority 500 { return }",
+                "include_fidelity": False,
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(result["valid"])
+        self.assertNotIn("fidelity", result)
+        self.assertEqual(result["diagnostic_summary"]["total"], 0)
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "each iRule source line"
+        ):
+            self.adapter.run_irule_analysis(
+                {"irule": "x" * (self.adapter.IRULE_ANALYSIS_MAX_LINE_BYTES + 1)},
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "valid Unicode"
+        ):
+            self.adapter.run_irule_analysis(
+                {"irule": "\ud800"},
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_http_api_exposes_irule_analysis(self) -> None:
+        server = self.adapter.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self.adapter._http_handler(Path(self.tcl_lsp_root))
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/analyze",
+                data=json.dumps(
+                    {
+                        "irule": "when HTTP_REQUEST priority 500 { return }",
+                        "profiles": ["TCP", "HTTP"],
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(response.status, 200)
+                payload = json.loads(response.read())
+            self.assertEqual(payload["analysis"], "tcl-lsp-basic")
+            self.assertEqual(payload["profile"], "tmos-17.5")
+            self.assertTrue(payload["valid"])
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_http_api_runs_behavior_pack(self) -> None:
         pack = json.loads(
             (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
@@ -20106,6 +20203,7 @@ when HTTP_RESPONSE {
         self.assertEqual(responses[2]["result"]["protocolVersion"], "2025-06-18")
         tool_names = {tool["name"] for tool in responses[3]["result"]["tools"]}
         self.assertIn("irule_simulate", tool_names)
+        self.assertIn("irule_analyze", tool_names)
         self.assertIn("irule_conformance", tool_names)
         self.assertIn("irule_pcap_replay", tool_names)
         self.assertIn("irule_session_trace", tool_names)
@@ -20212,6 +20310,25 @@ when HTTP_RESPONSE {
             self.assertEqual(
                 command_probe_payload["execution"]["value"], "mcp.example.com"
             )
+
+            analyzed = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 15,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_analyze",
+                        "arguments": {
+                            "irule": "when HTTP_REQUEST priority 500 { return }",
+                            "include_fidelity": False,
+                        },
+                    },
+                }
+            )
+            analyzed_payload = analyzed["result"]["structuredContent"]
+            self.assertEqual(analyzed_payload["analysis"], "tcl-lsp-basic")
+            self.assertTrue(analyzed_payload["valid"])
+            self.assertNotIn("fidelity", analyzed_payload)
 
             behavior_pack = server.handle_message(
                 {

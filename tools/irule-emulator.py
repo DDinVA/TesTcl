@@ -288,6 +288,11 @@ MAX_HTTP_PROXY_CHAIN_RETRIES = 1
 COMMAND_PROBE_MAX_ARGS = 64
 COMMAND_PROBE_MAX_ARG_BYTES = 16 * 1024
 COMMAND_PROBE_MAX_TOTAL_ARG_BYTES = 64 * 1024
+IRULE_ANALYSIS_MAX_SOURCE_BYTES = 512 * 1024
+IRULE_ANALYSIS_MAX_DIAGNOSTICS = 512
+IRULE_ANALYSIS_MAX_LINE_BYTES = 16 * 1024
+IRULE_ANALYSIS_MAX_LINES = 8192
+IRULE_ANALYSIS_MAX_PROFILES = 64
 BEHAVIOR_PACK_MAX_CASES = 256
 BEHAVIOR_PACK_MAX_NAME_BYTES = 256
 BEHAVIOR_PACK_MAX_BYTES = 2 * 1024 * 1024
@@ -3576,6 +3581,181 @@ def _analyze_rule_capabilities(
                 }
             ],
         }
+
+
+def _lsp_diagnostic_to_api_dict(diagnostic: Any) -> dict[str, Any]:
+    """Serialize one Tcl-LSP diagnostic without leaking provider objects."""
+    severity = getattr(diagnostic, "severity", None)
+    severity_name = getattr(severity, "name", None)
+    if not isinstance(severity_name, str) or not severity_name:
+        severity_name = "error"
+    result: dict[str, Any] = {
+        "source": "tcl-lsp",
+        "code": diagnostic.code if diagnostic.code is not None else "",
+        "severity": severity_name.lower(),
+        "message": str(diagnostic.message),
+        "range": {
+            "start": {
+                "line": diagnostic.range.start.line,
+                "character": diagnostic.range.start.character,
+            },
+            "end": {
+                "line": diagnostic.range.end.line,
+                "character": diagnostic.range.end.character,
+            },
+        },
+    }
+    return result
+
+
+def _compatibility_warning_to_api_dict(warning: dict[str, Any]) -> dict[str, Any]:
+    """Expose a static TMOS compatibility warning as a source-less diagnostic."""
+    result: dict[str, Any] = {
+        "source": "testcl",
+        "category": "compatibility",
+        "code": warning.get("code", "compatibility"),
+        "severity": warning.get("severity", "warning"),
+        "message": warning.get("message", "TMOS compatibility warning"),
+        "range": None,
+    }
+    for field in (
+        "command",
+        "event",
+        "target_status",
+        "runtime_status",
+        "required_profiles",
+    ):
+        if field in warning:
+            result[field] = warning[field]
+    return result
+
+
+def run_irule_analysis(
+    request: Any,
+    *,
+    tcl_lsp_root: str | None = None,
+    backend: str = "inprocess",
+) -> dict[str, Any]:
+    """Run bounded Tcl-LSP and TMOS 17.5 compatibility preflight on one rule.
+
+    This operation is intentionally read-only: it parses and analyses source,
+    but never creates a Tcl interpreter or executes the rule.  Tcl-LSP ranges
+    retain the standard zero-based LSP line/character convention.
+    """
+    if backend != "inprocess":
+        raise EmulatorInputError(
+            "the tmos-17.5 analyzer requires the in-process Tcl-LSP backend"
+        )
+    if not isinstance(request, dict):
+        raise EmulatorInputError("iRule analysis request must be a JSON object")
+    allowed = {"irule", "profiles", "include_fidelity"}
+    unknown = sorted(set(request) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            f"unsupported iRule analysis field(s): {', '.join(unknown)}"
+        )
+    source = _require_string(request.get("irule"), "irule")
+    if not source.strip():
+        raise EmulatorInputError("irule must be a non-empty source string")
+    if "\x00" in source:
+        raise EmulatorInputError("irule must not contain NUL characters")
+    try:
+        source_bytes = len(source.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise EmulatorInputError("irule must contain valid Unicode text") from exc
+    if source_bytes > IRULE_ANALYSIS_MAX_SOURCE_BYTES:
+        raise EmulatorInputError(
+            f"irule exceeds the {IRULE_ANALYSIS_MAX_SOURCE_BYTES}-byte analysis limit"
+        )
+    source_lines = source.splitlines() or [source]
+    if source.count("\n") + 1 > IRULE_ANALYSIS_MAX_LINES:
+        raise EmulatorInputError(
+            f"irule exceeds the {IRULE_ANALYSIS_MAX_LINES}-line analysis limit"
+        )
+    try:
+        line_sizes = [len(line.encode("utf-8")) for line in source_lines]
+    except UnicodeEncodeError as exc:
+        raise EmulatorInputError("irule must contain valid Unicode text") from exc
+    if any(size > IRULE_ANALYSIS_MAX_LINE_BYTES for size in line_sizes):
+        raise EmulatorInputError(
+            f"each iRule source line must be at most {IRULE_ANALYSIS_MAX_LINE_BYTES} UTF-8 bytes"
+        )
+
+    profiles = request.get("profiles", DEFAULT_PROFILES)
+    if not isinstance(profiles, list) or not profiles or len(profiles) > IRULE_ANALYSIS_MAX_PROFILES:
+        raise EmulatorInputError(
+            f"profiles must be a non-empty array of at most {IRULE_ANALYSIS_MAX_PROFILES} strings"
+        )
+    if not all(isinstance(profile, str) and profile.strip() for profile in profiles):
+        raise EmulatorInputError("profiles must contain non-empty strings")
+    try:
+        profile_sizes = [len(profile.encode("utf-8")) for profile in profiles]
+    except UnicodeEncodeError as exc:
+        raise EmulatorInputError("profiles must contain valid Unicode text") from exc
+    if any("\x00" in profile or size > 256 for profile, size in zip(profiles, profile_sizes)):
+        raise EmulatorInputError(
+            "profiles must not contain NUL and must be at most 256 UTF-8 bytes each"
+        )
+    include_fidelity = request.get("include_fidelity", True)
+    if not isinstance(include_fidelity, bool):
+        raise EmulatorInputError("include_fidelity must be a boolean")
+
+    root = _find_tcl_lsp_root(tcl_lsp_root)
+    try:
+        _load_session_class(root)
+        from compiler.registry.dialect import dialect_scope
+        from server.features.diagnostics import get_basic_diagnostics
+
+        with dialect_scope("f5-irules"):
+            diagnostics, _, _ = get_basic_diagnostics(
+                source,
+                optimiser_enabled=False,
+                line_ending="\n",
+            )
+    except (ImportError, RuntimeError, TypeError, ValueError) as exc:
+        raise EmulatorInputError(f"could not analyze iRule source: {exc}") from exc
+
+    diagnostics_truncated = len(diagnostics) > IRULE_ANALYSIS_MAX_DIAGNOSTICS
+    api_diagnostics = [
+        _lsp_diagnostic_to_api_dict(diagnostic)
+        for diagnostic in diagnostics[:IRULE_ANALYSIS_MAX_DIAGNOSTICS]
+    ]
+    fidelity: dict[str, Any] | None = None
+    compatibility_diagnostics: list[dict[str, Any]] = []
+    if include_fidelity:
+        fidelity = _analyze_rule_capabilities(root, source, list(profiles))
+        compatibility_diagnostics = [
+            _compatibility_warning_to_api_dict(warning)
+            for warning in fidelity.get("warnings", [])
+            if isinstance(warning, dict)
+        ]
+
+    all_diagnostics = api_diagnostics + compatibility_diagnostics
+    errors = sum(item.get("severity") == "error" for item in all_diagnostics)
+    warnings = sum(item.get("severity") == "warning" for item in all_diagnostics)
+    information = sum(item.get("severity") == "information" for item in all_diagnostics)
+    hints = sum(item.get("severity") == "hint" for item in all_diagnostics)
+    result: dict[str, Any] = {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "analysis": "tcl-lsp-basic",
+        "source_bytes": source_bytes,
+        "valid": errors == 0,
+        "diagnostics": all_diagnostics,
+        "diagnostic_summary": {
+            "total": len(all_diagnostics),
+            "errors": errors,
+            "warnings": warnings,
+            "information": information,
+            "hints": hints,
+            "truncated": diagnostics_truncated,
+        },
+    }
+    if fidelity is not None:
+        result["fidelity"] = fidelity
+    return result
 
 
 def _require_string(value: Any, field: str) -> str:
@@ -25500,6 +25680,28 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_analyze",
+                "title": "Preflight an iRule",
+                "description": "Run bounded read-only Tcl-LSP diagnostics and TMOS 17.5 compatibility checks without executing the rule.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "irule": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": IRULE_ANALYSIS_MAX_SOURCE_BYTES,
+                        },
+                        "profiles": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": IRULE_ANALYSIS_MAX_PROFILES,
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                        "include_fidelity": {"type": "boolean", "default": True},
+                    },
+                    ["irule"],
+                ),
+            },
+            {
                 "name": "irule_pcap_replay",
                 "title": "Replay a PCAP or pcapng capture",
                 "description": "Replay a bounded classic PCAP or pcapng capture through the BIG-IP 17.5 packet and Tcl event adapters.",
@@ -25757,6 +25959,13 @@ class McpProtocolServer:
             if set(args) != {"scenario"}:
                 raise McpProtocolError(-32602, "irule_simulate requires only scenario")
             return self._tool_success(run_scenario(args["scenario"], tcl_lsp_root=str(self._root)))
+
+        if name == "irule_analyze":
+            if "irule" not in args:
+                raise McpProtocolError(-32602, "irule_analyze requires irule")
+            return self._tool_success(
+                run_irule_analysis(args, tcl_lsp_root=str(self._root))
+            )
 
         if name == "irule_pcap_replay":
             unknown = sorted(
@@ -27795,6 +28004,20 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             parsed = urlparse(self.path)
+            if parsed.path == "/v1/analyze":
+                try:
+                    request = self._read_json()
+                    payload = run_irule_analysis(request, tcl_lsp_root=str(root))
+                except (
+                    json.JSONDecodeError,
+                    EmulatorInputError,
+                    EmulatorResourceError,
+                    OSError,
+                ) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
             if parsed.path == "/v1/command-probes":
                 try:
                     request = self._read_json()
