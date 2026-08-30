@@ -638,6 +638,14 @@ The optional `avr.cspm_injection` fixture similarly exposes
 once after `HTTP_RESPONSE` when an AVR profile is attached. It provides the
 response mutation point and records `AVR::disable_cspm_injection`, but does not
 generate CSPM JavaScript or emulate AVR analytics.
+The `XML_CONTENT_BASED_ROUTING` event is available through a synthetic event
+packet with an attached XML profile. Its bounded `xml` state installs the
+documented `XML_count`, `XML_queries(index)`, and `XML_values(index)` globals;
+the count and both list lengths must match. This models the rule-visible
+profile-match callback, not XML parsing, profile expression evaluation, or
+wire-triggered XML event discovery. See the F5
+[`XML_CONTENT_BASED_ROUTING`](https://clouddocs.f5.com/api/irules/XML_CONTENT_BASED_ROUTING.html)
+reference.
 The global `call` command is modeled for top-level iRule `proc` declarations,
 including optional `-debug`, list-safe argument dispatch, and propagation of
 Tcl procedure return/error codes. It does not evaluate arbitrary top-level

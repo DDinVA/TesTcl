@@ -2237,6 +2237,65 @@ when AVR_CSPM_INJECTION {
                         tcl_lsp_root=self.tcl_lsp_root,
                     )
 
+    def test_xml_content_based_routing_exposes_profile_match_arrays(self) -> None:
+        session = self.adapter.EmulatorSession(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP", "XML"],
+                "irule": """
+when XML_CONTENT_BASED_ROUTING {
+    log local0. "count=$XML_count first=$XML_queries(0)=$XML_values(0) second=$XML_queries(1)=$XML_values(1)"
+}
+""",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            result = session.fire_event(
+                "XML_CONTENT_BASED_ROUTING",
+                {
+                    "xml": {
+                        "count": 2,
+                        "queries": ["FinanceObject", "Amount"],
+                        "values": ["Invoice", 42],
+                    }
+                },
+            )
+            self.assertTrue(result["fired"])
+            self.assertEqual(result["state"]["xml"], {
+                "count": "2",
+                "queries": '"FinanceObject" "Amount"',
+                "values": '"Invoice" "42"',
+            })
+            self.assertTrue(any(
+                "count=2 first=FinanceObject=Invoice second=Amount=42" in entry
+                for entry in result["logs"]
+            ))
+        finally:
+            session.close()
+
+    def test_xml_content_based_routing_rejects_mismatched_fixture_lengths(self) -> None:
+        with self.assertRaises(self.adapter.EmulatorInputError):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "XML"],
+                    "irule": "when XML_CONTENT_BASED_ROUTING { log local0. unexpected }",
+                    "packets": [{
+                        "protocol": "event",
+                        "event": "XML_CONTENT_BASED_ROUTING",
+                        "state": {
+                            "xml": {
+                                "count": 2,
+                                "queries": ["only-one"],
+                                "values": ["one", "two"],
+                            }
+                        },
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_fix_tag_message_lookup_and_persistent_sender_mapping(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -3262,6 +3321,7 @@ when HTTP_REQUEST {
                 "ACCESS2_POLICY_EXPRESSION_EVAL",
                 "EPI_NA_CHECK_HTTP_REQUEST",
                 "AVR_CSPM_INJECTION",
+                "XML_CONTENT_BASED_ROUTING",
                 "PING_REQUEST_READY",
                 "PING_RESPONSE_READY",
                 "BOTDEFENSE_REQUEST",
@@ -3292,6 +3352,7 @@ when HTTP_REQUEST {
                 "ACCESS2_POLICY_EXPRESSION_EVAL": "ACCESS2 policy-expression procedure fixture after policy",
                 "EPI_NA_CHECK_HTTP_REQUEST": "Endpoint Inspector special status request",
                 "AVR_CSPM_INJECTION": "AVR CSPM response injection opportunity",
+                "XML_CONTENT_BASED_ROUTING": "synthetic XML profile match event",
                 "PING_REQUEST_READY": "PingAccess policy request ready before release",
                 "PING_RESPONSE_READY": "PingAccess policy response ready for mutation",
                 "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",

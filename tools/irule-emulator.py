@@ -799,6 +799,7 @@ EVENT_STATE_FIELDS = {
     },
     "eca": {"enabled", "selected", "client_machine_name", "domainname", "status", "username"},
     "avr": {"enabled", "cspm_injection_enabled", "log_requested"},
+    "xml": {"count", "queries", "values"},
     "fix": {"tags", "tag_maps"},
     "diameter": {
         "type",
@@ -1231,6 +1232,7 @@ EVENT_STATE_NAMESPACES = {
     "bwc": "::state::bwc",
     "eca": "::state::eca",
     "avr": "::state::avr",
+    "xml": "::state::xml",
     "fix": "::state::fix",
     "diameter": "::state::diameter",
     "radius": "::state::radius",
@@ -2951,7 +2953,13 @@ def _prepare_irule_source(
     # BIG-IP exposes these DOSL7 event values as predefined variables.  The
     # Tcl test loader executes handlers as ordinary global procs, where an
     # unqualified variable name would otherwise be local to the handler.
-    for variable_name in ("DOSL7_ATTACKER_IP", "DOSL7_MITIGATION"):
+    for variable_name in (
+        "DOSL7_ATTACKER_IP",
+        "DOSL7_MITIGATION",
+        "XML_count",
+        "XML_queries",
+        "XML_values",
+    ):
         prepared = re.sub(
             rf"\$\{{{variable_name}\}}",
             f"${{{'::' + variable_name}}}",
@@ -9528,7 +9536,29 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
         for field, value in values.items():
             if field not in EVENT_STATE_FIELDS[layer]:
                 raise EmulatorInputError(f"unsupported {layer} state field: {field}")
-            if layer == "policy" and field in POLICY_LIST_STATE_FIELDS and isinstance(value, list):
+            if layer == "xml" and field in {"queries", "values"}:
+                if isinstance(value, list):
+                    if len(value) > 256 or any(
+                        not isinstance(item, (str, int, float))
+                        or isinstance(item, bool)
+                        or "\x00" in str(item)
+                        for item in value
+                    ):
+                        raise EmulatorInputError(
+                            f"event state xml.{field} must be an array of at most 256 scalar values without NUL"
+                        )
+                    layer_values[field] = _tcl_list_value([str(item) for item in value])
+                elif isinstance(value, str):
+                    if "\x00" in value or len(value.encode("utf-8")) > 16384:
+                        raise EmulatorInputError(
+                            f"event state xml.{field} must be a Tcl list without NUL and at most 16384 UTF-8 bytes"
+                        )
+                    layer_values[field] = value
+                else:
+                    raise EmulatorInputError(
+                        f"event state xml.{field} must be a string or an array of scalar values"
+                    )
+            elif layer == "policy" and field in POLICY_LIST_STATE_FIELDS and isinstance(value, list):
                 if len(value) > 256 or any(
                     not isinstance(item, str) or not item or "\x00" in item
                     for item in value
@@ -10374,6 +10404,7 @@ PACKET_EVENT_ADAPTERS = {
     "ACCESS2_POLICY_EXPRESSION_EVAL": "ACCESS2 policy-expression procedure fixture after policy",
     "EPI_NA_CHECK_HTTP_REQUEST": "Endpoint Inspector special status request",
     "AVR_CSPM_INJECTION": "AVR CSPM response injection opportunity",
+    "XML_CONTENT_BASED_ROUTING": "synthetic XML profile match event",
     "PING_REQUEST_READY": "PingAccess policy request ready before release",
     "PING_RESPONSE_READY": "PingAccess policy response ready for mutation",
     "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",
@@ -17950,6 +17981,8 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::classification_apply_overrides")
         if "dns" in state:
             session.eval_tcl("::itest::semantic::dns_prepare_message")
+        if "xml" in state or event_name == "XML_CONTENT_BASED_ROUTING":
+            session.eval_tcl("::itest::semantic::xml_prepare_event")
         event_errors_before = len(_event_error_snapshot(session))
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
         event_result = session.fire_event(event_name)

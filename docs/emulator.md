@@ -1584,6 +1584,39 @@ The fixture defaults to `false` and resets for each request transaction. See
 the F5 [`AVR_CSPM_INJECTION`](https://clouddocs.f5.com/api/irules/AVR_CSPM_INJECTION.html)
 reference for the production event description.
 
+### XML profile match events
+
+`XML_CONTENT_BASED_ROUTING` is available as a synthetic event packet when the
+`XML` profile is attached. Supply the documented `XML_count`,
+`XML_queries(index)`, and `XML_values(index)` inputs through bounded `xml`
+event state; the emulator installs them as iRule-visible globals before the
+handler runs. Queries and values can be JSON arrays (or Tcl-list strings), and
+their lengths must exactly match `count`:
+
+```json
+{
+  "profiles": ["TCP", "XML"],
+  "irule": "when XML_CONTENT_BASED_ROUTING { log local0. $XML_queries(0)=$XML_values(0) }",
+  "packets": [{
+    "protocol": "event",
+    "event": "XML_CONTENT_BASED_ROUTING",
+    "state": {
+      "xml": {
+        "count": 1,
+        "queries": ["FinanceObject"],
+        "values": ["Invoice"]
+      }
+    }
+  }]
+}
+```
+
+This is a deterministic profile-match injection point for rule testing. It
+does not parse XML wire payloads, evaluate XML profile match expressions, or
+implement the deprecated XML parser event family. See the F5
+[`XML_CONTENT_BASED_ROUTING`](https://clouddocs.f5.com/api/irules/XML_CONTENT_BASED_ROUTING.html)
+reference.
+
 ### BWC flow controls
 
 The BWC overlay models the complete TMOS 17.5 command family as deterministic

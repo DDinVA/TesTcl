@@ -305,6 +305,11 @@ namespace eval ::itest::semantic {
     variable avr_cspm_injection_fixture 0
     variable avr_cspm_injection_fired 0
 
+    # XML profile event variables.  BIG-IP exposes these as global arrays
+    # during XML_CONTENT_BASED_ROUTING; the adapter supplies a bounded,
+    # deterministic profile-match fixture rather than parsing wire XML.
+    variable xml_max_entries 256
+
     # PingAccess policy-server lifecycle fixtures.  The emulator does not
     # open a policy-server connection; these flags expose the two documented
     # HTTP mutation points once per modeled request transaction.
@@ -1380,6 +1385,12 @@ namespace eval ::itest::semantic {
         variable enabled 1
         variable cspm_injection_enabled 1
         variable log_requested 0
+    }
+
+    namespace eval ::state::xml {
+        variable count 0
+        variable queries {}
+        variable values {}
     }
 
     namespace eval ::state::fix {
@@ -8220,6 +8231,45 @@ namespace eval ::itest::semantic {
             enabled $::state::avr::enabled \
             cspm_injection_enabled $::state::avr::cspm_injection_enabled \
             log_requested $::state::avr::log_requested]
+    }
+
+    proc xml_prepare_event {} {
+        variable xml_max_entries
+
+        # XML_count, XML_queries(), and XML_values() are iRule globals.  Clear
+        # all three on every event so values from a prior synthetic match
+        # cannot leak into a later event or connection.
+        unset -nocomplain \
+            ::XML_count ::XML_queries ::XML_values \
+            ::orch::XML_count ::orch::XML_queries ::orch::XML_values
+        array set ::XML_queries {}
+        array set ::XML_values {}
+        array set ::orch::XML_queries {}
+        array set ::orch::XML_values {}
+
+        set count_text $::state::xml::count
+        if {![string is integer -strict $count_text] ||
+            $count_text < 0 || $count_text > $xml_max_entries} {
+            error "XML event count must be an integer from 0 to $xml_max_entries"
+        }
+        if {[catch {llength $::state::xml::queries} query_count]} {
+            error "XML event queries must be a valid Tcl list"
+        }
+        if {[catch {llength $::state::xml::values} value_count]} {
+            error "XML event values must be a valid Tcl list"
+        }
+        if {$query_count != $count_text || $value_count != $count_text} {
+            error "XML event count must match queries and values lengths"
+        }
+
+        set ::XML_count $count_text
+        set ::orch::XML_count $count_text
+        for {set index 0} {$index < $count_text} {incr index} {
+            set ::XML_queries($index) [lindex $::state::xml::queries $index]
+            set ::XML_values($index) [lindex $::state::xml::values $index]
+            set ::orch::XML_queries($index) $::XML_queries($index)
+            set ::orch::XML_values($index) $::XML_values($index)
+        }
     }
 
     proc avr_no_args {command_name args} {
