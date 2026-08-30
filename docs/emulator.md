@@ -1056,9 +1056,12 @@ iRule handler commits a different response with `ACCESS::respond`; policy
 `redirect` produces a deterministic 302. Policy completion is once per
 session, while ACL evaluation is per request, including keep-alive requests.
 Configured `access.saml.authn` and `access.saml.assertion` payloads trigger
-their corresponding events after an allowed policy completes. The
-`slo_req`/`slo_resp` fixture values are available through explicit
-`ACCESS_SAML_SLO_REQ`/`ACCESS_SAML_SLO_RESP` event injection.
+their corresponding events after an allowed policy completes. Configured
+`access.saml.slo_req` and `access.saml.slo_resp` payloads likewise trigger
+`ACCESS_SAML_SLO_REQ` and `ACCESS_SAML_SLO_RESP` after the allowed policy
+completes. All four payloads can be read or updated through `ACCESS::saml`
+inside their corresponding event handlers. The SAML values are fixtures; the
+adapter does not parse, validate, send, or receive SAML messages.
 
 `ACCESS::disable`, `ACCESS::enable`, `ACCESS::respond`, ACL evaluation,
 per-flow mutation, SAML getters/setters, OAuth signing placeholders, and

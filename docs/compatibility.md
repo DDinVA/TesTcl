@@ -604,8 +604,12 @@ authentication or cryptographic signing. The HTTP request runner additionally
 models the 17.5 session-start, policy-completion, per-request ACL outcome, and
 session-close boundaries, with request-level ACL/policy fixture overrides.
 Configured SAML authentication and assertion fixtures drive their corresponding
-HTTP policy events; SLO request/response payloads remain explicit event-injection
-fixtures.
+HTTP policy events. SLO request/response fixtures drive
+`ACCESS_SAML_SLO_REQ`/`ACCESS_SAML_SLO_RESP` after an allowed policy completes;
+the `ACCESS::saml` values remain deterministic payload fixtures rather than a
+real SAML exchange. See the F5 [`ACCESS_SAML_SLO_REQ`](https://clouddocs.f5.com/api/irules/ACCESS_SAML_SLO_REQ.html)
+and [`ACCESS_SAML_SLO_RESP`](https://clouddocs.f5.com/api/irules/ACCESS_SAML_SLO_RESP.html)
+event references.
 This does not execute an APM policy graph, expire sessions against wall-clock
 time, or reproduce SAML/OAuth/AAA network behavior.
 The TMOS 17.5 `ACCESS2::access2_proc` command is also modeled for

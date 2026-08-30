@@ -14750,6 +14750,8 @@ namespace eval ::itest::semantic {
         foreach {field event_name} {
             authn ACCESS_SAML_AUTHN
             assertion ACCESS_SAML_ASSERTION
+            slo_req ACCESS_SAML_SLO_REQ
+            slo_resp ACCESS_SAML_SLO_RESP
         } {
             if {[dict get $access_saml $field] ne "" &&
                 [lsearch -exact [::itest::registered_events] $event_name] >= 0} {

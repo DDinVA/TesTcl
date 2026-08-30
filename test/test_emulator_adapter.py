@@ -3140,6 +3140,14 @@ when HTTP_REQUEST {
             "IN_DOSL7_ATTACK",
             coverage["event_lifecycle"]["target_unmapped_events"],
         )
+        self.assertNotIn(
+            "ACCESS_SAML_SLO_REQ",
+            coverage["event_lifecycle"]["target_unmapped_events"],
+        )
+        self.assertNotIn(
+            "ACCESS_SAML_SLO_RESP",
+            coverage["event_lifecycle"]["target_unmapped_events"],
+        )
         self.assertEqual(report["commands"]["post_target_count"], 10)
         self.assertEqual(
             report["commands"]["target_catalog_count"],
@@ -3165,6 +3173,8 @@ when HTTP_REQUEST {
                 "ACCESS_ACL_DENIED",
                 "ACCESS_SAML_AUTHN",
                 "ACCESS_SAML_ASSERTION",
+                "ACCESS_SAML_SLO_REQ",
+                "ACCESS_SAML_SLO_RESP",
                 "BOTDEFENSE_REQUEST",
                 "BOTDEFENSE_ACTION",
                 "ANTIFRAUD_LOGIN",
@@ -3188,6 +3198,8 @@ when HTTP_REQUEST {
                 "ACCESS_ACL_DENIED": "ACCESS deny decision after load-balancer selection",
                 "ACCESS_SAML_AUTHN": "ACCESS SAML authentication fixture after policy",
                 "ACCESS_SAML_ASSERTION": "ACCESS SAML assertion fixture after policy",
+                "ACCESS_SAML_SLO_REQ": "ACCESS SAML logout request fixture after policy",
+                "ACCESS_SAML_SLO_RESP": "ACCESS SAML logout response fixture after policy",
                 "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",
                 "BOTDEFENSE_ACTION": "Bot Defense action from HTTP request",
                 "ANTIFRAUD_LOGIN": "Anti-Fraud login inspection from HTTP request",
@@ -6878,6 +6890,48 @@ when HTTP_RESPONSE_DATA {
             self.assertTrue(any("resp=<LogoutResponse>fixture</LogoutResponse>" in log for log in response_event["logs"]))
         finally:
             session.close()
+
+    def test_http_access_saml_slo_fixtures_emit_logout_events(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ACCESS"],
+                "access": {
+                    "saml": {
+                        "slo_req": "<LogoutRequest>fixture</LogoutRequest>",
+                        "slo_resp": "<LogoutResponse>fixture</LogoutResponse>",
+                    }
+                },
+                "irule": (
+                    "when ACCESS_SAML_SLO_REQ { "
+                    "set value [ACCESS::saml slo_req]; "
+                    "ACCESS::saml slo_req \"${value}|changed\"; "
+                    "log local0. \"req=[ACCESS::saml slo_req]\" }\n"
+                    "when ACCESS_SAML_SLO_RESP { "
+                    "set value [ACCESS::saml slo_resp]; "
+                    "ACCESS::saml slo_resp \"${value}|changed\"; "
+                    "log local0. \"resp=[ACCESS::saml slo_resp]\" }"
+                ),
+                "request": {"uri": "/logout"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        self.assertEqual(
+            [event for event in item["events_fired"] if event.startswith("ACCESS_SAML_")],
+            ["ACCESS_SAML_SLO_REQ", "ACCESS_SAML_SLO_RESP"],
+        )
+        self.assertTrue(any("req=<LogoutRequest>fixture</LogoutRequest>|changed" in log for log in item["logs"]))
+        self.assertTrue(any("resp=<LogoutResponse>fixture</LogoutResponse>|changed" in log for log in item["logs"]))
+        self.assertEqual(
+            item["semantic"]["access"]["saml"],
+            {
+                "authn": "",
+                "assertion": "",
+                "slo_req": "<LogoutRequest>fixture</LogoutRequest>|changed",
+                "slo_resp": "<LogoutResponse>fixture</LogoutResponse>|changed",
+            },
+        )
 
     def test_http_access_saml_events_repeat_for_a_new_session_on_one_connection(self) -> None:
         result = self.adapter.run_scenario(
