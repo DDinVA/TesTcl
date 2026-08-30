@@ -1779,6 +1779,10 @@ per-request-agent, policy-completion, ACL, and session-close events, plus the
 profile-gated Bot Defense and Anti-Fraud request events. These transitions use
 bounded scenario fixtures and existing deterministic policy state; they are
 not claims of live policy evaluation or production security-service behavior.
+The `AUTH_RESULT`, `AUTH_SUCCESS`, `AUTH_FAILURE`, `AUTH_ERROR`, and
+`AUTH_WANTCREDENTIAL` events are likewise available when a rule drives the
+fixture-backed `AUTH::authenticate` flow; they model the command-driven
+authentication state machine, not a live authentication backend.
 
 ```sh
 SESSION=$(curl -sS -X POST -H 'Content-Type: application/json' \
