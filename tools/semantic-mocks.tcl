@@ -23,6 +23,8 @@ namespace eval ::itest::semantic {
     variable adapt_context_counter 0
     variable adapt_current_handle "static:request"
     variable adapt_current_side request
+    variable adapt_fixture_request noop
+    variable adapt_fixture_response noop
     variable crypto_contexts {}
     variable crypto_cipher_contexts {}
     variable crypto_context_max_bytes 16777216
@@ -15789,6 +15791,90 @@ namespace eval ::itest::semantic {
         set adapt_current_handle static:request
     }
 
+    proc adapt_fixture_set {side result} {
+        if {$side ni {request response}} {
+            error "ADAPT fixture side must be request or response"
+        }
+        if {$result ni {noop modified response error}} {
+            error "ADAPT fixture result must be noop, modified, response, or error"
+        }
+        variable adapt_fixture_request
+        variable adapt_fixture_response
+        if {$side eq "request"} {
+            set adapt_fixture_request $result
+        } else {
+            set adapt_fixture_response $result
+        }
+    }
+
+    proc adapt_fixture_result {side} {
+        if {$side ni {request response}} {
+            error "ADAPT fixture side must be request or response"
+        }
+        variable adapt_fixture_request
+        variable adapt_fixture_response
+        return [expr {$side eq "request" ? $adapt_fixture_request : $adapt_fixture_response}]
+    }
+
+    proc adapt_fixture_apply_current {side} {
+        variable adapt_contexts
+        variable adapt_current_handle
+        if {$side ni {request response}} {
+            error "ADAPT fixture side must be request or response"
+        }
+        if {![dict exists $adapt_contexts $adapt_current_handle]} {
+            error "ADAPT fixture selected an unknown context"
+        }
+        set fixture [adapt_fixture_result $side]
+        set internal_result [dict get $adapt_contexts $adapt_current_handle result]
+        switch -exact -- $fixture {
+            noop { set internal_result unknown }
+            modified { set internal_result modify }
+            response { set internal_result respond }
+            error { set internal_result error }
+        }
+        set record [dict get $adapt_contexts $adapt_current_handle]
+        dict set record result $internal_result
+        dict set adapt_contexts $adapt_current_handle $record
+        return $internal_result
+    }
+
+    proc _adapt_event_has_handlers {event_name} {
+        return [expr {[info exists ::itest::event_handlers($event_name)] &&
+            [llength $::itest::event_handlers($event_name)] > 0}]
+    }
+
+    proc adapt_auto_event {side} {
+        if {$side ni {request response}} {
+            error "ADAPT automatic event side must be request or response"
+        }
+        if {![_profile_enabled [string toupper "${side}ADAPT"]]} {
+            return
+        }
+        set fixture [adapt_fixture_result $side]
+        if {$fixture eq "noop"} {
+            return
+        }
+        set headers_event "ADAPT_[string toupper $side]_HEADERS"
+        set result_event "ADAPT_[string toupper $side]_RESULT"
+        adapt_prepare_event $headers_event
+        variable adapt_contexts
+        variable adapt_current_handle
+        if {![dict get $adapt_contexts $adapt_current_handle enabled]} {
+            return
+        }
+        adapt_fixture_apply_current $side
+        if {$fixture in {modified response} && [_adapt_event_has_handlers $headers_event]} {
+            set event_result [::itest::_testcl_fire_event_orig $headers_event]
+            ::itest::semantic::event_errors_record $headers_event $event_result
+        }
+        adapt_prepare_event $result_event
+        if {[_adapt_event_has_handlers $result_event]} {
+            set event_result [::itest::_testcl_fire_event_orig $result_event]
+            ::itest::semantic::event_errors_record $result_event $event_result
+        }
+    }
+
     proc adapt_snapshot {} {
         variable adapt_contexts
         variable adapt_current_handle
@@ -25341,7 +25427,10 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_header] ne ""} {
         if {[llength $args] == 1 && [lindex $args 0] eq "is_redirect"} {
             return [::itest::semantic::http_is_redirect_command]
         }
-        if {$::itest::current_event in {HTTP_RESPONSE_CONTINUE HTTP_PROXY_RESPONSE}} {
+        if {$::itest::current_event in {
+            HTTP_RESPONSE_CONTINUE HTTP_PROXY_RESPONSE
+            ADAPT_RESPONSE_HEADERS ADAPT_RESPONSE_RESULT
+        }} {
             set previous_event $::itest::current_event
             set ::itest::current_event HTTP_RESPONSE
             set rc [catch {
@@ -25434,6 +25523,22 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                      [lsearch -exact $events HTTP_PROXY_RESPONSE] >= 0) &&
                     [lsearch -exact $events HTTP_REQUEST] < 0} {
                     lappend events HTTP_REQUEST
+                }
+                # ADAPT events are downstream of the HTTP transaction.  The
+                # upstream orchestrator only enters an HTTP side when the
+                # corresponding base event is registered, so make the
+                # lifecycle entry point observable for ADAPT-only rules.
+                if {[::itest::semantic::_profile_enabled REQUESTADAPT] &&
+                    ([lsearch -exact $events ADAPT_REQUEST_HEADERS] >= 0 ||
+                     [lsearch -exact $events ADAPT_REQUEST_RESULT] >= 0) &&
+                    [lsearch -exact $events HTTP_REQUEST] < 0} {
+                    lappend events HTTP_REQUEST
+                }
+                if {[::itest::semantic::_profile_enabled RESPONSEADAPT] &&
+                    ([lsearch -exact $events ADAPT_RESPONSE_HEADERS] >= 0 ||
+                     [lsearch -exact $events ADAPT_RESPONSE_RESULT] >= 0) &&
+                    [lsearch -exact $events HTTP_RESPONSE] < 0} {
+                    lappend events HTTP_RESPONSE
                 }
             }
             return $events
@@ -25601,6 +25706,10 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::_maybe_fire_lb_failed_for_queue
         }
         if {$gated && $event_name eq "HTTP_REQUEST"} {
+            # Request adaptation completes after HTTP_REQUEST has configured
+            # the dynamic context, but before the request proceeds to the
+            # serverside path.
+            ::itest::semantic::adapt_auto_event request
             ::itest::semantic::access_auto_per_request_agent
             ::itest::semantic::access_auto_complete_policy
             if {$rewrite_auto &&
@@ -25629,6 +25738,9 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
         } elseif {$gated && $event_name eq "LB_SELECTED"} {
             ::itest::semantic::access_auto_acl
         } elseif {$gated && $event_name eq "HTTP_RESPONSE"} {
+            # Response adaptation observes the origin response before the
+            # remaining clientside response processing.
+            ::itest::semantic::adapt_auto_event response
             if {[::itest::semantic::_profile_enabled HTML]} {
                 ::itest::semantic::html_process_response
             }

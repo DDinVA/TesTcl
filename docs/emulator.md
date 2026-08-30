@@ -681,7 +681,30 @@ side, or the static context when none is enabled; the complete context list is
 returned under
 `semantic.adapt`. Contexts reset at connection boundaries. This is a
 rule-visible adaptation model only: it does not run an ICAP service, internal
-virtual server, or content transformation.
+virtual server, or content transformation. HTTP scenarios can seed the
+deterministic IVS outcome with a top-level `adapt` object, or override it for
+one request:
+
+```json
+{
+  "adapt": {
+    "request": {"result": "modified"},
+    "response": {"result": "response"}
+  }
+}
+```
+
+The accepted outcomes are `noop`, `modified`, `response`, and `error` (the
+aliases `modify`, `respond`, and `no-op` are accepted). A modified or direct
+response emits the corresponding `ADAPT_*_HEADERS` event followed by
+`ADAPT_*_RESULT`; a noop emits neither event, while an error emits only the
+result event. The request-side lifecycle runs after `HTTP_REQUEST` and before
+the serverside path; the response-side lifecycle runs after `HTTP_RESPONSE`
+and before remaining clientside response processing. This follows the F5
+descriptions for [`ADAPT_REQUEST_HEADERS`](https://clouddocs.f5.com/api/irules/ADAPT_REQUEST_HEADERS.html),
+[`ADAPT_REQUEST_RESULT`](https://clouddocs.f5.com/api/irules/ADAPT_REQUEST_RESULT.html),
+[`ADAPT_RESPONSE_HEADERS`](https://clouddocs.f5.com/api/irules/ADAPT_RESPONSE_HEADERS.html),
+and [`ADAPT_RESPONSE_RESULT`](https://clouddocs.f5.com/api/irules/ADAPT_RESPONSE_RESULT.html).
 
 The ONECONNECT layer models the four TMOS 17.5 rule controls
 `ONECONNECT::detach`, `ONECONNECT::label`, `ONECONNECT::reuse`, and

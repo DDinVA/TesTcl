@@ -51,6 +51,17 @@ except ModuleNotFoundError:  # test modules load this script by absolute path
 
 
 TMOS_VERSION = "17.5"
+ADAPT_FIXTURE_RESULTS = frozenset({"noop", "modified", "response", "error"})
+ADAPT_FIXTURE_RESULT_ALIASES = {
+    "noop": "noop",
+    "no-op": "noop",
+    "unknown": "noop",
+    "modified": "modified",
+    "modify": "modified",
+    "response": "response",
+    "respond": "response",
+    "error": "error",
+}
 CPU_INTERVALS = frozenset(
     {"1sec", "5secs", "15secs", "1min", "5mins", "15mins", "all_seconds", "all_minutes"}
 )
@@ -3162,6 +3173,15 @@ def _configure_asm(session: Any, asm: dict[str, Any]) -> None:
     session.eval_tcl("::itest::semantic::asm_prepare_request 0 \"\"")
 
 
+def _configure_adapt(session: Any, adapt: dict[str, str]) -> None:
+    """Install deterministic request/response adaptation IVS results."""
+    for side in ("request", "response"):
+        session.eval_tcl(
+            "::itest::semantic::adapt_fixture_set "
+            f"{_tcl_quote(side)} {_tcl_quote(adapt[side])}"
+        )
+
+
 def _configure_botdefense(session: Any, botdefense: dict[str, Any]) -> None:
     """Install deterministic Bot Defense policy results in the Tcl session."""
     scalar_values = (
@@ -4799,7 +4819,9 @@ def _semantic_snapshot(session: Any) -> dict[str, Any]:
             raise EmulatorInputError("invalid ADAPT context side or dynamic state")
         if fields[4] not in {"0", "1"} or fields[5] not in {"0", "1"}:
             raise EmulatorInputError("invalid ADAPT context boolean state")
-        if fields[7] not in {"unknown", "bypass", "modify", "respond", "close", "reset", "timeout"}:
+        if fields[7] not in {
+            "unknown", "bypass", "modify", "respond", "error", "close", "reset", "timeout"
+        }:
             raise EmulatorInputError("invalid ADAPT context result state")
         if fields[9] not in {"ignore", "drop", "reset"}:
             raise EmulatorInputError("invalid ADAPT service-down action state")
@@ -7248,6 +7270,40 @@ def _normalise_profile_settings(raw: Any) -> dict[str, dict[str, str]]:
     return settings
 
 
+def _normalise_adapt(raw: Any) -> dict[str, str]:
+    """Normalize deterministic results returned by request/response IVS fixtures."""
+    if raw is None:
+        return {"request": "noop", "response": "noop"}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("adapt must be an object")
+    unknown = sorted(set(raw) - {"request", "response"})
+    if unknown:
+        raise EmulatorInputError(
+            f"unsupported adapt fixture field(s): {', '.join(unknown)}"
+        )
+    results: dict[str, str] = {"request": "noop", "response": "noop"}
+    for side in results:
+        value = raw.get(side)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            raise EmulatorInputError(f"adapt.{side} must be an object")
+        fields = sorted(set(value) - {"result"})
+        if fields:
+            raise EmulatorInputError(
+                f"unsupported adapt.{side} field(s): {', '.join(fields)}"
+            )
+        result = _require_string(value.get("result", "noop"), f"adapt.{side}.result")
+        canonical = ADAPT_FIXTURE_RESULT_ALIASES.get(result.lower())
+        if canonical is None or canonical not in ADAPT_FIXTURE_RESULTS:
+            allowed = ", ".join(sorted(ADAPT_FIXTURE_RESULTS))
+            raise EmulatorInputError(
+                f"adapt.{side}.result must be one of: {allowed}"
+            )
+        results[side] = canonical
+    return results
+
+
 def _normalise_dosl7(raw: Any) -> dict[str, Any]:
     """Normalize deterministic inputs for the bounded DOSL7 policy model."""
     if raw is None:
@@ -8727,6 +8783,7 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
         "dosl7",
         "antifraud",
         "access",
+        "adapt",
     }
     unknown = sorted(set(request) - allowed - {"close_before", "close_after", "new_connection"})
     if unknown:
@@ -8792,6 +8849,8 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
         kwargs["antifraud"] = _normalise_antifraud_request(request["antifraud"])
     if "access" in request:
         kwargs["access"] = _normalise_access_request(request["access"])
+    if "adapt" in request:
+        kwargs["adapt"] = _normalise_adapt(request["adapt"])
     return kwargs
 
 
@@ -9031,6 +9090,7 @@ def _normalise_scenario_config(
     dict[str, str],
     dict[str, list[dict[str, Any]]],
     list[tuple[str, dict[str, str], str]],
+    dict[str, str],
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
@@ -9062,6 +9122,7 @@ def _normalise_scenario_config(
         "resolvers",
         "datagroups",
         "profile_settings",
+        "adapt",
         "dosl7",
         "asm",
         "botdefense",
@@ -9132,6 +9193,7 @@ def _normalise_scenario_config(
         _normalise_resolvers(scenario.get("resolvers")),
         _normalise_datagroups(scenario.get("datagroups")),
         _normalise_profile_settings(scenario.get("profile_settings")),
+        _normalise_adapt(scenario.get("adapt")),
         _normalise_dosl7(scenario.get("dosl7")),
         _normalise_asm(scenario.get("asm")),
         _normalise_botdefense(scenario.get("botdefense")),
@@ -10010,6 +10072,8 @@ PACKET_EVENT_ADAPTERS = {
     "SERVERSSL_DATA": "TLS server data",
     "FLOW_INIT": "FLOW profile connection initialization",
     "HTTP_REQUEST": "HTTP request transaction",
+    "ADAPT_REQUEST_HEADERS": "request adaptation headers from IVS fixture",
+    "ADAPT_REQUEST_RESULT": "request adaptation result from IVS fixture",
     "HTTP_CLASS_SELECTED": "supplied HTTP class selection outcome",
     "HTTP_CLASS_FAILED": "supplied HTTP class selection failure",
     "HTTP_DISABLED": "HTTP::disable control outcome",
@@ -10042,6 +10106,8 @@ PACKET_EVENT_ADAPTERS = {
     "ASM_REQUEST_DONE": "ASM request inspection completion",
     "ASM_REQUEST_BLOCKING": "ASM blocking-response hook",
     "HTTP_RESPONSE": "HTTP response transaction",
+    "ADAPT_RESPONSE_HEADERS": "response adaptation headers from IVS fixture",
+    "ADAPT_RESPONSE_RESULT": "response adaptation result from IVS fixture",
     "HTTP_RESPONSE_DATA": "collected HTTP response body",
     "HTTP_RESPONSE_CONTINUE": "raw HTTP 100 Continue response",
     "HTTP_RESPONSE_RELEASE": "HTTP response transaction release phase",
@@ -16437,6 +16503,7 @@ class EmulatorSession:
             resolvers,
             datagroups,
             profile_settings,
+            adapt,
             dosl7,
             asm,
             botdefense,
@@ -16472,6 +16539,7 @@ class EmulatorSession:
         self._resolvers = resolvers
         self._datagroups = datagroups
         self._profile_settings = profile_settings
+        self._adapt = adapt
         self._dosl7 = dosl7
         self._asm = asm
         self._botdefense = botdefense
@@ -16623,6 +16691,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::bwc_reset_connection")
                 session.eval_tcl("::itest::semantic::ipfix_reset_connection")
                 session.eval_tcl("::itest::semantic::adapt_reset_connection")
+                _configure_adapt(session, self._adapt)
                 session.eval_tcl("::itest::semantic::datagram_reset_connection")
                 session.eval_tcl("::itest::semantic::sctp_reset_connection")
                 session.eval_tcl("::itest::semantic::feature_controls_reset_connection")
@@ -16869,6 +16938,9 @@ class EmulatorSession:
             antifraud_login = antifraud_request.get("login", antifraud_login)
             antifraud_alert = antifraud_request.get("alert", antifraud_alert)
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
+        adapt_request = kwargs.pop("adapt", None)
+        if adapt_request is not None:
+            _configure_adapt(session, adapt_request)
         original_kwargs = dict(kwargs)
         oneconnect_enabled = any(
             str(profile).upper() == "ONECONNECT" for profile in self._profiles
@@ -17216,6 +17288,8 @@ class EmulatorSession:
                     retry_kwargs.setdefault("http2", original_kwargs["http2"])
                 kwargs = retry_kwargs
         finally:
+            if adapt_request is not None:
+                _configure_adapt(session, self._adapt)
             session.eval_tcl(
                 "unset -nocomplain ::itest::semantic::automatic_http_flow"
             )

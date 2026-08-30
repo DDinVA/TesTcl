@@ -469,9 +469,11 @@ enable/allow, internal-virtual selection, preview size, service-down action,
 timeout, and result updates, and are visible in `semantic.adapt`. Direct
 `ADAPT_REQUEST_*` and `ADAPT_RESPONSE_*` events select the first enabled
 dynamic context on their side, or the static context when none is enabled.
-Contexts reset at connection boundaries;
-the adapter does not run an ICAP service, internal virtual server, or real
-content transformation.
+HTTP scenarios can seed request and response IVS outcomes with the `adapt`
+fixture. `modified` and `response` emit headers then result events, `noop`
+emits neither, and `error` emits only the result event. Contexts reset at
+connection boundaries; the adapter does not run an ICAP service, internal
+virtual server, or real content transformation.
 
 The TMOS 17.5 `ONECONNECT::detach`, `ONECONNECT::label`,
 `ONECONNECT::reuse`, and `ONECONNECT::select` commands model the rule-visible

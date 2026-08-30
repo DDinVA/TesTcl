@@ -3317,6 +3317,10 @@ when HTTP_REQUEST {
             "proxy chaining CONNECT response",
         )
         for event_name in (
+            "ADAPT_REQUEST_HEADERS",
+            "ADAPT_REQUEST_RESULT",
+            "ADAPT_RESPONSE_HEADERS",
+            "ADAPT_RESPONSE_RESULT",
             "FLOW_INIT",
             "HTTP_REQUEST_DATA",
             "HTTP_REQUEST_SEND",
@@ -3419,7 +3423,118 @@ when ADAPT_REQUEST_RESULT {
         finally:
             session.close()
 
+    def test_adapt_request_and_response_lifecycle_uses_ivs_fixture_results(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "REQUESTADAPT", "RESPONSEADAPT"],
+                "adapt": {
+                    "request": {"result": "modified"},
+                    "response": {"result": "response"},
+                },
+                "irule": """
+when HTTP_REQUEST {
+    log local0. "http-request"
+}
+when ADAPT_REQUEST_HEADERS {
+    log local0. "request-headers=[ADAPT::result]"
+    HTTP::header insert X-Adapt-Request headers
+}
+when ADAPT_REQUEST_RESULT {
+    log local0. "request-result=[ADAPT::result]"
+    ADAPT::result bypass
+}
+when HTTP_RESPONSE {
+    log local0. "http-response"
+}
+when ADAPT_RESPONSE_HEADERS {
+    log local0. "response-headers=[ADAPT::result]"
+    HTTP::header insert X-Adapt-Response headers
+}
+when ADAPT_RESPONSE_RESULT {
+    log local0. "response-result=[ADAPT::result]"
+    ADAPT::result close
+}
+""",
+                "request": {"uri": "/", "headers": {"Host": "example.test"}},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        events = result["results"][0]["events_fired"]
+        self.assertLess(events.index("HTTP_REQUEST"), events.index("ADAPT_REQUEST_HEADERS"))
+        self.assertLess(events.index("ADAPT_REQUEST_HEADERS"), events.index("ADAPT_REQUEST_RESULT"))
+        self.assertLess(events.index("HTTP_RESPONSE"), events.index("ADAPT_RESPONSE_HEADERS"))
+        self.assertLess(events.index("ADAPT_RESPONSE_HEADERS"), events.index("ADAPT_RESPONSE_RESULT"))
+        request_result = result["results"][0]
+        self.assertEqual(
+            request_result["request"]["headers"]["x-adapt-request"],
+            "headers",
+        )
+        self.assertEqual(
+            request_result["response"]["headers"]["x-adapt-response"],
+            "headers",
+        )
+        self.assertTrue(any("request-headers=modify" in entry for entry in request_result["logs"]))
+        self.assertTrue(any("request-result=modify" in entry for entry in request_result["logs"]))
+        self.assertTrue(any("response-headers=respond" in entry for entry in request_result["logs"]))
+        self.assertTrue(any("response-result=respond" in entry for entry in request_result["logs"]))
+        contexts = request_result["semantic"]["adapt"]["contexts"]
+        self.assertEqual(contexts[0]["result"], "bypass")
+
+    def test_adapt_noop_and_error_fixtures_gate_headers_event(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "REQUESTADAPT", "RESPONSEADAPT"],
+                "adapt": {
+                    "request": {"result": "noop"},
+                    "response": {"result": "error"},
+                },
+                "irule": """
+when ADAPT_REQUEST_HEADERS { log local0. request-headers }
+when ADAPT_REQUEST_RESULT { log local0. request-result }
+when ADAPT_RESPONSE_HEADERS { log local0. response-headers }
+when ADAPT_RESPONSE_RESULT { log local0. response-result }
+""",
+                "request": {"uri": "/"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        events = result["results"][0]["events_fired"]
+        self.assertNotIn("ADAPT_REQUEST_HEADERS", events)
+        self.assertNotIn("ADAPT_REQUEST_RESULT", events)
+        self.assertNotIn("ADAPT_RESPONSE_HEADERS", events)
+        self.assertIn("ADAPT_RESPONSE_RESULT", events)
+
+    def test_adapt_request_fixture_override_is_scoped_to_one_request(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "REQUESTADAPT"],
+                "adapt": {"request": {"result": "noop"}},
+                "irule": "when ADAPT_REQUEST_RESULT { log local0. adapt-result }",
+                "requests": [
+                    {"uri": "/modified", "adapt": {"request": {"result": "modified"}}},
+                    {"uri": "/noop"},
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertIn("ADAPT_REQUEST_RESULT", result["results"][0]["events_fired"])
+        self.assertNotIn("ADAPT_REQUEST_RESULT", result["results"][1]["events_fired"])
+
     def test_adapt_context_validation_boundaries(self) -> None:
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "adapt.request.result must be one of",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP", "REQUESTADAPT"],
+                    "adapt": {"request": {"result": "not-an-ivs-result"}},
+                    "irule": "when HTTP_REQUEST { return }",
+                    "request": {"uri": "/"},
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
         with self.assertRaisesRegex(
             self.adapter.EmulatorInputError, "no more than 256 bytes"
         ):
