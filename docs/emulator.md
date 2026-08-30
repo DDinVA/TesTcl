@@ -150,6 +150,12 @@ emulator field even when the surrounding result documents differ. Missing
 paths and execution errors fail only that vector, while pack validation is
 atomic before execution begins.
 
+The result also includes bounded `analysis` data: total comparison counts,
+execution-error counts, the first 32 vector IDs with execution errors, and
+mismatch groups keyed by operation and comparison label. This makes a large
+capture pack useful for prioritizing fidelity work without replacing the
+per-vector evidence.
+
 Run the checked-in contract fixture locally:
 
 ```sh

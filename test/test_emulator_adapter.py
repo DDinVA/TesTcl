@@ -3105,6 +3105,18 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(
             result["summary"], {"vector_count": 3, "passed": 3, "failed": 0}
         )
+        self.assertEqual(
+            result["analysis"],
+            {
+                "comparison_count": 10,
+                "comparison_passed": 10,
+                "comparison_failed": 0,
+                "comparison_skipped": 0,
+                "execution_error_count": 0,
+                "execution_error_vector_ids": [],
+                "mismatch_groups": [],
+            },
+        )
         self.assertTrue(all(vector["status"] == "passed" for vector in result["vectors"]))
 
         pack["vectors"][0]["reference"]["output"]["results"][0]["pool"] = "wrong_pool"
@@ -3117,6 +3129,16 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(mismatch["label"], "selected pool")
         self.assertEqual(mismatch["expected"], "wrong_pool")
         self.assertEqual(mismatch["actual"], "api_pool")
+        self.assertEqual(failed["analysis"]["comparison_failed"], 1)
+        self.assertEqual(
+            failed["analysis"]["mismatch_groups"],
+            [{
+                "operation": "scenario",
+                "label": "selected pool",
+                "mismatch_count": 1,
+                "vector_ids": ["http-request-pool-selection"],
+            }],
+        )
         self.assertEqual(
             self.adapter._golden_report_value("x" * 65537)["truncated"], True
         )

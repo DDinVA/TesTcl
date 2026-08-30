@@ -296,6 +296,8 @@ GOLDEN_VECTOR_MAX_COMPARISONS = 64
 GOLDEN_VECTOR_MAX_PATH_COMPONENTS = 32
 GOLDEN_VECTOR_MAX_LABEL_BYTES = 256
 GOLDEN_VECTOR_MAX_REPORTED_VALUE_BYTES = 64 * 1024
+GOLDEN_VECTOR_MAX_MISMATCH_GROUPS = 128
+GOLDEN_VECTOR_MAX_MISMATCH_VECTOR_IDS = 32
 OBSERVATION_PROVENANCE_MAX_FIELDS = 16
 OBSERVATION_PROVENANCE_MAX_VALUE_BYTES = 256
 EVENT_STATE_FIELDS = {
@@ -25592,6 +25594,34 @@ def run_golden_vectors(
     prepared = _normalise_golden_vectors(root, pack)
     rows: list[dict[str, Any]] = []
     passed = 0
+    comparison_count = 0
+    comparison_passed = 0
+    comparison_skipped = 0
+    execution_error_count = 0
+    execution_error_vector_ids: list[str] = []
+    mismatch_groups: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def record_mismatch(operation: str, label: str, vector_id: str) -> None:
+        key = (operation, label)
+        if key not in mismatch_groups:
+            if len(mismatch_groups) >= GOLDEN_VECTOR_MAX_MISMATCH_GROUPS:
+                key = ("mixed", "__other__")
+            mismatch_groups.setdefault(
+                key,
+                {
+                    "operation": key[0],
+                    "label": key[1],
+                    "mismatch_count": 0,
+                    "vector_ids": [],
+                },
+            )
+        group = mismatch_groups[key]
+        group["mismatch_count"] += 1
+        if vector_id not in group["vector_ids"] and len(
+            group["vector_ids"]
+        ) < GOLDEN_VECTOR_MAX_MISMATCH_VECTOR_IDS:
+            group["vector_ids"].append(vector_id)
+
     for vector in prepared["vectors"]:
         vector_id = vector["id"]
         try:
@@ -25617,6 +25647,10 @@ def run_golden_vectors(
                     },
                 )
         except (EmulatorInputError, OSError, RuntimeError, ValueError) as exc:
+            execution_error_count += 1
+            comparison_skipped += len(vector["comparisons"])
+            if len(execution_error_vector_ids) < GOLDEN_VECTOR_MAX_MISMATCH_VECTOR_IDS:
+                execution_error_vector_ids.append(vector_id)
             rows.append(
                 {
                     "id": vector_id,
@@ -25632,6 +25666,7 @@ def run_golden_vectors(
         mismatches: list[dict[str, Any]] = []
         reference_output = vector["reference"]["output"]
         for comparison in vector["comparisons"]:
+            comparison_count += 1
             try:
                 actual_value = _behavior_json_path(actual_output, comparison["actual_path"])
             except (KeyError, IndexError, TypeError) as exc:
@@ -25661,6 +25696,12 @@ def run_golden_vectors(
             comparison_rows.append(comparison_row)
             if comparison_row["status"] == "failed":
                 mismatches.append(comparison_row)
+            else:
+                comparison_passed += 1
+        for mismatch in mismatches:
+            record_mismatch(
+                vector["operation"], mismatch["label"], vector_id
+            )
         row_status = "passed" if not mismatches else "failed"
         if row_status == "passed":
             passed += 1
@@ -25675,6 +25716,10 @@ def run_golden_vectors(
             }
         )
     failed = len(rows) - passed
+    mismatch_summary = sorted(
+        mismatch_groups.values(),
+        key=lambda group: (-group["mismatch_count"], group["operation"], group["label"]),
+    )
     return {
         "status": "passed" if failed == 0 else "failed",
         "schema_version": 1,
@@ -25691,6 +25736,15 @@ def run_golden_vectors(
             "vector_count": len(rows),
             "passed": passed,
             "failed": failed,
+        },
+        "analysis": {
+            "comparison_count": comparison_count,
+            "comparison_passed": comparison_passed,
+            "comparison_failed": comparison_count - comparison_passed,
+            "comparison_skipped": comparison_skipped,
+            "execution_error_count": execution_error_count,
+            "execution_error_vector_ids": execution_error_vector_ids,
+            "mismatch_groups": mismatch_summary,
         },
         "vectors": rows,
     }
