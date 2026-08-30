@@ -323,6 +323,9 @@ namespace eval ::itest::semantic {
     variable asm_default_payload ""
     variable asm_default_violations {}
     variable asm_violations {}
+    variable asm_default_response_violations {}
+    variable asm_response_violations {}
+    variable asm_response_active 0
     variable asm_default_signatures [dict create]
     variable asm_signatures [dict create]
     variable asm_default_campaigns [dict create]
@@ -12418,6 +12421,24 @@ namespace eval ::itest::semantic {
         set asm_violations $violations
     }
 
+    proc asm_set_response_violations {args} {
+        variable asm_default_response_violations
+        variable asm_response_violations
+        set violations [list]
+        foreach record $args {
+            if {[llength $record] != 4} {
+                error "ASM response violation records require name, attack type, rating, and details"
+            }
+            lassign $record name attack_type rating details
+            if {$name eq "" || [llength $details] % 2} {
+                error "invalid ASM response violation record"
+            }
+            lappend violations [list $name $attack_type $rating $details]
+        }
+        set asm_default_response_violations $violations
+        set asm_response_violations $violations
+    }
+
     proc asm_set_signatures {field raw_values} {
         variable asm_default_signatures
         variable asm_signatures
@@ -12489,6 +12510,9 @@ namespace eval ::itest::semantic {
         variable asm_signatures
         variable asm_default_campaigns
         variable asm_campaigns
+        variable asm_default_response_violations
+        variable asm_response_violations
+        variable asm_response_active
         variable asm_captcha_sent
         variable asm_uncaptcha
         variable asm_unblocked
@@ -12508,6 +12532,8 @@ namespace eval ::itest::semantic {
         set asm_payload $asm_default_payload
         if {$has_body} { set asm_payload $body }
         set asm_violations $asm_default_violations
+        set asm_response_violations $asm_default_response_violations
+        set asm_response_active 0
         set asm_signatures $asm_default_signatures
         set asm_campaigns $asm_default_campaigns
         if {$asm_status eq ""} { set asm_status [_asm_derived_status] }
@@ -12517,6 +12543,73 @@ namespace eval ::itest::semantic {
         set asm_unblocked 0
         set asm_conviction 0
         set asm_deception 0
+    }
+
+    proc asm_prepare_response {body} {
+        variable asm_violations
+        variable asm_response_violations
+        variable asm_status
+        variable asm_severity
+        variable asm_payload
+        variable asm_default_status
+        variable asm_default_severity
+        variable asm_response_active
+        set asm_violations $asm_response_violations
+        set asm_status $asm_default_status
+        set asm_severity $asm_default_severity
+        if {$asm_status eq ""} { set asm_status [_asm_derived_status] }
+        if {$asm_severity eq ""} { set asm_severity [_asm_derived_severity] }
+        set asm_payload $body
+        set asm_response_active 1
+    }
+
+    proc asm_response_violation_count {} {
+        variable asm_response_violations
+        return [llength $asm_response_violations]
+    }
+
+    proc asm_auto_request_events {} {
+        variable asm_enabled
+        if {![_profile_enabled ASM] || !$asm_enabled} {
+            return
+        }
+        set violation_count [llength $::itest::semantic::asm_violations]
+        foreach event_name {
+            ASM_REQUEST_VIOLATION ASM_REQUEST_DONE ASM_REQUEST_BLOCKING
+        } {
+            if {$event_name eq "ASM_REQUEST_VIOLATION" && !$violation_count} {
+                continue
+            }
+            if {$event_name eq "ASM_REQUEST_BLOCKING" &&
+                (!$violation_count || $::itest::semantic::asm_status ne "Blocked")} {
+                continue
+            }
+            if {[info exists ::itest::event_handlers($event_name)] &&
+                [llength $::itest::event_handlers($event_name)] > 0} {
+                set event_result [::itest::_testcl_fire_event_orig $event_name]
+                ::itest::semantic::event_errors_record $event_name $event_result
+            }
+        }
+    }
+
+    proc asm_auto_response_event {} {
+        variable asm_enabled
+        variable asm_response_active
+        if {![_profile_enabled ASM] || !$asm_enabled} {
+            return
+        }
+        if {$asm_response_active} {
+            return
+        }
+        if {[asm_response_violation_count] == 0} {
+            return
+        }
+        asm_prepare_response $::state::http::response::payload
+        if {[info exists ::itest::event_handlers(ASM_RESPONSE_VIOLATION)] &&
+            [llength $::itest::event_handlers(ASM_RESPONSE_VIOLATION)] > 0} {
+            set event_result [::itest::_testcl_fire_event_orig ASM_RESPONSE_VIOLATION]
+            ::itest::semantic::event_errors_record ASM_RESPONSE_VIOLATION $event_result
+        }
     }
 
     proc asm_reset_connection {} {
@@ -12730,9 +12823,23 @@ namespace eval ::itest::semantic {
         return ""
     }
 
+    proc _asm_payload_hex {payload} {
+        binary scan [encoding convertto utf-8 $payload] H* payload_hex
+        return $payload_hex
+    }
+
+    proc _asm_payload_from_hex {payload_hex} {
+        return [encoding convertfrom utf-8 [binary format H* $payload_hex]]
+    }
+
     proc asm_payload {args} {
         variable asm_payload
+        set payload_hex [_asm_payload_hex $asm_payload]
+        set payload_bytes [expr {[string length $payload_hex] / 2}]
         if {[llength $args] == 0} { return $asm_payload }
+        if {[llength $args] == 1 && [lindex $args 0] eq "length"} {
+            return $payload_bytes
+        }
         if {[lindex $args 0] eq "replace"} {
             if {[llength $args] != 4} { error "ASM::payload replace requires offset, length, and payload" }
             set offset [lindex $args 1]
@@ -12740,10 +12847,16 @@ namespace eval ::itest::semantic {
             if {![string is integer -strict $offset] || $offset < 0 || ![string is integer -strict $length] || $length < 0} {
                 error "ASM::payload offsets and lengths must be non-negative integers"
             }
-            set offset [expr {min($offset, [string length $asm_payload])}]
-            set prefix [string range $asm_payload 0 [expr {$offset - 1}]]
-            set suffix [string range $asm_payload [expr {$offset + $length}] end]
-            set asm_payload "$prefix[lindex $args 3]$suffix"
+            set offset [expr {min($offset, $payload_bytes)}]
+            set end [expr {min($offset + $length, $payload_bytes)}]
+            set prefix_hex [string range $payload_hex 0 [expr {$offset * 2 - 1}]]
+            set suffix_hex [string range $payload_hex [expr {$end * 2}] end]
+            set replacement_hex [_asm_payload_hex [lindex $args 3]]
+            set asm_payload [_asm_payload_from_hex "$prefix_hex$replacement_hex$suffix_hex"]
+            if {$::itest::current_event eq "ASM_RESPONSE_VIOLATION"} {
+                set ::state::http::response::payload $asm_payload
+                set ::state::http::response::payload_length [string bytelength $asm_payload]
+            }
             return ""
         }
         if {[llength $args] == 1} {
@@ -12758,7 +12871,10 @@ namespace eval ::itest::semantic {
         if {![string is integer -strict $offset] || $offset < 0 || ![string is integer -strict $length] || $length < 0} {
             error "ASM::payload offsets and lengths must be non-negative integers"
         }
-        return [string range $asm_payload $offset [expr {$offset + $length - 1}]]
+        set offset [expr {min($offset, $payload_bytes)}]
+        set end [expr {min($offset + $length, $payload_bytes)}]
+        if {$end <= $offset} { return "" }
+        return [_asm_payload_from_hex [string range $payload_hex [expr {$offset * 2}] [expr {$end * 2 - 1}]]]
     }
 
     proc asm_violation_data {args} {
@@ -25430,6 +25546,7 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_header] ne ""} {
         if {$::itest::current_event in {
             HTTP_RESPONSE_CONTINUE HTTP_PROXY_RESPONSE
             ADAPT_RESPONSE_HEADERS ADAPT_RESPONSE_RESULT
+            ASM_RESPONSE_VIOLATION
         }} {
             set previous_event $::itest::current_event
             set ::itest::current_event HTTP_RESPONSE
@@ -25534,9 +25651,24 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                     [lsearch -exact $events HTTP_REQUEST] < 0} {
                     lappend events HTTP_REQUEST
                 }
+                if {[::itest::semantic::_profile_enabled ASM] &&
+                    ([lsearch -exact $events ASM_REQUEST_VIOLATION] >= 0 ||
+                     [lsearch -exact $events ASM_REQUEST_DONE] >= 0 ||
+                     [lsearch -exact $events ASM_REQUEST_BLOCKING] >= 0) &&
+                    [lsearch -exact $events HTTP_REQUEST] < 0} {
+                    lappend events HTTP_REQUEST
+                }
                 if {[::itest::semantic::_profile_enabled RESPONSEADAPT] &&
                     ([lsearch -exact $events ADAPT_RESPONSE_HEADERS] >= 0 ||
                      [lsearch -exact $events ADAPT_RESPONSE_RESULT] >= 0) &&
+                    [lsearch -exact $events HTTP_RESPONSE] < 0} {
+                    lappend events HTTP_RESPONSE
+                }
+                # ASM response inspection is downstream of HTTP_RESPONSE.
+                # Ensure a rule that only registers ASM_RESPONSE_VIOLATION
+                # still enters the HTTP response lifecycle.
+                if {[::itest::semantic::_profile_enabled ASM] &&
+                    [lsearch -exact $events ASM_RESPONSE_VIOLATION] >= 0 &&
                     [lsearch -exact $events HTTP_RESPONSE] < 0} {
                     lappend events HTTP_RESPONSE
                 }
@@ -25706,6 +25838,10 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             ::itest::semantic::_maybe_fire_lb_failed_for_queue
         }
         if {$gated && $event_name eq "HTTP_REQUEST"} {
+            # ASM request inspection is a pre-LB lifecycle.  Dispatch it
+            # here, after HTTP_REQUEST has run but before the request can
+            # select or connect to an origin server.
+            ::itest::semantic::asm_auto_request_events
             # Request adaptation completes after HTTP_REQUEST has configured
             # the dynamic context, but before the request proceeds to the
             # serverside path.
@@ -25754,6 +25890,16 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             }
             ::itest::semantic::compression_process_response
             ::itest::semantic::httplog_record response
+            # ASM inspects the origin response after HTTP_RESPONSE handlers
+            # and any collected HTTP_RESPONSE_DATA processing run, allowing
+            # the response-violation handler to rewrite the buffered response.
+            if {!$::state::http::collect_response} {
+                ::itest::semantic::asm_auto_response_event
+            }
+        } elseif {$gated && $event_name eq "HTTP_RESPONSE_DATA"} {
+            # A collected response body is complete at this point; ASM's
+            # response inspection follows the data event.
+            ::itest::semantic::asm_auto_response_event
         }
         return $result
     }

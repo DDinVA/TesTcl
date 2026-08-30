@@ -830,6 +830,14 @@ The `ASM` policy surface can be seeded with deterministic WAF inputs:
         "details": {"param_data.param_name": "dGVzdA=="}
       }
     ],
+    "response_violations": [
+      {
+        "name": "VIOLATION_RESPONSE_SCRUBBING",
+        "attack_type": "Information Leakage",
+        "rating": "Error",
+        "details": {"response": "secret"}
+      }
+    ],
     "signatures": {"ids": ["200000001"]},
     "threat_campaigns": {"names": ["campaign-a"]}
   },
@@ -846,7 +854,10 @@ Request body data replaces the seeded payload for that transaction. Policy
 inputs reset between requests; connection-scoped enable/disable and policy
 overrides reset at a new connection. This is a deterministic policy model,
 not a WAF inspection, signature-matching, CAPTCHA service, or attack-detection
-engine.
+engine. A non-empty `response_violations` fixture emits
+`ASM_RESPONSE_VIOLATION` after `HTTP_RESPONSE` and any collected response-data
+event; response-side `ASM::violation` and `ASM::payload` state are available
+to the handler, and `ASM::payload replace` updates the modeled response body.
 With the `ASM` profile attached, an enabled HTTP request also runs the bounded
 ASM request lifecycle: `ASM_REQUEST_VIOLATION` is emitted when seeded or
 rule-created violations exist, followed by `ASM_REQUEST_DONE`; the
@@ -854,7 +865,7 @@ rule-created violations exist, followed by `ASM_REQUEST_DONE`; the
 after the done handlers. This lets a rule use `ASM::unblock` to suppress the
 blocking hook, and the result's `semantic.asm` snapshot includes the final
 handler mutations. The lifecycle is fixture-driven and does not implement WAF
-inspection, production enforcement, or ASM response events.
+inspection, production enforcement, or automatic finding detection.
 The `BOTDEFENSE` policy surface can be seeded with deterministic client and
 decision results:
 

@@ -531,8 +531,8 @@ rate and timeout values but does not implement wall-clock expiry, traffic-rate
 measurement, or the ASM/DOS inspection and mitigation engines.
 The TMOS 17.5 `ASM::` surface is represented by a deterministic scenario-level
 policy model covering all 25 catalogued commands. It can seed policy identity,
-client identity, login/CAPTCHA state, payload, violations, signatures, threat
-campaigns, and status/severity values; rule actions such as enable/disable,
+client identity, login/CAPTCHA state, payload, request and response violations,
+signatures, threat campaigns, and status/severity values; rule actions such as enable/disable,
 raise, unblock, uncaptcha, conviction, deception, and payload replacement are
 recorded in request semantic state. Request inputs reset between transactions,
 while connection overrides reset when a new connection begins. The model does
@@ -543,9 +543,13 @@ adapter emits `ASM_REQUEST_VIOLATION` when the bounded fixture has violations,
 then `ASM_REQUEST_DONE`, and finally `ASM_REQUEST_BLOCKING` only when violations
 remain blocked after the `ASM_REQUEST_DONE` handlers run. An `ASM::unblock`
 action therefore suppresses the blocking hook, and the returned semantic
-snapshot reflects mutations made by those handlers. This is a deterministic
-request lifecycle for rule testing; it does not add a WAF inspection engine,
-blocking response generator, or ASM response-event pipeline.
+snapshot reflects mutations made by those handlers. A non-empty
+`response_violations` fixture emits `ASM_RESPONSE_VIOLATION` after the response
+transaction and exposes response-side `ASM::violation` and `ASM::payload`
+state; `ASM::payload replace` updates the modeled response body. This is a
+deterministic request/response lifecycle for rule testing; it does not add a
+WAF inspection engine, blocking response generator, or automatic finding
+detector.
 The TMOS 17.5 `BOTDEFENSE::` surface is represented by a deterministic policy
 model covering all 25 catalogued commands. Scenario inputs can seed action,
 client and bot classification, anomalies/categories, CAPTCHA/cookie state,

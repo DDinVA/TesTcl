@@ -3206,6 +3206,29 @@ def _configure_asm(session: Any, asm: dict[str, Any]) -> None:
     if records:
         command += " " + " ".join(_tcl_quote(record) for record in records)
     session.eval_tcl(command)
+    response_records: list[str] = []
+    for violation in asm["response_violations"]:
+        details_flattened = [
+            item
+            for key, value in violation["details"].items()
+            for item in (key, value)
+        ]
+        response_records.append(
+            " ".join(
+                [
+                    _tcl_quote(violation["name"]),
+                    _tcl_quote(violation["attack_type"]),
+                    _tcl_quote(violation["rating"]),
+                    _tcl_list(details_flattened),
+                ]
+            )
+        )
+    response_command = "::itest::semantic::asm_set_response_violations"
+    if response_records:
+        response_command += " " + " ".join(
+            _tcl_quote(record) for record in response_records
+        )
+    session.eval_tcl(response_command)
     for field in ASM_SIGNATURE_FIELDS:
         session.eval_tcl(
             "::itest::semantic::asm_set_signatures "
@@ -7460,26 +7483,28 @@ def _normalise_asm_string_list(value: Any, field: str) -> list[str]:
     return list(value)
 
 
-def _normalise_asm_violations(raw: Any) -> list[dict[str, Any]]:
+def _normalise_asm_violations(
+    raw: Any, field: str = "asm.violations"
+) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
-        raise EmulatorInputError("asm.violations must be an array")
+        raise EmulatorInputError(f"{field} must be an array")
     violations: list[dict[str, Any]] = []
     for index, item in enumerate(raw):
-        field = f"asm.violations[{index}]"
+        item_field = f"{field}[{index}]"
         if not isinstance(item, dict):
-            raise EmulatorInputError(f"{field} must be an object")
+            raise EmulatorInputError(f"{item_field} must be an object")
         unknown = sorted(set(item) - {"name", "attack_type", "rating", "details"})
         if unknown:
             raise EmulatorInputError(
-                f"{field} unsupported field(s): {', '.join(unknown)}"
+                f"{item_field} unsupported field(s): {', '.join(unknown)}"
             )
-        name = _normalise_asm_string(item.get("name"), f"{field}.name")
+        name = _normalise_asm_string(item.get("name"), f"{item_field}.name")
         if not name:
-            raise EmulatorInputError(f"{field}.name cannot be empty")
+            raise EmulatorInputError(f"{item_field}.name cannot be empty")
         attack_type = _normalise_asm_string(
-            item.get("attack_type", ""), f"{field}.attack_type"
+            item.get("attack_type", ""), f"{item_field}.attack_type"
         )
-        rating = _normalise_asm_string(item.get("rating", ""), f"{field}.rating")
+        rating = _normalise_asm_string(item.get("rating", ""), f"{item_field}.rating")
         details = item.get("details", {})
         if not isinstance(details, dict) or not all(
             isinstance(key, str)
@@ -7488,7 +7513,7 @@ def _normalise_asm_violations(raw: Any) -> list[dict[str, Any]]:
             and "\x00" not in value
             for key, value in details.items()
         ):
-            raise EmulatorInputError(f"{field}.details must be an object of strings")
+            raise EmulatorInputError(f"{item_field}.details must be an object of strings")
         violations.append(
             {
                 "name": name,
@@ -7521,6 +7546,7 @@ def _normalise_asm(raw: Any) -> dict[str, Any]:
         "captcha_age",
         "payload",
         "violations",
+        "response_violations",
         "signatures",
         "threat_campaigns",
     }
@@ -7625,6 +7651,9 @@ def _normalise_asm(raw: Any) -> dict[str, Any]:
         "captcha_age": captcha_age,
         "payload": payload,
         "violations": _normalise_asm_violations(raw.get("violations", [])),
+        "response_violations": _normalise_asm_violations(
+            raw.get("response_violations", []), "asm.response_violations"
+        ),
         "signatures": signatures,
         "threat_campaigns": campaigns,
     }
@@ -10153,6 +10182,7 @@ PACKET_EVENT_ADAPTERS = {
     "ASM_REQUEST_VIOLATION": "ASM request violation inspection",
     "ASM_REQUEST_DONE": "ASM request inspection completion",
     "ASM_REQUEST_BLOCKING": "ASM blocking-response hook",
+    "ASM_RESPONSE_VIOLATION": "ASM response violation inspection",
     "HTTP_RESPONSE": "HTTP response transaction",
     "ADAPT_RESPONSE_HEADERS": "response adaptation headers from IVS fixture",
     "ADAPT_RESPONSE_RESULT": "response adaptation result from IVS fixture",
@@ -17017,54 +17047,6 @@ class EmulatorSession:
                     missing.append(item)
             return missing + list(existing)
 
-        def append_asm_event(request_result: dict[str, Any], event_name: str) -> None:
-            decisions_before = len(session.get_decisions())
-            logs_before = len(session.get_logs())
-            errors_before = len(_event_error_snapshot(session))
-            event_result = self._fire_event_on_worker(session, event_name, {})
-            request_result["events_fired"].extend(
-                event_result.get("events_fired", [])
-            )
-            request_result["decisions"].extend(
-                session.get_decisions()[decisions_before:]
-            )
-            request_result["logs"].extend(session.get_logs()[logs_before:])
-            errors = _event_error_snapshot(session)
-            if len(errors) > errors_before:
-                first_error = errors[errors_before]
-                self._close_packet_connection(session)
-                self._connection_request_number = 0
-                raise EmulatorInputError(
-                    "iRule handler error in {}: {}".format(
-                        first_error["event"], first_error["message"]
-                    )
-                )
-
-        def append_asm_request_events(request_result: dict[str, Any]) -> None:
-            if "ASM" not in {str(profile).upper() for profile in self._profiles}:
-                return
-            if session.eval_tcl("set ::itest::semantic::asm_enabled") != "1":
-                return
-            try:
-                violation_count = int(
-                    session.eval_tcl("::itest::semantic::asm_violation count")
-                )
-            except (TypeError, ValueError):
-                raise EmulatorInputError("invalid ASM violation count") from None
-            if violation_count < 0:
-                raise EmulatorInputError("invalid ASM violation count")
-            if violation_count:
-                append_asm_event(request_result, "ASM_REQUEST_VIOLATION")
-            append_asm_event(request_result, "ASM_REQUEST_DONE")
-            # ASM_REQUEST_DONE may change the disposition (for example via
-            # ASM::unblock), so inspect the mutable state before blocking.
-            if (
-                violation_count
-                and session.eval_tcl("::itest::semantic::asm_status") == "Blocked"
-            ):
-                append_asm_event(request_result, "ASM_REQUEST_BLOCKING")
-            request_result["semantic"]["asm"] = _semantic_snapshot(session)["asm"]
-
         result: dict[str, Any]
         try:
             while True:
@@ -17269,8 +17251,6 @@ class EmulatorSession:
                             first_error["event"], first_error["message"]
                         )
                     )
-
-                append_asm_request_events(result)
 
                 decision_history.extend(result.get("decisions", []))
                 log_history.extend(result.get("logs", []))

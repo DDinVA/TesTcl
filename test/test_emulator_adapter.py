@@ -3128,7 +3128,10 @@ when HTTP_REQUEST {
             coverage["event_lifecycle"]["target_adapter_count"],
             report["events"]["packet_adapter_count"],
         )
-        self.assertIn("ASM_RESPONSE_VIOLATION", coverage["event_lifecycle"]["target_unmapped_events"])
+        self.assertNotIn(
+            "ASM_RESPONSE_VIOLATION",
+            coverage["event_lifecycle"]["target_unmapped_events"],
+        )
         self.assertEqual(report["commands"]["post_target_count"], 10)
         self.assertEqual(
             report["commands"]["target_catalog_count"],
@@ -5792,7 +5795,7 @@ when HTTP_RESPONSE_DATA {
         item = result["results"][0]
         self.assertEqual(
             item["events_fired"],
-            ["ASM_REQUEST_VIOLATION", "ASM_REQUEST_DONE"],
+            ["HTTP_REQUEST", "ASM_REQUEST_VIOLATION", "ASM_REQUEST_DONE"],
         )
         self.assertTrue(any("violation=1/Blocked" in log for log in item["logs"]))
         self.assertTrue(any("done=Blocked/support-1" in log for log in item["logs"]))
@@ -5809,7 +5812,132 @@ when HTTP_RESPONSE_DATA {
         )
         self.assertEqual(
             clear["results"][0]["events_fired"],
-            ["ASM_REQUEST_DONE"],
+            ["HTTP_REQUEST", "ASM_REQUEST_DONE"],
+        )
+
+    def test_http_asm_response_violation_follows_http_response_and_rewrites_response(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ASM"],
+                "asm": {
+                    "policy": "/Common/waf",
+                    "support_id": "response-support-1",
+                    "response_violations": [
+                        {
+                            "name": "VIOLATION_RESPONSE_SCRUBBING",
+                            "attack_type": "Information Leakage",
+                            "rating": "Error",
+                            "details": {"response": "secret"},
+                        }
+                    ],
+                },
+                "irule": (
+                    "when HTTP_RESPONSE { "
+                    'log local0. "http=[HTTP::status]" }\n'
+                    "when ASM_RESPONSE_VIOLATION { "
+                    'log local0. "asm=[ASM::violation count]/[ASM::status]/[ASM::payload]"; '
+                    "HTTP::header insert X-ASM-Response seen; "
+                    'ASM::payload replace 0 [ASM::payload length] "scrubbed" }'
+                ),
+                "request": {
+                    "uri": "/response",
+                    "response_status": 200,
+                    "response_headers": {"X-Origin": "yes"},
+                    "response_body": "secret",
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        events = item["events_fired"]
+        self.assertLess(
+            events.index("HTTP_RESPONSE"),
+            events.index("ASM_RESPONSE_VIOLATION"),
+        )
+        self.assertEqual(item["response"]["body"], "scrubbed")
+        self.assertEqual(item["response"]["headers"]["x-asm-response"], "seen")
+        self.assertTrue(
+            any("asm=1/Alarm/secret" in entry for entry in item["logs"])
+        )
+        self.assertEqual(item["semantic"]["asm"]["violations"][0]["name"], "VIOLATION_RESPONSE_SCRUBBING")
+
+        utf8 = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ASM"],
+                "asm": {
+                    "response_violations": [{"name": "VIOLATION_UTF8"}],
+                },
+                "irule": (
+                    "when ASM_RESPONSE_VIOLATION { "
+                    'log local0. "length=[ASM::payload length]"; '
+                    'ASM::payload replace 1 2 "X" }'
+                ),
+                "request": {"uri": "/utf8", "response_body": "héllo"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        utf8_item = utf8["results"][0]
+        self.assertTrue(any("length=6" in entry for entry in utf8_item["logs"]))
+        self.assertEqual(utf8_item["response"]["body"], "hXllo")
+
+        no_response_violation = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ASM"],
+                "asm": {},
+                "irule": "when ASM_RESPONSE_VIOLATION { log local0. unexpected }",
+                "request": {"uri": "/clear", "response_body": "clean"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertNotIn(
+            "ASM_RESPONSE_VIOLATION",
+            no_response_violation["results"][0]["events_fired"],
+        )
+
+        disabled = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ASM"],
+                "asm": {
+                    "enabled": False,
+                    "response_violations": [
+                        {"name": "VIOLATION_RESPONSE_SCRUBBING"}
+                    ],
+                },
+                "irule": "when ASM_RESPONSE_VIOLATION { log local0. unexpected }",
+                "request": {"uri": "/disabled", "response_body": "clean"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertNotIn(
+            "ASM_RESPONSE_VIOLATION",
+            disabled["results"][0]["events_fired"],
+        )
+
+        both_sides = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "ASM"],
+                "asm": {
+                    "status": "Blocked",
+                    "violations": [{"name": "VIOLATION_REQUEST"}],
+                    "response_violations": [{"name": "VIOLATION_RESPONSE"}],
+                },
+                "irule": (
+                    "when ASM_REQUEST_VIOLATION { log local0. request }\n"
+                    "when ASM_REQUEST_DONE { log local0. done }\n"
+                    "when ASM_RESPONSE_VIOLATION { log local0. response }"
+                ),
+                "request": {"uri": "/both", "response_body": "body"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        both_events = both_sides["results"][0]["events_fired"]
+        self.assertEqual(both_events.count("ASM_REQUEST_VIOLATION"), 1)
+        self.assertEqual(both_events.count("ASM_REQUEST_DONE"), 1)
+        self.assertEqual(both_events.count("ASM_RESPONSE_VIOLATION"), 1)
+        self.assertLess(
+            both_events.index("ASM_REQUEST_DONE"),
+            both_events.index("ASM_RESPONSE_VIOLATION"),
         )
 
     def test_asm_input_validation_rejects_unsafe_or_ambiguous_values(self) -> None:
@@ -5825,6 +5953,7 @@ when HTTP_RESPONSE_DATA {
             ({"login_status": {}}, "asm.login_status must be a string without NUL"),
             ({"captcha_age": -2}, "asm.captcha_age must be an integer"),
             ({"violations": [{"name": "x", "details": ["bad"]}]}, "details must be an object"),
+            ({"response_violations": [{"name": "x", "details": ["bad"]}]}, "details must be an object"),
             ({"signatures": {"ids": ["bad\x00value"]}}, "array of strings without NUL"),
             ({"unknown": True}, "asm unsupported field"),
         )
