@@ -514,6 +514,153 @@ class EmulatorAdapterTests(unittest.TestCase):
         self.assertEqual(usage["HTTP::payload"]["runtime_status"], "semantic-mock")
         self.assertEqual(result["fidelity"]["warnings"], [])
 
+    def test_interleaved_packet_flows_are_isolated_and_merged(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {
+                    "a_pool": ["10.0.0.10:80"],
+                    "b_pool": ["10.0.0.11:80"],
+                },
+                "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::host] eq "a.example"} {
+        pool a_pool
+    } else {
+        pool b_pool
+    }
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "http",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.1", "port": 50001},
+                        "destination": {"address": "192.0.2.10", "port": 80},
+                        "host": "a.example",
+                        "uri": "/a",
+                    },
+                    {
+                        "protocol": "http",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.2", "port": 50002},
+                        "destination": {"address": "192.0.2.10", "port": 80},
+                        "host": "b.example",
+                        "uri": "/b",
+                    },
+                    {
+                        "protocol": "http",
+                        "direction": "server_to_client",
+                        "source": {"address": "192.0.2.10", "port": 80},
+                        "destination": {"address": "10.0.0.1", "port": 50001},
+                        "status": 200,
+                        "response_body": "a-response",
+                    },
+                    {
+                        "protocol": "http",
+                        "direction": "server_to_client",
+                        "source": {"address": "192.0.2.10", "port": 80},
+                        "destination": {"address": "10.0.0.2", "port": 50002},
+                        "status": 200,
+                        "response_body": "b-response",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(result["flow_mode"], "isolated")
+        self.assertEqual(result["flow_count"], 2)
+        self.assertEqual(
+            [entry["index"] for entry in result["trace"]], [0, 1, 2, 3]
+        )
+        self.assertEqual(
+            [entry["flow_id"] for entry in result["flows"]],
+            [
+                "tcp:10.0.0.1:50001->192.0.2.10:80",
+                "tcp:10.0.0.2:50002->192.0.2.10:80",
+            ],
+        )
+        self.assertEqual(
+            [entry["packet_indexes"] for entry in result["flows"]], [[0, 2], [1, 3]]
+        )
+        self.assertEqual([item["pool"] for item in result["results"]], ["a_pool", "b_pool"])
+        self.assertEqual(
+            [item["response"]["body"] for item in result["results"]],
+            ["a-response", "b-response"],
+        )
+
+    def test_multi_flow_synthetic_events_require_flow_id(self) -> None:
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "synthetic event packets in a multi-flow trace require flow_id",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when CLIENT_ACCEPTED { log local0. accepted }",
+                    "packets": [
+                        {
+                            "protocol": "http",
+                            "direction": "client_to_server",
+                            "source": {"address": "10.0.0.1", "port": 50001},
+                            "destination": {"address": "192.0.2.10", "port": 80},
+                            "host": "a.example",
+                            "uri": "/a",
+                        },
+                        {
+                            "protocol": "http",
+                            "direction": "client_to_server",
+                            "source": {"address": "10.0.0.2", "port": 50002},
+                            "destination": {"address": "192.0.2.10", "port": 80},
+                            "host": "b.example",
+                            "uri": "/b",
+                        },
+                        {
+                            "protocol": "event",
+                            "event": "CLIENT_ACCEPTED",
+                            "state": {},
+                        },
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_flow_id_is_preserved_for_raw_wire_packets(self) -> None:
+        raw_hex = _raw_ipv4_tcp_hex(
+            "10.0.0.1", "192.0.2.10", 50001, 80, 0x18, b"GET / HTTP/1.0\r\n\r\n"
+        )
+        packets = self.adapter._normalise_packets(
+            [{"protocol": "wire", "flow_id": "raw-a", "raw_hex": raw_hex}]
+        )
+        self.assertEqual(packets[0]["flow_id"], "raw-a")
+        self.assertEqual(packets[0]["protocol"], "tcp")
+
+    def test_packet_flow_count_is_bounded_before_child_sessions_start(self) -> None:
+        packets = [
+            {
+                "protocol": "http",
+                "direction": "client_to_server",
+                "source": {"address": f"192.0.2.{index}", "port": 40000 + index},
+                "destination": {"address": "198.51.100.10", "port": 80},
+                "host": "example.com",
+                "uri": f"/{index}",
+            }
+            for index in range(1, 66)
+        ]
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "packet trace cannot contain more than 64 flows",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when HTTP_REQUEST { log local0. bounded }",
+                    "packets": packets,
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_http_disable_emits_http_disabled_with_passthrough_reason(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -2956,7 +3103,7 @@ when HTTP_RESPONSE_RELEASE {
         )
         self.assertEqual(result["status"], "passed")
         self.assertEqual(
-            result["summary"], {"vector_count": 2, "passed": 2, "failed": 0}
+            result["summary"], {"vector_count": 3, "passed": 3, "failed": 0}
         )
         self.assertTrue(all(vector["status"] == "passed" for vector in result["vectors"]))
 
@@ -2965,7 +3112,7 @@ when HTTP_RESPONSE_RELEASE {
             pack, tcl_lsp_root=self.tcl_lsp_root
         )
         self.assertEqual(failed["status"], "failed")
-        self.assertEqual(failed["summary"], {"vector_count": 2, "passed": 1, "failed": 1})
+        self.assertEqual(failed["summary"], {"vector_count": 3, "passed": 2, "failed": 1})
         mismatch = failed["vectors"][0]["mismatches"][0]
         self.assertEqual(mismatch["label"], "selected pool")
         self.assertEqual(mismatch["expected"], "wrong_pool")
@@ -18547,7 +18694,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
                 self.assertEqual(response.status, 200)
                 payload = json.loads(response.read())
             self.assertEqual(payload["status"], "passed")
-            self.assertEqual(payload["summary"]["passed"], 2)
+            self.assertEqual(payload["summary"]["passed"], 3)
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -18605,7 +18752,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["status"], "passed")
-        self.assertEqual(payload["summary"]["vector_count"], 2)
+        self.assertEqual(payload["summary"]["vector_count"], 3)
 
     def test_input_contract_rejects_wrong_profile_and_unknown_fields(self) -> None:
         base = {"irule": "when HTTP_REQUEST { pool api_pool }"}
@@ -18897,7 +19044,7 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             )
             golden_payload = golden_vectors["result"]["structuredContent"]
             self.assertEqual(golden_payload["status"], "passed")
-            self.assertEqual(golden_payload["summary"]["vector_count"], 2)
+            self.assertEqual(golden_payload["summary"]["vector_count"], 3)
 
             udp_behavior_pack = server.handle_message(
                 {

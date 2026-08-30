@@ -2304,7 +2304,26 @@ because there is no protocol-specific event to infer. WebSocket support is a
 structured packet adapter: it models the HTTP upgrade and the eight WebSocket
 frame/data events, and the raw TCP/PCAP path decodes RFC 6455 frames after a
 successful upgrade. Compressed frames using unsupported RSV extensions are
-rejected; IPv4 fragment handling remains outside this slice.
+rejected; raw IPv4 and IPv6 fragments are reassembled within bounded resource
+limits before protocol decoding.
+
+Packet records may optionally include a `flow_id` string of at most 128 UTF-8
+bytes. Without one, the adapter derives a direction-independent flow identity
+from transport family plus the client/server endpoint pair (the endpoints are
+swapped for server-to-client packets). An explicit `flow_id` is authoritative
+and requests that packets carrying that ID share one isolated context. When a
+trace contains interleaved flows, each flow is replayed in its own Tcl context
+and the resulting trace, emissions, and HTTP results are merged by the original
+packet index. Replay is bounded to 64
+flows. Sequential connection traces retain one Tcl context so `RULE_INIT` and
+scenario-wide globals preserve their existing behavior. Isolation prevents
+pending requests, connection-scoped state, and stream buffers from leaking
+between interleaved flows, but it intentionally does not claim TMM-wide shared
+Tcl globals across those isolated contexts.
+Synthetic `{"protocol":"event"}` records must carry `flow_id` when they are
+combined with another flow; otherwise there is no safe target connection for
+the event. `RULE_INIT` therefore runs once per isolated flow in a multi-flow
+trace.
 The WebSocket payload-processing controls are also modeled: `WS::payload_ivs`
 records the selected internal virtual server and `WS::payload_processing` tracks
 whether payload protocol processing is enabled or disabled. These are

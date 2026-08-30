@@ -10650,6 +10650,8 @@ IKE_PAYLOAD_TYPES = {
     56: "KD2",
 }
 MAX_PACKET_STREAMS = 128
+MAX_PACKET_FLOWS = 64
+PACKET_FLOW_ID_MAX_BYTES = 128
 MAX_IP_FRAGMENT_SETS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
@@ -10697,6 +10699,7 @@ PACKET_COMMON_FIELDS = {
     "ttl",
     "tos",
     "datagram",
+    "flow_id",
 }
 PACKET_PROTOCOL_FIELDS = {
     "event": {
@@ -12663,7 +12666,7 @@ def _wire_fragment_descriptor(
     prefix plus fragment payload needed to reconstruct one complete IP packet.
     """
     unknown = set(raw_packet) - {
-        "protocol", "direction", "raw_hex", "network", "timestamp"
+        "protocol", "direction", "raw_hex", "network", "timestamp", "flow_id"
     }
     if unknown:
         raise EmulatorInputError(
@@ -12675,6 +12678,20 @@ def _wire_fragment_descriptor(
     if network not in {"ipv4", "ipv6"}:
         raise EmulatorInputError("raw wire packets must use IPv4 or IPv6")
     raw_hex = _require_string(raw_packet.get("raw_hex"), f"wire packet {index} raw_hex")
+    flow_id = raw_packet.get("flow_id")
+    if flow_id is not None:
+        flow_id = _require_string(flow_id, f"wire packet {index} flow_id")
+        try:
+            flow_id_bytes = flow_id.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise EmulatorInputError(
+                f"wire packet {index} flow_id must be valid UTF-8"
+            ) from exc
+        if not flow_id or "\x00" in flow_id or len(flow_id_bytes) > PACKET_FLOW_ID_MAX_BYTES:
+            raise EmulatorInputError(
+                f"wire packet {index} flow_id must be non-empty, NUL-free, and at most "
+                f"{PACKET_FLOW_ID_MAX_BYTES} UTF-8 bytes"
+            )
     try:
         raw = bytes.fromhex(raw_hex)
     except ValueError as exc:
@@ -12715,7 +12732,7 @@ def _wire_fragment_descriptor(
             )
         source = raw[12:16]
         destination = raw[16:20]
-        key = ("ipv4", direction, source, destination, raw[9], raw[4:6])
+        key = ("ipv4", flow_id, direction, source, destination, raw[9], raw[4:6])
         fingerprint = bytearray(raw[:header_length])
         fingerprint[2:4] = b"\x00\x00"
         fingerprint[6:8] = (fragment_field & 0x4000).to_bytes(2, "big")
@@ -12733,6 +12750,7 @@ def _wire_fragment_descriptor(
             "source": source,
             "destination": destination,
             "protocol": raw[9],
+            "flow_id": flow_id,
         }
 
     if len(raw) < IPV6_FIXED_HEADER_BYTES or raw[0] >> 4 != 6:
@@ -12789,7 +12807,7 @@ def _wire_fragment_descriptor(
             fingerprint = bytearray(prefix)
             fingerprint[4:6] = b"\x00\x00"
             key = (
-                "ipv6", direction, source, destination,
+                "ipv6", flow_id, direction, source, destination,
                 fragment_next_header, raw[payload_offset + 4 : payload_offset + 8],
             )
             return {
@@ -12801,6 +12819,7 @@ def _wire_fragment_descriptor(
                 "prefix": bytes(prefix),
                 "fingerprint": bytes(fingerprint),
                 "fragment_next_header": fragment_next_header,
+                "flow_id": flow_id,
             }
         if payload_offset + 2 > total_length:
             raise EmulatorInputError(
@@ -12957,7 +12976,8 @@ def _reassemble_wire_fragments(raw_packets: list[Any]) -> list[dict[str, Any]]:
 
 def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) -> dict[str, Any]:
     unknown = sorted(
-        set(raw_packet) - {"protocol", "direction", "raw_hex", "network", "timestamp"}
+        set(raw_packet)
+        - {"protocol", "direction", "raw_hex", "network", "timestamp", "flow_id"}
     )
     if unknown:
         raise EmulatorInputError(
@@ -13070,6 +13090,8 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
             "destination": {"address": destination_address, "port": int.from_bytes(payload[2:4], "big")},
             "_wire_length": total_length,
         }
+        if "flow_id" in raw_packet:
+            packet["flow_id"] = raw_packet["flow_id"]
         if "timestamp" in raw_packet:
             packet["timestamp"] = raw_packet["timestamp"]
         if tcp_payload:
@@ -13089,6 +13111,8 @@ def _decode_wire_packet(raw_packet: dict[str, Any], index: int, direction: str) 
             "destination": {"address": destination_address, "port": int.from_bytes(payload[2:4], "big")},
             "_wire_length": total_length,
         }
+        if "flow_id" in raw_packet:
+            packet["flow_id"] = raw_packet["flow_id"]
         if "timestamp" in raw_packet:
             packet["timestamp"] = raw_packet["timestamp"]
         if udp_payload:
@@ -16179,7 +16203,9 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 f"packet {index} protocol must be one of: {', '.join(sorted(PACKET_PROTOCOLS))}"
             )
         if protocol == "event":
-            unknown_event_fields = sorted(set(packet) - {"protocol", "event", "state"})
+            unknown_event_fields = sorted(
+                set(packet) - {"protocol", "event", "state", "flow_id"}
+            )
             if unknown_event_fields:
                 raise EmulatorInputError(
                     f"unsupported synthetic event packet field(s): {', '.join(unknown_event_fields)}"
@@ -16210,6 +16236,20 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             "source": _packet_endpoint(packet.get("source"), "source", index),
             "destination": _packet_endpoint(packet.get("destination"), "destination", index),
         }
+        if "flow_id" in packet:
+            flow_id = _require_string(packet["flow_id"], f"packet {index} flow_id")
+            try:
+                flow_id_bytes = flow_id.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise EmulatorInputError(
+                    f"packet {index} flow_id must be valid UTF-8"
+                ) from exc
+            if not flow_id or "\x00" in flow_id or len(flow_id_bytes) > PACKET_FLOW_ID_MAX_BYTES:
+                raise EmulatorInputError(
+                    f"packet {index} flow_id must be non-empty, NUL-free, and at most "
+                    f"{PACKET_FLOW_ID_MAX_BYTES} UTF-8 bytes"
+                )
+            normalised["flow_id"] = flow_id
         if protocol == "event":
             event_name, event_state = _normalise_event(
                 packet.get("event"), packet.get("state")
@@ -17613,6 +17653,98 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             normalised["message_type"] = normalised["type"]
         packets.append(normalised)
     return packets
+
+
+def _packet_flow_key(packet: dict[str, Any]) -> tuple[str, ...]:
+    """Return a bounded, direction-independent identity for one packet flow."""
+    flow_id = packet.get("flow_id")
+    if flow_id is not None:
+        return ("id", str(flow_id))
+    if packet["protocol"] == "event":
+        return ("event",)
+
+    protocol = packet["protocol"]
+    if protocol in {
+        "tls", "http", "http2", "websocket", "ftp", "icap", "imap", "pop3",
+        "ldap", "smtps", "ntlm", "protocol_inspection", "classification",
+        "category", "rtsp", "tds", "qoe", "l7check", "fix", "socks", "mqtt",
+    }:
+        transport = "tcp"
+    elif protocol in {
+        "udp", "dns", "dhcpv4", "dhcpv6", "ike", "diameter", "radius", "gtp", "pcp",
+    }:
+        transport = "udp"
+    elif protocol == "sctp":
+        transport = "sctp"
+    elif protocol == "sip":
+        transport = str(packet.get("transport", "sip")).lower()
+    else:
+        transport = protocol
+
+    source = packet.get("source", {})
+    destination = packet.get("destination", {})
+    if packet["direction"] == "client_to_server":
+        client, server = source, destination
+    else:
+        client, server = destination, source
+    return (
+        "endpoint",
+        transport,
+        str(client.get("address", "")),
+        str(client.get("port", 0)),
+        str(server.get("address", "")),
+        str(server.get("port", 0)),
+    )
+
+
+def _packet_flow_label(flow_key: tuple[str, ...]) -> str:
+    if flow_key[0] == "id":
+        return f"id:{flow_key[1]}"
+    if flow_key[0] == "event":
+        return "unbound-event"
+    return (
+        f"{flow_key[1]}:{flow_key[2]}:{flow_key[3]}"
+        f"->{flow_key[4]}:{flow_key[5]}"
+    )
+
+
+def _packet_has_complete_flow_endpoints(packet: dict[str, Any]) -> bool:
+    source = packet.get("source", {})
+    destination = packet.get("destination", {})
+    return all(
+        endpoint.get(field) not in (None, "")
+        for endpoint in (source, destination)
+        for field in ("address", "port")
+    )
+
+
+def _packet_flows_are_interleaved(
+    packets: list[dict[str, Any]],
+    flow_groups: dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]],
+) -> bool:
+    """Detect overlap without splitting ordinary sequential connection traces."""
+    if len(flow_groups) <= 1:
+        return False
+    if any("flow_id" in packet for packet in packets):
+        return True
+    if any(
+        packet["protocol"] != "event"
+        and not _packet_has_complete_flow_endpoints(packet)
+        for packet in packets
+    ):
+        return False
+
+    seen: set[tuple[str, ...]] = set()
+    previous: tuple[str, ...] | None = None
+    for packet in packets:
+        flow_key = _packet_flow_key(packet)
+        if flow_key == previous:
+            continue
+        if flow_key in seen:
+            return True
+        seen.add(flow_key)
+        previous = flow_key
+    return False
 
 
 def _run_request_with_state(session: Any, proc_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -23097,9 +23229,16 @@ class EmulatorSession:
             "results": http_results,
         }
 
+    def _run_normalised_packet_trace(
+        self, packets: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        return self._call(
+            lambda session: self._run_packet_trace_on_worker(session, packets)
+        )
+
     def run_packet_trace(self, packets: Any) -> dict[str, Any]:
         normalised = _normalise_packets(packets)
-        return self._call(lambda session: self._run_packet_trace_on_worker(session, normalised))
+        return self._run_normalised_packet_trace(normalised)
 
     def metadata(self, session_id: str) -> dict[str, Any]:
         def read_metadata(session: Any) -> dict[str, Any]:
@@ -23126,6 +23265,143 @@ class EmulatorSession:
             if self._thread.is_alive():
                 self._tasks.put(None)
         self._thread.join(timeout=5)
+
+
+def _run_isolated_packet_trace(
+    root: Path,
+    scenario: dict[str, Any],
+    normalised_packets: list[dict[str, Any]],
+    flow_groups: dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]],
+    *,
+    backend: str,
+) -> dict[str, Any]:
+    """Replay multiple packet flows in bounded, independent Tcl contexts."""
+    if not flow_groups:
+        raise EmulatorInputError("packet flow grouping produced no flows")
+    if len(flow_groups) > MAX_PACKET_FLOWS:
+        raise EmulatorInputError(
+            f"packet trace cannot contain more than {MAX_PACKET_FLOWS} flows"
+        )
+
+    child_scenario = dict(scenario)
+    child_scenario.pop("packets", None)
+    trace_rows: list[tuple[int, int, int, dict[str, Any]]] = []
+    emitted_rows: list[tuple[int, int, int, dict[str, Any]]] = []
+    result_rows: list[tuple[int, int, int, dict[str, Any]]] = []
+    flow_summaries: list[dict[str, Any]] = []
+    registered_events: list[str] | None = None
+    event_controls: Any = None
+    fidelity: Any = None
+
+    for flow_ordinal, (flow_key, entries) in enumerate(flow_groups.items()):
+        original_indexes = [original_index for original_index, _ in entries]
+
+        def original_index_for(local_index: Any, fallback_order: int) -> int:
+            if (
+                isinstance(local_index, int)
+                and not isinstance(local_index, bool)
+                and 0 <= local_index < len(original_indexes)
+            ):
+                return original_indexes[local_index]
+            return original_indexes[min(fallback_order, len(original_indexes) - 1)]
+
+        child = EmulatorSession(
+            root,
+            child_scenario,
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+            backend=backend,
+        )
+        try:
+            local_result = child._run_normalised_packet_trace(
+                [dict(packet) for _, packet in entries]
+            )
+            if registered_events is None:
+                registered_events = list(child.registered_events)
+                event_controls = child.event_controls
+                fidelity = child.fidelity
+        finally:
+            child.close()
+
+        local_trace = local_result.get("trace", [])
+        if not isinstance(local_trace, list):  # pragma: no cover - internal contract guard
+            raise EmulatorInputError("isolated packet trace returned an invalid trace")
+        result_locations: dict[int, tuple[int, int]] = {}
+        for local_order, local_entry in enumerate(local_trace):
+            if not isinstance(local_entry, dict):  # pragma: no cover - internal contract guard
+                raise EmulatorInputError("isolated packet trace returned an invalid trace entry")
+            original_index = original_index_for(local_entry.get("index"), local_order)
+            trace_entry = dict(local_entry)
+            trace_entry["index"] = original_index
+            if "completed_at" in trace_entry:
+                trace_entry["completed_at"] = original_index_for(
+                    trace_entry["completed_at"], local_order
+                )
+            trace_rows.append((original_index, flow_ordinal, local_order, trace_entry))
+
+            candidates: list[Any] = []
+            http_results = local_entry.get("http_results")
+            if isinstance(http_results, list):
+                candidates.extend(http_results)
+            elif isinstance(local_entry.get("http_result"), dict):
+                candidates.append(local_entry["http_result"])
+            for result in candidates:
+                if isinstance(result, dict):
+                    result_locations.setdefault(
+                        id(result), (original_index, local_order)
+                    )
+
+        local_emitted = local_result.get("emitted", [])
+        if not isinstance(local_emitted, list):  # pragma: no cover - internal contract guard
+            raise EmulatorInputError("isolated packet trace returned invalid emissions")
+        for local_order, emission in enumerate(local_emitted):
+            if not isinstance(emission, dict):  # pragma: no cover - internal contract guard
+                raise EmulatorInputError("isolated packet trace returned an invalid emission")
+            item = dict(emission)
+            original_index = original_index_for(item.get("packet_index"), local_order)
+            item["packet_index"] = original_index
+            emitted_rows.append((original_index, flow_ordinal, local_order, item))
+
+        local_results = local_result.get("results", [])
+        if not isinstance(local_results, list):  # pragma: no cover - internal contract guard
+            raise EmulatorInputError("isolated packet trace returned invalid results")
+        for local_order, result in enumerate(local_results):
+            if not isinstance(result, dict):  # pragma: no cover - internal contract guard
+                raise EmulatorInputError("isolated packet trace returned an invalid result")
+            original_index, trace_order = result_locations.get(
+                id(result),
+                (original_index_for(None, local_order), local_order),
+            )
+            result_rows.append((original_index, flow_ordinal, trace_order, result))
+
+        flow_summaries.append(
+            {
+                "flow_id": _packet_flow_label(flow_key),
+                "packet_count": len(entries),
+                "packet_indexes": original_indexes,
+            }
+        )
+
+    trace_rows.sort(key=lambda row: (row[0], row[1], row[2]))
+    emitted_rows.sort(key=lambda row: (row[0], row[1], row[2]))
+    result_rows.sort(key=lambda row: (row[0], row[1], row[2]))
+    return {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "packets_processed": len(normalised_packets),
+        "flow_mode": "isolated",
+        "flow_count": len(flow_summaries),
+        "flows": flow_summaries,
+        "trace": [row[3] for row in trace_rows],
+        "emitted": [row[3] for row in emitted_rows],
+        "results": [row[3] for row in result_rows],
+        "registered_events": registered_events or [],
+        "event_controls": event_controls if event_controls is not None else [],
+        "fidelity": fidelity if fidelity is not None else {},
+    }
 
 
 class EmulatorNotFoundError(KeyError):
@@ -23904,6 +24180,41 @@ def run_scenario(
             allow_packets=True,
             require_http=False,
         )
+        normalised_packets = _normalise_packets(scenario["packets"])
+        flow_groups: dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]] = {}
+        for index, packet in enumerate(normalised_packets):
+            flow_groups.setdefault(_packet_flow_key(packet), []).append((index, packet))
+        if len(flow_groups) > 1:
+            if len(flow_groups) > MAX_PACKET_FLOWS:
+                raise EmulatorInputError(
+                    f"packet trace cannot contain more than {MAX_PACKET_FLOWS} flows"
+                )
+            unbound_events = [
+                index
+                for index, packet in enumerate(normalised_packets)
+                if packet["protocol"] == "event" and "flow_id" not in packet
+            ]
+            if unbound_events:
+                indexes = ", ".join(str(index) for index in unbound_events[:8])
+                if len(unbound_events) > 8:
+                    indexes += ", ..."
+                raise EmulatorInputError(
+                    "synthetic event packets in a multi-flow trace require flow_id "
+                    f"(missing on packet index {indexes})"
+                )
+            if _packet_flows_are_interleaved(normalised_packets, flow_groups):
+                try:
+                    return _run_isolated_packet_trace(
+                        root,
+                        scenario,
+                        normalised_packets,
+                        flow_groups,
+                        backend=backend,
+                    )
+                except EmulatorInputError:
+                    raise
+                except Exception as exc:
+                    raise EmulatorInputError(f"emulator packet trace failed: {exc}") from exc
         session = EmulatorSession(
             root,
             scenario,
@@ -23913,7 +24224,7 @@ def run_scenario(
             backend=backend,
         )
         try:
-            packet_result = session.run_packet_trace(scenario["packets"])
+            packet_result = session._run_normalised_packet_trace(normalised_packets)
         except EmulatorInputError:
             raise
         except Exception as exc:
