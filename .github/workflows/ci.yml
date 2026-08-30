@@ -58,13 +58,22 @@ jobs:
 
       - name: Smoke test the portable emulator image
         run: |
-          docker run --detach --name testcl-irule-emulator-ci --publish 18080:8080 testcl-irule-emulator:ci
-          trap 'docker rm --force testcl-irule-emulator-ci >/dev/null 2>&1 || true' EXIT
+          container_name="testcl-irule-emulator-ci-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-$$"
+          trap 'docker rm --force "$container_name" >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name "$container_name" --publish 18080:8080 testcl-irule-emulator:ci
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:18080/healthz >/tmp/testcl-healthz.json; then
+            if curl --fail --silent --show-error http://127.0.0.1:18080/healthz >/tmp/testcl-healthz.json; then
               break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs "$container_name"
+              exit 1
             fi
             sleep 1
           done
-          curl --fail --silent http://127.0.0.1:18080/healthz | grep -F 'tmos-17.5'
-          curl --fail --silent http://127.0.0.1:18080/ | grep -F 'BIG-IP 17.5 iRule Emulator'
+          grep -F 'tmos-17.5' /tmp/testcl-healthz.json
+          if ! curl --fail --silent --show-error http://127.0.0.1:18080/ >/tmp/testcl-workbench.html; then
+            docker logs "$container_name"
+            exit 1
+          fi
+          grep -F 'TesTcl · TMOS 17.5 iRule workbench' /tmp/testcl-workbench.html
