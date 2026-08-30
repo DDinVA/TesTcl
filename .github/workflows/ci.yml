@@ -44,6 +44,7 @@ jobs:
       - name: Run Python integration suite
         env:
           TCL_LSP_ROOT: ${{ runner.temp }}/tcl-lsp
+          PYTHONPATH: .
         run: uv run --python 3.13 pytest -q
 
   container:
