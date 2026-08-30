@@ -24,6 +24,7 @@ COPY tools/irule-emulator.py /opt/testcl/tools/irule-emulator.py
 COPY tools/semantic-mocks.tcl /opt/testcl/tools/semantic-mocks.tcl
 COPY tools/http2_wire.py /opt/testcl/tools/http2_wire.py
 COPY web/emulator.html /opt/testcl/web/emulator.html
+COPY examples/scenarios/live-http-17.5.json /opt/testcl/examples/scenarios/live-http-17.5.json
 COPY requirements-emulator.txt /opt/testcl/requirements-emulator.txt
 COPY LICENSE /opt/testcl/LICENSE
 COPY THIRD_PARTY.md /opt/testcl/THIRD_PARTY.md

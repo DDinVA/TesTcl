@@ -60,7 +60,12 @@ jobs:
         run: |
           container_name="testcl-irule-emulator-ci-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-$$"
           trap 'docker rm --force "$container_name" >/dev/null 2>&1 || true' EXIT
-          docker run --detach --name "$container_name" --publish 18080:8080 testcl-irule-emulator:ci
+          docker run --detach --name "$container_name" \
+            --publish 18080:8080 --publish 18081:18080 \
+            testcl-irule-emulator:ci \
+            --serve --host 0.0.0.0 --port 8080 \
+            --data-plane-scenario /opt/testcl/examples/scenarios/live-http-17.5.json \
+            --data-plane-host 0.0.0.0 --data-plane-port 18080
           for attempt in $(seq 1 30); do
             if curl --fail --silent --show-error http://127.0.0.1:18080/healthz >/tmp/testcl-healthz.json; then
               break
@@ -77,3 +82,14 @@ jobs:
             exit 1
           fi
           grep -F 'TesTcl · TMOS 17.5 iRule workbench' /tmp/testcl-workbench.html
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:18081/health >/tmp/testcl-data-plane.txt; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs "$container_name"
+              exit 1
+            fi
+            sleep 1
+          done
+          grep -F 'hello from the modeled origin' /tmp/testcl-data-plane.txt
