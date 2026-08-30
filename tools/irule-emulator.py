@@ -8657,7 +8657,7 @@ PROTOCOL_INSPECTION_ID_MAX_BYTES = 4 * 1024
 PROTOCOL_INSPECTION_IDS_MAX_BYTES = 64 * 1024
 CATEGORY_RESULT_MAX_ITEMS = 128
 CATEGORY_RESULT_MAX_BYTES = 64 * 1024
-PACKET_PROTOCOLS = {"event", "tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "wire"}
+PACKET_PROTOCOLS = {"event", "tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category", "tls", "http", "http2", "dns", "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp", "rtsp", "tds", "wire"}
 PACKET_DIRECTIONS = {"client_to_server", "server_to_client"}
 PACKET_COMMON_FIELDS = {
     "protocol",
@@ -8733,6 +8733,22 @@ PACKET_PROTOCOL_FIELDS = {
         "tls_active",
         "tls_session_reused",
     },
+    "tds": {
+        "payload_hex",
+        "type",
+        "length",
+        "procid",
+        "procname",
+        "sqltext",
+        "xacttype",
+        "xactid",
+        "is_read",
+        "request_type",
+        "username",
+        "dbname",
+        "loginoption",
+        "version",
+    },
     "icap": {
         "payload_hex",
         "type",
@@ -8806,6 +8822,7 @@ PACKET_PROTOCOL_FIELDS = {
         "host",
         "headers",
         "body",
+        "lb_failure",
         "status",
         "response_headers",
         "response_body",
@@ -8981,6 +8998,8 @@ PACKET_EVENT_ADAPTERS = {
     "ECA_REQUEST_DENIED": "injected NTLM/ECA authentication failure",
     "FIX_MESSAGE": "structured FIX message event",
     "SERVER_DATA": "server payload (TCP or generic UDP)",
+    "TDS_REQUEST": "structured TDS request message",
+    "TDS_RESPONSE": "structured TDS response message",
     "CLIENTSSL_CLIENTHELLO": "TLS client hello",
     "CLIENTSSL_CLIENTCERT": "TLS client certificate",
     "CLIENTSSL_HANDSHAKE": "TLS client handshake",
@@ -12240,7 +12259,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             raise EmulatorInputError(
                 f"unsupported packet {index} field(s): {', '.join(unknown)}"
             )
-        if protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and "payload" in packet and "payload_hex" in packet:
+        if protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and "payload" in packet and "payload_hex" in packet:
             raise EmulatorInputError(
                 f"packet {index} {protocol.upper()} packets must use payload or payload_hex, not both"
             )
@@ -12370,6 +12389,14 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 ):
                     raise EmulatorInputError(f"packet {index} {field} must be an object of strings")
                 normalised[field] = value
+            elif protocol == "http" and field == "lb_failure":
+                failure = _require_string(packet[field], f"packet {index} lb_failure")
+                if failure not in LB_FAILURE_CAUSES:
+                    causes = ", ".join(sorted(LB_FAILURE_CAUSES))
+                    raise EmulatorInputError(
+                        f"packet {index} lb_failure must be one of: {causes}"
+                    )
+                normalised[field] = failure
             elif field in {"body", "response_body", "method", "uri", "host"}:
                 normalised[field] = _require_string(packet[field], f"packet {index} {field}")
             elif field == "http2":
@@ -12450,7 +12477,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     else:
                         options[canonical_id] = _packet_scalar(option_value, "options")
                 normalised[field] = options
-            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
+            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
                 value = _require_string(packet[field], f"packet {index} payload_hex")
                 if len(value) % 2:
                     raise EmulatorInputError(
@@ -12575,6 +12602,14 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                         packet[field], f"packet {index} type", 255
                     )
                     continue
+                if protocol == "tds":
+                    value = packet[field]
+                    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                        raise EmulatorInputError(
+                            f"packet {index} TDS type must be a non-negative integer"
+                        )
+                    normalised[field] = value
+                    continue
                 packet_type = _require_string(packet[field], f"packet {index} type").lower()
                 if protocol == "tls":
                     if packet_type not in {
@@ -12641,6 +12676,41 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = value
             elif protocol == "ftp" and field in {"tls_active", "tls_session_reused"}:
                 normalised[field] = _packet_bool(packet[field], f"packet {index} {field}")
+            elif protocol == "tds" and field in {
+                "type",
+                "length",
+                "procid",
+                "xacttype",
+                "xactid",
+            }:
+                value = packet[field]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise EmulatorInputError(
+                        f"packet {index} TDS {field} must be a non-negative integer"
+                    )
+                normalised[field] = value
+            elif protocol == "tds" and field == "is_read":
+                normalised[field] = _packet_bool(packet[field], f"packet {index} is_read")
+            elif protocol == "tds" and field == "request_type":
+                request_type = _require_string(
+                    packet[field], f"packet {index} request_type"
+                ).lower()
+                if request_type not in {"read", "write"}:
+                    raise EmulatorInputError(
+                        f"packet {index} TDS request_type must be read or write"
+                    )
+                normalised[field] = request_type
+            elif protocol == "tds" and field in {
+                "procname",
+                "sqltext",
+                "username",
+                "dbname",
+                "loginoption",
+                "version",
+            }:
+                normalised[field] = _require_string(
+                    packet[field], f"packet {index} {field}"
+                )
             elif protocol in STARTTLS_PROTOCOLS and field == "command":
                 command = _require_string(packet[field], f"packet {index} command")
                 if len(command.encode("utf-8")) > STARTTLS_COMMAND_MAX_BYTES:
@@ -12880,6 +12950,20 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             normalised.setdefault("response_code", 0)
             normalised.setdefault("tls_active", "0")
             normalised.setdefault("tls_session_reused", "0")
+        if protocol == "tds":
+            normalised.setdefault("type", 0)
+            normalised.setdefault("length", 0)
+            normalised.setdefault("procid", 0)
+            normalised.setdefault("procname", "")
+            normalised.setdefault("sqltext", "")
+            normalised.setdefault("xacttype", 0)
+            normalised.setdefault("xactid", 0)
+            normalised.setdefault("is_read", "0")
+            normalised.setdefault("request_type", "read")
+            normalised.setdefault("username", "")
+            normalised.setdefault("dbname", "")
+            normalised.setdefault("loginoption", "")
+            normalised.setdefault("version", "")
         if protocol == "icap":
             normalised.setdefault(
                 "type", "request" if direction == "client_to_server" else "response"
@@ -12950,6 +13034,10 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             normalised.setdefault("analytics", "disable")
         if protocol == "http" and direction == "client_to_server" and "status" in normalised:
             raise EmulatorInputError(f"packet {index} HTTP requests cannot specify status")
+        if protocol == "http" and direction == "server_to_client" and "lb_failure" in normalised:
+            raise EmulatorInputError(
+                f"packet {index} HTTP responses cannot specify lb_failure"
+            )
         if protocol == "http" and direction == "server_to_client" and "method" in normalised:
             raise EmulatorInputError(f"packet {index} HTTP responses cannot specify method")
         if protocol == "http" and direction == "server_to_client" and "status" in normalised:
@@ -14890,6 +14978,12 @@ class EmulatorSession:
             ftp_state["payload"] = bytes(payload)
             ftp_state["payload_length"] = str(len(payload))
             state["ftp"] = ftp_state
+        elif protocol == "tds":
+            tds_state: dict[str, Any] = {}
+            for field in EVENT_STATE_FIELDS["tds"]:
+                if field in packet:
+                    tds_state[field] = _packet_scalar(packet[field], field)
+            state["tds"] = tds_state
         elif protocol in {"dhcpv4", "dhcpv6"}:
             payload = packet.get("_wire_payload")
             if not isinstance(payload, (bytes, bytearray)):
@@ -15213,7 +15307,7 @@ class EmulatorSession:
             mr_state["payload_length"] = str(len(payload))
             state["mr"] = mr_state
         if (
-            protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp", "ftp", "icap"}
+            protocol in {"tcp", "tls", "http", "http2", "websocket", "mqtt", "diameter", "mr", "rtsp", "ftp", "icap", "tds"}
             or (protocol == "sip" and packet.get("transport", "tcp") == "tcp")
         ):
             state["tcp"] = {}
@@ -16535,6 +16629,19 @@ class EmulatorSession:
                 "payload_hex",
                 "rtdom",
                 "subscriber",
+                "length",
+                "procid",
+                "procname",
+                "sqltext",
+                "xacttype",
+                "xactid",
+                "is_read",
+                "request_type",
+                "lb_failure",
+                "username",
+                "dbname",
+                "loginoption",
+                "version",
                 "proto",
                 "fields",
                 "payload_length",
@@ -16628,6 +16735,8 @@ class EmulatorSession:
                     for field in ("host", "headers", "body"):
                         if field in packet:
                             request[field] = packet[field]
+                    if "lb_failure" in packet:
+                        request["lb_failure"] = packet["lb_failure"]
                     if "http2" in packet:
                         request["http2"] = packet["http2"]
                     if "payload" in packet and "body" not in request:
@@ -17442,6 +17551,24 @@ class EmulatorSession:
                     entry["disabled"] = True
                 if "payload" in ftp_state:
                     entry["payload_after"] = ftp_state["payload"]
+                continue
+            elif protocol == "tds":
+                self._activate_packet_connection(session, packet, entry["events"])
+                if direction == "server_to_client" and not self._server_connection_open:
+                    self._activate_packet_server_connection(
+                        session, packet, entry["events"], emit_init=True
+                    )
+                event_name = (
+                    "TDS_REQUEST"
+                    if direction == "client_to_server"
+                    else "TDS_RESPONSE"
+                )
+                entry["events"].append(
+                    self._fire_event_on_worker(
+                        session, event_name, self._packet_event_state(packet)
+                    )
+                )
+                finish_packet_connection(packet, entry, index)
                 continue
             elif protocol == "icap":
                 self._activate_packet_connection(session, packet, entry["events"])

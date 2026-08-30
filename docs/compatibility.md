@@ -109,7 +109,7 @@ decisions only and are not a claim of live routing, QoS, or packet behavior.
 The optional TMOS 17.5 emulator exposes the pinned `tcl-lsp` registry in
 bounded chunks and reports static command-handler and packet-event coverage
 through its conformance endpoint. Structured packet traces currently cover
-TCP, TLS, HTTP, generic UDP, SCTP, DNS, SIP over TCP or UDP, Diameter over TCP, RADIUS over UDP, GTP over UDP or GTP-Prime over TCP, Message Routing Framework messages over TCP, and raw IPv4 transport records. Fragmented IPv4
+TCP, TLS, HTTP, generic UDP, SCTP, DNS, SIP over TCP or UDP, Diameter over TCP, RADIUS over UDP, GTP over UDP or GTP-Prime over TCP, Message Routing Framework messages over TCP, and raw IPv4 transport records. HTTP packet traces also accept a bounded client-side `lb_failure` cause for exercising `LB_FAILED` fallback and `LB::reselect`. Fragmented IPv4
 packets remain outside the current boundary. Classic PCAP and bounded pcapng
 ingestion are supported, and TCP stream reassembly includes bounded gap,
 overlap, and retransmission de-duplication handling. Diameter validates and
@@ -359,12 +359,14 @@ forms.
 `-method METHOD URI ?BODY?` form and records bounded local-request state under
 `semantic.rest`; it never performs outbound network I/O or exposes a response.
 
-The TDS command surface is modeled for direct `TDS_REQUEST` and
-`TDS_RESPONSE` events. `TDS::msg` provides the event message fields and the
-read/write `request_type` override; `TDS::session` provides connection-scoped
-username, database, login-option, and version metadata. Message state resets
-between TDS events while session metadata persists, and the result is exposed
-under `semantic.tds`. Packet-level TDS decoding is not implemented yet.
+The TDS command surface is modeled for direct and structured-packet
+`TDS_REQUEST` and `TDS_RESPONSE` events. `TDS::msg` provides the event message
+fields and the read/write `request_type` override; `TDS::session` provides
+connection-scoped username, database, login-option, and version metadata.
+Message state resets between TDS events while session metadata persists.
+Structured packets use bounded caller-supplied fields and TCP lifecycle
+ordering; arbitrary TDS wire decoding and database-peer behavior remain out of
+scope.
 
 The IKE namespace is implemented for direct `IKE_AUTH` events. The emulator
 models certificate retrieval, SAN getters, and the `IKE::auth_success` decision

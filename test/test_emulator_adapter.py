@@ -6097,6 +6097,69 @@ when LB_FAILED { log local0. "automatic=[event info]" }
         )
         self.assertTrue(any("automatic=no_member" in entry for entry in request_result["logs"]))
 
+    def test_http_packet_lb_failure_drives_fallback_event(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "pools": {
+                    "primary_pool": ["192.0.2.10:443"],
+                    "fallback_pool": ["192.0.2.20:443"],
+                },
+                "irule": """
+when HTTP_REQUEST { pool primary_pool }
+when LB_FAILED {
+    log local0. "packet-failure=[event info]"
+    pool fallback_pool
+    LB::reselect
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "http",
+                        "direction": "client_to_server",
+                        "uri": "/health",
+                        "lb_failure": "connection_timeout",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.100", "port": 443},
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        entry = result["trace"][0]["http_result"]
+        self.assertIn("LB_FAILED", entry["events_fired"])
+        self.assertEqual(entry["pool"], "fallback_pool")
+        self.assertEqual(entry["node"], "192.0.2.20")
+        self.assertEqual(
+            entry["lb_failure"],
+            {"cause": "connection_timeout", "fired": True, "selected": True},
+        )
+        self.assertTrue(
+            any("packet-failure=connection_timeout" in log for log in entry["logs"])
+        )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "HTTP responses cannot specify lb_failure",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when HTTP_RESPONSE { }",
+                    "packets": [
+                        {
+                            "protocol": "http",
+                            "direction": "server_to_client",
+                            "lb_failure": "connection_timeout",
+                            "source": {"address": "192.0.2.10", "port": 443},
+                            "destination": {"address": "10.0.0.5", "port": 51000},
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_http_retry_replays_request_and_reselects_next_member(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -9726,6 +9789,87 @@ when TDS_RESPONSE {
         self.assertEqual(
             response["semantic"]["tds"]["session"]["username"], "alice"
         )
+
+    def test_tds_structured_packets_drive_request_and_response_events(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "TDS"],
+                "irule": """
+when TDS_REQUEST {
+    TDS::msg request_type write
+    log local0. "request=[TDS::msg type]/[TDS::msg procname]/[TDS::msg request_type] session=[TDS::session username]/[TDS::session dbname]"
+}
+when TDS_RESPONSE {
+    log local0. "response=[TDS::msg type]/[TDS::msg length] session=[TDS::session username]/[TDS::session dbname]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tds",
+                        "direction": "client_to_server",
+                        "type": 4,
+                        "length": 128,
+                        "procid": 7,
+                        "procname": "sp_executesql",
+                        "sqltext": "select 1",
+                        "xacttype": 2,
+                        "xactid": 9,
+                        "is_read": True,
+                        "username": "alice",
+                        "dbname": "app",
+                        "loginoption": "integrated",
+                        "version": "7.4",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 1433},
+                    },
+                    {
+                        "protocol": "tds",
+                        "direction": "server_to_client",
+                        "type": 5,
+                        "length": 32,
+                        "username": "alice",
+                        "dbname": "app",
+                        "loginoption": "integrated",
+                        "version": "7.4",
+                        "source": {"address": "192.0.2.10", "port": 1433},
+                        "destination": {"address": "10.0.0.5", "port": 51000},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        request_events = result["trace"][0]["events"]
+        response_events = result["trace"][1]["events"]
+        self.assertEqual(request_events[-1]["event"], "TDS_REQUEST")
+        self.assertEqual(request_events[-1]["state"]["tds"]["request_type"], "write")
+        self.assertTrue(
+            any("request=4/sp_executesql/write" in log for log in request_events[-1]["logs"])
+        )
+        self.assertEqual(
+            [event["event"] for event in response_events],
+            ["SERVER_INIT", "SERVER_CONNECTED", "TDS_RESPONSE"],
+        )
+        self.assertTrue(any("response=5/32" in log for log in response_events[-1]["logs"]))
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "TDS request_type must be read or write",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "TDS"],
+                    "irule": "when TDS_REQUEST { }",
+                    "packets": [
+                        {
+                            "protocol": "tds",
+                            "request_type": "query",
+                            "source": {"address": "10.0.0.5", "port": 51000},
+                            "destination": {"address": "192.0.2.10", "port": 1433},
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
 
     def test_ike_auth_commands_model_certificate_and_san_state(self) -> None:
         session = self.adapter.EmulatorSession(
