@@ -2892,6 +2892,7 @@ when HTTP_RESPONSE_RELEASE {
             "lb-17.5.json": 5,
             "uri-17.5.json": 8,
             "stateful-17.5.json": 2,
+            "ssl-tls-17.5.json": 16,
         }
         for filename, case_count in expected_counts.items():
             with self.subTest(filename=filename):
