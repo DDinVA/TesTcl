@@ -3149,6 +3149,14 @@ when HTTP_REQUEST {
             coverage["event_lifecycle"]["target_unmapped_events"],
         )
         self.assertNotIn(
+            "PING_REQUEST_READY",
+            coverage["event_lifecycle"]["target_unmapped_events"],
+        )
+        self.assertNotIn(
+            "PING_RESPONSE_READY",
+            coverage["event_lifecycle"]["target_unmapped_events"],
+        )
+        self.assertNotIn(
             "ACCESS_SAML_SLO_REQ",
             coverage["event_lifecycle"]["target_unmapped_events"],
         )
@@ -3185,6 +3193,8 @@ when HTTP_REQUEST {
                 "ACCESS_SAML_SLO_RESP",
                 "ACCESS2_POLICY_EXPRESSION_EVAL",
                 "EPI_NA_CHECK_HTTP_REQUEST",
+                "PING_REQUEST_READY",
+                "PING_RESPONSE_READY",
                 "BOTDEFENSE_REQUEST",
                 "BOTDEFENSE_ACTION",
                 "ANTIFRAUD_LOGIN",
@@ -3212,6 +3222,8 @@ when HTTP_REQUEST {
                 "ACCESS_SAML_SLO_RESP": "ACCESS SAML logout response fixture after policy",
                 "ACCESS2_POLICY_EXPRESSION_EVAL": "ACCESS2 policy-expression procedure fixture after policy",
                 "EPI_NA_CHECK_HTTP_REQUEST": "Endpoint Inspector special status request",
+                "PING_REQUEST_READY": "PingAccess policy request ready before release",
+                "PING_RESPONSE_READY": "PingAccess policy response ready for mutation",
                 "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",
                 "BOTDEFENSE_ACTION": "Bot Defense action from HTTP request",
                 "ANTIFRAUD_LOGIN": "Anti-Fraud login inspection from HTTP request",
@@ -13267,6 +13279,98 @@ when ACCESS2_POLICY_EXPRESSION_EVAL {
         )
         self.assertTrue(any("epi=/my.status.eps" in log for log in result["results"][0]["logs"]))
         self.assertTrue(any("request=/normal" in log for log in result["results"][1]["logs"]))
+
+    def test_pingaccess_ready_events_mutate_http_request_and_response(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "ping": {"request_ready": True, "response_ready": True},
+                "irule": (
+                    "when PING_REQUEST_READY { "
+                    "HTTP::header insert X-Ping-Request ready; "
+                    "log local0. \"ping-request=[HTTP::header X-Ping-Request]\" }\n"
+                    "when PING_RESPONSE_READY { "
+                    "HTTP::header insert X-Ping-Response ready; "
+                    "log local0. \"ping-response=[HTTP::header X-Ping-Response]\" }"
+                ),
+                "request": {
+                    "uri": "/ping",
+                    "response_status": 204,
+                    "response_headers": {"X-Origin": "yes"},
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        self.assertEqual(
+            item["events_fired"],
+            ["HTTP_REQUEST", "PING_REQUEST_READY", "HTTP_RESPONSE", "PING_RESPONSE_READY"],
+        )
+        self.assertTrue(any("ping-request=ready" in log for log in item["logs"]))
+        self.assertTrue(any("ping-response=ready" in log for log in item["logs"]))
+        self.assertEqual(item["request"]["headers"]["x-ping-request"], "ready")
+        self.assertEqual(item["response"]["headers"]["x-ping-response"], "ready")
+
+    def test_pingaccess_fixture_defaults_to_disabled(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "ping": {"request_ready": True},
+                "irule": (
+                    "when PING_REQUEST_READY { log local0. request-ready }\n"
+                    "when PING_RESPONSE_READY { log local0. response-ready }"
+                ),
+                "request": {"uri": "/ping"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        item = result["results"][0]
+        self.assertIn("PING_REQUEST_READY", item["events_fired"])
+        self.assertNotIn("PING_RESPONSE_READY", item["events_fired"])
+        self.assertTrue(any("request-ready" in log for log in item["logs"]))
+        self.assertFalse(any("response-ready" in log for log in item["logs"]))
+
+    def test_pingaccess_ready_events_reset_once_per_request(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "ping": {"request_ready": True, "response_ready": True},
+                "irule": (
+                    "when PING_REQUEST_READY { log local0. request-ready }\n"
+                    "when PING_RESPONSE_READY { log local0. response-ready }"
+                ),
+                "requests": [{"uri": "/one"}, {"uri": "/two"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(len(result["results"]), 2)
+        for item in result["results"]:
+            self.assertEqual(item["events_fired"].count("PING_REQUEST_READY"), 1)
+            self.assertEqual(item["events_fired"].count("PING_RESPONSE_READY"), 1)
+            self.assertTrue(any("request-ready" in log for log in item["logs"]))
+            self.assertTrue(any("response-ready" in log for log in item["logs"]))
+
+    def test_pingaccess_fixture_validation_rejects_ambiguous_inputs(self) -> None:
+        for invalid_ping in (
+            True,
+            {"request_ready": 1},
+            {"response_ready": "true"},
+            {"unexpected": True},
+        ):
+            with self.subTest(invalid_ping=invalid_ping):
+                with self.assertRaises(self.adapter.EmulatorInputError):
+                    self.adapter.run_scenario(
+                        {
+                            "profiles": ["TCP", "HTTP"],
+                            "ping": invalid_ping,
+                            "irule": "when HTTP_REQUEST { log local0. ok }",
+                            "request": {"uri": "/ping"},
+                        },
+                        tcl_lsp_root=self.tcl_lsp_root,
+                    )
 
     def test_am_commands_model_acceleration_metadata_and_disable_state(self) -> None:
         session = self.adapter.EmulatorSession(

@@ -1109,6 +1109,31 @@ strings do not change the path match. This models the internal event trigger
 documented by F5; it does not implement Endpoint Inspector or Network Access
 status processing.
 
+### PingAccess policy-server ready hooks
+
+The optional top-level `ping` fixture exposes the two TMOS 17.5 PingAccess
+HTTP lifecycle points without opening a policy-server connection:
+
+```json
+{
+  "profiles": ["TCP", "HTTP"],
+  "ping": {"request_ready": true, "response_ready": true},
+  "irule": "when PING_REQUEST_READY { HTTP::header insert X-Ping-Request ready }\nwhen PING_RESPONSE_READY { HTTP::header insert X-Ping-Response ready }",
+  "request": {"uri": "/ping"}
+}
+```
+
+`PING_REQUEST_READY` fires once after the modeled `HTTP_REQUEST` handler and
+represents the point before the PingAccess policy request is released.
+`PING_RESPONSE_READY` fires once after the modeled `HTTP_RESPONSE` handler and
+allows response-header mutation. Each flag defaults to `false`, and both
+flags reset for every request transaction. See the F5
+[`PING_REQUEST_READY`](https://clouddocs.f5.com/api/irules/PING_REQUEST_READY.html)
+and
+[`PING_RESPONSE_READY`](https://clouddocs.f5.com/api/irules/PING_RESPONSE_READY.html)
+references; this adapter models their iRule-visible control points, not a
+PingAccess service or network exchange.
+
 ### `call` procedure dispatch
 
 The global `call ?-debug? proc_name ?arg ...?` command invokes a procedure

@@ -3432,6 +3432,15 @@ def _configure_access2(session: Any, access2: dict[str, str]) -> None:
     )
 
 
+def _configure_ping(session: Any, ping: dict[str, bool]) -> None:
+    """Install deterministic PingAccess request/response event fixtures."""
+    session.eval_tcl(
+        "::itest::semantic::ping_configure "
+        f"{_tcl_quote('1' if ping['request_ready'] else '0')} "
+        f"{_tcl_quote('1' if ping['response_ready'] else '0')}"
+    )
+
+
 def _configure_ip(session: Any, ip_config: dict[str, Any]) -> None:
     """Install deterministic IP path, intelligence, and reputation inputs."""
     session.eval_tcl(
@@ -8193,6 +8202,26 @@ def _normalise_access2(raw: Any) -> dict[str, str]:
     return {"proc": value}
 
 
+def _normalise_ping(raw: Any) -> dict[str, bool]:
+    """Normalize optional PingAccess lifecycle event fixtures."""
+    if raw is None:
+        return {"request_ready": False, "response_ready": False}
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("ping must be an object")
+    unknown = sorted(set(raw) - {"request_ready", "response_ready"})
+    if unknown:
+        raise EmulatorInputError(
+            "ping unsupported field(s): " + ", ".join(unknown)
+        )
+    result: dict[str, bool] = {}
+    for field in ("request_ready", "response_ready"):
+        value = raw.get(field, False)
+        if not isinstance(value, bool):
+            raise EmulatorInputError(f"ping.{field} must be a boolean")
+        result[field] = value
+    return result
+
+
 def _normalise_access_request(raw: Any) -> dict[str, Any]:
     """Normalize per-request APM access-policy and ACL overrides."""
     if not isinstance(raw, dict):
@@ -9294,6 +9323,7 @@ def _normalise_scenario_config(
     dict[str, Any],
     dict[str, Any],
     dict[str, str],
+    dict[str, bool],
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
@@ -9332,6 +9362,7 @@ def _normalise_scenario_config(
         "aaa",
         "access",
         "access2",
+        "ping",
         "ip",
         "route",
         "http_proxy",
@@ -9404,6 +9435,7 @@ def _normalise_scenario_config(
         _normalise_aaa(scenario.get("aaa")),
         _normalise_access(scenario.get("access")),
         _normalise_access2(scenario.get("access2")),
+        _normalise_ping(scenario.get("ping")),
         _normalise_ip(scenario.get("ip")),
         _normalise_route(scenario.get("route")),
         _normalise_http_proxy(scenario.get("http_proxy")),
@@ -10300,6 +10332,8 @@ PACKET_EVENT_ADAPTERS = {
     "ACCESS_SAML_SLO_RESP": "ACCESS SAML logout response fixture after policy",
     "ACCESS2_POLICY_EXPRESSION_EVAL": "ACCESS2 policy-expression procedure fixture after policy",
     "EPI_NA_CHECK_HTTP_REQUEST": "Endpoint Inspector special status request",
+    "PING_REQUEST_READY": "PingAccess policy request ready before release",
+    "PING_RESPONSE_READY": "PingAccess policy response ready for mutation",
     "BOTDEFENSE_REQUEST": "Bot Defense request inspection from HTTP request",
     "BOTDEFENSE_ACTION": "Bot Defense action from HTTP request",
     "ANTIFRAUD_LOGIN": "Anti-Fraud login inspection from HTTP request",
@@ -16722,6 +16756,7 @@ class EmulatorSession:
             aaa,
             access,
             access2,
+            ping,
             ip_config,
             route_config,
             http_proxy_config,
@@ -16759,6 +16794,7 @@ class EmulatorSession:
         self._aaa = aaa
         self._access = access
         self._access2 = access2
+        self._ping = ping
         self._ip_config = ip_config
         self._route_config = route_config
         self._route_visible = bool(route_config["metrics"]) or "ROUTE::" in source
@@ -16982,6 +17018,7 @@ class EmulatorSession:
                     session, self._access, auto_interest=access_auto_interest
                 )
                 _configure_access2(session, self._access2)
+                _configure_ping(session, self._ping)
                 _configure_ip(session, self._ip_config)
                 _configure_route(session, self._route_config)
                 _configure_http_proxy(session, self._http_proxy_config)
@@ -17196,6 +17233,11 @@ class EmulatorSession:
                 except ValueError:
                     missing.append(item)
             return missing + list(existing)
+
+        # PingAccess ready hooks are one pair per modeled HTTP transaction,
+        # not one pair per retry attempt.  Reset them outside the retry loop so
+        # an origin retry cannot manufacture a second policy-server exchange.
+        session.eval_tcl("::itest::semantic::ping_prepare_request")
 
         result: dict[str, Any]
         try:

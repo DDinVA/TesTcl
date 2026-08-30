@@ -625,6 +625,14 @@ Endpoint Inspector/Network Access status paths when an ACCESS profile is
 attached; the event is not a status-report processor. See the F5
 [`EPI_NA_CHECK_HTTP_REQUEST`](https://clouddocs.f5.com/api/irules/EPI_NA_CHECK_HTTP_REQUEST.html)
 reference.
+The optional `ping` fixture exposes the TMOS 17.5
+[`PING_REQUEST_READY`](https://clouddocs.f5.com/api/irules/PING_REQUEST_READY.html)
+and
+[`PING_RESPONSE_READY`](https://clouddocs.f5.com/api/irules/PING_RESPONSE_READY.html)
+events once per modeled HTTP transaction. They are deterministic HTTP
+mutation points after the corresponding base request/response handler; no
+PingAccess policy-server connection is opened, and the fixture flags default
+to disabled and reset for each request.
 The global `call` command is modeled for top-level iRule `proc` declarations,
 including optional `-debug`, list-safe argument dispatch, and propagation of
 Tcl procedure return/error codes. It does not evaluate arbitrary top-level

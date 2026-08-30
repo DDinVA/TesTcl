@@ -302,6 +302,14 @@ namespace eval ::itest::semantic {
     variable dosl7_greylist
     set dosl7_greylist [dict create]
 
+    # PingAccess policy-server lifecycle fixtures.  The emulator does not
+    # open a policy-server connection; these flags expose the two documented
+    # HTTP mutation points once per modeled request transaction.
+    variable ping_request_ready 0
+    variable ping_response_ready 0
+    variable ping_request_fired 0
+    variable ping_response_fired 0
+
     variable asm_default_enabled 1
     variable asm_enabled 1
     variable asm_default_policy ""
@@ -14512,6 +14520,52 @@ namespace eval ::itest::semantic {
         return $uri_parts(path)
     }
 
+    proc ping_configure {request_ready response_ready} {
+        variable ping_request_ready
+        variable ping_response_ready
+        if {$request_ready ni {0 1} || $response_ready ni {0 1}} {
+            error "PingAccess fixture states must be boolean"
+        }
+        set ping_request_ready $request_ready
+        set ping_response_ready $response_ready
+        ping_prepare_request
+    }
+
+    proc ping_prepare_request {} {
+        variable ping_request_fired
+        variable ping_response_fired
+        set ping_request_fired 0
+        set ping_response_fired 0
+    }
+
+    proc ping_auto_event {side} {
+        variable ping_request_ready
+        variable ping_response_ready
+        variable ping_request_fired
+        variable ping_response_fired
+        if {$side ni {request response}} {
+            error "PingAccess automatic event side must be request or response"
+        }
+        if {$side eq "request"} {
+            set enabled $ping_request_ready
+            set event_name PING_REQUEST_READY
+            set fired_var ping_request_fired
+        } else {
+            set enabled $ping_response_ready
+            set event_name PING_RESPONSE_READY
+            set fired_var ping_response_fired
+        }
+        if {!$enabled || [set $fired_var]} {
+            return ""
+        }
+        set $fired_var 1
+        if {[lsearch -exact [::itest::registered_events] $event_name] >= 0} {
+            set event_result [::itest::_testcl_fire_event_orig $event_name]
+            ::itest::semantic::event_errors_record $event_name $event_result
+        }
+        return $event_name
+    }
+
     proc access2_proc_command {args} {
         if {$::itest::current_event ne "ACCESS2_POLICY_EXPRESSION_EVAL"} {
             error "ACCESS2::access2_proc is not valid during $::itest::current_event"
@@ -25728,7 +25782,7 @@ if {[::tmm::_orig_info commands ::itest::cmd::http_header] ne ""} {
         if {$::itest::current_event in {
             HTTP_RESPONSE_CONTINUE HTTP_PROXY_RESPONSE
             ADAPT_RESPONSE_HEADERS ADAPT_RESPONSE_RESULT
-            ASM_RESPONSE_LOGIN ASM_RESPONSE_VIOLATION
+            ASM_RESPONSE_LOGIN ASM_RESPONSE_VIOLATION PING_RESPONSE_READY
         }} {
             set previous_event $::itest::current_event
             set ::itest::current_event HTTP_RESPONSE
@@ -25869,6 +25923,16 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
                     [lsearch -exact $events EPI_NA_CHECK_HTTP_REQUEST] >= 0 &&
                     [lsearch -exact $events HTTP_REQUEST] < 0} {
                     lappend events HTTP_REQUEST
+                }
+                if {[::itest::semantic::_profile_enabled HTTP] &&
+                    [lsearch -exact $events PING_REQUEST_READY] >= 0 &&
+                    [lsearch -exact $events HTTP_REQUEST] < 0} {
+                    lappend events HTTP_REQUEST
+                }
+                if {[::itest::semantic::_profile_enabled HTTP] &&
+                    [lsearch -exact $events PING_RESPONSE_READY] >= 0 &&
+                    [lsearch -exact $events HTTP_RESPONSE] < 0} {
+                    lappend events HTTP_RESPONSE
                 }
             }
             return $events
@@ -26040,6 +26104,10 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             # after the ordinary HTTP_REQUEST handler, using the parsed path
             # so a query string does not change the internal-event trigger.
             ::itest::semantic::epi_na_auto_event
+            # PingAccess request hooks are exposed after the ordinary
+            # HTTP_REQUEST handler, representing the point immediately before
+            # the modeled policy-server request is released.
+            ::itest::semantic::ping_auto_event request
             # ASM request inspection is a pre-LB lifecycle.  Dispatch it
             # here, after HTTP_REQUEST has run but before the request can
             # select or connect to an origin server.
@@ -26083,6 +26151,10 @@ if {[::tmm::_orig_info commands ::itest::fire_event] ne "" &&
             # Response adaptation observes the origin response before the
             # remaining clientside response processing.
             ::itest::semantic::adapt_auto_event response
+            # The response-ready hook is a response mutation point after the
+            # ordinary HTTP_RESPONSE handler and before later response-side
+            # processing in this bounded model.
+            ::itest::semantic::ping_auto_event response
             if {[::itest::semantic::_profile_enabled HTML]} {
                 ::itest::semantic::html_process_response
             }
