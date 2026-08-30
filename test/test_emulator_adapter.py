@@ -3137,6 +3137,8 @@ when HTTP_REQUEST {
                 "BOTDEFENSE_ACTION",
                 "ANTIFRAUD_LOGIN",
                 "ANTIFRAUD_ALERT",
+                "USER_REQUEST",
+                "USER_RESPONSE",
             )},
             {
                 "ACCESS_SESSION_STARTED": "ACCESS session start from client connection",
@@ -3150,6 +3152,8 @@ when HTTP_REQUEST {
                 "BOTDEFENSE_ACTION": "Bot Defense action from HTTP request",
                 "ANTIFRAUD_LOGIN": "Anti-Fraud login inspection from HTTP request",
                 "ANTIFRAUD_ALERT": "Anti-Fraud alert from HTTP request",
+                "USER_REQUEST": "queued TCP::notify request event",
+                "USER_RESPONSE": "queued TCP::notify response event",
             },
         )
         self.assertEqual(
