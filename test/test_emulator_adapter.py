@@ -2698,6 +2698,38 @@ when SERVER_CONNECTED { log local0. connected }
         self.assertTrue(any("connected" in log for log in logs))
         self.assertIn("SERVER_INIT", result["fidelity"]["events"])
 
+    def test_udp_server_lifecycle_does_not_claim_tcp_server_init(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": """
+when SERVER_INIT { log local0. unexpected-init }
+when SERVER_CONNECTED { log local0. connected }
+""",
+                "packets": [
+                    {
+                        "protocol": "udp",
+                        "direction": "client_to_server",
+                        "payload": "request",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                    {
+                        "protocol": "udp",
+                        "direction": "server_to_client",
+                        "payload": "response",
+                        "source": {"address": "192.0.2.10", "port": 443},
+                        "destination": {"address": "10.0.0.5", "port": 51000},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        server_events = [event["event"] for event in result["trace"][1]["events"]]
+        self.assertEqual(server_events, ["SERVER_CONNECTED", "SERVER_DATA"])
+        self.assertFalse(any("unexpected-init" in log for log in result["trace"][1]["events"][0]["logs"]))
+
     def test_ftp_packet_controls_and_connection_lifecycle(self) -> None:
         result = self.adapter.run_scenario(
             {

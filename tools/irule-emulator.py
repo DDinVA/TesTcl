@@ -15655,16 +15655,22 @@ class EmulatorSession:
         session.eval_tcl(command)
 
     def _activate_packet_server_connection(
-        self, session: Any, packet: dict[str, Any], events: list[dict[str, Any]]
+        self,
+        session: Any,
+        packet: dict[str, Any],
+        events: list[dict[str, Any]],
+        *,
+        emit_init: bool = False,
     ) -> None:
         """Emit the server-side initialization and connection lifecycle once."""
         if self._server_connection_open:
             return
         self._configure_packet_connection(session, packet)
         connection_state = {"connection": self._packet_connection_state(packet)}
-        events.append(
-            self._fire_event_on_worker(session, "SERVER_INIT", connection_state)
-        )
+        if emit_init:
+            events.append(
+                self._fire_event_on_worker(session, "SERVER_INIT", connection_state)
+            )
         events.append(
             self._fire_event_on_worker(session, "SERVER_CONNECTED", connection_state)
         )
@@ -17151,7 +17157,9 @@ class EmulatorSession:
                     and self._connection_open
                     and not self._server_connection_open
                 ):
-                    self._activate_packet_server_connection(session, packet, entry["events"])
+                    self._activate_packet_server_connection(
+                        session, packet, entry["events"], emit_init=True
+                    )
             elif protocol == "dns":
                 event_name = "DNS_REQUEST" if direction == "client_to_server" else "DNS_RESPONSE"
                 event_result = self._fire_event_on_worker(
@@ -17375,7 +17383,9 @@ class EmulatorSession:
             elif protocol in STARTTLS_PROTOCOLS:
                 self._activate_packet_connection(session, packet, entry["events"])
                 if direction == "server_to_client" and not self._server_connection_open:
-                    self._activate_packet_server_connection(session, packet, entry["events"])
+                    self._activate_packet_server_connection(
+                        session, packet, entry["events"], emit_init=True
+                    )
                 if session.eval_tcl(f"set ::state::{protocol}::enabled") == "0":
                     entry["ignored"] = f"{protocol.upper()} processing is disabled"
                     entry["disabled"] = True
@@ -17412,7 +17422,9 @@ class EmulatorSession:
                     entry["ignored"] = "FTP processing is disabled"
                     continue
                 if direction == "server_to_client" and not self._server_connection_open:
-                    self._activate_packet_server_connection(session, packet, entry["events"])
+                    self._activate_packet_server_connection(
+                        session, packet, entry["events"], emit_init=True
+                    )
                 event_name = "CLIENT_DATA" if direction == "client_to_server" else "SERVER_DATA"
                 event_result = self._fire_event_on_worker(
                     session, event_name, self._packet_event_state(packet)

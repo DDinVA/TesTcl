@@ -224,11 +224,13 @@ deterministic unused-port allocator; those values persist across packet
 events in the emulated connection. This is transport-control state, not a
 kernel TCP implementation or wire-level congestion/retransmission simulator.
 When the first server-to-client packet opens the server side of a structured
-trace, the adapter emits `SERVER_INIT` followed by `SERVER_CONNECTED` once per
-connection. Both events receive the packet's connection state; later
-server-side packets go directly to their protocol data event. This models the
-observable event ordering documented for server-side flow setup, not a real
-SYN/retransmission timer or upstream socket.
+TCP or TCP-based protocol trace, the adapter emits `SERVER_INIT` followed by
+`SERVER_CONNECTED` once per connection. Both events receive the packet's
+connection state; later server-side packets go directly to their protocol data
+event. This models the observable event ordering documented for server-side
+flow setup, not a real SYN/retransmission timer or upstream socket. UDP and
+SCTP traces retain `SERVER_CONNECTED` without claiming the TCP-only
+`SERVER_INIT` event.
 Structured SCTP packet traces expose `CLIENT_ACCEPTED`, `CLIENT_DATA`,
 `SERVER_CONNECTED`, and `SERVER_DATA` when the `SCTP` profile is attached.
 The 14-command SCTP slice models client/server/local/remote ports, MSS, PPI,
