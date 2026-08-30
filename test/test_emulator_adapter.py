@@ -3146,6 +3146,7 @@ when HTTP_REQUEST {
                 "AUTH_WANTCREDENTIAL",
                 "USER_REQUEST",
                 "USER_RESPONSE",
+                "NAME_RESOLVED",
             )},
             {
                 "ACCESS_SESSION_STARTED": "ACCESS session start from client connection",
@@ -3168,6 +3169,7 @@ when HTTP_REQUEST {
                 "AUTH_WANTCREDENTIAL": "AUTH credential challenge from AUTH::authenticate",
                 "USER_REQUEST": "queued TCP::notify request event",
                 "USER_RESPONSE": "queued TCP::notify response event",
+                "NAME_RESOLVED": "bounded NAME::lookup callback",
             },
         )
         self.assertEqual(

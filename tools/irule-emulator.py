@@ -9986,6 +9986,7 @@ PACKET_EVENT_ADAPTERS = {
     "CLIENT_DATA": "client payload (TCP or generic UDP)",
     "USER_REQUEST": "queued TCP::notify request event",
     "USER_RESPONSE": "queued TCP::notify response event",
+    "NAME_RESOLVED": "bounded NAME::lookup callback",
     "ECA_REQUEST_ALLOWED": "injected NTLM/ECA authentication success",
     "ECA_REQUEST_DENIED": "injected NTLM/ECA authentication failure",
     "PROTOCOL_INSPECTION_MATCH": "protocol inspection match packet",
