@@ -33,6 +33,9 @@ fixtures by adding `"live_data_plane": {"protocol": "tcp"}` to the scenario.
 bridge for testing a real backend peer; it is not a kernel TCP stack, TLS
 terminator, pool scheduler, or database emulator. Protocol-specific TDS, FTP,
 LDAP, and similar wire parsers remain available through the packet/API drivers.
+Pool-aware raw TCP scenarios can map pools member names to local backend targets
+through live_data_plane.upstream.targets; the iRule's pool command then
+determines which mapped peer is opened.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:

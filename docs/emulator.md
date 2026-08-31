@@ -98,20 +98,30 @@ terminate the stream. With an explicit upstream target, ordinary TCP bytes and
 `SERVER_INIT` and `SERVER_CONNECTED` are fired when the backend socket opens,
 and server-side `TCP::respond` output is sent to that backend. The upstream
 target is opt-in and supports only a hostname/address, port, and connect
-timeout. This live adapter is still not a kernel TCP stack, TLS endpoint, pool
-scheduler, or full database peer. Protocol-specific TDS, FTP, LDAP, and similar
-parsers are exercised through the packet/API drivers.
+timeout in its direct form. For pool-aware testing, use upstream.pool plus a
+targets map keyed by the member names in pools; the iRule must select that pool
+(for example, pool app_pool) and the selected member must have a target mapping.
+This live adapter is still not a kernel TCP stack, TLS endpoint, pool scheduler,
+or full database peer. Protocol-specific TDS, FTP, LDAP, and similar parsers are
+exercised through the packet/API drivers.
 
 For example, a raw TCP scenario can bridge to a local test service with:
 
 ```json
 {
   "profiles": ["TCP"],
-  "irule": "when CLIENT_ACCEPTED { TCP::collect } when CLIENT_DATA { TCP::release; TCP::collect } when SERVER_DATA { TCP::release; TCP::collect }",
+  "pools": {"app_pool": ["backend-a:19000"]},
+  "irule": "when CLIENT_ACCEPTED { pool app_pool; TCP::collect } when CLIENT_DATA { TCP::release; TCP::collect } when SERVER_DATA { TCP::release; TCP::collect }",
   "live_data_plane": {
     "protocol": "tcp",
     "read_timeout": 1.0,
-    "upstream": {"host": "127.0.0.1", "port": 19000, "connect_timeout": 2.0}
+    "upstream": {
+      "pool": "app_pool",
+      "targets": {
+        "backend-a:19000": {"host": "127.0.0.1", "port": 19000}
+      },
+      "connect_timeout": 2.0
+    }
   }
 }
 ```

@@ -28470,6 +28470,17 @@ class EmulatorSession:
 
         return self._call(dispatch)
 
+    def selected_pool_member(self) -> dict[str, str]:
+        """Return the current Tcl load-balancing selection for a live bridge."""
+
+        def read_selection(session: Any) -> dict[str, str]:
+            return {
+                field: str(session.eval_tcl(f"set ::state::lb::{field}"))
+                for field in ("pool", "pool_member", "node_addr", "node_port", "selected")
+            }
+
+        return self._call(read_selection)
+
     def metadata(self, session_id: str) -> dict[str, Any]:
         def read_metadata(session: Any) -> dict[str, Any]:
             return {
@@ -28816,6 +28827,13 @@ class _PersistentEmulatorSession:
                 None, field="server connection"
             )
             return session.open_packet_server_connection(packet)
+
+    def selected_pool_member(self) -> dict[str, str]:
+        """Return the selected pool member from the active flow context."""
+        with self._lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
+            return self._state_session().selected_pool_member()
 
     def metadata(self, session_id: str, flow_id: Any = None) -> dict[str, Any]:
         with self._lock:
@@ -31773,43 +31791,125 @@ def _normalise_live_data_plane_scenario(
         if not isinstance(upstream_config, dict):
             raise EmulatorInputError("live_data_plane.upstream must be an object")
         unknown_upstream = sorted(
-            set(upstream_config) - {"host", "port", "connect_timeout"}
+            set(upstream_config)
+            - {"host", "port", "pool", "targets", "connect_timeout"}
         )
         if unknown_upstream:
             raise EmulatorInputError(
                 "unsupported live_data_plane.upstream field(s): "
                 + ", ".join(unknown_upstream)
             )
-        upstream_host = upstream_config.get("host")
-        if (
-            not isinstance(upstream_host, str)
-            or not upstream_host
-            or "\x00" in upstream_host
-            or "\r" in upstream_host
-            or "\n" in upstream_host
-        ):
+        has_direct_endpoint = "host" in upstream_config or "port" in upstream_config
+        has_target_map = "targets" in upstream_config
+        if has_direct_endpoint and has_target_map:
             raise EmulatorInputError(
-                "live_data_plane.upstream.host must be a non-empty hostname or address"
+                "live_data_plane.upstream must use host/port or targets, not both"
             )
-        try:
-            upstream_host_bytes = upstream_host.encode("utf-8")
-        except UnicodeEncodeError as exc:
+        if not has_direct_endpoint and not has_target_map:
             raise EmulatorInputError(
-                "live_data_plane.upstream.host must be valid UTF-8"
-            ) from exc
-        if len(upstream_host_bytes) > 4096:
-            raise EmulatorInputError(
-                "live_data_plane.upstream.host cannot exceed 4096 UTF-8 bytes"
+                "live_data_plane.upstream requires host/port or targets"
             )
-        upstream_port = upstream_config.get("port")
-        if (
-            isinstance(upstream_port, bool)
-            or not isinstance(upstream_port, int)
-            or not 1 <= upstream_port <= 65535
-        ):
-            raise EmulatorInputError(
-                "live_data_plane.upstream.port must be between 1 and 65535"
+
+        def normalise_endpoint(raw_endpoint: Any, field: str) -> dict[str, Any]:
+            if not isinstance(raw_endpoint, dict):
+                raise EmulatorInputError(f"{field} must be an object")
+            if set(raw_endpoint) != {"host", "port"}:
+                raise EmulatorInputError(f"{field} must contain only host and port")
+            endpoint_host = raw_endpoint["host"]
+            if (
+                not isinstance(endpoint_host, str)
+                or not endpoint_host
+                or "\x00" in endpoint_host
+                or "\r" in endpoint_host
+                or "\n" in endpoint_host
+            ):
+                raise EmulatorInputError(
+                    f"{field}.host must be a non-empty hostname or address"
+                )
+            try:
+                endpoint_host_bytes = endpoint_host.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise EmulatorInputError(
+                    f"{field}.host must be valid UTF-8"
+                ) from exc
+            if len(endpoint_host_bytes) > 4096:
+                raise EmulatorInputError(
+                    f"{field}.host cannot exceed 4096 UTF-8 bytes"
+                )
+            endpoint_port = raw_endpoint["port"]
+            if (
+                isinstance(endpoint_port, bool)
+                or not isinstance(endpoint_port, int)
+                or not 1 <= endpoint_port <= 65535
+            ):
+                raise EmulatorInputError(
+                    f"{field}.port must be between 1 and 65535"
+                )
+            return {"host": endpoint_host, "port": endpoint_port}
+
+        pool_name = upstream_config.get("pool")
+        if pool_name is not None:
+            try:
+                pool_name_bytes = pool_name.encode("utf-8") if isinstance(pool_name, str) else b""
+            except UnicodeEncodeError:
+                pool_name_bytes = b""
+            if (
+                not isinstance(pool_name, str)
+                or not pool_name
+                or "\x00" in pool_name
+                or not pool_name_bytes
+                or len(pool_name_bytes) > 256
+            ):
+                raise EmulatorInputError(
+                    "live_data_plane.upstream.pool must be a non-empty pool name"
+                )
+        if has_direct_endpoint:
+            if pool_name is not None:
+                raise EmulatorInputError(
+                    "live_data_plane.upstream host/port form cannot include pool"
+                )
+            endpoint = normalise_endpoint(
+                {"host": upstream_config.get("host"), "port": upstream_config.get("port")},
+                "live_data_plane.upstream",
             )
+            targets = None
+        else:
+            raw_targets = upstream_config["targets"]
+            if not isinstance(raw_targets, dict) or not raw_targets:
+                raise EmulatorInputError(
+                    "live_data_plane.upstream.targets must be a non-empty object"
+                )
+            if len(raw_targets) > BACKEND_MAX_MEMBERS:
+                raise EmulatorInputError(
+                    f"live_data_plane.upstream.targets cannot contain more than {BACKEND_MAX_MEMBERS} members"
+                )
+            targets = {}
+            for member, raw_endpoint in raw_targets.items():
+                try:
+                    member_bytes = member.encode("utf-8") if isinstance(member, str) else b""
+                except UnicodeEncodeError:
+                    member_bytes = b""
+                if (
+                    not isinstance(member, str)
+                    or not member
+                    or "\x00" in member
+                    or not member_bytes
+                    or len(member_bytes) > 512
+                ):
+                    raise EmulatorInputError(
+                        "live_data_plane.upstream.targets member names must be non-empty and at most 512 UTF-8 bytes"
+                    )
+                targets[member] = normalise_endpoint(
+                    raw_endpoint,
+                    f"live_data_plane.upstream.targets.{member}",
+                )
+            if pool_name is not None:
+                configured_pools = _normalise_pools(scenario.get("pools"))
+                if pool_name not in configured_pools:
+                    raise EmulatorInputError(
+                        "live_data_plane.upstream.pool must name a configured pool"
+                    )
+            endpoint = None
         connect_timeout = upstream_config.get("connect_timeout", timeout)
         if (
             isinstance(connect_timeout, bool)
@@ -31821,8 +31921,9 @@ def _normalise_live_data_plane_scenario(
                 "live_data_plane.upstream.connect_timeout must be between 0.05 and 60 seconds"
             )
         upstream = {
-            "host": upstream_host,
-            "port": upstream_port,
+            "endpoint": endpoint,
+            "pool": pool_name,
+            "targets": targets,
             "connect_timeout": float(connect_timeout),
         }
     else:
@@ -32185,6 +32286,46 @@ def _live_tcp_handler(
                 return True
             return False
 
+        def _resolve_upstream_endpoint(self, session_id: str) -> dict[str, Any]:
+            upstream_config = config.get("upstream")
+            if upstream_config is None:
+                raise EmulatorInputError("live upstream configuration is missing")
+            endpoint = upstream_config.get("endpoint")
+            if endpoint is not None:
+                return dict(endpoint)
+            targets = upstream_config.get("targets")
+            if not isinstance(targets, dict):
+                raise EmulatorInputError("live upstream target map is invalid")
+            selection = manager.execute(
+                session_id,
+                lambda session: session.selected_pool_member(),
+            )
+            if selection.get("selected") != "1" or not selection.get("pool_member"):
+                configured_pool = upstream_config.get("pool")
+                suffix = (
+                    f" for pool {configured_pool!r}"
+                    if configured_pool is not None
+                    else ""
+                )
+                raise EmulatorInputError(
+                    "iRule did not select a live upstream pool member" + suffix
+                )
+            selected_pool = selection.get("pool", "")
+            configured_pool = upstream_config.get("pool")
+            if configured_pool is not None and selected_pool != configured_pool:
+                raise EmulatorInputError(
+                    "iRule selected pool "
+                    f"{selected_pool!r}, but live upstream is configured for "
+                    f"{configured_pool!r}"
+                )
+            member = selection["pool_member"]
+            endpoint = targets.get(member)
+            if endpoint is None:
+                raise EmulatorInputError(
+                    f"no live upstream target is mapped for selected pool member {member!r}"
+                )
+            return dict(endpoint)
+
         def handle(self) -> None:  # noqa: D401 - socketserver API
             session_id: str | None = None
             upstream: socket.socket | None = None
@@ -32214,8 +32355,9 @@ def _live_tcp_handler(
                 upstream_config = config.get("upstream")
                 if upstream_config is not None:
                     try:
+                        endpoint = self._resolve_upstream_endpoint(session_id)
                         upstream = socket.create_connection(
-                            (upstream_config["host"], upstream_config["port"]),
+                            (endpoint["host"], endpoint["port"]),
                             timeout=upstream_config["connect_timeout"],
                         )
                         upstream.settimeout(config["read_timeout"])

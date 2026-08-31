@@ -20924,8 +20924,9 @@ when HTTP_RESPONSE {
     def test_live_tcp_data_plane_forwards_tcp_respond_and_preserves_session(self) -> None:
         scenario = {
             "profiles": ["TCP"],
+            "pools": {"app_pool": ["backend-a:19000"]},
             "irule": """
-when CLIENT_ACCEPTED { TCP::collect }
+when CLIENT_ACCEPTED { pool app_pool; TCP::collect }
 when CLIENT_DATA {
     TCP::respond "echo:[TCP::payload]"
     TCP::release
@@ -21108,8 +21109,9 @@ when CLIENT_DATA {
         upstream_thread.start()
         scenario = {
             "profiles": ["TCP"],
+            "pools": {"app_pool": ["backend-a:19000"]},
             "irule": """
-when CLIENT_ACCEPTED { TCP::collect }
+when CLIENT_ACCEPTED { pool app_pool; TCP::collect }
 when CLIENT_DATA {
     TCP::release
     TCP::collect
@@ -21125,8 +21127,13 @@ when SERVER_DATA {
                 "protocol": "tcp",
                 "read_timeout": 0.5,
                 "upstream": {
-                    "host": "127.0.0.1",
-                    "port": upstream_server.server_address[1],
+                    "pool": "app_pool",
+                    "targets": {
+                        "backend-a:19000": {
+                            "host": "127.0.0.1",
+                            "port": upstream_server.server_address[1],
+                        }
+                    },
                 },
             },
         }
@@ -21152,6 +21159,41 @@ when SERVER_DATA {
             upstream_server.shutdown()
             upstream_thread.join(timeout=5)
             upstream_server.server_close()
+
+    def test_packet_pool_selection_is_visible_to_live_target_resolution(self) -> None:
+        session = self.adapter.EmulatorSession(
+            Path(self.tcl_lsp_root),
+            {
+                "profiles": ["TCP"],
+                "pools": {"app_pool": ["backend-a:19000"]},
+                "irule": "when CLIENT_ACCEPTED { pool app_pool }",
+            },
+            allow_irule_file=False,
+            allow_requests=False,
+        )
+        try:
+            session.run_packet_trace(
+                [
+                    {
+                        "protocol": "tcp",
+                        "flags": ["SYN"],
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    }
+                ]
+            )
+            self.assertEqual(
+                session.selected_pool_member(),
+                {
+                    "pool": "app_pool",
+                    "pool_member": "backend-a:19000",
+                    "node_addr": "backend-a",
+                    "node_port": "19000",
+                    "selected": "1",
+                },
+            )
+        finally:
+            session.close()
 
     def test_live_tcp_data_plane_rejects_http_only_fixtures_and_limits(self) -> None:
         with self.assertRaisesRegex(
@@ -21197,6 +21239,28 @@ when SERVER_DATA {
                     },
                 },
             )
+        _, direct_config = self.adapter._normalise_live_data_plane_scenario(
+            {
+                "irule": "when CLIENT_ACCEPTED {}",
+                "live_data_plane": {
+                    "protocol": "tcp",
+                    "upstream": {
+                        "host": "127.0.0.1",
+                        "port": 19000,
+                        "connect_timeout": 2.0,
+                    },
+                },
+            }
+        )
+        self.assertEqual(
+            direct_config["upstream"],
+            {
+                "endpoint": {"host": "127.0.0.1", "port": 19000},
+                "pool": None,
+                "targets": None,
+                "connect_timeout": 2.0,
+            },
+        )
         with self.assertRaisesRegex(
             self.adapter.EmulatorInputError, "upstream.port"
         ):
@@ -21209,6 +21273,40 @@ when SERVER_DATA {
                     "live_data_plane": {
                         "protocol": "tcp",
                         "upstream": {"host": "127.0.0.1", "port": 0},
+                    },
+                },
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "requires host/port or targets"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "irule": "when CLIENT_ACCEPTED {}",
+                    "live_data_plane": {
+                        "protocol": "tcp",
+                        "upstream": {"pool": "app_pool"},
+                    },
+                },
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "cannot include pool"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "irule": "when CLIENT_ACCEPTED {}",
+                    "live_data_plane": {
+                        "protocol": "tcp",
+                        "upstream": {
+                            "host": "127.0.0.1",
+                            "port": 19000,
+                            "pool": "app_pool",
+                        },
                     },
                 },
             )
