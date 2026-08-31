@@ -4747,6 +4747,7 @@ when HTTP_RESPONSE_RELEASE {
             "asm-controls-17.5.json": 2,
             "botdefense-controls-17.5.json": 2,
             "category-17.5.json": 6,
+            "diameter-controls-17.5.json": 3,
             "tcp-controls-17.5.json": 2,
             "tcp-introspection-17.5.json": 15,
             "dns-17.5.json": 7,

@@ -374,7 +374,7 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 442 of 989 target F5 commands (44.69%). This is test-input
+current report covers 469 of 989 target F5 commands (47.42%). This is test-input
 coverage, not a semantic-fidelity score.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
@@ -501,6 +501,15 @@ semantics:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/botdefense-controls-17.5.json
+```
+
+Run the DIAMETER controls behavior pack to verify packet lifecycle events,
+header and AVP mutation, routing/retransmission controls, and message drop or
+response behavior:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/diameter-controls-17.5.json
 ```
 
 Run the TCP introspection behavior pack to verify connection ports, transport

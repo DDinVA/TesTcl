@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "diameter-controls-17.5",
+  "cases": [
+    {
+      "id": "structured-message-and-routing-controls",
+      "scenario": {
+        "profiles": ["TCP", "DIAMETER"],
+        "irule": "when CLIENT_ACCEPTED {\n  DIAMETER::retransmission_default action disabled\n  DIAMETER::skip_capabilities_exchange example.test\n}\nwhen DIAMETER_INGRESS {\n  log local0. \"request=[DIAMETER::is_request]/[DIAMETER::is_response] command=[DIAMETER::command] version=[DIAMETER::header version] app=[DIAMETER::header application_id] host=[DIAMETER::host origin] realm=[DIAMETER::realm origin] result=[DIAMETER::result] state=[DIAMETER::state] route=[DIAMETER::route_status]\"\n  DIAMETER::header pflag 1\n  DIAMETER::avp count 268\n  DIAMETER::avp code 268\n  DIAMETER::avp data 268\n  DIAMETER::avp length 268\n  DIAMETER::avp flags get 268\n  DIAMETER::avp flags set 268 0\n  DIAMETER::avp replace 264 edited.example.com\n  DIAMETER::avp create 999 created\n  DIAMETER::avp insert 0 998 inserted\n  DIAMETER::avp append 999 appended\n  DIAMETER::avp delete 998\n  DIAMETER::session session-2\n  DIAMETER::host dest dest.example.com\n  DIAMETER::realm dest dest.example.net\n  DIAMETER::result 2001\n  DIAMETER::persist diameter-key\n  DIAMETER::persist use\n  DIAMETER::dynamic_route_lookup connection 0\n  DIAMETER::dynamic_route_lookup message 0\n  DIAMETER::dynamic_route_insertion 0\n  DIAMETER::retransmission action disabled\n  DIAMETER::retransmit disabled note\n  DIAMETER::retry retry-message 1\n  set message [DIAMETER::message]\n  set payload [DIAMETER::payload]\n  DIAMETER::payload replace payload-override\n  DIAMETER::respond 1 1 1 0 0\n  DIAMETER::disconnect peer.example.com example.com do_not_want_to_talk_to_you\n}",
+        "packets": [
+          {
+            "protocol": "diameter",
+            "direction": "client_to_server",
+            "type": "request",
+            "command_code": 272,
+            "application_id": 4,
+            "hop_by_hop_id": 270544960,
+            "end_to_end_id": 1348497536,
+            "avps": [
+              {"code": 263, "data": "session-1"},
+              {"code": 264, "data": "origin.example.com"},
+              {"code": 296, "data": "example.com"},
+              {"code": 268, "type": "unsigned32", "data": "2001"}
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "protocol"], "equals": "diameter"},
+          {"path": ["trace", 0, "responded"], "equals": true},
+          {"path": ["trace", 0, "disconnect_requested"], "equals": true},
+          {"path": ["trace", 0, "response", "arguments"], "equals": ["1", "1", "1", "0", "0"]},
+          {"path": ["trace", 0, "events", 2, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 2, "state", "diameter", "pflag"], "equals": "1"},
+          {"path": ["trace", 0, "events", 2, "state", "diameter", "payload"], "equals": "payload-override"},
+          {"path": ["trace", 0, "events", 2, "state", "diameter", "persist_key"], "equals": "diameter-key"}
+        ]
+      }
+    },
+    {
+      "id": "response-and-retransmission-state",
+      "scenario": {
+        "profiles": ["TCP", "DIAMETER"],
+        "irule": "when DIAMETER_EGRESS {\n  log local0. \"response=[DIAMETER::is_response] retransmission=[DIAMETER::is_retransmission] reason=[DIAMETER::retransmission_reason] length=[DIAMETER::length] route=[DIAMETER::route_status]\"\n  DIAMETER::retransmission action busy\n  DIAMETER::retransmit busy retry-note\n}",
+        "packets": [
+          {
+            "protocol": "diameter",
+            "direction": "server_to_client",
+            "type": "response",
+            "command_code": 272,
+            "application_id": 4,
+            "tflag": true,
+            "avps": [{"code": 268, "type": "unsigned32", "data": "2001"}]
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "protocol"], "equals": "diameter"},
+          {"path": ["trace", 0, "events", 3, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 3, "state", "diameter", "type"], "equals": "response"},
+          {"path": ["trace", 0, "events", 3, "state", "diameter", "tflag"], "equals": "1"}
+        ]
+      }
+    },
+    {
+      "id": "drop-message",
+      "scenario": {
+        "profiles": ["TCP", "DIAMETER"],
+        "irule": "when DIAMETER_INGRESS { DIAMETER::drop }",
+        "packets": [
+          {"protocol": "diameter", "direction": "client_to_server", "type": "request", "command_code": 280}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "dropped"], "equals": true},
+          {"path": ["trace", 0, "drop_reason"], "equals": "message"}
+        ]
+      }
+    }
+  ]
+}
