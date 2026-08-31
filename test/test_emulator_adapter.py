@@ -5669,6 +5669,40 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["status_counts"], {"ok": 32})
         self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
 
+    def test_http2_candidate_sweep_uses_active_transaction_fixtures(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        packs = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted((ROOT / "examples" / "behavior-packs").glob("*.json"))
+        ]
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, packs, 0, 10, namespace="HTTP2", variants=1
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        http2_state = by_command["HTTP2::push"]["input"]["state"]["http2"]
+        self.assertTrue(http2_state["active"])
+        self.assertEqual(http2_state["version"], 2)
+        self.assertEqual(
+            http2_state["pseudo_headers"][":authority"], "h2.example.test"
+        )
+        self.assertEqual(
+            by_command["HTTP2::push"]["input"]["args"][:3],
+            ["/static/app.js", "-priority", "16"],
+        )
+        self.assertEqual(
+            by_command["HTTP2::header"]["input"]["args"], [":authority"]
+        )
+
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, packs, 0, 10, namespace="HTTP2", variants=8
+        )
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 10)
+        self.assertEqual(sweep["summary"]["variant_count"], 21)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 21})
+        self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(

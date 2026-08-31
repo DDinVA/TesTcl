@@ -3013,6 +3013,46 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("GET /testcl/command HTTP/1.1\r\nHost: example.test\r\n\r\n",),
         ("-reset", "GET /testcl/command HTTP/1.1\r\nHost: example.test\r\n\r\n"),
     ),
+    "HTTP2::disable": (
+        (),
+        ("clientside",),
+        ("serverside",),
+        ("discard",),
+        ("clientside", "discard"),
+    ),
+    "HTTP2::enable": (
+        (),
+        ("clientside",),
+        ("serverside",),
+    ),
+    "HTTP2::header": (
+        (":authority",),
+        ("remove", ":path"),
+        ("replace", ":path", "/rewritten"),
+    ),
+    "HTTP2::push": (
+        (
+            "/static/app.js",
+            "-priority",
+            "16",
+            "-content",
+            "console.log('pushed');",
+            "-noserver",
+            "host",
+            "example.test",
+            "--",
+            ":status",
+            "200",
+            "content-type",
+            "application/javascript",
+        ),
+    ),
+    "HTTP2::stream": (
+        (),
+        ("id",),
+        ("priority",),
+        ("priority", "42"),
+    ),
     "MQTT::collect": ((), ("1",)),
     "MQTT::insert": (
         ("before", "type", "PUBLISH", "topic", "testcl/command", "payload", "testcl"),
@@ -3513,6 +3553,40 @@ _CANDIDATE_STATE_HINTS = {
     # out of external capture plans, which must obtain state from TMOS.
     "MQTT::will": {"mqtt": {"type": "CONNECT"}},
 }
+_HTTP2_CANDIDATE_STATE = {
+    "http2": {
+        "active": True,
+        "version": 2,
+        "stream_id": 3,
+        "stream_priority": 8,
+        "concurrency": 2,
+        "requests": 4,
+        "enabled": True,
+        "clientside_enabled": True,
+        "serverside_enabled": True,
+        "disconnected": False,
+        "discarded": False,
+        "pseudo_headers": {
+            ":authority": "h2.example.test",
+            ":method": "GET",
+            ":path": "/testcl/command",
+            ":scheme": "https",
+        },
+    }
+}
+for _http2_command in {
+    "HTTP2::active",
+    "HTTP2::concurrency",
+    "HTTP2::disable",
+    "HTTP2::disconnect",
+    "HTTP2::enable",
+    "HTTP2::header",
+    "HTTP2::push",
+    "HTTP2::requests",
+    "HTTP2::stream",
+    "HTTP2::version",
+}:
+    _CANDIDATE_STATE_HINTS[_http2_command] = _HTTP2_CANDIDATE_STATE
 _DNS_RR_CANDIDATE_STATE = {
     "dns": {
         "qname": "example.com.",
@@ -13849,6 +13923,18 @@ def _normalise_event(event: Any, state: Any) -> tuple[str, dict[str, dict[str, s
             raise EmulatorInputError(f"unsupported event state layer: {layer}")
         if not isinstance(values, dict):
             raise EmulatorInputError(f"event state layer {layer!r} must be an object")
+        if layer == "http2":
+            http2_values = _normalise_http2_state(values, "event state http2")
+            layer_values: dict[str, str] = {}
+            for field, value in http2_values.items():
+                if field == "pseudo_headers":
+                    layer_values[field] = _tcl_dict_value(value)
+                elif isinstance(value, bool):
+                    layer_values[field] = "1" if value else "0"
+                else:
+                    layer_values[field] = str(value)
+            normalised[layer] = layer_values
+            continue
         layer_values: dict[str, str] = {}
         for field, value in values.items():
             if field not in EVENT_STATE_FIELDS[layer]:
