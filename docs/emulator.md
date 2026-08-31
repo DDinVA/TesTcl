@@ -405,6 +405,20 @@ command-specific fixture or protocol driver before collection. Use
 /v1/behavior-candidates` with `{"packs":[...]}` for custom packs. The same
 operation is exposed as `irule_behavior_candidates` in MCP.
 
+To evaluate those hypotheses against the local emulator, run a bounded sweep:
+
+`_`sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-sweep --namespace HTTP --offset 0 --limit 16
+`_`
+
+The sweep executes each generated input and returns compact per-command
+execution evidence, including `ok`, `argument-required`, `runtime-error`, or
+`profile-gated` results. It is a local diagnostic and does not claim TMOS
+parity. Use `GET /v1/behavior-sweep` for checked-in packs or `POST
+/v1/behavior-sweep` with `{"packs":[...]}` for custom packs; MCP exposes the
+same operation as `irule_behavior_sweep`.
+
 ### TMOS 17.5 differential vectors
 
 Behavior packs assert values authored inside the emulator project. Differential
@@ -2466,9 +2480,11 @@ curl -X POST -H 'Content-Type: application/json' \
 
 The service exposes `GET /healthz`, `GET /v1/capabilities`,
 `GET /v1/probes`, `GET /v1/catalog-smoke`, `GET /v1/behavior-candidates`,
+`GET /v1/behavior-sweep`,
 `GET /v1/conformance`, `POST /v1/simulations`, `POST /v1/analyze`,
 `POST /v1/command-probes`, `POST /v1/behavior-packs`,
-`POST /v1/behavior-coverage`, `POST /v1/behavior-candidates`, and
+`POST /v1/behavior-coverage`, `POST /v1/behavior-candidates`,
+`POST /v1/behavior-sweep`, and
 `POST /v1/simulations/pcap`. It also supports persistent sessions through
 `POST /v1/sessions`, `GET /v1/sessions/{session_id}`,
 `POST /v1/sessions/{session_id}/requests`,
@@ -2651,6 +2667,8 @@ clients can discover these tools with `tools/list`:
   catalog and returns the uncovered implementation queue.
 - `irule_behavior_candidates` turns that queue into a bounded, reference-free
   command-probe capture plan with registry-derived argument hypotheses.
+- `irule_behavior_sweep` executes a bounded candidate chunk locally and reports
+  compact runtime evidence without presenting it as TMOS observation data.
 - `irule_conformance` reports static catalog/runtime and packet-adapter coverage.
 - `irule_session_create`, `irule_session_inspect`, `irule_session_request`,
   `irule_session_trace`, `irule_session_event`, and `irule_session_close` manage

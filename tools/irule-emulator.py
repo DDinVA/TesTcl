@@ -329,6 +329,7 @@ BEHAVIOR_COVERAGE_MAX_PACKS = 64
 BEHAVIOR_COVERAGE_MAX_BYTES = 2 * 1024 * 1024
 BEHAVIOR_CANDIDATE_MAX_COMMANDS = 64
 BEHAVIOR_CANDIDATE_MAX_VARIANTS = 8
+BEHAVIOR_SWEEP_MAX_COMMANDS = 64
 GOLDEN_VECTOR_MAX_CASES = 256
 GOLDEN_VECTOR_MAX_NAME_BYTES = 256
 GOLDEN_VECTOR_MAX_BYTES = 2 * 1024 * 1024
@@ -3322,6 +3323,114 @@ def _build_behavior_vector_candidates(
         ),
         "candidates": candidate_rows,
         "capture_plan": plan,
+    }
+
+
+def _build_behavior_vector_sweep(
+    root: Path,
+    packs: Any,
+    offset: int,
+    limit: int,
+    *,
+    namespace: str | None = None,
+    runtime_status: str | None = None,
+) -> dict[str, Any]:
+    """Execute one bounded candidate chunk locally and return compact evidence."""
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise EmulatorInputError("behavior sweep limit must be an integer")
+    if not 1 <= limit <= BEHAVIOR_SWEEP_MAX_COMMANDS:
+        raise EmulatorInputError(
+            "behavior sweep limit must be between 1 and "
+            f"{BEHAVIOR_SWEEP_MAX_COMMANDS}"
+        )
+    candidates = _build_behavior_vector_candidates(
+        root,
+        packs,
+        offset,
+        limit,
+        namespace=namespace,
+        runtime_status=runtime_status,
+    )
+    rows: list[dict[str, Any]] = []
+    status_counts: dict[str, int] = {}
+    execution_status_counts = {"ok": 0, "error": 0, "profile-gated": 0}
+    for candidate in candidates["candidates"]:
+        row = {
+            "id": candidate["id"],
+            "command": candidate["command"],
+            "event": candidate.get("event"),
+            "profiles": candidate.get("profiles", []),
+            "args": (
+                candidate["input"].get("args", [])
+                if isinstance(candidate.get("input"), dict)
+                else None
+            ),
+            "candidate_status": candidate["candidate_status"],
+            "sweep_status": "candidate-unavailable",
+        }
+        probe_input = candidate.get("input")
+        if not isinstance(probe_input, dict):
+            if candidate.get("generation_error"):
+                row["error"] = candidate["generation_error"]
+            rows.append(row)
+            status_counts["candidate-unavailable"] = (
+                status_counts.get("candidate-unavailable", 0) + 1
+            )
+            continue
+        try:
+            result = run_command_probe(
+                probe_input,
+                tcl_lsp_root=str(root),
+                allow_external_protocol_request=True,
+            )
+            execution = result.get("execution")
+            if not isinstance(execution, dict):
+                raise EmulatorInputError(
+                    "command probe returned no execution object"
+                )
+            sweep_status = _catalog_smoke_status(execution)
+            row.update(
+                {
+                    "sweep_status": sweep_status,
+                    "execution": _catalog_smoke_execution_snapshot(execution),
+                }
+            )
+            execution_status = execution.get("status")
+            if execution_status in execution_status_counts:
+                execution_status_counts[execution_status] += 1
+        except (EmulatorInputError, OSError) as exc:
+            row.update({"sweep_status": "input-error", "error": str(exc)[:2048]})
+        rows.append(row)
+        status = row["sweep_status"]
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    candidate_summary = candidates["summary"]
+    return {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "source": "behavior-vector-local-sweep",
+        "interpretation": (
+            "This sweep executes registry-derived candidates against the local "
+            "emulator. It is useful for finding dispatch, fixture, and semantic "
+            "failures, but it is not independent TMOS 17.5 evidence."
+        ),
+        "summary": {
+            "uncovered_command_count": candidate_summary["uncovered_command_count"],
+            "candidate_command_count": len(rows),
+            "executed_count": sum(
+                count
+                for status, count in status_counts.items()
+                if status not in {"candidate-unavailable", "input-error"}
+            ),
+            "status_counts": dict(sorted(status_counts.items())),
+            "execution_status_counts": execution_status_counts,
+            "coverage": candidate_summary["coverage"],
+        },
+        "chunk": candidates["chunk"],
+        "candidates": rows,
+        "capture_plan": candidates["capture_plan"],
     }
 
 
@@ -31109,6 +31218,34 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_behavior_sweep",
+                "title": "Run local behavior sweep",
+                "description": "Execute a bounded local sweep over registry-derived TMOS 17.5 command candidates and return compact runtime evidence without claiming TMOS parity.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "packs": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": BEHAVIOR_COVERAGE_MAX_PACKS,
+                            "items": {"type": "object"},
+                        },
+                        "offset": {"type": "integer", "minimum": 0, "default": 0},
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": BEHAVIOR_SWEEP_MAX_COMMANDS,
+                            "default": 16,
+                        },
+                        "namespace": {"type": "string", "minLength": 1},
+                        "runtime_status": {
+                            "type": "string",
+                            "enum": sorted(RUNTIME_STATUS_VALUES),
+                        },
+                    },
+                    ["packs"],
+                ),
+            },
+            {
                 "name": "irule_differential_vectors",
                 "title": "Compare TMOS 17.5 golden vectors",
                 "description": "Run bounded emulator inputs and compare selected observations with independently captured TMOS 17.5 reference output.",
@@ -31486,6 +31623,26 @@ class McpProtocolServer:
                 )
             return self._tool_success(
                 _build_behavior_vector_candidates(
+                    self._root,
+                    args["packs"],
+                    args.get("offset", 0),
+                    args.get("limit", 16),
+                    namespace=args.get("namespace"),
+                    runtime_status=args.get("runtime_status"),
+                )
+            )
+
+        if name == "irule_behavior_sweep":
+            allowed = {"packs", "offset", "limit", "namespace", "runtime_status"}
+            unknown = sorted(set(args) - allowed)
+            if unknown or not isinstance(args.get("packs"), list):
+                details = f": {', '.join(unknown)}" if unknown else ""
+                raise McpProtocolError(
+                    -32602,
+                    "irule_behavior_sweep requires a packs array" + details,
+                )
+            return self._tool_success(
+                _build_behavior_vector_sweep(
                     self._root,
                     args["packs"],
                     args.get("offset", 0),
@@ -36637,6 +36794,33 @@ def _http_handler(
                     return
                 _json_response(self, 200, payload)
                 return
+            if parsed.path == "/v1/behavior-sweep":
+                query = parse_qs(parsed.query, strict_parsing=False)
+                try:
+                    offset = int(query.get("offset", ["0"])[0])
+                    limit = int(query.get("limit", ["16"])[0])
+                    filters = {
+                        field: query[field][0]
+                        for field in ("namespace", "runtime_status")
+                        if field in query
+                    }
+                    pack_dir = (
+                        Path(__file__).resolve().parent.parent
+                        / "examples"
+                        / "behavior-packs"
+                    )
+                    payload = _build_behavior_vector_sweep(
+                        root,
+                        _read_behavior_coverage_directory(pack_dir),
+                        offset,
+                        limit,
+                        **filters,
+                    )
+                except (TypeError, ValueError, EmulatorInputError, OSError) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
             if parsed.path == "/v1/conformance":
                 try:
                     payload = _build_conformance(root)
@@ -36739,6 +36923,40 @@ def _http_handler(
                             "behavior candidate request requires a packs array" + details
                         )
                     payload = _build_behavior_vector_candidates(
+                        root,
+                        request["packs"],
+                        request.get("offset", 0),
+                        request.get("limit", 16),
+                        namespace=request.get("namespace"),
+                        runtime_status=request.get("runtime_status"),
+                    )
+                except (
+                    json.JSONDecodeError,
+                    EmulatorInputError,
+                    EmulatorResourceError,
+                    OSError,
+                ) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
+            if parsed.path == "/v1/behavior-sweep":
+                try:
+                    request = self._read_json()
+                    if not isinstance(request, dict):
+                        raise EmulatorInputError(
+                            "behavior sweep request must be a JSON object"
+                        )
+                    allowed = {
+                        "packs", "offset", "limit", "namespace", "runtime_status"
+                    }
+                    unknown = sorted(set(request) - allowed)
+                    if unknown or not isinstance(request.get("packs"), list):
+                        details = f": {', '.join(unknown)}" if unknown else ""
+                        raise EmulatorInputError(
+                            "behavior sweep request requires a packs array" + details
+                        )
+                    payload = _build_behavior_vector_sweep(
                         root,
                         request["packs"],
                         request.get("offset", 0),
@@ -37221,6 +37439,11 @@ def main(argv: list[str] | None = None) -> int:
         help="generate a bounded reference-capture plan for uncovered TMOS 17.5 commands",
     )
     mode.add_argument(
+        "--behavior-sweep",
+        action="store_true",
+        help="execute a bounded local sweep over generated TMOS 17.5 behavior candidates",
+    )
+    mode.add_argument(
         "--golden-vectors",
         nargs="?",
         const="-",
@@ -37256,7 +37479,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, help="capability or catalog chunk size")
     parser.add_argument(
         "--behavior-pack-dir",
-        help="directory of JSON behavior packs for --behavior-coverage or --behavior-candidates",
+        help="directory of JSON behavior packs for --behavior-coverage, --behavior-candidates, or --behavior-sweep",
     )
     parser.add_argument("--namespace", help="limit capabilities to one exact command namespace")
     parser.add_argument(
@@ -37347,16 +37570,17 @@ def main(argv: list[str] | None = None) -> int:
                 "--capture-records requires --assemble-observations"
             )
         if args.behavior_pack_dir is not None and not (
-            args.behavior_coverage or args.behavior_candidates
+            args.behavior_coverage or args.behavior_candidates or args.behavior_sweep
         ):
             raise EmulatorInputError(
                 "--behavior-pack-dir requires --behavior-coverage or --behavior-candidates"
             )
-        if args.behavior_candidates and args.target_status not in (
+        if (args.behavior_candidates or args.behavior_sweep) and args.target_status not in (
             None, "available-in-tmos-17.5"
         ):
             raise EmulatorInputError(
-                "--behavior-candidates only supports available-in-tmos-17.5 commands"
+                "--behavior-candidates and --behavior-sweep only support "
+                "available-in-tmos-17.5 commands"
             )
         if (
             args.capture_plan_name is not None
@@ -37378,6 +37602,7 @@ def main(argv: list[str] | None = None) -> int:
             or args.catalog_smoke
             or args.behavior_coverage
             or args.behavior_candidates
+            or args.behavior_sweep
         ):
             raise EmulatorInputError(
                 "use either --scenario PATH or a direct operation input, not both"
@@ -37387,6 +37612,7 @@ def main(argv: list[str] | None = None) -> int:
             args.serve or args.data_plane or args.mcp or args.capabilities or args.catalog or args.probe
             or args.catalog_smoke or args.behavior_coverage or args.capture_campaign or args.command_probe or args.behavior_pack or args.golden_vectors
             or args.behavior_candidates
+            or args.behavior_sweep
             or args.capture_plan_template or args.import_observations
             or args.assemble_observations or args.conformance
         ):
@@ -37507,6 +37733,19 @@ def main(argv: list[str] | None = None) -> int:
                     "--behavior-candidates only supports available-in-tmos-17.5 commands"
                 )
             response = _build_behavior_vector_candidates(
+                root,
+                _read_behavior_coverage_directory(pack_dir),
+                args.offset,
+                16 if args.limit is None else args.limit,
+                namespace=args.namespace,
+                runtime_status=args.runtime_status,
+            )
+        elif args.behavior_sweep:
+            if args.behavior_pack_dir is None:
+                pack_dir = Path(__file__).resolve().parent.parent / "examples" / "behavior-packs"
+            else:
+                pack_dir = Path(args.behavior_pack_dir)
+            response = _build_behavior_vector_sweep(
                 root,
                 _read_behavior_coverage_directory(pack_dir),
                 args.offset,

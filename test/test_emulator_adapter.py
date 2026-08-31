@@ -4916,6 +4916,28 @@ when HTTP_RESPONSE_RELEASE {
         self.assertNotEqual(getattr(spec, "required_package", None), "Tk")
         self.assertEqual(spec.subcommands, {})
 
+    def test_behavior_sweep_executes_candidates_and_keeps_local_evidence_distinct(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 0, 2, namespace="HTTP"
+        )
+
+        self.assertEqual(sweep["source"], "behavior-vector-local-sweep")
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 2)
+        self.assertEqual(sweep["summary"]["executed_count"], 2)
+        self.assertEqual(sweep["summary"]["execution_status_counts"]["ok"], 2)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 2})
+        self.assertIn("not independent TMOS 17.5 evidence", sweep["interpretation"])
+        self.assertEqual(
+            [row["command"] for row in sweep["candidates"]],
+            ["HTTP::class", "HTTP::close"],
+        )
+        self.assertTrue(all("execution" in row for row in sweep["candidates"]))
+
     def test_behavior_pack_validation_is_bounded_and_atomic(self) -> None:
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "schema_version"):
             self.adapter.run_behavior_pack(
@@ -23755,6 +23777,22 @@ when CLIENT_DATA {
                 len(candidates_payload["capture_plan"]["observations"]), 1
             )
 
+            sweep_request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/behavior-sweep",
+                data=json.dumps({
+                    "packs": [pack],
+                    "namespace": "HTTP",
+                    "limit": 1,
+                }).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(sweep_request) as response:
+                sweep_payload = json.loads(response.read())
+            self.assertEqual(sweep_payload["status"], "ok")
+            self.assertEqual(sweep_payload["summary"]["executed_count"], 1)
+            self.assertEqual(sweep_payload["summary"]["status_counts"], {"ok": 1})
+
             stateful = json.loads(
                 (ROOT / "examples" / "behavior-packs" / "stateful-17.5.json")
                 .read_text(encoding="utf-8")
@@ -24255,6 +24293,7 @@ when CLIENT_DATA {
         self.assertIn("irule_behavior_pack", tool_names)
         self.assertIn("irule_behavior_coverage", tool_names)
         self.assertIn("irule_behavior_candidates", tool_names)
+        self.assertIn("irule_behavior_sweep", tool_names)
         self.assertIn("irule_differential_vectors", tool_names)
         self.assertIn("irule_import_observations", tool_names)
         self.assertIn("irule_assemble_observations", tool_names)
@@ -24441,6 +24480,31 @@ when CLIENT_DATA {
             self.assertEqual(candidates_payload["status"], "ok")
             self.assertEqual(candidates_payload["summary"]["candidate_command_count"], 1)
             self.assertEqual(candidates_payload["candidates"][0]["command"], "HTTP::class")
+
+            sweep = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 22,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_behavior_sweep",
+                        "arguments": {
+                            "packs": [
+                                json.loads(
+                                    (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+                                    .read_text(encoding="utf-8")
+                                )
+                            ],
+                            "namespace": "HTTP",
+                            "limit": 1,
+                        },
+                    },
+                }
+            )
+            sweep_payload = sweep["result"]["structuredContent"]
+            self.assertEqual(sweep_payload["status"], "ok")
+            self.assertEqual(sweep_payload["summary"]["executed_count"], 1)
+            self.assertEqual(sweep_payload["summary"]["status_counts"], {"ok": 1})
 
             command_probe = server.handle_message(
                 {
