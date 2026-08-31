@@ -421,7 +421,11 @@ commands per request. The argument hypotheses are intentionally reviewable:
 they start from the pinned tcl-lsp synopsis metadata and use bounded TMOS-safe
 type hints where a synopsis only names a type such as `BOOL_VALUE`; each
 candidate records its argument source. They may still need a command-specific
-fixture or protocol driver before collection. Use
+fixture or protocol driver before collection. A small set of modeled lifecycle
+commands also carries explicit safe event hints (for example,
+`HTTP::release` in `HTTP_REQUEST_DATA` and `HTTP::retry` in `HTTP_RESPONSE`)
+so generated sweeps do not confuse an invalid event fixture with a semantic
+failure. Use
 `GET /v1/behavior-candidates` for the checked-in packs or `POST
 /v1/behavior-candidates` with `{"packs":[...]}` for custom packs. The same
 operation is exposed as `irule_behavior_candidates` in MCP.
