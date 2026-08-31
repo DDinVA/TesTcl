@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "tcp-controls-17.5",
+  "cases": [
+    {
+      "id": "transport-tuning-persists",
+      "scenario": {
+        "profiles": ["TCP"],
+        "irule": "when CLIENT_ACCEPTED { TCP::nagle disable; TCP::keepalive 60; TCP::idletime 120; TCP::sendbuf 100000; TCP::recvwnd 200000; TCP::setmss 1200; TCP::pacing enable; TCP::push_flag auto; TCP::proxybuffer 10000 2000; TCP::congestion cubic; TCP::collect 1 } when CLIENT_DATA { log local0. \"mss=[TCP::mss] nagle=[TCP::naglemode]/[TCP::naglestate] keepalive=[TCP::keepalive] sendbuf=[TCP::sendbuf] recvwnd=[TCP::recvwnd] pacing=[TCP::pacing] push=[TCP::push_flag] high=[TCP::proxybufferhigh] low=[TCP::proxybufferlow] congestion=[TCP::congestion]\" }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.5", "port": 51000},
+            "destination": {"address": "192.0.2.10", "port": 9999},
+            "flags": ["SYN"]
+          },
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.5", "port": 51000},
+            "destination": {"address": "192.0.2.10", "port": 9999},
+            "flags": ["ACK"],
+            "payload": "x"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 1, "event"], "equals": "CLIENT_ACCEPTED"},
+          {"path": ["trace", 0, "events", 1, "state", "connection", "mss"], "equals": "1200"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "idletime"], "equals": "120"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "proxybuffer_high"], "equals": "10000"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "proxybuffer_low"], "equals": "2000"},
+          {"path": ["trace", 1, "events", 0, "event"], "equals": "CLIENT_DATA"},
+          {"path": ["trace", 1, "events", 0, "state", "connection", "mss"], "equals": "1200"},
+          {"path": ["trace", 1, "events", 0, "state", "tcp", "keepalive"], "equals": "60"},
+          {"path": ["trace", 1, "events", 0, "state", "tcp", "sendbuf"], "equals": "100000"},
+          {"path": ["trace", 1, "events", 0, "state", "tcp", "recvwnd"], "equals": "200000"},
+          {"path": ["trace", 1, "events", 0, "state", "tcp", "pacing"], "equals": "1"},
+          {"path": ["trace", 1, "events", 0, "state", "tcp", "push_flag"], "equals": "auto"},
+          {"path": ["trace", 1, "events", 0, "state", "tcp", "congestion"], "equals": "cubic"}
+        ]
+      }
+    },
+    {
+      "id": "tcp-loss-and-recovery-controls",
+      "scenario": {
+        "profiles": ["TCP"],
+        "irule": "when CLIENT_ACCEPTED { TCP::abc disable; TCP::analytics key api; TCP::autowin disable; TCP::delayed_ack disable; TCP::dsack disable; TCP::earlyrxmit disable; TCP::ecn disable; TCP::enhanced_loss_recovery disable; TCP::limxmit disable; TCP::lossfilter 150 10; set ::burst [TCP::lossfilterburst]; set ::rate [TCP::lossfilterrate]; set ::rcv_scale [TCP::rcv_scale]; set ::snd_scale [TCP::snd_scale]; set ::ssthresh [TCP::snd_ssthresh]; set ::rexmt [TCP::rexmt_thresh 100]; TCP::rt_metrics_timeout 300; set ::port [TCP::unused_port 192.0.2.20 80 10.0.0.5 55000]; set ::port2 [TCP::unused_port 192.0.2.20 80 10.0.0.5]; TCP::collect 1 } when CLIENT_DATA { log local0. \"abc=[set ::state::tcp::abc] analytics=[set ::state::tcp::analytics]/[set ::state::tcp::analytics_key] autowin=[set ::state::tcp::autowin] earlyrxmit=[set ::state::tcp::earlyrxmit] ecn=[set ::state::tcp::ecn] loss=[set ::burst]/[set ::rate] rcv=[set ::rcv_scale] snd=[set ::snd_scale] ssthresh=[set ::ssthresh] rexmt=[set ::rexmt] port=[set ::port]/[set ::port2]\" }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.5", "port": 51000},
+            "destination": {"address": "192.0.2.10", "port": 9999},
+            "flags": ["SYN"]
+          },
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.5", "port": 51000},
+            "destination": {"address": "192.0.2.10", "port": 9999},
+            "flags": ["ACK"],
+            "payload": "x"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "abc"], "equals": "disable"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "analytics"], "equals": "enable"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "analytics_key"], "equals": "api"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "autowin"], "equals": "disable"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "delayed_ack"], "equals": "disable"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "dsack"], "equals": "disable"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "earlyrxmit"], "equals": "disable"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "ecn"], "equals": "disable"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "enhanced_loss_recovery"], "equals": "disable"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "limxmit"], "equals": "disable"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "lossfilter_rate"], "equals": "150"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "lossfilter_burst"], "equals": "10"},
+          {"path": ["trace", 0, "events", 1, "state", "tcp", "rt_metrics_timeout"], "equals": "300"},
+          {"path": ["trace", 1, "events", 0, "event"], "equals": "CLIENT_DATA"}
+        ]
+      }
+    }
+  ]
+}

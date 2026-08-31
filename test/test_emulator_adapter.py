@@ -4744,6 +4744,7 @@ when HTTP_RESPONSE_RELEASE {
         expected_counts = {
             "aaa-17.5.json": 3,
             "category-17.5.json": 6,
+            "tcp-controls-17.5.json": 2,
             "dns-17.5.json": 7,
             "tcp-17.5.json": 6,
             "lb-17.5.json": 5,

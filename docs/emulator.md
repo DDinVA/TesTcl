@@ -374,7 +374,7 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 259 of 989 target F5 commands (26.19%). This is test-input
+current report covers 269 of 989 target F5 commands (27.20%). This is test-input
 coverage, not a semantic-fidelity score.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
@@ -459,6 +459,15 @@ operations, and CONNECT will state:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/mqtt-17.5.json
+```
+
+Run the TCP controls behavior pack to verify transport tuning persists from
+`CLIENT_ACCEPTED` into `CLIENT_DATA` and that loss/recovery settings are
+inspectable:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/tcp-controls-17.5.json
 ```
 
 For service clients, submit the packs as one bounded JSON request to
