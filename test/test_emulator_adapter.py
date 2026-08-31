@@ -5017,6 +5017,37 @@ when HTTP_RESPONSE_RELEASE {
         )
         self.assertTrue(all("execution" in row for row in sweep["candidates"]))
 
+    def test_tcp_candidate_sweep_uses_typed_fixtures_for_modeled_commands(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 32, namespace="TCP", variants=8
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        self.assertEqual(
+            [
+                variant["args"]
+                for variant in by_command["TCP::abc"]["argument_candidates"]
+            ],
+            [["enable"], ["disable"]],
+        )
+        self.assertEqual(by_command["TCP::collect"]["input"]["args"], [])
+        self.assertEqual(
+            by_command["TCP::proxybuffer"]["input"]["args"], ["10000", "2000"]
+        )
+        self.assertEqual(by_command["TCP::notify"]["event"], "CLIENT_DATA")
+
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 0, 32, namespace="TCP", variants=8
+        )
+        self.assertEqual(sweep["summary"]["variant_count"], 50)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 50})
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(

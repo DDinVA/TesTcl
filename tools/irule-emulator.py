@@ -2896,7 +2896,13 @@ def _command_probe_template(
 
     selected_name: str | None = None
     selected_props: Any | None = None
+    hinted_event = _CANDIDATE_EVENT_HINTS.get(command)
+    if hinted_event is not None and hinted_event in by_name:
+        selected_name = hinted_event
+        selected_props = by_name[hinted_event]
     for name in ordered_names:
+        if selected_name is not None:
+            break
         props = by_name.get(name)
         if props is None:
             continue
@@ -2964,6 +2970,24 @@ _CANDIDATE_LITERAL_WORDS = frozenset(
         "value", "values", "version", "write",
     }
 )
+_CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "TCP::abc": (("enable",), ("disable",)),
+    "TCP::autowin": (("enable",), ("disable",)),
+    "TCP::collect": ((), ("1",), ("1", "0")),
+    "TCP::delayed_ack": (("enable",), ("disable",)),
+    "TCP::dsack": (("enable",), ("disable",)),
+    "TCP::earlyrxmit": ((), ("enable",), ("disable",)),
+    "TCP::ecn": (("enable",), ("disable",)),
+    "TCP::enhanced_loss_recovery": (("enable",), ("disable",)),
+    "TCP::idletime": (("60",),),
+    "TCP::keepalive": ((), ("60",)),
+    "TCP::limxmit": (("enable",), ("disable",)),
+    "TCP::lossfilter": (("100", "2"),),
+    "TCP::notify": (("request",), ("eom",)),
+    "TCP::pacing": ((), ("enable",), ("disable",)),
+    "TCP::proxybuffer": (("10000", "2000"),),
+}
+_CANDIDATE_EVENT_HINTS = {"TCP::notify": "CLIENT_DATA"}
 
 
 def _candidate_synopsis_words(synopsis: str, command: str) -> list[tuple[str, bool]]:
@@ -3052,14 +3076,20 @@ def _candidate_argument_value(
         return "testcl-secret"
     if key in {"pattern", "regex", "regexp"}:
         return ".*"
-    if key in {"boolean", "bool", "flag"}:
-        return "1"
+    if key in {"boolean", "bool", "flag", "bool_value"}:
+        return "enable"
     if key in {
         "number", "integer", "count", "length", "size", "offset", "index", "seconds",
         "content_length", "nonnegative_integer",
         "timeout", "ttl", "code", "status_code", "priority", "weight", "limit",
+        "collect_bytes", "skip_bytes", "idle_time", "keep_alive_interval", "buffer_size",
+        "window_size", "tcp_ignore_rate", "tcp_ignore_burst",
     }:
         return "1"
+    if key == "tcp_rexmt_thresh_value":
+        return "3"
+    if key == "tcp_max_segment_size":
+        return "1200"
     if key in {"type", "dns_type", "rr_type"} and command.startswith("DNS"):
         return "A"
     if key in {"status", "action"}:
@@ -3082,6 +3112,17 @@ def _command_argument_candidates(
     command: str, spec: Any
 ) -> list[dict[str, Any]]:
     """Build bounded argument variants from registry subcommand/synopsis metadata."""
+    hinted_arguments = _CANDIDATE_ARGUMENT_HINTS.get(command)
+    if hinted_arguments is not None:
+        return [
+            {
+                "args": list(args),
+                "source": "tmos-17.5-safe-argument-hint",
+                "synopsis": f"{command} typed-safe fixture",
+                "minimum_arity": len(args),
+            }
+            for args in hinted_arguments
+        ]
     variants: list[dict[str, Any]] = []
     if spec.subcommands:
         for subcommand, sub_spec in spec.subcommands.items():
@@ -3358,9 +3399,10 @@ def _build_behavior_vector_candidates(
             "has_more": start + len(selected_names) < len(uncovered),
         },
         "interpretation": (
-            "Candidates are registry-derived invocation hypotheses and a reference-free "
-            "capture plan. They are syntactically executable through the local probe "
-            "path, but their results are not TMOS 17.5 evidence until collected externally."
+            "Candidates are registry-derived invocation hypotheses supplemented by "
+            "bounded TMOS-safe type hints and a reference-free capture plan. They are "
+            "syntactically executable through the local probe path, but their results "
+            "are not TMOS 17.5 evidence until collected externally."
         ),
         "candidates": candidate_rows,
         "capture_plan": plan,

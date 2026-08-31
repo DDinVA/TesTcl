@@ -418,8 +418,10 @@ plan would exceed the 256-observation capture limit. The default is one primary
 argument form per command.
 Candidates are chunked over the uncovered-command queue, with a maximum of 64
 commands per request. The argument hypotheses are intentionally reviewable:
-they are derived from the pinned tcl-lsp synopsis metadata and may need a
-command-specific fixture or protocol driver before collection. Use
+they start from the pinned tcl-lsp synopsis metadata and use bounded TMOS-safe
+type hints where a synopsis only names a type such as `BOOL_VALUE`; each
+candidate records its argument source. They may still need a command-specific
+fixture or protocol driver before collection. Use
 `GET /v1/behavior-candidates` for the checked-in packs or `POST
 /v1/behavior-candidates` with `{"packs":[...]}` for custom packs. The same
 operation is exposed as `irule_behavior_candidates` in MCP.
