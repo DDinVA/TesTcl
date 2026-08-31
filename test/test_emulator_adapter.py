@@ -4779,6 +4779,7 @@ when HTTP_RESPONSE_RELEASE {
             "http2-17.5.json": 11,
             "udp-datagram-17.5.json": 15,
             "sip-17.5.json": 41,
+            "sctp-controls-17.5.json": 1,
         }
         for filename, case_count in expected_counts.items():
             with self.subTest(filename=filename):

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "sctp-controls-17.5",
+  "cases": [
+    {
+      "id": "packet-collection-payload-and-timers",
+      "scenario": {
+        "profiles": ["SCTP"],
+        "irule": "when CLIENT_ACCEPTED { set ::ports [list [SCTP::client_port] [SCTP::server_port] [SCTP::local_port] [SCTP::remote_port] [SCTP::local_port clientside] [SCTP::remote_port serverside]]; set ::timers [list [SCTP::rto_initial] [SCTP::rto_max] [SCTP::rto_min] [SCTP::sack_timeout]]; set ::mss [SCTP::mss]; SCTP::ppi 3; SCTP::collect 4 }\nwhen CLIENT_DATA { set ::before [list [SCTP::payload] [SCTP::payload length] [SCTP::payload 2]]; SCTP::payload replace 0 4 PONG; SCTP::respond reply 0 3; set ::after [SCTP::payload]; SCTP::release 0; log local0. \"ports=$::ports timers=$::timers mss=$::mss ppi=[SCTP::ppi] before=$::before after=$::after\" }",
+        "packets": [
+          {
+            "protocol": "sctp",
+            "source": {"address": "10.0.0.1", "port": 5000},
+            "destination": {"address": "192.0.2.10", "port": 9899},
+            "payload": "ping",
+            "ppi": 7
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 1, "event"], "equals": "CLIENT_ACCEPTED"},
+          {"path": ["trace", 0, "events", 1, "state", "sctp", "ppi"], "equals": "3"},
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "CLIENT_DATA"},
+          {"path": ["trace", 0, "events", 2, "state", "sctp", "payload"], "equals": "PONG"},
+          {"path": ["trace", 0, "events", 2, "state", "sctp", "ppi"], "equals": "7"},
+          {"path": ["trace", 0, "events", 2, "state", "sctp", "released"], "equals": "1"},
+          {"path": ["trace", 0, "response"], "equals": "rep"},
+          {"path": ["emitted", 0, "protocol"], "equals": "sctp"}
+        ]
+      }
+    }
+  ]
+}

@@ -348,7 +348,7 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 The command exits non-zero when a case fails and prints every mismatch without
 discarding the passing cases. The same runner is available as
 `POST /v1/behavior-packs` and the MCP tool `irule_behavior_pack`. The checked-in
-packs cover AAA, ACCESS, AUTH, CACHE, CATEGORY, DHCPv4, HTTP, HTTP/2, DNS, TCP, TLS/SSL, X509, UDP/datagram, WebSocket, RTSP,
+packs cover AAA, ACCESS, AUTH, CACHE, CATEGORY, DHCPv4, HTTP, HTTP/2, DNS, TCP, TLS/SSL, X509, UDP/datagram, WebSocket, RTSP, SCTP,
 SIP/SDP/SIPALG, load-balancing, URI, stream filtering, route metrics, TMM CMP
 topology, FLOWTABLE queries, classification lifecycle, profile introspection,
 Message Routing controls, HTTP edge controls, MQTT protocol controls, and stateful
@@ -374,7 +374,7 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 591 of 989 target F5 commands (59.76%). This is test-input
+current report covers 605 of 989 target F5 commands (61.17%). This is test-input
 coverage, not a semantic-fidelity score.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
@@ -399,6 +399,14 @@ lookups, request controls, and ACCESS responses:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/access-controls-17.5.json
+```
+
+Run the SCTP controls behavior pack to verify packet collection, PPI, payload
+mutation, port and timer accessors, response emission, and release behavior:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/sctp-controls-17.5.json
 ```
 
 Run the AUTH controls behavior pack to verify authentication sessions,
