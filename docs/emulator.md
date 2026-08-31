@@ -351,7 +351,7 @@ discarding the passing cases. The same runner is available as
 packs cover HTTP, HTTP/2, DNS, TCP, TLS/SSL, UDP/datagram, WebSocket, RTSP,
 SIP/SDP/SIPALG, load-balancing, URI, stream filtering, route metrics, TMM CMP
 topology, FLOWTABLE queries, classification lifecycle, profile introspection,
-Message Routing controls, HTTP edge controls, and stateful
+Message Routing controls, HTTP edge controls, MQTT protocol controls, and stateful
 session/table contracts for
 the pinned 17.5 profile. The SIP pack exercises all 16 catalogued `SIP::`
 commands, nine SDP accessors, and three SIPALG controls across command probes
@@ -374,7 +374,7 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 220 of 989 target F5 commands (22.24%). This is test-input
+current report covers 249 of 989 target F5 commands (25.18%). This is test-input
 coverage, not a semantic-fidelity score.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
@@ -435,6 +435,14 @@ accessors, proxy state, and response helpers:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/http-edge-17.5.json
+```
+
+Run the MQTT behavior pack to verify protocol fields, payload controls, message
+operations, and CONNECT will state:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/mqtt-17.5.json
 ```
 
 For service clients, submit the packs as one bounded JSON request to

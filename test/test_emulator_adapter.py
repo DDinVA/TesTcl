@@ -4754,6 +4754,7 @@ when HTTP_RESPONSE_RELEASE {
             "profile-17.5.json": 25,
             "mr-17.5.json": 23,
             "http-edge-17.5.json": 23,
+            "mqtt-17.5.json": 29,
             "stateful-17.5.json": 2,
             "ssl-tls-17.5.json": 16,
             "http2-17.5.json": 11,
