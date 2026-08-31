@@ -5326,7 +5326,7 @@ def _build_conformance(root: Path) -> dict[str, Any]:
     }
     for name, status in status_map.items():
         command_counts[status] = command_counts.get(status, 0) + 1
-        kind = _catalog_kind(name, registry.get_any(name))
+        kind = _catalog_kind(name, _f5_catalog_spec(registry, name))
         catalog_kind_counts[kind] += 1
         if (
             name not in TMOS_17_5_POST_TARGET_COMMANDS
@@ -5364,7 +5364,7 @@ def _build_conformance(root: Path) -> dict[str, Any]:
             or status not in implementation_statuses
         ):
             continue
-        spec = registry.get_any(name)
+        spec = _f5_catalog_spec(registry, name)
         namespace = name.split("::", 1)[0] if "::" in name else ""
         if _catalog_kind(name, spec) == "f5-irule":
             implementation_buckets.setdefault((namespace, status), []).append(name)
@@ -6029,7 +6029,7 @@ def _analyze_rule_capabilities(
         warnings: list[dict[str, Any]] = []
         command_rows: list[dict[str, Any]] = []
         for name in sorted(usage):
-            spec = registry.get_any(name)
+            spec = _f5_catalog_spec(registry, name) or registry.get_any(name)
             status = status_map.get(name)
             if status is None:
                 status = "unknown-command" if spec is None else "no-runtime-handler"
