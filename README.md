@@ -29,8 +29,8 @@ combine `--serve --data-plane-scenario PATH`; the container exposes the API on
 The same listener can expose a bounded raw TCP data plane for iRule TCP
 fixtures by adding `"live_data_plane": {"protocol": "tcp"}` to the scenario.
 `TCP::respond` emissions are written back to the client. An explicit
-`live_data_plane.upstream` target can opt into a bounded, bidirectional TCP
-bridge for testing a real backend peer; it is not a kernel TCP stack, TLS
+`live_data_plane.upstream` target can opt into a bounded, bidirectional TCP or
+HTTP bridge for testing a real backend peer; it is not a kernel TCP stack, TLS
 terminator, or database emulator. Protocol-specific TDS, FTP,
 LDAP, and similar wire parsers remain available through the packet/API drivers.
 Pool-aware raw TCP scenarios can map pools member names to local backend targets

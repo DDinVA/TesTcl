@@ -15,6 +15,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import http.client
 import importlib.util
 import ipaddress
 import json
@@ -28512,6 +28513,38 @@ class EmulatorSession:
 
         self._call(apply_selection)
 
+    def start_staged_http_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Run a live HTTP request through HTTP_REQUEST and stop before origin I/O."""
+        if not isinstance(request, dict):
+            raise EmulatorInputError("staged HTTP request must be an object")
+        return self._call(
+            lambda session: self._start_staged_http_request_on_worker(session, request)
+        )
+
+    def deliver_staged_http_body(
+        self, staged: dict[str, Any], body: bytes
+    ) -> list[dict[str, Any]]:
+        """Deliver a bounded request body into an armed HTTP collection window."""
+        if not isinstance(staged, dict) or not isinstance(body, bytes):
+            raise EmulatorInputError("staged HTTP body input is invalid")
+        return self._call(
+            lambda session: self._deliver_staged_http_body_on_worker(
+                session, staged, body
+            )
+        )
+
+    def complete_staged_http_request(
+        self, staged: dict[str, Any], response: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Resume a staged request with a real or fixture origin response."""
+        if not isinstance(staged, dict) or not isinstance(response, dict):
+            raise EmulatorInputError("staged HTTP completion input is invalid")
+        return self._call(
+            lambda session: self._complete_staged_http_request_on_worker(
+                session, staged, response
+            )
+        )
+
     def metadata(self, session_id: str) -> dict[str, Any]:
         def read_metadata(session: Any) -> dict[str, Any]:
             return {
@@ -28872,6 +28905,33 @@ class _PersistentEmulatorSession:
             if self._closed:
                 raise EmulatorInputError("emulator session is closed")
             self._state_session().force_pool_member(pool, member)
+
+    def start_staged_http_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Run HTTP_REQUEST while retaining the persistent flow context."""
+        with self._lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
+            return self._state_session().start_staged_http_request(request)
+
+    def deliver_staged_http_body(
+        self, staged: dict[str, Any], body: bytes
+    ) -> list[dict[str, Any]]:
+        """Deliver a request body into the active staged HTTP flow."""
+        with self._lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
+            return self._state_session().deliver_staged_http_body(staged, body)
+
+    def complete_staged_http_request(
+        self, staged: dict[str, Any], response: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Complete the active staged HTTP flow with an origin response."""
+        with self._lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
+            return self._state_session().complete_staged_http_request(
+                staged, response
+            )
 
     def metadata(self, session_id: str, flow_id: Any = None) -> dict[str, Any]:
         with self._lock:
@@ -31846,19 +31906,18 @@ def _normalise_live_data_plane_scenario(
 
     scenario = dict(raw)
     scenario.pop("live_data_plane", None)
+    origin: dict[str, Any] | None = None
     if protocol == "http":
-        if "upstream" in config:
+        if "upstream" in config and "live_origin" in scenario:
             raise EmulatorInputError(
-                "live_data_plane.upstream is only valid for the raw TCP data plane"
+                "live_origin cannot be combined with a live HTTP upstream"
             )
         scenario, origin = _normalise_live_http_scenario(scenario)
-        return scenario, {"protocol": "http", "origin": origin}
-
-    if "live_origin" in scenario:
-        raise EmulatorInputError(
-            "live_origin is only valid for the HTTP data plane"
-        )
-    if any(field in scenario for field in ("request", "requests", "packets")):
+    elif "live_origin" in scenario:
+        raise EmulatorInputError("live_origin is only valid for the HTTP data plane")
+    if protocol == "tcp" and any(
+        field in scenario for field in ("request", "requests", "packets")
+    ):
         raise EmulatorInputError(
             "raw TCP data-plane scenario cannot contain request, requests, or packets"
         )
@@ -32046,12 +32105,72 @@ def _normalise_live_data_plane_scenario(
             upstream["failure_cooldown"] = float(failure_cooldown)
     else:
         upstream = None
-    return scenario, {
-        "protocol": "tcp",
+    result: dict[str, Any] = {
+        "protocol": protocol,
         "read_timeout": float(timeout),
         "max_read_bytes": max_read_bytes,
         "upstream": upstream,
     }
+    if protocol == "http":
+        assert origin is not None
+        result["origin"] = origin
+    return scenario, result
+
+
+def _resolve_live_upstream_candidates(
+    config: dict[str, Any],
+    manager: "SessionManager",
+    session_id: str,
+    scheduler: _LivePoolScheduler | None,
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """Resolve a direct target or Tcl-selected mapped pool candidates."""
+    upstream_config = config.get("upstream")
+    if not isinstance(upstream_config, dict):
+        raise EmulatorInputError("live upstream configuration is missing")
+    endpoint = upstream_config.get("endpoint")
+    if endpoint is not None:
+        return [("", "", dict(endpoint))]
+    targets = upstream_config.get("targets")
+    if not isinstance(targets, dict):
+        raise EmulatorInputError("live upstream target map is invalid")
+    selection = manager.execute(
+        session_id,
+        lambda session: session.selected_pool_member(),
+    )
+    if selection.get("selected") != "1" or not selection.get("pool_member"):
+        configured_pool = upstream_config.get("pool")
+        suffix = (
+            f" for pool {configured_pool!r}"
+            if configured_pool is not None
+            else ""
+        )
+        raise EmulatorInputError(
+            "iRule did not select a live upstream pool member" + suffix
+        )
+    selected_pool = selection.get("pool", "")
+    configured_pool = upstream_config.get("pool")
+    if configured_pool is not None and selected_pool != configured_pool:
+        raise EmulatorInputError(
+            "iRule selected pool "
+            f"{selected_pool!r}, but live upstream is configured for "
+            f"{configured_pool!r}"
+        )
+    preferred_member = selection["pool_member"]
+    members = (
+        scheduler.candidates(selected_pool, preferred_member)
+        if scheduler is not None
+        else [preferred_member]
+    )
+    candidates = [
+        (selected_pool, member, dict(targets[member]))
+        for member in members
+        if member in targets
+    ]
+    if not candidates:
+        raise EmulatorInputError(
+            f"no eligible live upstream target is mapped for pool {selected_pool!r}"
+        )
+    return candidates
 
 
 def _live_http_handler(
@@ -32059,6 +32178,8 @@ def _live_http_handler(
     scenario: dict[str, Any],
     origin_defaults: dict[str, Any],
     manager: "SessionManager",
+    config: dict[str, Any] | None = None,
+    scheduler: _LivePoolScheduler | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build a small real-client HTTP adapter over persistent iRule sessions."""
 
@@ -32115,6 +32236,158 @@ def _live_http_handler(
                 raise EmulatorInputError("request body ended before Content-Length")
             return body
 
+        def _stage_request(
+            self, session_id: str, request: dict[str, Any], body: bytes
+        ) -> dict[str, Any]:
+            body_text = body.decode("utf-8", errors="replace")
+            body_bytes = body_text.encode("utf-8")
+            initial = manager.execute(
+                session_id,
+                lambda session: session.start_staged_http_request(request),
+            )
+            staged: dict[str, Any] = {
+                "request": dict(request),
+                "initial_result": initial,
+                "body_mode": "content-length",
+                "expected": len(body_bytes),
+                "body": bytearray(),
+                "wire_body": bytearray(),
+                "collect_requested": bool(
+                    initial.get("staged", {}).get("collect_requested")
+                ),
+                "collect_length": int(initial.get("staged", {}).get("collect_length", 0)),
+                "collect_offset": 0,
+                "events": list(initial.get("events_fired", [])),
+                "decisions": list(initial.get("decisions", [])),
+                "logs": list(initial.get("logs", [])),
+                "data_events": [],
+            }
+            if body_bytes:
+                if staged["collect_requested"]:
+                    manager.execute(
+                        session_id,
+                        lambda session: session.deliver_staged_http_body(
+                            staged, body_bytes
+                        ),
+                    )
+                else:
+                    staged["body"] = bytearray(body_bytes)
+            return staged
+
+        @staticmethod
+        def _backend_request(staged: dict[str, Any]) -> tuple[str, str, dict[str, str], bytes]:
+            initial_request = staged.get("initial_result", {}).get("request", {})
+            if not isinstance(initial_request, dict):
+                raise EmulatorInputError("emulator returned an invalid staged HTTP request")
+            method = initial_request.get("method", "GET")
+            uri = initial_request.get("uri", "/")
+            headers = initial_request.get("headers", {})
+            if (
+                not isinstance(method, str)
+                or not method
+                or not isinstance(uri, str)
+                or not uri
+                or any(character in method + uri for character in "\r\n\x00")
+            ):
+                raise EmulatorInputError("emulator returned an invalid staged HTTP target")
+            if not isinstance(headers, dict):
+                raise EmulatorInputError("emulator returned invalid staged HTTP headers")
+            safe_headers: dict[str, str] = {}
+            for name, value in headers.items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or not isinstance(value, str)
+                    or any(character in name + value for character in "\r\n\x00")
+                ):
+                    raise EmulatorInputError("emulator returned unsafe upstream HTTP headers")
+                lower_name = name.lower()
+                if lower_name in {
+                    "connection",
+                    "content-length",
+                    "expect",
+                    "keep-alive",
+                    "proxy-connection",
+                    "transfer-encoding",
+                    "upgrade",
+                }:
+                    continue
+                safe_headers[name] = value
+            if not any(name.lower() == "host" for name in safe_headers):
+                host = initial_request.get("host", "")
+                if isinstance(host, str) and host:
+                    safe_headers["Host"] = host
+            body = bytes(staged.get("body", b""))
+            return method, uri, safe_headers, body
+
+        def _run_live_upstream(
+            self, session_id: str, staged: dict[str, Any]
+        ) -> dict[str, Any]:
+            if config is None or config.get("upstream") is None:
+                raise EmulatorInputError("live HTTP upstream configuration is missing")
+            initial = staged.get("initial_result", {})
+            if initial.get("response_committed"):
+                return manager.execute(
+                    session_id,
+                    lambda session: session.complete_staged_http_request(staged, {}),
+                )
+            candidates = _resolve_live_upstream_candidates(
+                config, manager, session_id, scheduler
+            )
+            method, uri, headers, body = self._backend_request(staged)
+            upstream_config = config["upstream"]
+            connect_error: OSError | ValueError | http.client.HTTPException | None = None
+            for selected_pool, member, endpoint in candidates:
+                if member:
+                    manager.execute(
+                        session_id,
+                        lambda session, selected_pool=selected_pool, selected_member=member: session.force_pool_member(
+                            selected_pool, selected_member
+                        ),
+                    )
+                connection: http.client.HTTPConnection | None = None
+                try:
+                    connection = http.client.HTTPConnection(
+                        endpoint["host"],
+                        endpoint["port"],
+                        timeout=upstream_config["connect_timeout"],
+                    )
+                    connection.request(method, uri, body=body or None, headers=headers)
+                    response = connection.getresponse()
+                    response_body = response.read(LIVE_HTTP_MAX_REQUEST_BYTES + 1)
+                    if len(response_body) > LIVE_HTTP_MAX_REQUEST_BYTES:
+                        raise EmulatorResourceError(
+                            "live upstream response body exceeds the 2 MiB limit"
+                        )
+                    response_headers = dict(response.getheaders())
+                    result = manager.execute(
+                        session_id,
+                        lambda session: session.complete_staged_http_request(
+                            staged,
+                            {
+                                "response_status": response.status,
+                                "response_headers": response_headers,
+                                "response_body": response_body.decode(
+                                    "utf-8", errors="replace"
+                                ),
+                            },
+                        ),
+                    )
+                    if scheduler is not None and member:
+                        scheduler.mark_success(selected_pool, member)
+                    return result
+                except (OSError, ValueError, http.client.HTTPException) as exc:
+                    connect_error = exc
+                    if scheduler is not None and member:
+                        scheduler.mark_failure(selected_pool, member)
+                finally:
+                    if connection is not None:
+                        connection.close()
+            raise EmulatorInputError(
+                "live HTTP upstream connection failed: "
+                f"{connect_error or 'no candidate accepted the request'}"
+            )
+
         def _handle_live_request(self) -> None:
             try:
                 if self.headers.get("Expect", "").lower() == "100-continue":
@@ -32128,13 +32401,17 @@ def _live_http_handler(
                     "uri": self.path,
                     "host": self.headers.get("Host", ""),
                     "headers": dict(self.headers.items()),
-                    "body": body.decode("utf-8", errors="replace"),
-                    **origin_defaults,
                 }
-                result = manager.execute(
-                    self._live_session_id,
-                    lambda session: session.run_request(request),
-                )
+                if config is not None and config.get("upstream") is not None:
+                    staged = self._stage_request(self._live_session_id, request, body)
+                    result = self._run_live_upstream(self._live_session_id, staged)
+                else:
+                    request["body"] = body.decode("utf-8", errors="replace")
+                    request.update(origin_defaults)
+                    result = manager.execute(
+                        self._live_session_id,
+                        lambda session: session.run_request(request),
+                    )
                 response = result.get("response", {})
                 status = response.get("status", 500)
                 if isinstance(status, bool) or not isinstance(status, int) or not 200 <= status <= 599:
@@ -32408,52 +32685,9 @@ def _live_tcp_handler(
         def _resolve_upstream_candidates(
             self, session_id: str
         ) -> list[tuple[str, str, dict[str, Any]]]:
-            upstream_config = config.get("upstream")
-            if upstream_config is None:
-                raise EmulatorInputError("live upstream configuration is missing")
-            endpoint = upstream_config.get("endpoint")
-            if endpoint is not None:
-                return [("", "", dict(endpoint))]
-            targets = upstream_config.get("targets")
-            if not isinstance(targets, dict):
-                raise EmulatorInputError("live upstream target map is invalid")
-            selection = manager.execute(
-                session_id,
-                lambda session: session.selected_pool_member(),
+            return _resolve_live_upstream_candidates(
+                config, manager, session_id, scheduler
             )
-            if selection.get("selected") != "1" or not selection.get("pool_member"):
-                configured_pool = upstream_config.get("pool")
-                suffix = (
-                    f" for pool {configured_pool!r}"
-                    if configured_pool is not None
-                    else ""
-                )
-                raise EmulatorInputError(
-                    "iRule did not select a live upstream pool member" + suffix
-                )
-            selected_pool = selection.get("pool", "")
-            configured_pool = upstream_config.get("pool")
-            if configured_pool is not None and selected_pool != configured_pool:
-                raise EmulatorInputError(
-                    "iRule selected pool "
-                    f"{selected_pool!r}, but live upstream is configured for "
-                    f"{configured_pool!r}"
-                )
-            preferred_member = selection["pool_member"]
-            if scheduler is None:
-                members = [preferred_member]
-            else:
-                members = scheduler.candidates(selected_pool, preferred_member)
-            candidates = [
-                (selected_pool, member, dict(targets[member]))
-                for member in members
-                if member in targets
-            ]
-            if not candidates:
-                raise EmulatorInputError(
-                    f"no eligible live upstream target is mapped for pool {selected_pool!r}"
-                )
-            return candidates
 
         def handle(self) -> None:  # noqa: D401 - socketserver API
             session_id: str | None = None
@@ -32664,7 +32898,9 @@ def _data_plane_server(
         if config["protocol"] == "http":
             server = ThreadingHTTPServer(
                 (host, port),
-                _live_http_handler(root, scenario, config["origin"], manager),
+                _live_http_handler(
+                    root, scenario, config["origin"], manager, config, scheduler
+                ),
             )
         else:
             server = _LiveTCPServer(

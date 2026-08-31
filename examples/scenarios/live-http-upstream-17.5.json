@@ -1,0 +1,22 @@
+{
+  "tmos_version": "17.5",
+  "profiles": ["TCP", "HTTP"],
+  "pools": {
+    "app_pool": ["backend-a:18090"]
+  },
+  "irule": "when HTTP_REQUEST { HTTP::header insert X-From-Rule live-upstream; pool app_pool } when HTTP_RESPONSE { HTTP::header insert X-Processed by-irule }",
+  "live_data_plane": {
+    "protocol": "http",
+    "upstream": {
+      "pool": "app_pool",
+      "targets": {
+        "backend-a:18090": {
+          "host": "127.0.0.1",
+          "port": 18090
+        }
+      },
+      "connect_timeout": 2.0,
+      "failure_cooldown": 1.0
+    }
+  }
+}

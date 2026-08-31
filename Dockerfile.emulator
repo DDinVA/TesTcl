@@ -27,6 +27,7 @@ COPY tools/semantic-mocks.tcl /opt/testcl/tools/semantic-mocks.tcl
 COPY tools/http2_wire.py /opt/testcl/tools/http2_wire.py
 COPY web/emulator.html /opt/testcl/web/emulator.html
 COPY examples/scenarios/live-http-17.5.json /opt/testcl/examples/scenarios/live-http-17.5.json
+COPY examples/scenarios/live-http-upstream-17.5.json /opt/testcl/examples/scenarios/live-http-upstream-17.5.json
 COPY examples/scenarios/live-tcp-17.5.json /opt/testcl/examples/scenarios/live-tcp-17.5.json
 COPY examples/scenarios/live-tcp-pool-17.5.json /opt/testcl/examples/scenarios/live-tcp-pool-17.5.json
 COPY requirements-emulator.txt /opt/testcl/requirements-emulator.txt

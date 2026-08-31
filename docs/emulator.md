@@ -67,6 +67,16 @@ are rejected explicitly, and response hop-by-hop headers are normalized by the
 listener. This is a deterministic HTTP data-plane adapter, not a TLS listener,
 kernel TCP stack, or live upstream proxy.
 
+To exercise a real HTTP backend, replace `live_origin` with
+`live_data_plane.upstream`. The direct `{host, port}` form sends the
+iRule-mutated request to one backend. The pool form uses the same mapped target
+and bounded scheduler model as raw TCP; `HTTP_REQUEST` runs before the backend
+request is sent, and `HTTP_RESPONSE` plus response-body collection run after the
+backend reply is received. Backend response bodies are capped at 2 MiB and
+hop-by-hop headers are not forwarded through the adapter. The checked-in
+[`live-http-upstream-17.5.json`](../examples/scenarios/live-http-upstream-17.5.json)
+scenario is a minimal example.
+
 For raw TCP clients, add an explicit `live_data_plane` object to the scenario:
 
 ```json
