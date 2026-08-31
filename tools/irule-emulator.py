@@ -22262,10 +22262,10 @@ class EmulatorSession:
         }
         return result
 
-    def _live_lb_failure_result_on_worker(
+    def _build_committed_staged_result_on_worker(
         self, session: Any, staged: dict[str, Any]
     ) -> dict[str, Any]:
-        """Build a response when LB_FAILED committed HTTP::respond output."""
+        """Build a result when a staged request commits a local response."""
         initial = staged.get("initial_result", {})
         request_state = session.get_state("http_request")
         response_state = session.get_state("http_response")
@@ -22310,6 +22310,12 @@ class EmulatorSession:
             "request_data": bool(staged.get("data_events")),
         }
         return result
+
+    def _live_lb_failure_result_on_worker(
+        self, session: Any, staged: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Build a response when LB_FAILED committed HTTP::respond output."""
+        return self._build_committed_staged_result_on_worker(session, staged)
 
     def _fire_live_lb_failure_on_worker(
         self, session: Any, staged: dict[str, Any], cause: str
@@ -22650,6 +22656,13 @@ class EmulatorSession:
         initial = staged["initial_result"]
         request_snapshot = initial.get("request", {})
         body_text = _decode_wire_text(bytes(staged["body"]))
+        if session.eval_tcl("set ::state::http::response_committed") == "1":
+            result = self._build_committed_staged_result_on_worker(session, staged)
+            result["request"]["body"] = body_text
+            self._request_count += 1
+            self._connection_request_number += 1
+            self._connection_open = True
+            return result
         if initial.get("response_committed"):
             result = dict(initial)
             result["request"] = dict(request_snapshot)
@@ -33320,6 +33333,20 @@ def _live_http2_handler(
             staged["events"] = list(staged.get("events_fired", []))
             staged["decisions"] = list(staged.get("decisions", []))
             staged["logs"] = list(staged.get("logs", []))
+            stage_metadata = staged.get("staged", {})
+            if not isinstance(stage_metadata, dict):
+                raise EmulatorInputError("emulator returned invalid staged HTTP metadata")
+            staged["collect_requested"] = bool(stage_metadata.get("collect_requested"))
+            try:
+                staged["collect_length"] = max(
+                    0, int(stage_metadata.get("collect_length", 0))
+                )
+            except (TypeError, ValueError):
+                raise EmulatorInputError(
+                    "invalid HTTP request collection length"
+                ) from None
+            staged["collect_offset"] = 0
+            staged["data_events"] = []
             body = bytes(stream["body"])
             staged["expected"] = len(body)
             staged["body"] = bytearray()

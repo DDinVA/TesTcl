@@ -21207,6 +21207,106 @@ when HTTP_RESPONSE {
                 },
             )
 
+    def test_live_http2_data_plane_collects_body_and_reuses_connection(self) -> None:
+        certificate_pem, private_key = _valid_server_material()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            certificate_path = Path(temporary_directory) / "server.pem"
+            key_path = Path(temporary_directory) / "server.key"
+            certificate_path.write_text(certificate_pem, encoding="ascii")
+            key_path.write_bytes(private_key)
+            scenario = {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST { HTTP::collect 4 }
+when HTTP_REQUEST_DATA { HTTP::respond 200 content [HTTP::payload] }
+when HTTP_RESPONSE { HTTP::header insert X-Request-Number [HTTP::request_num] }
+""",
+                "live_origin": {"status": 200, "body": "second-origin"},
+                "live_data_plane": {
+                    "protocol": "http2",
+                    "tls": {
+                        "certfile": str(certificate_path),
+                        "keyfile": str(key_path),
+                    },
+                },
+            }
+            server, manager = self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+            )
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            client_context.check_hostname = False
+            client_context.verify_mode = ssl.CERT_NONE
+            client_context.set_alpn_protocols(["h2"])
+            client = socket.create_connection(
+                ("127.0.0.1", self.adapter._data_plane_bound_port(server)), timeout=2
+            )
+            secure_client = client_context.wrap_socket(
+                client, server_hostname="localhost"
+            )
+            try:
+                self.assertEqual(secure_client.selected_alpn_protocol(), "h2")
+                request_encoder = Encoder()
+                first_headers = request_encoder.encode(
+                    [
+                        (":method", "POST"),
+                        (":scheme", "https"),
+                        (":authority", "live.example"),
+                        (":path", "/echo"),
+                        ("content-length", "4"),
+                    ]
+                )
+                second_headers = request_encoder.encode(
+                    [
+                        (":method", "GET"),
+                        (":scheme", "https"),
+                        (":authority", "live.example"),
+                        (":path", "/second"),
+                    ]
+                )
+                secure_client.sendall(
+                    HTTP2_CLIENT_PREFACE
+                    + _http2_frame(0x4, 0, 0)
+                    + _http2_frame(0x1, 0x4, 1, first_headers)
+                    + _http2_frame(0x0, 0x1, 1, b"echo")
+                    + _http2_frame(0x1, 0x5, 3, second_headers)
+                )
+                decoder = Http2ConnectionDecoder()
+                events: list[dict[str, Any]] = []
+                complete_streams: set[int] = set()
+                secure_client.settimeout(2)
+                while complete_streams != {1, 3}:
+                    payload = secure_client.recv(65535)
+                    self.assertTrue(payload, "HTTP/2 server closed before both responses")
+                    events.extend(decoder.feed(payload, "server_to_client"))
+                    complete_streams = {
+                        event["stream_id"]
+                        for event in events
+                        if event.get("kind") == "data" and event.get("end_stream")
+                    }
+                response_headers = {
+                    event["stream_id"]: event
+                    for event in events
+                    if event.get("kind") == "headers"
+                }
+                response_data = {
+                    event["stream_id"]: event
+                    for event in events
+                    if event.get("kind") == "data"
+                }
+                self.assertEqual(response_headers[1]["pseudo_headers"][":status"], "200")
+                self.assertEqual(response_data[1]["data"], b"echo")
+                self.assertEqual(response_headers[3]["pseudo_headers"][":status"], "200")
+                self.assertEqual(response_headers[3]["headers"]["x-request-number"], "2")
+                self.assertEqual(response_data[3]["data"], b"second-origin")
+            finally:
+                secure_client.close()
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                manager.close_all()
+
     def test_live_http_upstream_failure_fires_lb_failed_and_uses_fallback_pool(self) -> None:
         class FallbackHandler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
