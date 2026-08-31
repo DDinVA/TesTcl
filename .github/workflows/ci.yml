@@ -97,7 +97,7 @@ jobs:
 
           docker run --rm testcl-irule-emulator:ci --behavior-coverage >/tmp/testcl-behavior-coverage.json
           grep -F '"target_f5_command_count":989' /tmp/testcl-behavior-coverage.json
-          grep -F '"covered_command_count":111' /tmp/testcl-behavior-coverage.json
+          grep -F '"covered_command_count":118' /tmp/testcl-behavior-coverage.json
           docker run --rm testcl-irule-emulator:ci \
             --behavior-pack /opt/testcl/examples/behavior-packs/http2-17.5.json \
             >/tmp/testcl-http2-pack.json
