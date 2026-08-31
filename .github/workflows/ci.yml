@@ -54,7 +54,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build the portable emulator image
-        run: docker build --build-arg TCL_LSP_COMMIT="$TCL_LSP_COMMIT" -f Dockerfile.emulator -t testcl-irule-emulator:ci .
+        run: |
+          docker compose config --quiet
+          docker build --build-arg TCL_LSP_COMMIT="$TCL_LSP_COMMIT" -f Dockerfile.emulator -t testcl-irule-emulator:ci .
 
       - name: Smoke test the portable emulator image
         run: |

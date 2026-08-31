@@ -48,5 +48,7 @@ ENV TCL_LSP_ROOT=/opt/tcl-lsp \
 
 WORKDIR /work
 EXPOSE 8080 18080
+HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=5 \
+    CMD python -c "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2); response.read(); response.close(); raise SystemExit(0 if response.status == 200 else 1)"
 ENTRYPOINT ["python", "/opt/testcl/tools/irule-emulator.py"]
 CMD ["--serve", "--host", "0.0.0.0"]

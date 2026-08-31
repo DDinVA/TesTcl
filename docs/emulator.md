@@ -2620,6 +2620,27 @@ high-level requests, injects events, replays packet arrays, and searches the
 full catalog. The page is served from the repository and makes no external
 network requests.
 
+### One-command container stack
+
+Docker Compose provides a portable evaluation stack with the API on port 8080
+and the deterministic real-client HTTP data plane on port 18080. It builds the
+same Python 3.13 image used by CI and pins the tcl-lsp checkout unless
+`TCL_LSP_COMMIT` is overridden:
+
+```sh
+docker compose up --build -d
+curl --fail http://127.0.0.1:8080/healthz
+curl --fail http://127.0.0.1:18080/health
+curl -i http://127.0.0.1:18080/health
+docker compose down
+```
+
+The Compose service uses the checked-in
+[`live-http-17.5.json`](../examples/scenarios/live-http-17.5.json) fixture, so
+the data-plane response is deterministic. The image healthcheck only tests API
+readiness; it does not claim that the modeled listener reproduces a live BIG-IP
+or that the scenario has independent TMOS observation evidence.
+
 The conformance response includes a machine-readable `coverage` matrix. It
 separates complete catalog ingestion from partial command behavior and event
 lifecycle coverage, and reports target-only behavioral, placeholder, unhandled,
