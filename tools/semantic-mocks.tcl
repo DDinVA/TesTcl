@@ -4789,7 +4789,7 @@ namespace eval ::itest::semantic {
 
     proc mqtt_disable_command {args} {
         variable mqtt_enabled
-        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::disable
+        _mqtt_require_event {CLIENT_ACCEPTED SERVER_CONNECTED MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::disable
         if {[llength $args] != 0} { error "MQTT::disable takes no arguments" }
         set mqtt_enabled 0
         ::itest::log_decision mqtt disable
@@ -4798,7 +4798,7 @@ namespace eval ::itest::semantic {
 
     proc mqtt_enable_command {args} {
         variable mqtt_enabled
-        _mqtt_require_event {MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::enable
+        _mqtt_require_event {CLIENT_ACCEPTED SERVER_CONNECTED MQTT_CLIENT_INGRESS MQTT_SERVER_INGRESS MQTT_CLIENT_DATA MQTT_SERVER_DATA} MQTT::enable
         if {[llength $args] != 0} { error "MQTT::enable takes no arguments" }
         set mqtt_enabled 1
         ::itest::log_decision mqtt enable

@@ -5129,6 +5129,46 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(first["summary"]["execution_status_counts"]["error"], 0)
         self.assertEqual(second["summary"]["execution_status_counts"]["error"], 0)
 
+    def test_mqtt_candidate_sweep_uses_message_fixtures(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 29, namespace="MQTT", variants=1
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        self.assertEqual(by_command["MQTT::disable"]["event"], "CLIENT_ACCEPTED")
+        self.assertEqual(by_command["MQTT::disable"]["profiles"], ["TCP", "MQTT"])
+        self.assertEqual(by_command["MQTT::enable"]["event"], "CLIENT_ACCEPTED")
+        self.assertEqual(by_command["MQTT::enable"]["profiles"], ["TCP", "MQTT"])
+        self.assertEqual(by_command["MQTT::release"]["event"], "MQTT_CLIENT_DATA")
+        self.assertEqual(by_command["MQTT::will"]["event"], "MQTT_CLIENT_INGRESS")
+        self.assertEqual(
+            by_command["MQTT::will"]["input"]["state"],
+            {"mqtt": {"type": "CONNECT"}},
+        )
+        self.assertNotIn("request", by_command["MQTT::will"]["input"])
+        self.assertNotIn(
+            "state",
+            self.adapter._capture_plan_probe_input(by_command["MQTT::will"]["input"]),
+        )
+        self.assertEqual(
+            by_command["MQTT::respond"]["input"]["args"],
+            ["type", "CONNACK", "return_code", "0"],
+        )
+
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 0, 29, namespace="MQTT", variants=8
+        )
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 29)
+        self.assertEqual(sweep["summary"]["variant_count"], 39)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 39})
+        self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(

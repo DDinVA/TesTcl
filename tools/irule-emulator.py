@@ -2898,8 +2898,10 @@ def _command_probe_template(
     selected_props: Any | None = None
     hinted_event = _CANDIDATE_EVENT_HINTS.get(command)
     if hinted_event is not None and hinted_event in by_name:
-        selected_name = hinted_event
-        selected_props = by_name[hinted_event]
+        hinted_props = by_name[hinted_event]
+        if requirements is None or event_satisfies(hinted_props, requirements, hinted_event):
+            selected_name = hinted_event
+            selected_props = hinted_props
     for name in ordered_names:
         if selected_name is not None:
             break
@@ -2949,6 +2951,8 @@ def _command_probe_template(
     elif "FASTHTTP" in profile_candidates:
         add_profile("FASTHTTP")
     for profile in sorted(profile_candidates - {"HTTP", "FASTHTTP"}):
+        add_profile(profile)
+    for profile in _CANDIDATE_PROFILE_HINTS.get(command, ()):
         add_profile(profile)
     if not profiles and selected_name == "RULE_INIT":
         profiles.extend(DEFAULT_PROFILES)
@@ -3009,6 +3013,26 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("GET /testcl/command HTTP/1.1\r\nHost: example.test\r\n\r\n",),
         ("-reset", "GET /testcl/command HTTP/1.1\r\nHost: example.test\r\n\r\n"),
     ),
+    "MQTT::collect": ((), ("1",)),
+    "MQTT::insert": (
+        ("before", "type", "PUBLISH", "topic", "testcl/command", "payload", "testcl"),
+    ),
+    "MQTT::keep_alive": ((), ("60",)),
+    "MQTT::packet_id": ((), ("1",)),
+    "MQTT::payload": (
+        (),
+        ("length",),
+        ("append", "testcl"),
+        ("prepend", "testcl"),
+        ("replace", "testcl"),
+    ),
+    "MQTT::protocol_version": ((), ("4",)),
+    "MQTT::replace": (
+        ("type", "PUBLISH", "topic", "testcl/command", "payload", "testcl"),
+    ),
+    "MQTT::respond": (("type", "CONNACK", "return_code", "0"),),
+    "MQTT::return_code": ((), ("0",)),
+    "MQTT::topic": ((), ("testcl/command",)),
 }
 _CANDIDATE_EVENT_HINTS = {
     "TCP::recvwnd": "CLIENT_ACCEPTED",
@@ -3020,6 +3044,20 @@ _CANDIDATE_EVENT_HINTS = {
     "ANTIFRAUD::fingerprint": "ANTIFRAUD_LOGIN",
     "ANTIFRAUD::guid": "ANTIFRAUD_LOGIN",
     "ANTIFRAUD::username": "ANTIFRAUD_LOGIN",
+    "MQTT::disable": "CLIENT_ACCEPTED",
+    "MQTT::enable": "CLIENT_ACCEPTED",
+    "MQTT::release": "MQTT_CLIENT_DATA",
+    "MQTT::will": "MQTT_CLIENT_INGRESS",
+}
+_CANDIDATE_PROFILE_HINTS = {
+    # MQTT::enable has an event-only catalog requirement, but its implementation
+    # still needs the MQTT semantic layer when exercised on a connection event.
+    "MQTT::enable": ("MQTT",),
+}
+_CANDIDATE_STATE_HINTS = {
+    # MQTT::will reads the current message type; keep this local-only fixture
+    # out of external capture plans, which must obtain state from TMOS.
+    "MQTT::will": {"mqtt": {"type": "CONNECT"}},
 }
 
 
@@ -3320,9 +3358,15 @@ def _build_behavior_vector_candidates(
                 "event": template["event"],
                 "profiles": template["profiles"],
             }
-            request = _protocol_request_template(template["event"])
-            if request is not None:
-                probe_input["request"] = request
+            state_hint = _CANDIDATE_STATE_HINTS.get(command)
+            if state_hint is not None:
+                probe_input["state"] = {
+                    layer: dict(values) for layer, values in state_hint.items()
+                }
+            else:
+                request = _protocol_request_template(template["event"])
+                if request is not None:
+                    probe_input["request"] = request
             scenario = _candidate_fixture_scenario(command)
             if scenario is not None:
                 probe_input["scenario"] = scenario
