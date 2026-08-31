@@ -2505,9 +2505,12 @@ The generated plan contains one `command_probe` observation per runnable
 catalog command, a target-valid event/profile shell, and a status comparison.
 Its empty `args` array is intentional: command arguments and fixture values
 are command-specific and must be selected by the collector or operator from
-the catalog synopsis. Replace the placeholder provenance when using the
-defaults. The plan contains no reference output and therefore is not evidence
-until a real BIG-IP or vLab collector produces matching records.
+the catalog synopsis. DNS, MQTT, and SIP event templates also include a small
+starter `request` fixture for the bundled protocol driver; replace its
+destination and values for the target environment. Replace the placeholder
+provenance when using the defaults. The plan contains no reference output and
+therefore is not evidence until a real BIG-IP or vLab collector produces
+matching records.
 
 The HTTP equivalent is `GET /v1/capture-plan-template`; it accepts the same
 pagination and filtering parameters as the campaign endpoint plus

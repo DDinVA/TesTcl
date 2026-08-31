@@ -288,6 +288,16 @@ MAX_HTTP_PROXY_CHAIN_RETRIES = 1
 COMMAND_PROBE_MAX_ARGS = 64
 COMMAND_PROBE_MAX_ARG_BYTES = 16 * 1024
 COMMAND_PROBE_MAX_TOTAL_ARG_BYTES = 64 * 1024
+PROTOCOL_REQUEST_MAX_FIELDS = 32
+PROTOCOL_REQUEST_MAX_BYTES = 256 * 1024
+PROTOCOL_REQUEST_MAX_TEXT_BYTES = 256 * 1024
+PROTOCOL_REQUEST_FIELDS = frozenset(
+    {
+        "destination", "timeout", "payload", "payload_base64", "qname", "qtype",
+        "qclass", "transaction_id", "recursion_desired", "client_id", "topic",
+        "keepalive", "message", "method", "uri", "status", "headers", "body",
+    }
+)
 IRULE_ANALYSIS_MAX_SOURCE_BYTES = 512 * 1024
 IRULE_ANALYSIS_MAX_DIAGNOSTICS = 512
 IRULE_ANALYSIS_MAX_LINE_BYTES = 16 * 1024
@@ -2887,6 +2897,28 @@ def _command_probe_template(
     }
 
 
+def _protocol_request_template(event: str) -> dict[str, Any] | None:
+    """Return a bounded starter fixture for the reusable protocol driver."""
+    if event.startswith("DNS_"):
+        return {
+            "qname": "example.com",
+            "qtype": "A",
+            "recursion_desired": True,
+        }
+    if event.startswith("MQTT_"):
+        return {
+            "client_id": "testcl-1705",
+            "topic": "testcl/command",
+            "payload": "testcl",
+        }
+    if event.startswith("SIP_"):
+        return {
+            "method": "OPTIONS",
+            "uri": "sip:test@example.invalid",
+        }
+    return None
+
+
 def _build_capture_plan_template(
     root: Path,
     offset: int,
@@ -2928,16 +2960,20 @@ def _build_capture_plan_template(
     observations: list[dict[str, Any]] = []
     for case in campaign_data["cases"]:
         template = _command_probe_template(root, case["name"], event_inventory)
+        protocol_request = _protocol_request_template(template["event"])
+        probe_input = {
+            "command": case["name"],
+            "args": template["args"],
+            "event": template["event"],
+            "profiles": template["profiles"],
+        }
+        if protocol_request is not None:
+            probe_input["request"] = protocol_request
         observations.append(
             {
                 "id": case["id"],
                 "operation": "command_probe",
-                "input": {
-                    "command": case["name"],
-                    "args": template["args"],
-                    "event": template["event"],
-                    "profiles": template["profiles"],
-                },
+                "input": probe_input,
                 "comparisons": [
                     {
                         "label": "command status",
@@ -3173,8 +3209,161 @@ def _command_probe_irule(event: str, command: str, args: list[str]) -> str:
 """
 
 
+def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
+    """Validate the bounded, external-only request sent to a protocol driver."""
+    if not isinstance(request, dict):
+        raise EmulatorInputError("protocol driver request must be a JSON object")
+    if len(request) > PROTOCOL_REQUEST_MAX_FIELDS:
+        raise EmulatorInputError(
+            f"protocol driver request accepts at most {PROTOCOL_REQUEST_MAX_FIELDS} fields"
+        )
+    unknown = sorted(
+        str(field) for field in request if field not in PROTOCOL_REQUEST_FIELDS
+    )
+    if unknown:
+        raise EmulatorInputError(
+            "unsupported protocol driver request field(s): " + ", ".join(unknown)
+        )
+    try:
+        request_bytes = len(
+            json.dumps(request, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            .encode("utf-8")
+        )
+    except (TypeError, ValueError, OverflowError, UnicodeEncodeError) as exc:
+        raise EmulatorInputError(
+            "protocol driver request must contain only finite JSON-compatible UTF-8 data"
+        ) from exc
+    if request_bytes > PROTOCOL_REQUEST_MAX_BYTES:
+        raise EmulatorInputError(
+            f"protocol driver request exceeds the {PROTOCOL_REQUEST_MAX_BYTES // 1024} KiB limit"
+        )
+
+    text_fields = (
+        "destination", "payload", "payload_base64", "qname", "qtype", "client_id", "topic",
+        "message", "method", "uri", "status", "body",
+    )
+    non_empty_text_fields = {
+        "destination", "qname", "qtype", "client_id", "topic", "message", "method",
+        "uri", "status",
+    }
+    for field in text_fields:
+        if field not in request:
+            continue
+        value = request[field]
+        if not isinstance(value, str):
+            raise EmulatorInputError(f"protocol driver request {field} must be a string")
+        if field in non_empty_text_fields and not value:
+            raise EmulatorInputError(
+                f"protocol driver request {field} must be a non-empty string"
+            )
+        if "\x00" in value:
+            raise EmulatorInputError(
+                f"protocol driver request {field} must not contain NUL"
+            )
+        if field in {"destination", "method", "uri", "status"} and (
+            "\r" in value or "\n" in value
+        ):
+            raise EmulatorInputError(
+                f"protocol driver request {field} must not contain line breaks"
+            )
+        try:
+            value_bytes = value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise EmulatorInputError(
+                f"protocol driver request {field} must be valid UTF-8"
+            ) from exc
+        if len(value_bytes) > PROTOCOL_REQUEST_MAX_TEXT_BYTES:
+            raise EmulatorInputError(
+                f"protocol driver request {field} exceeds the "
+                f"{PROTOCOL_REQUEST_MAX_TEXT_BYTES // 1024} KiB limit"
+            )
+
+    headers = request.get("headers")
+    if headers is not None:
+        if not isinstance(headers, dict):
+            raise EmulatorInputError("protocol driver request headers must be an object")
+        for key, value in headers.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise EmulatorInputError(
+                    "protocol driver request headers must contain string keys and values"
+                )
+            for field, text in (("header name", key), ("header value", value)):
+                if "\r" in text or "\n" in text:
+                    raise EmulatorInputError(
+                        f"protocol driver request {field} must not contain line breaks"
+                    )
+                if "\x00" in text:
+                    raise EmulatorInputError(
+                        f"protocol driver request {field} must not contain NUL"
+                    )
+                try:
+                    text_bytes = text.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise EmulatorInputError(
+                        f"protocol driver request {field} must be valid UTF-8"
+                    ) from exc
+                if len(text_bytes) > PROTOCOL_REQUEST_MAX_TEXT_BYTES:
+                    raise EmulatorInputError(
+                        f"protocol driver request {field} exceeds the "
+                        f"{PROTOCOL_REQUEST_MAX_TEXT_BYTES // 1024} KiB limit"
+                    )
+
+    timeout = request.get("timeout")
+    if timeout is not None:
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise EmulatorInputError("protocol driver request timeout must be a number")
+        try:
+            timeout_value = float(timeout)
+        except (OverflowError, ValueError) as exc:
+            raise EmulatorInputError(
+                "protocol driver request timeout must be a finite number"
+            ) from exc
+        if not math.isfinite(timeout_value) or not 0 < timeout_value <= 60:
+            raise EmulatorInputError(
+                "protocol driver request timeout must be greater than 0 and at most 60"
+            )
+    for field, minimum, maximum in (
+        ("qclass", 1, 65535),
+        ("transaction_id", 0, 65535),
+        ("keepalive", 0, 65535),
+    ):
+        value = request.get(field)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum
+        ):
+            raise EmulatorInputError(
+                f"protocol driver request {field} must be between {minimum} and {maximum}"
+            )
+    recursion_desired = request.get("recursion_desired")
+    if recursion_desired is not None and not isinstance(recursion_desired, bool):
+        raise EmulatorInputError(
+            "protocol driver request recursion_desired must be a boolean"
+        )
+    qtype = request.get("qtype")
+    if qtype is not None and (
+        isinstance(qtype, bool)
+        or not isinstance(qtype, (str, int))
+        or (isinstance(qtype, int) and not 1 <= qtype <= 65535)
+    ):
+        raise EmulatorInputError(
+            "protocol driver request qtype must be a string or a value from 1 to 65535"
+        )
+
+    if event.startswith("DNS_") and "qname" not in request:
+        raise EmulatorInputError("DNS protocol driver requests require qname")
+    if event.startswith("MQTT_") and "topic" not in request:
+        raise EmulatorInputError("MQTT protocol driver requests require topic")
+    if not event.startswith(("DNS_", "MQTT_", "SIP_")) and not {
+        "payload", "payload_base64"
+    } & set(request):
+        raise EmulatorInputError(
+            "raw protocol driver requests require payload or payload_base64"
+        )
+    return dict(request)
+
+
 def _normalise_command_probe_request(
-    root: Path, request: Any
+    root: Path, request: Any, *, allow_external_protocol_request: bool = False
 ) -> dict[str, Any]:
     """Validate a command probe and construct its fixture-only scenario."""
     if not isinstance(request, dict):
@@ -3282,12 +3471,15 @@ def _normalise_command_probe_request(
         raise EmulatorInputError("command probe accepts state or request, not both")
     if http_request is not None:
         if event_name not in {"HTTP_REQUEST", "HTTP_RESPONSE"}:
-            raise EmulatorInputError(
-                "command probe request input is supported only for HTTP_REQUEST or HTTP_RESPONSE"
-            )
-        if not isinstance(http_request, dict):
-            raise EmulatorInputError("command probe request must be a JSON object")
-        http_request = _normalise_requests({"request": http_request})[0]
+            if not allow_external_protocol_request:
+                raise EmulatorInputError(
+                    "command probe request input is supported only for HTTP_REQUEST or HTTP_RESPONSE"
+                )
+            http_request = _normalise_protocol_request(event_name, http_request)
+        else:
+            if not isinstance(http_request, dict):
+                raise EmulatorInputError("command probe request must be a JSON object")
+            http_request = _normalise_requests({"request": http_request})[0]
     _normalise_event(event_name, state)
     scenario["profiles"] = list(profiles)
     scenario["irule"] = _command_probe_irule(event_name, command, args)
@@ -27512,7 +27704,9 @@ def _normalise_observation_provenance(value: Any) -> dict[str, Any]:
     return normalised
 
 
-def _normalise_golden_vectors(root: Path, pack: Any) -> dict[str, Any]:
+def _normalise_golden_vectors(
+    root: Path, pack: Any, *, allow_external_protocol_request: bool = False
+) -> dict[str, Any]:
     """Validate an external TMOS 17.5 reference-vector pack atomically."""
     if not isinstance(pack, dict):
         raise EmulatorInputError("golden vector pack must be a JSON object")
@@ -27624,7 +27818,11 @@ def _normalise_golden_vectors(root: Path, pack: Any) -> dict[str, Any]:
                 require_http=False,
             )
         elif operation == "command_probe":
-            _normalise_command_probe_request(root, vector_input)
+            _normalise_command_probe_request(
+                root,
+                vector_input,
+                allow_external_protocol_request=allow_external_protocol_request,
+            )
         else:
             pcap_allowed = {
                 "scenario", "pcap_base64", "direction", "client_addr", "server_addr"
@@ -27903,7 +28101,11 @@ def _normalise_capture_plan(root: Path, plan: Any) -> dict[str, Any]:
                 require_http=False,
             )
         elif operation == "command_probe":
-            _normalise_command_probe_request(root, vector_input)
+            _normalise_command_probe_request(
+                root,
+                vector_input,
+                allow_external_protocol_request=True,
+            )
         elif operation == "pcap":
             if not isinstance(vector_input, dict):
                 raise EmulatorInputError(
@@ -28214,6 +28416,7 @@ def _normalise_observation_pack(root: Path, pack: Any) -> dict[str, Any]:
             "provenance": provenance,
             "vectors": vectors,
         },
+        allow_external_protocol_request=True,
     )
 
 

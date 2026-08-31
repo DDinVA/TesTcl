@@ -3814,6 +3814,56 @@ when HTTP_RESPONSE_RELEASE {
         )
         self.assertEqual(dns_template["event"], "DNS_REQUEST")
         self.assertEqual(dns_template["profiles"], ["UDP", "DNS"])
+        self.assertEqual(
+            self.adapter._protocol_request_template("DNS_REQUEST"),
+            {"qname": "example.com", "qtype": "A", "recursion_desired": True},
+        )
+        self.assertEqual(
+            self.adapter._protocol_request_template("MQTT_CLIENT_DATA"),
+            {
+                "client_id": "testcl-1705",
+                "topic": "testcl/command",
+                "payload": "testcl",
+            },
+        )
+        self.assertEqual(
+            self.adapter._protocol_request_template("SIP_REQUEST"),
+            {"method": "OPTIONS", "uri": "sip:test@example.invalid"},
+        )
+        self.assertIsNone(self.adapter._protocol_request_template("CLIENT_DATA"))
+
+        protocol_plan = self.adapter._build_capture_plan_template(
+            root, 0, 1, namespace="DNS", tmos_build="17.5.4"
+        )
+        protocol_input = protocol_plan["observations"][0]["input"]
+        self.assertEqual(protocol_input["event"], "DNS_REQUEST")
+        self.assertEqual(
+            protocol_input["request"],
+            {"qname": "example.com", "qtype": "A", "recursion_desired": True},
+        )
+        assembled_protocol = self.adapter.run_capture_assemble(
+            protocol_plan,
+            [{"id": protocol_plan["observations"][0]["id"], "output": {"status": "ok"}}],
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(assembled_protocol["status"], "ok")
+        self.assertEqual(
+            assembled_protocol["pack"]["vectors"][0]["input"]["request"],
+            protocol_input["request"],
+        )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "finite number"):
+            self.adapter._normalise_protocol_request(
+                "DNS_REQUEST", {"qname": "example.com", "timeout": 10**1000}
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "line breaks"):
+            self.adapter._normalise_protocol_request(
+                "SIP_REQUEST",
+                {
+                    "method": "OPTIONS",
+                    "uri": "sip:test@example.invalid",
+                    "headers": {"X-Test": "safe\r\nInjected: yes"},
+                },
+            )
 
     def test_capability_filters_produce_bounded_implementation_slices(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
@@ -3948,6 +3998,18 @@ when HTTP_RESPONSE_RELEASE {
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "not valid"):
             self.adapter.run_command_probe(
                 {"command": "HTTP::host", "event": "DNS_REQUEST"},
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "supported only for HTTP_REQUEST or HTTP_RESPONSE",
+        ):
+            self.adapter.run_command_probe(
+                {
+                    "command": "DNS::name",
+                    "event": "DNS_REQUEST",
+                    "request": {"qname": "example.com"},
+                },
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
