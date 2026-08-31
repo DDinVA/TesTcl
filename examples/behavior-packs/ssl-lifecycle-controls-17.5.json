@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "ssl-lifecycle-controls-17.5",
+  "cases": [
+    {
+      "id": "disable-clientside",
+      "probe": {
+        "command": "SSL::disable",
+        "args": ["clientside"],
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"]
+      },
+      "expect": {"status": "ok", "value": "", "value_bytes": 0, "tcl_return_code": 0}
+    },
+    {
+      "id": "enable-serverside",
+      "probe": {
+        "command": "SSL::enable",
+        "args": ["serverside"],
+        "event": "SERVERSSL_HANDSHAKE",
+        "profiles": ["TCP", "SERVERSSL"]
+      },
+      "expect": {"status": "ok", "value": "", "value_bytes": 0, "tcl_return_code": 0}
+    },
+    {
+      "id": "respond-during-client-handshake",
+      "probe": {
+        "command": "SSL::respond",
+        "args": ["handshake-response"],
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"]
+      },
+      "expect": {"status": "ok", "value": "", "value_bytes": 0, "tcl_return_code": 0}
+    }
+  ]
+}

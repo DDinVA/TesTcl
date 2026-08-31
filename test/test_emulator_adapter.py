@@ -4765,6 +4765,7 @@ when HTTP_RESPONSE_RELEASE {
             "stateful-17.5.json": 2,
             "ssl-tls-17.5.json": 16,
             "ssl-controls-17.5.json": 2,
+            "ssl-lifecycle-controls-17.5.json": 3,
             "http2-17.5.json": 11,
             "udp-datagram-17.5.json": 15,
             "sip-17.5.json": 41,
