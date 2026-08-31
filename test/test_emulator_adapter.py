@@ -25105,6 +25105,9 @@ when CLIENT_DATA {
                 self.assertEqual(workbench_response.status, 200)
                 self.assertIn("TMOS 17.5 iRule workbench", workbench)
                 self.assertIn("/v1/sessions", workbench)
+                self.assertIn("Generate capture candidates", workbench)
+                self.assertIn("Run local sweep", workbench)
+                self.assertIn("/v1/behavior-sweep", workbench)
 
             status, conformance = request_json("/v1/conformance")
             self.assertEqual(status, 200)

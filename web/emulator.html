@@ -212,6 +212,22 @@ when HTTP_RESPONSE {
     </section>
 
     <section class="panel wide">
+      <h2>Behavior exploration</h2>
+      <div class="catalog-controls">
+        <label>Namespace (optional)<input id="behavior-namespace" value="HTTP" placeholder="HTTP"></label>
+        <label>Queue offset<input id="behavior-offset" type="number" min="0" value="0"></label>
+        <label>Commands<input id="behavior-limit" type="number" min="1" max="64" value="16"></label>
+        <label>Argument variants<input id="behavior-variants" type="number" min="1" max="8" value="1"></label>
+      </div>
+      <div class="row" style="margin-top:.7rem">
+        <button id="generate-behavior">Generate capture candidates</button>
+        <button id="run-behavior" class="primary">Run local sweep</button>
+      </div>
+      <p id="behavior-summary" class="hint">No behavior exploration run.</p>
+      <pre id="behavior-output">Candidate and sweep results will appear here.</pre>
+    </section>
+
+    <section class="panel wide">
       <h2>Output</h2>
       <pre id="output">Responses will appear here.</pre>
     </section>
@@ -321,6 +337,45 @@ when HTTP_RESPONSE {
         catalogCommands = data.chunks.flatMap((chunk) => chunk.commands);
         renderCatalog();
       }).catch((error) => output(`Error: ${error.message}`));
+    });
+    const behaviorOptions = (includeVariants) => {
+      const params = new URLSearchParams();
+      const namespace = $("behavior-namespace").value.trim();
+      if (namespace) params.set("namespace", namespace);
+      params.set("offset", $("behavior-offset").value || "0");
+      params.set("limit", $("behavior-limit").value || "16");
+      if (includeVariants) params.set("variants", $("behavior-variants").value || "1");
+      return params.toString();
+    };
+    const renderBehavior = (data, operation) => {
+      const summary = data.summary || {};
+      const count = summary.variant_count ?? summary.candidate_command_count ?? 0;
+      const executed = summary.executed_count ?? summary.plan_observation_count ?? 0;
+      $("behavior-summary").textContent =
+        `${operation} · ${count} candidate variants · ${executed} executed/planned · ` +
+        `${summary.coverage?.coverage_percent ?? "?"}% pack coverage`;
+      $("behavior-output").textContent = JSON.stringify(data, null, 2);
+      output(data);
+    };
+    $("generate-behavior").addEventListener("click", () => {
+      Promise.resolve().then(async () => {
+        const data = await request(`/v1/behavior-candidates?${behaviorOptions(false)}`);
+        renderBehavior(data, "Candidates");
+      }).catch((error) => {
+        $("behavior-summary").textContent = error.message;
+        $("behavior-summary").className = "hint status error";
+        output(`Error: ${error.message}`);
+      });
+    });
+    $("run-behavior").addEventListener("click", () => {
+      Promise.resolve().then(async () => {
+        const data = await request(`/v1/behavior-sweep?${behaviorOptions(true)}`);
+        renderBehavior(data, "Local sweep");
+      }).catch((error) => {
+        $("behavior-summary").textContent = error.message;
+        $("behavior-summary").className = "hint status error";
+        output(`Error: ${error.message}`);
+      });
     });
     request("/healthz").then((data) => { $("health").textContent = `online · ${data.profile}`; $("health").className = "status ok"; }).catch((error) => { $("health").textContent = error.message; $("health").className = "status error"; });
   </script>
