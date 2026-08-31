@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "x509-controls-17.5",
+  "cases": [
+    {
+      "id": "client-certificate-field-and-key-inspection",
+      "scenario": {
+        "profiles": ["TCP", "CLIENTSSL"],
+        "irule": "when CLIENTSSL_CLIENTCERT {\n  set cert [SSL::cert 0]\n  set fields [X509::cert_fields $cert 10 hash issuer serial sigalg subject subpubkey validity versionnum whole]\n  set extensions [X509::extensions $cert]\n  set hash [X509::hash $cert]\n  set issuer [X509::issuer $cert]\n  set after [X509::not_valid_after $cert]\n  set before [X509::not_valid_before $cert]\n  set der [X509::pem2der [X509::whole $cert]]\n  set serial [X509::serial_number $cert]\n  set signature [X509::signature_algorithm $cert]\n  set subject [X509::subject $cert]\n  set key [X509::subject_public_key $cert]\n  set bits [X509::subject_public_key_RSA_bits $cert]\n  set key_type [X509::subject_public_key_type $cert]\n  set error_text [X509::verify_cert_error_string 10]\n  set version [X509::version $cert]\n}",
+        "packets": [
+          {
+            "protocol": "tls",
+            "direction": "client_to_server",
+            "type": "client_cert",
+            "cert_count": 1,
+            "cert_subject": "CN=client.example.com,O=Example",
+            "cert_issuer": "CN=Example Root",
+            "cert_serial": "01:02:03",
+            "cert_hash": "AA:BB:CC",
+            "cert_extensions": "X509v3 extensions:\n    X509v3 Extended Key Usage: clientAuth",
+            "cert_not_valid_before": "Jan  1 00:00:00 2026 GMT",
+            "cert_not_valid_after": "Jan  1 00:00:00 2027 GMT",
+            "cert_signature_algorithm": "sha256WithRSAEncryption",
+            "cert_public_key": "public-key",
+            "cert_public_key_type": "RSA",
+            "cert_public_key_bits": 2048,
+            "cert_public_key_curve": "",
+            "cert_version": 3,
+            "cert_pem": "-----BEGIN CERTIFICATE-----\nSGVsbG8=\n-----END CERTIFICATE-----"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "CLIENTSSL_CLIENTCERT"},
+          {"path": ["trace", 0, "events", 2, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "cert_count"], "equals": "1"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "cert_subject"], "equals": "CN=client.example.com,O=Example"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "cert_issuer"], "equals": "CN=Example Root"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "cert_hash"], "equals": "AA:BB:CC"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "cert_serial"], "equals": "01:02:03"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "cert_public_key_type"], "equals": "RSA"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "cert_public_key_bits"], "equals": "2048"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "cert_version"], "equals": "3"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "cert_signature_algorithm"], "equals": "sha256WithRSAEncryption"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "cert_not_valid_before"], "equals": "Jan  1 00:00:00 2026 GMT"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "cert_not_valid_after"], "equals": "Jan  1 00:00:00 2027 GMT"}
+        ]
+      }
+    }
+  ]
+}

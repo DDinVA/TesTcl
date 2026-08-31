@@ -4749,6 +4749,7 @@ when HTTP_RESPONSE_RELEASE {
             "botdefense-controls-17.5.json": 2,
             "cache-controls-17.5.json": 3,
             "category-17.5.json": 6,
+            "x509-controls-17.5.json": 1,
             "diameter-controls-17.5.json": 3,
             "tcp-controls-17.5.json": 2,
             "tcp-introspection-17.5.json": 15,
