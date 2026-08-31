@@ -3138,6 +3138,98 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
     "MR::store": ((), ("testcl",)),
     "MR::stream": (("testcl",), ("end", "testcl")),
     "MR::transport": ((),),
+    "DNS::additional": (
+        ("count",),
+        ("clear",),
+        ("insert", "example.com. A IN 30 192.0.2.10"),
+        ("remove", "example.com. A IN 30 192.0.2.10"),
+    ),
+    "DNS::answer": (
+        ("count",),
+        ("clear",),
+        ("insert", "example.com. A IN 30 192.0.2.10"),
+        ("remove", "example.com. A IN 30 192.0.2.10"),
+    ),
+    "DNS::authority": (
+        ("count",),
+        ("clear",),
+        ("insert", "example.com. A IN 30 192.0.2.10"),
+        ("remove", "example.com. A IN 30 192.0.2.10"),
+    ),
+    "DNS::class": (
+        ("example.com. A IN 30 192.0.2.10",),
+        ("example.com. A IN 30 192.0.2.10", "CH"),
+    ),
+    "DNS::disable": ((),),
+    "DNS::drop": ((),),
+    "DNS::edns0": (
+        ("exists",),
+        ("exists", "nsid"),
+        ("do",),
+        ("do", "1"),
+        ("sz",),
+        ("sz", "1232"),
+        ("nsid",),
+        ("nsid", "testcl"),
+    ),
+    "DNS::enable": ((),),
+    "DNS::header": (
+        ("rcode",),
+        ("rcode", "NXDOMAIN"),
+        ("opcode",),
+        ("id",),
+        ("id", "1"),
+        ("aa",),
+        ("aa", "1"),
+        ("qr",),
+    ),
+    "DNS::is_wideip": (("example.com.",),),
+    "DNS::last_act": ((), ("allow",), ("drop",), ("reject",), ("hint",), ("noerror",)),
+    "DNS::len": ((),),
+    "DNS::log": ((), ("testcl",)),
+    "DNS::name": (
+        ("example.com. A IN 30 192.0.2.10",),
+        ("example.com. A IN 30 192.0.2.10", "alias.example.com."),
+    ),
+    "DNS::ptype": ((),),
+    "DNS::query": (
+        ("dnsx", "example.com.", "A"),
+        ("dnsx", "example.com.", "A", "1"),
+    ),
+    "DNS::rdata": (
+        ("example.com. A IN 30 192.0.2.10",),
+        ("example.com. A IN 30 192.0.2.10", "192.0.2.20"),
+    ),
+    "DNS::return": ((),),
+    "DNS::rpz_policy": ((),),
+    "DNS::rr": (
+        ("example.com. A IN 30 192.0.2.10",),
+        ("example.com.", "A", "IN", "30", "192.0.2.10"),
+    ),
+    "DNS::scrape": (
+        ("answer", "type"),
+        ("answer", "ttl"),
+        ("answer", "qname"),
+        ("answer", "rdata"),
+        ("all", "type"),
+    ),
+    "DNS::question": (
+        ("name",),
+        ("type",),
+        ("class",),
+        ("name", "example.com."),
+        ("type", "AAAA"),
+        ("class", "CH"),
+    ),
+    "DNS::tsig": (("exists",), ("remove",)),
+    "DNS::ttl": (
+        ("example.com. A IN 30 192.0.2.10",),
+        ("example.com. A IN 30 192.0.2.10", "60"),
+    ),
+    "DNS::type": (
+        ("example.com. A IN 30 192.0.2.10",),
+        ("example.com. A IN 30 192.0.2.10", "AAAA"),
+    ),
 }
 _CANDIDATE_EVENT_HINTS = {
     "TCP::recvwnd": "CLIENT_ACCEPTED",
@@ -3189,6 +3281,40 @@ _CANDIDATE_STATE_HINTS = {
     # out of external capture plans, which must obtain state from TMOS.
     "MQTT::will": {"mqtt": {"type": "CONNECT"}},
 }
+_DNS_RR_CANDIDATE_STATE = {
+    "dns": {
+        "qname": "example.com.",
+        "qtype": "A",
+        "qclass": "IN",
+        "qr": "1",
+        # The outer braces make this a one-record Tcl list; without them the
+        # DNS preparation loop would treat each RR field as a separate record.
+        "answers": "{example.com. A IN 30 192.0.2.10}",
+        "authority": "",
+        "additional": "",
+    }
+}
+for _dns_command in {
+    "DNS::additional",
+    "DNS::answer",
+    "DNS::authority",
+    "DNS::class",
+    "DNS::edns0",
+    "DNS::header",
+    "DNS::is_wideip",
+    "DNS::last_act",
+    "DNS::len",
+    "DNS::name",
+    "DNS::ptype",
+    "DNS::query",
+    "DNS::rdata",
+    "DNS::rr",
+    "DNS::scrape",
+    "DNS::question",
+    "DNS::ttl",
+    "DNS::type",
+}:
+    _CANDIDATE_STATE_HINTS[_dns_command] = _DNS_RR_CANDIDATE_STATE
 
 
 def _candidate_synopsis_words(synopsis: str, command: str) -> list[tuple[str, bool]]:

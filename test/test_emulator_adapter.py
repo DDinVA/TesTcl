@@ -5373,6 +5373,46 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["status_counts"], {"ok": 46})
         self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
 
+    def test_dns_candidate_sweep_uses_nested_rr_fixtures(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        packs = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted((ROOT / "examples" / "behavior-packs").glob("*.json"))
+        ]
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, packs, 0, 21, namespace="DNS", variants=1
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        self.assertEqual(
+            {candidate["event"] for candidate in candidates["candidates"]},
+            {"DNS_REQUEST"},
+        )
+        self.assertEqual(
+            by_command["DNS::answer"]["input"]["state"]["dns"]["answers"],
+            "{example.com. A IN 30 192.0.2.10}",
+        )
+        self.assertEqual(
+            by_command["DNS::answer"]["input"]["args"], ["count"],
+        )
+        self.assertEqual(
+            by_command["DNS::rr"]["input"]["args"],
+            ["example.com. A IN 30 192.0.2.10"],
+        )
+        self.assertEqual(
+            by_command["DNS::query"]["input"]["args"],
+            ["dnsx", "example.com.", "A"],
+        )
+
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, packs, 0, 21, namespace="DNS", variants=8
+        )
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 21)
+        self.assertEqual(sweep["summary"]["variant_count"], 54)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 54})
+        self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(
