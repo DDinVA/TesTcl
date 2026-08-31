@@ -5526,6 +5526,44 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["status_counts"], {"ok": 19})
         self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
 
+    def test_access_candidate_sweep_seeds_profile_and_session_lifecycle(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 15, namespace="ACCESS", variants=1
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        self.assertTrue(
+            all("ACCESS" in candidate["profiles"] for candidate in candidates["candidates"])
+        )
+        self.assertEqual(
+            by_command["ACCESS::respond"]["input"]["args"],
+            ["200", "ifile", "testcl"],
+        )
+        self.assertEqual(
+            by_command["ACCESS::session"]["input"]["args"],
+            ["sid"],
+        )
+        self.assertEqual(
+            by_command["ACCESS::session"]["input"]["scenario"]["access"]["session_data"][
+                "session.user.name"
+            ],
+            "testcl",
+        )
+
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 0, 15, namespace="ACCESS", variants=8
+        )
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 15)
+        self.assertEqual(sweep["summary"]["variant_count"], 42)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 42})
+        self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(

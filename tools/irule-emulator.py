@@ -3301,6 +3301,53 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
     "AUTH::wantcredential_prompt": (("auth-1",),),
     "AUTH::wantcredential_prompt_style": (("auth-1",),),
     "AUTH::wantcredential_type": (("auth-1",),),
+    "ACCESS::disable": ((),),
+    "ACCESS::enable": ((),),
+    "ACCESS::ephemeral-auth": (
+        ("create", "-user", "testcl", "-auth_cfg", "default_radius", "-sid", "sid-1"),
+        ("verify", "-user", "testcl", "-password", "temporary-password-1", "-protocol", "pam"),
+    ),
+    "ACCESS::flowid": ((), ("flow-testcl",)),
+    "ACCESS::log": (("testcl",), ("notice", "testcl")),
+    "ACCESS::oauth": (("sign", "-payload", "testcl", "-key", "testcl"),),
+    "ACCESS::perflow": (
+        ("get", "perflow.custom"),
+        ("set", "perflow.custom", "testcl"),
+        ("get", "perflow.scratchpad"),
+        ("set", "perflow.scratchpad", "testcl"),
+    ),
+    "ACCESS::policy": (
+        ("agent_id",),
+        ("uri",),
+        ("evaluate", "-sid", "sid-1", "-profile", "/Common/testcl"),
+        ("result", "-sid", "sid-1"),
+    ),
+    "ACCESS::respond": (("200", "ifile", "testcl"),),
+    "ACCESS::restrict_irule_events": (("enable",), ("disable",)),
+    "ACCESS::saml": (
+        ("assertion",),
+        ("assertion", "testcl"),
+        ("authn",),
+        ("authn", "testcl"),
+        ("slo_req",),
+        ("slo_req", "testcl"),
+        ("slo_resp",),
+        ("slo_resp", "testcl"),
+    ),
+    "ACCESS::session": (
+        ("sid",),
+        ("exists", "-sid", "sid-1"),
+        ("remove", "-sid", "sid-1"),
+        ("create", "-flow", "-timeout", "60", "-lifetime", "300"),
+        ("modify", "-sid", "sid-1", "-timeout", "60", "-lifetime", "300"),
+        ("data", "get", "-sid", "sid-1", "session.user.name"),
+        ("data", "set", "-sid", "sid-1", "session.testcl", "updated"),
+    ),
+    "ACCESS::user": (
+        ("getkey", "testcl-hash"),
+        ("getsid", "userkey-testcl-hash"),
+    ),
+    "ACCESS::uuid": (("getsid", "sid-1"),),
 }
 _CANDIDATE_EVENT_HINTS = {
     "TCP::recvwnd": "CLIENT_ACCEPTED",
@@ -3366,6 +3413,24 @@ _CANDIDATE_PROFILE_HINTS = {
     # still needs the MQTT semantic layer when exercised on a connection event.
     "MQTT::enable": ("MQTT",),
 }
+for _access_command in {
+    "ACCESS::acl",
+    "ACCESS::disable",
+    "ACCESS::enable",
+    "ACCESS::ephemeral-auth",
+    "ACCESS::flowid",
+    "ACCESS::log",
+    "ACCESS::oauth",
+    "ACCESS::perflow",
+    "ACCESS::policy",
+    "ACCESS::respond",
+    "ACCESS::restrict_irule_events",
+    "ACCESS::saml",
+    "ACCESS::session",
+    "ACCESS::user",
+    "ACCESS::uuid",
+}:
+    _CANDIDATE_PROFILE_HINTS[_access_command] = ("ACCESS",)
 for _auth_command in {
     "AUTH::abort",
     "AUTH::authenticate",
@@ -3659,6 +3724,30 @@ def _command_argument_candidates(
 
 def _candidate_fixture_scenario(command: str) -> dict[str, Any] | None:
     """Supply only generic, non-secret state useful to local probe execution."""
+    if command.startswith("ACCESS::"):
+        return {
+            "access": {
+                "acl_lookup": ["acl-testcl"],
+                "acl_matched": ["acl-testcl"],
+                "policy_agent_id": "agent-testcl",
+                "policy_uri": True,
+                "flow_id": "flow-testcl",
+                "session_data": {
+                    "session.user.name": "testcl",
+                    "session.testcl": "value",
+                },
+                "perflow": {
+                    "perflow.custom": "custom-value",
+                    "perflow.scratchpad": "scratchpad-value",
+                },
+                "saml": {
+                    "authn": "authn-testcl",
+                    "assertion": "assertion-testcl",
+                    "slo_req": "slo-req-testcl",
+                    "slo_resp": "slo-resp-testcl",
+                },
+            }
+        }
     if command.startswith("AUTH::"):
         return {
             "auth": {
@@ -4685,6 +4774,23 @@ def _command_probe_irule(event: str, command: str, args: list[str]) -> str:
             "set ::orch::_testcl_dnsmsg_fixture "
             "[RESOLVER::name_lookup testcl example.com. A]\n    "
         )
+    elif command.startswith("ACCESS::"):
+        # ACCESS session/user commands need an existing policy session. Keep
+        # this setup inside the generated event so each candidate variant gets
+        # a fresh sid-1 without leaking state across probes.
+        fixture_setup = (
+            "set ::orch::_testcl_access_sid [ACCESS::session create -flow]\n    "
+        )
+        if command == "ACCESS::user":
+            fixture_setup += (
+                "set ::orch::_testcl_access_user_key "
+                "[ACCESS::user getkey testcl-hash]\n    "
+            )
+        elif command == "ACCESS::ephemeral-auth":
+            fixture_setup += (
+                "set ::orch::_testcl_access_ephemeral_password "
+                "[ACCESS::ephemeral-auth create -user testcl -sid $::orch::_testcl_access_sid]\n    "
+            )
     return f"""when {event} {{
     {fixture_setup}set ::orch::_testcl_command_probe_rc [catch {{
         set ::orch::_testcl_command_probe_value [{command_words}]
