@@ -16255,9 +16255,14 @@ def _decode_websocket_frames(
 
 
 def _encode_live_websocket_frame(
-    frame_type: str, payload: bytes, *, fin: bool = True
+    frame_type: str,
+    payload: bytes,
+    *,
+    fin: bool = True,
+    masked: bool = False,
+    mask_key: bytes | None = None,
 ) -> bytes:
-    """Encode one unmasked server-to-client RFC 6455 frame."""
+    """Encode one bounded RFC 6455 frame for either side of a bridge."""
     opcode_by_type = {name: opcode for opcode, name in WEBSOCKET_OPCODE_NAMES.items()}
     opcode = opcode_by_type.get(frame_type)
     if opcode is None:
@@ -16276,7 +16281,15 @@ def _encode_live_websocket_frame(
         length = b"\x7e" + len(payload).to_bytes(2, "big")
     else:
         length = b"\x7f" + len(payload).to_bytes(8, "big")
-    return bytes([first]) + length + payload
+    if not masked:
+        return bytes([first]) + length + payload
+    key = secrets.token_bytes(4) if mask_key is None else bytes(mask_key)
+    if len(key) != 4:
+        raise EmulatorInputError("WebSocket mask keys must contain four bytes")
+    masked_payload = bytes(
+        value ^ key[index % 4] for index, value in enumerate(payload)
+    )
+    return bytes([first]) + bytes([length[0] | 0x80]) + length[1:] + key + masked_payload
 
 
 MQTT_PACKET_TYPES = {
@@ -32202,10 +32215,6 @@ def _normalise_live_data_plane_scenario(
             raise EmulatorInputError(
                 "live_origin cannot be combined with a live HTTP upstream"
             )
-        if protocol == "websocket" and "upstream" in config:
-            raise EmulatorInputError(
-                "live WebSocket currently supports the deterministic local peer only; upstream is not supported"
-            )
         if protocol == "websocket" and "live_origin" in scenario:
             raise EmulatorInputError(
                 "live_origin is not valid for the WebSocket data plane"
@@ -32406,9 +32415,9 @@ def _normalise_live_data_plane_scenario(
             )
         upstream_tls = None
         if "tls" in upstream_config and upstream_config["tls"] is not None:
-            if protocol not in {"http", "http2"}:
+            if protocol not in {"http", "http2", "websocket"}:
                 raise EmulatorInputError(
-                    "live_data_plane.upstream.tls is only valid for HTTP"
+                    "live_data_plane.upstream.tls is only valid for HTTP or WebSocket"
                 )
             upstream_tls = _normalise_live_upstream_tls(upstream_config["tls"])
         if protocol == "http2" and upstream_config is not None and upstream_tls is None:
@@ -32927,6 +32936,7 @@ def _live_websocket_handler(
     scenario: dict[str, Any],
     config: dict[str, Any],
     manager: "SessionManager",
+    scheduler: _LivePoolScheduler | None = None,
 ) -> type[socketserver.BaseRequestHandler]:
     """Build a real-client WebSocket adapter over the packet iRule engine.
 
@@ -33006,6 +33016,24 @@ def _live_websocket_handler(
                 raise EmulatorInputError("Sec-WebSocket-Key must decode to 16 bytes")
             return target, headers, bytes(buffer[buffer.index(marker) + len(marker) :]), bytes_read
 
+        def _client_upgrade_request(
+            self,
+        ) -> tuple[str, dict[str, str], bytes, int, dict[str, Any]]:
+            target, headers, leftover, bytes_read = self._read_upgrade()
+            return (
+                target,
+                headers,
+                leftover,
+                bytes_read,
+                self._packet(
+                    "request",
+                    method="GET",
+                    uri=target,
+                    host=_websocket_header_value(headers, "host"),
+                    headers=dict(headers),
+                ),
+            )
+
         def _packet(self, packet_type: str, **values: Any) -> dict[str, Any]:
             server_address = self.server.server_address
             if packet_type == "request":
@@ -33026,20 +33054,13 @@ def _live_websocket_handler(
             }
 
         def _upgrade(self, session_id: str) -> tuple[bytes, int]:
-            target, headers, leftover, bytes_read = self._read_upgrade()
+            target, headers, leftover, bytes_read, request = self._client_upgrade_request()
             key = _websocket_header_value(headers, "sec-websocket-key")
             accept = base64.b64encode(
                 hashlib.sha1(
                     (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
                 ).digest()
             ).decode("ascii")
-            request = self._packet(
-                "request",
-                method="GET",
-                uri=target,
-                host=_websocket_header_value(headers, "host"),
-                headers={name: value for name, value in headers.items()},
-            )
             response_headers = {
                 "Upgrade": "websocket",
                 "Connection": "Upgrade",
@@ -33078,17 +33099,231 @@ def _live_websocket_handler(
             )
             return leftover, bytes_read
 
-        def _process_frame(self, session_id: str, frame: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
+        def _read_upstream_response(
+            self, connection: socket.socket, expected_accept: str
+        ) -> tuple[int, dict[str, str], bytes, int]:
+            buffer = bytearray()
+            marker = b"\r\n\r\n"
+            bytes_read = 0
+            while marker not in buffer:
+                remaining = config["max_read_bytes"] - bytes_read
+                if remaining <= 0:
+                    raise OSError("WebSocket upstream upgrade exceeds the byte limit")
+                chunk = connection.recv(min(LIVE_RAW_READ_SIZE, remaining))
+                if not chunk:
+                    raise OSError("WebSocket upstream closed during upgrade")
+                buffer.extend(chunk)
+                bytes_read += len(chunk)
+            raw_headers, leftover = bytes(buffer).split(marker, 1)
+            lines = raw_headers.split(b"\r\n")
+            try:
+                status_line = lines[0].decode("ascii")
+            except (IndexError, UnicodeDecodeError) as exc:
+                raise OSError("WebSocket upstream returned an invalid status line") from exc
+            parts = status_line.split(" ", 2)
+            if len(parts) != 3 or parts[0] != "HTTP/1.1":
+                raise OSError("WebSocket upstream did not return HTTP/1.1")
+            try:
+                status = int(parts[1])
+            except ValueError as exc:
+                raise OSError("WebSocket upstream returned an invalid status") from exc
+            headers: dict[str, str] = {}
+            for raw_line in lines[1:]:
+                if not raw_line or b":" not in raw_line:
+                    raise OSError("WebSocket upstream returned an invalid header")
+                raw_name, raw_value = raw_line.split(b":", 1)
+                try:
+                    name = raw_name.decode("ascii").strip()
+                    value = raw_value.decode("iso-8859-1").strip()
+                except UnicodeDecodeError as exc:
+                    raise OSError("WebSocket upstream returned an invalid header") from exc
+                if not name or not re.fullmatch(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", name):
+                    raise OSError("WebSocket upstream returned an invalid header name")
+                if any(character in value for character in "\r\n\x00"):
+                    raise OSError("WebSocket upstream returned an unsafe header")
+                lower_name = name.lower()
+                if lower_name in headers:
+                    headers[lower_name] = headers[lower_name] + ", " + value
+                else:
+                    headers[lower_name] = value
+            if status != 101 or not _websocket_response_is_upgrade(
+                {"response_headers": headers}
+            ):
+                raise OSError("WebSocket upstream did not complete a valid 101 upgrade")
+            if _websocket_header_value(headers, "sec-websocket-accept") != expected_accept:
+                raise OSError("WebSocket upstream returned an invalid Sec-WebSocket-Accept")
+            return status, headers, bytes(leftover), bytes_read
+
+        def _upstream_upgrade(
+            self, session_id: str
+        ) -> tuple[bytes, int, socket.socket, bytes, int]:
+            target, client_headers, client_leftover, client_bytes, request = (
+                self._client_upgrade_request()
+            )
+            manager.execute(
+                session_id,
+                lambda session: session.run_packet_trace([request]),
+            )
+            request_runtime = manager.execute(
+                session_id,
+                lambda session: session.websocket_runtime_state(),
+            )
+            if not request_runtime["enabled"]:
+                self.request.sendall(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                raise EmulatorInputError("iRule disabled the WebSocket upgrade")
+
+            candidates = _resolve_live_upstream_candidates(
+                config, manager, session_id, scheduler
+            )
+            upstream_config = config.get("upstream")
+            if not isinstance(upstream_config, dict):
+                raise EmulatorInputError("live WebSocket upstream configuration is missing")
+            last_error: OSError | None = None
+            for selected_pool, member, endpoint in candidates:
+                if member:
+                    manager.execute(
+                        session_id,
+                        lambda session, selected_pool=selected_pool, selected_member=member: session.force_pool_member(
+                            selected_pool, selected_member
+                        ),
+                    )
+                raw_socket: socket.socket | None = None
+                connection: socket.socket | None = None
+                try:
+                    raw_socket = socket.create_connection(
+                        (endpoint["host"], endpoint["port"]),
+                        timeout=upstream_config["connect_timeout"],
+                    )
+                    upstream_tls = upstream_config.get("tls")
+                    if upstream_tls is not None:
+                        context = _build_live_upstream_tls_context(
+                            upstream_tls, alpn_protocols=["http/1.1"]
+                        )
+                        connection = context.wrap_socket(
+                            raw_socket, server_hostname=endpoint["host"]
+                        )
+                        raw_socket = None
+                    else:
+                        connection = raw_socket
+                        raw_socket = None
+                    connection.settimeout(config["read_timeout"])
+                    backend_key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
+                    expected_accept = base64.b64encode(
+                        hashlib.sha1(
+                            (backend_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode(
+                                "ascii"
+                            )
+                        ).digest()
+                    ).decode("ascii")
+                    backend_host = _websocket_header_value(client_headers, "host") or endpoint["host"]
+                    backend_headers = {
+                        "Host": backend_host,
+                        "Upgrade": "websocket",
+                        "Connection": "Upgrade",
+                        "Sec-WebSocket-Key": backend_key,
+                        "Sec-WebSocket-Version": "13",
+                    }
+                    for name, value in client_headers.items():
+                        if name in {
+                            "host",
+                            "upgrade",
+                            "connection",
+                            "sec-websocket-key",
+                            "sec-websocket-version",
+                        }:
+                            continue
+                        backend_headers[name] = value
+                    request_bytes = (
+                        f"GET {target} HTTP/1.1\r\n"
+                        + "".join(f"{name}: {value}\r\n" for name, value in backend_headers.items())
+                        + "\r\n"
+                    ).encode("iso-8859-1")
+                    connection.sendall(request_bytes)
+                    status, response_headers, upstream_leftover, upstream_bytes = self._read_upstream_response(
+                        connection, expected_accept
+                    )
+                    response = self._packet(
+                        "response", status=status, response_headers=response_headers
+                    )
+                    response_result = manager.execute(
+                        session_id,
+                        lambda session: session.run_packet_trace([response]),
+                    )
+                    response_runtime = manager.execute(
+                        session_id,
+                        lambda session: session.websocket_runtime_state(),
+                    )
+                    if not response_runtime["upgraded"]:
+                        raise OSError("iRule did not accept the WebSocket upstream response")
+                    if scheduler is not None and member:
+                        scheduler.mark_success(selected_pool, member)
+                    response_wire = (
+                        "HTTP/1.1 101 Switching Protocols\r\n"
+                        + "".join(f"{name}: {value}\r\n" for name, value in response_headers.items())
+                        + "\r\n"
+                    ).encode("iso-8859-1")
+                    self.request.sendall(response_wire)
+                    return (
+                        client_leftover,
+                        client_bytes,
+                        connection,
+                        upstream_leftover,
+                        upstream_bytes,
+                    )
+                except OSError as exc:
+                    last_error = exc
+                    if scheduler is not None and member:
+                        scheduler.mark_failure(selected_pool, member)
+                    if connection is not None:
+                        try:
+                            connection.close()
+                        except OSError:
+                            pass
+                    if raw_socket is not None:
+                        try:
+                            raw_socket.close()
+                        except OSError:
+                            pass
+                except BaseException:
+                    if connection is not None:
+                        try:
+                            connection.close()
+                        except OSError:
+                            pass
+                    if raw_socket is not None:
+                        try:
+                            raw_socket.close()
+                        except OSError:
+                            pass
+                    raise
+            self.request.sendall(
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            raise EmulatorInputError(
+                "live WebSocket upstream connection failed: "
+                f"{last_error or 'no candidate accepted the upgrade'}"
+            )
+
+        def _process_frame(
+            self,
+            session_id: str,
+            frame: dict[str, Any],
+            *,
+            source: dict[str, Any] | None = None,
+            destination: dict[str, Any] | None = None,
+        ) -> tuple[dict[str, Any], bytes]:
             def process(session: Any) -> tuple[dict[str, Any], bytes]:
                 packet = dict(frame)
                 wire_payload = packet.pop("_wire_payload", b"")
                 packet.pop("payload", None)
                 packet["payload_hex"] = bytes(wire_payload).hex()
-                packet["source"] = {
+                packet["source"] = source or {
                     "address": self.client_address[0],
                     "port": self.client_address[1],
                 }
-                packet["destination"] = {
+                packet["destination"] = destination or {
                     "address": self.server.server_address[0],
                     "port": self.server.server_address[1],
                 }
@@ -33115,14 +33350,221 @@ def _live_websocket_handler(
                 return _encode_live_websocket_frame(frame_type, payload, fin=frame["fin"] == "1")
             return b""
 
+        @staticmethod
+        def _validate_frame_sequence(
+            frame: dict[str, Any], fragmented: bool
+        ) -> bool:
+            """Validate RFC 6455 control and fragmentation sequencing."""
+            frame_type = frame["frame_type"]
+            payload = frame.get("_wire_payload", b"")
+            if frame_type in {"close", "ping", "pong"}:
+                if frame["fin"] != "1" or len(payload) > 125:
+                    raise EmulatorInputError(
+                        "WebSocket control frames must be final and no larger than 125 bytes"
+                    )
+                if frame_type == "close":
+                    if len(payload) == 1:
+                        raise EmulatorInputError("WebSocket close payload cannot contain one byte")
+                    if len(payload) >= 2:
+                        code = int.from_bytes(payload[:2], "big")
+                        if code < 1000 or code in {1004, 1005, 1006, 1015} or code >= 5000:
+                            raise EmulatorInputError("WebSocket close code is invalid")
+                        try:
+                            payload[2:].decode("utf-8")
+                        except UnicodeDecodeError as exc:
+                            raise EmulatorInputError(
+                                "WebSocket close reason must be valid UTF-8"
+                            ) from exc
+                return fragmented
+            if frame_type == "continuation":
+                if not fragmented:
+                    raise EmulatorInputError("WebSocket continuation has no open message")
+                return frame["fin"] != "1"
+            if fragmented:
+                raise EmulatorInputError(
+                    "WebSocket data frame starts before the prior message ended"
+                )
+            return frame["fin"] != "1"
+
+        def _send_bridge_close_emissions(
+            self, result: dict[str, Any], upstream: socket.socket
+        ) -> bool:
+            """Send WS::disconnect close emissions to both live peers."""
+            emitted = False
+            for emission in result.get("emitted", []):
+                if not isinstance(emission, dict):
+                    continue
+                if (
+                    emission.get("protocol") != "websocket"
+                    or emission.get("frame_type") != "close"
+                ):
+                    continue
+                payload_hex = emission.get("payload_hex")
+                direction = emission.get("direction")
+                if not isinstance(payload_hex, str) or direction not in {
+                    "client_to_server",
+                    "server_to_client",
+                }:
+                    raise EmulatorInputError(
+                        "emulator returned an invalid WebSocket close emission"
+                    )
+                try:
+                    payload = bytes.fromhex(payload_hex)
+                except ValueError as exc:
+                    raise EmulatorInputError(
+                        "emulator returned an invalid WebSocket close payload"
+                    ) from exc
+                target = upstream if direction == "client_to_server" else self.request
+                target.sendall(
+                    _encode_live_websocket_frame(
+                        "close", payload, masked=direction == "client_to_server"
+                    )
+                )
+                emitted = True
+            return emitted
+
+        def _bridge_frames(
+            self,
+            session_id: str,
+            upstream: socket.socket,
+            client_buffer: bytes,
+            upstream_buffer: bytes,
+            client_bytes: int,
+            upstream_bytes: int,
+        ) -> None:
+            """Run a bounded bidirectional WebSocket frame bridge."""
+            buffers = {
+                self.request: bytearray(client_buffer),
+                upstream: bytearray(upstream_buffer),
+            }
+            total = {self.request: client_bytes, upstream: upstream_bytes}
+            fragmented = {self.request: False, upstream: False}
+            sockets = [self.request, upstream]
+            while sockets:
+                for source_socket in tuple(sockets):
+                    buffer = buffers[source_socket]
+                    while buffer:
+                        decoded = _decode_websocket_frame(
+                            bytes(buffer),
+                            "client_to_server"
+                            if source_socket is self.request
+                            else "server_to_client",
+                        )
+                        if decoded is None:
+                            break
+                        frame, consumed = decoded
+                        del buffer[:consumed]
+                        from_client = source_socket is self.request
+                        if from_client and frame["masked"] != "1":
+                            raise EmulatorInputError(
+                                "client WebSocket frames must be masked"
+                            )
+                        if not from_client and frame["masked"] == "1":
+                            raise EmulatorInputError(
+                                "upstream WebSocket server frames must not be masked"
+                            )
+                        fragmented[source_socket] = self._validate_frame_sequence(
+                            frame, fragmented[source_socket]
+                        )
+                        source = (
+                            {"address": self.client_address[0], "port": self.client_address[1]}
+                            if from_client
+                            else {
+                                "address": self.server.server_address[0],
+                                "port": self.server.server_address[1],
+                            }
+                        )
+                        destination = (
+                            {"address": self.server.server_address[0], "port": self.server.server_address[1]}
+                            if from_client
+                            else {"address": self.client_address[0], "port": self.client_address[1]}
+                        )
+                        result, transformed = self._process_frame(
+                            session_id,
+                            frame,
+                            source=source,
+                            destination=destination,
+                        )
+                        trace = result.get("trace", [])
+                        entry = trace[-1] if trace and isinstance(trace[-1], dict) else {}
+                        if entry.get("dropped"):
+                            if frame["frame_type"] == "close":
+                                return
+                            continue
+                        if self._send_bridge_close_emissions(result, upstream):
+                            return
+                        frame_type = frame["frame_type"]
+                        if frame_type == "close":
+                            if from_client:
+                                upstream.sendall(
+                                    _encode_live_websocket_frame(
+                                        "close", frame["_wire_payload"], masked=True
+                                    )
+                                )
+                            self.request.sendall(
+                                _encode_live_websocket_frame(
+                                    "close", frame["_wire_payload"]
+                                )
+                            )
+                            return
+                        if frame_type in {"text", "binary", "continuation", "ping", "pong"}:
+                            target = upstream if from_client else self.request
+                            target.sendall(
+                                _encode_live_websocket_frame(
+                                    frame_type,
+                                    transformed,
+                                    fin=frame["fin"] == "1",
+                                    masked=from_client,
+                                )
+                            )
+                try:
+                    readable, _, _ = select.select(
+                        sockets, [], [], config["read_timeout"]
+                    )
+                except (OSError, ValueError):
+                    return
+                if not readable:
+                    return
+                for source_socket in readable:
+                    remaining = config["max_read_bytes"] - total[source_socket]
+                    if remaining <= 0:
+                        return
+                    payload = source_socket.recv(min(LIVE_RAW_READ_SIZE, remaining))
+                    if not payload:
+                        return
+                    total[source_socket] += len(payload)
+                    buffers[source_socket].extend(payload)
+                    if len(buffers[source_socket]) > config["max_read_bytes"]:
+                        raise EmulatorResourceError(
+                            "WebSocket buffered frames exceed the configured byte limit"
+                        )
+
         def handle(self) -> None:  # noqa: D401 - socketserver API
             session_id: str | None = None
+            upstream: socket.socket | None = None
             buffer = bytearray()
             fragmented = False
             total_bytes = 0
             try:
                 session_id = manager.create(scenario)
                 self.request.settimeout(config["read_timeout"])
+                if config.get("upstream") is not None:
+                    (
+                        upgrade_leftover,
+                        total_bytes,
+                        upstream,
+                        upstream_leftover,
+                        upstream_bytes,
+                    ) = self._upstream_upgrade(session_id)
+                    self._bridge_frames(
+                        session_id,
+                        upstream,
+                        upgrade_leftover,
+                        upstream_leftover,
+                        total_bytes,
+                        upstream_bytes,
+                    )
+                    return
                 upgrade_leftover, total_bytes = self._upgrade(session_id)
                 buffer.extend(upgrade_leftover)
                 while True:
@@ -33215,6 +33657,11 @@ def _live_websocket_handler(
             ) as exc:
                 print(f"testcl live WebSocket connection closed: {exc}", file=sys.stderr)
             finally:
+                if upstream is not None:
+                    try:
+                        upstream.close()
+                    except OSError:
+                        pass
                 if session_id is not None:
                     try:
                         manager.close(session_id)
@@ -34257,7 +34704,7 @@ def _data_plane_server(
                 else None
             )
             server_class = _LiveHTTPServer
-            handler = _live_websocket_handler(scenario, config, manager)
+            handler = _live_websocket_handler(scenario, config, manager, scheduler)
             if config["protocol"] in {"http", "http2"}:
                 handler = _live_http_handler(
                     root, scenario, config["origin"], manager, config, scheduler

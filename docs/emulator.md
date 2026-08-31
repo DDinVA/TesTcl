@@ -147,8 +147,14 @@ text/binary/continuation frames after iRule payload mutation, answers pings
 with pongs, and honors `WS::frame drop`, `WS::message drop`, and close
 emissions. It enforces bounded headers, frames, control-frame rules, and
 fragmentation ordering. This first live slice uses a deterministic local peer;
-WebSocket upstream tunneling is intentionally not enabled yet. TLS termination
-is available with the same `live_data_plane.tls` block described above.
+with `live_data_plane.upstream` it can instead complete a real upstream
+WebSocket upgrade and bridge frames in both directions. Direct `{host, port}`
+and pool-mapped `targets` forms are supported; pool selection follows the
+`WS_REQUEST` iRule lifecycle and failed mapped members are cooled down by the
+live scheduler. Upstream TLS is optional for `ws://` fixtures and uses the
+same explicit verification settings as HTTP/1.1 when configured. TLS
+termination is available with the same `live_data_plane.tls` block described
+above.
 
 For raw TCP clients, add an explicit `live_data_plane` object to the scenario:
 

@@ -51,7 +51,9 @@ Set `live_data_plane.protocol` to `websocket` to run a real RFC 6455 upgrade and
 frame loop through the `WS_*` iRule events. The live WebSocket peer is a bounded
 deterministic local echo endpoint that supports payload mutation, frame/message
 drops, ping/pong, close, fragmentation ordering, and optional TLS termination.
-WebSocket upstream tunneling is not enabled yet.
+An explicit direct or pool-mapped `live_data_plane.upstream` can bridge a real
+WebSocket backend, including bidirectional iRule frame mutation and scheduler
+member selection.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:
