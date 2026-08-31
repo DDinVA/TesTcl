@@ -289,6 +289,52 @@ def test_icap_driver_rejects_ambiguous_or_unsafe_fields() -> None:
         )
 
 
+def test_tds_driver_builds_sql_batch_and_accepts_raw_packets() -> None:
+    payload = driver.build_tds_message(
+        {"tds": {"sqltext": "select 1"}}, "TDS_REQUEST"
+    )
+    assert payload[:8] == b"\x01\x01\x00\x18\x00\x00\x01\x00"
+    assert payload[8:] == "select 1".encode("utf-16-le")
+    response = driver.build_tds_message({"tds": {}}, "TDS_RESPONSE")
+    assert response == b"\x04\x01\x00\x08\x00\x00\x01\x00"
+    raw = base64.b64encode(payload).decode("ascii")
+    assert driver.build_tds_message(
+        {"tds": {"message_base64": raw}}, "TDS_REQUEST"
+    ) == payload
+    endpoint, generated, timeout = driver.build_payload(
+        {
+            "event": "TDS_REQUEST",
+            "traffic_url": "tcp://192.0.2.20:1433",
+            "request": {"tds": {"sqltext": "select 1"}},
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 1433)
+    assert generated == payload
+    assert timeout == 10.0
+
+
+def test_tds_driver_rejects_ambiguous_or_wrong_direction() -> None:
+    with pytest.raises(driver.DriverError, match="mutually exclusive"):
+        driver.build_tds_message(
+            {"tds": {"message_hex": "00", "message_base64": "AA=="}},
+            "TDS_REQUEST",
+        )
+    with pytest.raises(driver.DriverError, match="server response"):
+        driver.build_tds_message({"tds": {"type": 4}}, "TDS_REQUEST")
+    assert driver.build_tds_message(
+        {"tds": {"type": 9, "payload_base64": "AQ=="}}, "TDS_REQUEST"
+    )[0] == 9
+    with pytest.raises(driver.DriverError, match="sqltext and payload_base64"):
+        driver.build_tds_message(
+            {"tds": {"sqltext": "select 1", "payload_base64": "AQ=="}},
+            "TDS_REQUEST",
+        )
+    with pytest.raises(driver.DriverError, match="end of a generated message"):
+        driver.build_tds_message(
+            {"tds": {"status": 0, "sqltext": "select 1"}}, "TDS_REQUEST"
+        )
+
+
 def test_fix_driver_builds_framed_tags_and_accepts_raw_bytes() -> None:
     payload = driver.build_fix_message(
         {

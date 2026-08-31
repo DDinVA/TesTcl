@@ -35,6 +35,8 @@ MAX_FIX_MESSAGE_BYTES = 2 * 1024 * 1024
 MAX_ICAP_MESSAGE_BYTES = 2 * 1024 * 1024
 MAX_ICAP_HEADERS = 128
 MAX_ICAP_LINE_BYTES = 64 * 1024
+MAX_TDS_MESSAGE_BYTES = 2 * 1024 * 1024
+TDS_PACKET_MAX_BYTES = 65535
 # Three framing tags (8, 9, and 10) are added to structured input.  Keep the
 # generated message within the emulator's total field bound.
 MAX_FIX_FIELDS = 509
@@ -701,6 +703,79 @@ def build_icap_message(request: dict[str, Any], event: str) -> bytes:
     if len(encoded) > MAX_ICAP_MESSAGE_BYTES:
         raise DriverError("ICAP message exceeds the 2 MiB limit")
     return encoded
+
+
+def _tds_raw_bytes(value: Any, field: str, *, encoding: str) -> bytes:
+    if not isinstance(value, str) or not value:
+        raise DriverError(f"TDS {field} must be a non-empty string")
+    try:
+        if encoding == "hex":
+            if len(value) % 2:
+                raise ValueError("odd hexadecimal length")
+            data = bytes.fromhex(value)
+        else:
+            data = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise DriverError(f"TDS {field} is not valid {encoding}") from exc
+    if not data or len(data) > MAX_TDS_MESSAGE_BYTES:
+        raise DriverError("TDS raw message must be between 1 byte and 2 MiB")
+    return data
+
+
+def build_tds_message(request: dict[str, Any], event: str) -> bytes:
+    """Build one bounded TDS packet message for request or response replay."""
+    if event not in {"TDS_REQUEST", "TDS_RESPONSE"}:
+        raise DriverError("TDS protocol driver supports TDS_REQUEST and TDS_RESPONSE")
+    tds = request.get("tds", {})
+    if not isinstance(tds, dict):
+        raise DriverError("TDS request tds must be an object")
+    allowed = {"message_hex", "message_base64", "type", "status", "sqltext", "payload_base64"}
+    unknown = sorted(set(tds) - allowed)
+    if unknown:
+        raise DriverError("TDS request unsupported field(s): " + ", ".join(unknown))
+    raw_hex = tds.get("message_hex")
+    raw_base64 = tds.get("message_base64")
+    if raw_hex is not None and raw_base64 is not None:
+        raise DriverError("TDS message_hex and message_base64 are mutually exclusive")
+    if raw_hex is not None:
+        if set(tds) != {"message_hex"}:
+            raise DriverError("TDS raw message cannot be combined with structured fields")
+        return _tds_raw_bytes(raw_hex, "message_hex", encoding="hex")
+    if raw_base64 is not None:
+        if set(tds) != {"message_base64"}:
+            raise DriverError("TDS raw message cannot be combined with structured fields")
+        return _tds_raw_bytes(raw_base64, "message_base64", encoding="base64")
+    packet_type = tds.get("type", 1 if event == "TDS_REQUEST" else 4)
+    if isinstance(packet_type, bool) or not isinstance(packet_type, int) or packet_type not in {1, 3, 4, 6, 7, 8, 9, 16, 17}:
+        raise DriverError("TDS type must be one of the supported packet types")
+    status = tds.get("status", 1)
+    if isinstance(status, bool) or not isinstance(status, int) or not 0 <= status <= 255:
+        raise DriverError("TDS status must be an integer from 0 to 255")
+    if not status & 0x01:
+        raise DriverError("TDS status must mark the end of a generated message")
+    if event == "TDS_REQUEST" and packet_type == 4:
+        raise DriverError("TDS request type is a server response packet type")
+    if event == "TDS_RESPONSE" and packet_type in {1, 3, 16, 17}:
+        raise DriverError("TDS response type is a client request packet type")
+    if "payload_base64" in tds and "sqltext" in tds:
+        raise DriverError("TDS sqltext and payload_base64 are mutually exclusive")
+    if "payload_base64" in tds:
+        body = _tds_raw_bytes(tds["payload_base64"], "payload_base64", encoding="base64")
+    else:
+        sqltext = tds.get("sqltext", "select 1" if event == "TDS_REQUEST" else "")
+        if not isinstance(sqltext, str):
+            raise DriverError("TDS sqltext must be a string")
+        try:
+            body = sqltext.encode("utf-16-le")
+        except UnicodeEncodeError as exc:
+            raise DriverError("TDS sqltext must be valid Unicode text") from exc
+    if not body and event == "TDS_REQUEST":
+        raise DriverError("TDS request sqltext or payload_base64 must not be empty")
+    if len(body) + 8 > TDS_PACKET_MAX_BYTES:
+        raise DriverError("TDS packet exceeds the 65535-byte limit")
+    packet_length = len(body) + 8
+    header = bytes([packet_type, status]) + packet_length.to_bytes(2, "big") + b"\x00\x00\x01\x00"
+    return header + body
 
 
 def build_fix_message(request: dict[str, Any], event: str) -> bytes:
@@ -1725,6 +1800,17 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
                 default_port=1344,
             ),
             build_icap_message(request, event),
+            timeout,
+        )
+    if event in {"TDS_REQUEST", "TDS_RESPONSE"}:
+        return (
+            endpoint_from_request(
+                request,
+                trigger.get("traffic_url"),
+                default_scheme="tcp",
+                default_port=1433,
+            ),
+            build_tds_message(request, event),
             timeout,
         )
     if event in {"CLIENT_DATA", "SERVER_DATA", "FIX_HEADER", "FIX_MESSAGE"} and "fix" in request:

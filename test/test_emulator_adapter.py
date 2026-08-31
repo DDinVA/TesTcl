@@ -16138,6 +16138,141 @@ when TDS_RESPONSE {
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+    def test_raw_tds_messages_are_reassembled_and_decode_sql_batch(self) -> None:
+        body = "select 1".encode("utf-16-le")
+        message = b"\x01\x01" + (len(body) + 8).to_bytes(2, "big") + b"\x00\x00\x01\x00" + body
+        split_at = 8 + 4
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "TDS"],
+                "irule": """
+when TDS_REQUEST {
+    log local0. "type=[TDS::msg type] length=[TDS::msg length] sql=[TDS::msg sqltext] read=[TDS::msg is_read] request=[TDS::msg request_type]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "source": {"address": "192.0.2.10", "port": 41000},
+                        "destination": {"address": "198.51.100.20", "port": 1433},
+                        "payload_hex": message[:split_at].hex(),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "source": {"address": "192.0.2.10", "port": 41000},
+                        "destination": {"address": "198.51.100.20", "port": 1433},
+                        "payload_hex": message[split_at:].hex(),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        events = [
+            event
+            for trace in result["trace"]
+            for event in trace["events"]
+            if event["event"] == "TDS_REQUEST"
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertTrue(
+            any("type=1 length=24 sql=select 1 read=1 request=read" in log for log in events[0]["logs"])
+        )
+        self.assertTrue(result["trace"][0]["buffered"])
+
+        response = b"\x04\x01\x00\x08\x00\x00\x01\x00"
+        coalesced = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "TDS"],
+                "irule": "when TDS_RESPONSE { log local0. \"type=[TDS::msg type] length=[TDS::msg length]\" }",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": {"address": "198.51.100.20", "port": 1433},
+                        "destination": {"address": "192.0.2.10", "port": 41000},
+                        "payload_hex": (response + response).hex(),
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        responses = [
+            event
+            for trace in coalesced["trace"]
+            for event in trace["events"]
+            if event["event"] == "TDS_RESPONSE"
+        ]
+        self.assertEqual(len(responses), 2)
+        self.assertTrue(any("type=4 length=8" in log for log in responses[0]["logs"]))
+
+    def test_raw_tds_multi_packet_batch_and_direction_errors(self) -> None:
+        body = "select 1".encode("utf-16-le")
+        first_body = body[:6]
+        second_body = body[6:]
+        first = b"\x01\x00" + (len(first_body) + 8).to_bytes(2, "big") + b"\x00\x00\x01\x00" + first_body
+        second = b"\x01\x01" + (len(second_body) + 8).to_bytes(2, "big") + b"\x00\x00\x02\x00" + second_body
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "TDS"],
+                "irule": "when TDS_REQUEST { log local0. \"sql=[TDS::msg sqltext] length=[TDS::msg length]\" }",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "source": {"address": "192.0.2.10", "port": 41000},
+                        "destination": {"address": "198.51.100.20", "port": 1433},
+                        "payload_hex": (first + second).hex(),
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        event = next(
+            event
+            for trace in result["trace"]
+            for event in trace["events"]
+            if event["event"] == "TDS_REQUEST"
+        )
+        self.assertEqual(event["state"]["tds"]["sqltext"], "select 1")
+        self.assertEqual(event["state"]["tds"]["length"], "32")
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "server packet type"
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "TDS"],
+                    "irule": "when TDS_REQUEST { }",
+                    "packets": [
+                        {
+                            "protocol": "tcp",
+                            "source": {"address": "198.51.100.20", "port": 1433},
+                            "destination": {"address": "192.0.2.10", "port": 41000},
+                            "payload_hex": "0401000800000100",
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "smaller than its header"
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "TDS"],
+                    "irule": "when TDS_REQUEST { }",
+                    "packets": [
+                        {
+                            "protocol": "tcp",
+                            "source": {"address": "192.0.2.10", "port": 41000},
+                            "destination": {"address": "198.51.100.20", "port": 1433},
+                            "payload_hex": "0101000700000100",
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_ike_auth_commands_model_certificate_and_san_state(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),

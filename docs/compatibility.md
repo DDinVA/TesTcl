@@ -430,8 +430,10 @@ fields and the read/write `request_type` override; `TDS::session` provides
 connection-scoped username, database, login-option, and version metadata.
 Message state resets between TDS events while session metadata persists.
 Structured packets use bounded caller-supplied fields and TCP lifecycle
-ordering; arbitrary TDS wire decoding and database-peer behavior remain out of
-scope.
+ordering. Raw TDS packet messages on port 1433 are reassembled across TCP
+fragments and coalesced messages; SQL Batch (type 1) bodies are decoded as
+UTF-16LE and classified as read/write requests. Login, RPC parameter, result
+token, database-peer, and session-negotiation behavior remain out of scope.
 
 The IKE namespace is implemented for direct `IKE_AUTH` events and the bounded
 packet adapter. It models certificate retrieval, SAN getters, and the

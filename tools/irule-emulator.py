@@ -296,7 +296,7 @@ PROTOCOL_REQUEST_FIELDS = frozenset(
         "destination", "timeout", "payload", "payload_base64", "qname", "qtype",
         "qclass", "transaction_id", "recursion_desired", "client_id", "topic",
         "keepalive", "message", "method", "uri", "version", "status", "headers", "body", "pcp",
-        "radius", "websocket", "ldap", "fix", "icap",
+        "radius", "websocket", "ldap", "fix", "icap", "tds",
     }
 )
 IRULE_ANALYSIS_MAX_SOURCE_BYTES = 512 * 1024
@@ -2954,6 +2954,10 @@ def _protocol_request_template(event: str) -> dict[str, Any] | None:
                 "headers": {"ISTag": "testcl-1705"},
             }
         }
+    if event == "TDS_REQUEST":
+        return {"tds": {"type": 1, "sqltext": "select 1"}}
+    if event == "TDS_RESPONSE":
+        return {"tds": {"type": 4}}
     if event in {"FIX_HEADER", "FIX_MESSAGE"}:
         return {
             "fix": {
@@ -3851,6 +3855,50 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
                     "protocol driver request ICAP encapsulated must be an object"
                 )
         return dict(request)
+    if event in {"TDS_REQUEST", "TDS_RESPONSE"}:
+        tds = request.get("tds")
+        if not isinstance(tds, dict):
+            raise EmulatorInputError(
+                f"{event} protocol driver requests require tds"
+            )
+        allowed_tds_fields = {
+            "message_hex", "message_base64", "type", "status", "sqltext", "payload_base64"
+        }
+        unknown_tds = sorted(set(tds) - allowed_tds_fields)
+        if unknown_tds:
+            raise EmulatorInputError(
+                "protocol driver request TDS unsupported field(s): "
+                + ", ".join(unknown_tds)
+            )
+        raw_fields = {"message_hex", "message_base64"}.intersection(tds)
+        if len(raw_fields) > 1:
+            raise EmulatorInputError(
+                "protocol driver request TDS message_hex and message_base64 are mutually exclusive"
+            )
+        if raw_fields and set(tds) != raw_fields:
+            raise EmulatorInputError(
+                "protocol driver request TDS raw message cannot be combined with structured fields"
+            )
+        if not raw_fields:
+            packet_type = tds.get("type", 1 if event == "TDS_REQUEST" else 4)
+            if (
+                isinstance(packet_type, bool)
+                or not isinstance(packet_type, int)
+                or packet_type not in TDS_PACKET_TYPES
+            ):
+                raise EmulatorInputError(
+                    "protocol driver request TDS type is unsupported"
+                )
+            sqltext = tds.get("sqltext", "" if event == "TDS_RESPONSE" else "select 1")
+            if not isinstance(sqltext, str):
+                raise EmulatorInputError(
+                    "protocol driver request TDS sqltext must be a string"
+                )
+            if "payload_base64" in tds and "sqltext" in tds:
+                raise EmulatorInputError(
+                    "protocol driver request TDS sqltext and payload_base64 are mutually exclusive"
+                )
+        return dict(request)
     if event.startswith("RTSP_"):
         if event not in {"RTSP_REQUEST", "RTSP_REQUEST_DATA"}:
             raise EmulatorInputError(
@@ -4004,7 +4052,7 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
     if event.startswith("MQTT_") and "topic" not in request:
         raise EmulatorInputError("MQTT protocol driver requests require topic")
     if (
-        not event.startswith(("DNS_", "MQTT_", "SIP_", "RTSP_", "ICAP_"))
+        not event.startswith(("DNS_", "MQTT_", "SIP_", "RTSP_", "ICAP_", "TDS_"))
         and event not in {
             "PCP_REQUEST", "RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST",
             "WS_REQUEST", "FIX_HEADER", "FIX_MESSAGE",
@@ -4191,6 +4239,35 @@ def _protocol_request_packet(event: str, request: dict[str, Any]) -> dict[str, A
             "uri": icap_request.get("uri", "icap://example.test/reqmod"),
             "status": icap_request.get("status", 204),
             "headers": icap_request.get("headers", {}),
+        }
+    elif event in {"TDS_REQUEST", "TDS_RESPONSE"}:
+        tds_request = request.get("tds")
+        if not isinstance(tds_request, dict):
+            raise EmulatorInputError(
+                f"{event} protocol driver requests require tds"
+            )
+        if "message_hex" in tds_request or "message_base64" in tds_request:
+            raise EmulatorInputError(
+                "local TDS replay accepts structured fields; use the external driver for raw message bytes"
+            )
+        direction = (
+            "client_to_server" if event == "TDS_REQUEST" else "server_to_client"
+        )
+        packet = {
+            "protocol": "tds",
+            "direction": direction,
+            "source": (
+                {"address": "192.0.2.10", "port": 53000}
+                if event == "TDS_REQUEST"
+                else {"address": "192.0.2.53", "port": 1433}
+            ),
+            "destination": (
+                {"address": "192.0.2.53", "port": 1433}
+                if event == "TDS_REQUEST"
+                else {"address": "192.0.2.10", "port": 53000}
+            ),
+            "type": tds_request.get("type", 1 if event == "TDS_REQUEST" else 4),
+            "sqltext": tds_request.get("sqltext", "" if event == "TDS_RESPONSE" else "select 1"),
         }
     elif event in {"FIX_HEADER", "FIX_MESSAGE"}:
         fix_request = request.get("fix")
@@ -17060,6 +17137,12 @@ ICAP_METHODS = frozenset({"REQMOD", "RESPMOD", "OPTIONS"})
 ICAP_ENCAPSULATED_PARTS = frozenset(
     {"req-hdr", "req-body", "res-hdr", "res-body", "opt-body", "null-body"}
 )
+TDS_RAW_PORTS = frozenset({1433})
+TDS_PACKET_HEADER_BYTES = 8
+TDS_PACKET_MAX_BYTES = 65535
+TDS_MAX_MESSAGE_BYTES = 2 * 1024 * 1024
+TDS_PACKET_TYPES = frozenset({1, 3, 4, 6, 7, 8, 9, 16, 17})
+TDS_EOM_STATUS = 0x01
 RTSP_METHODS = frozenset(
     {
         "ANNOUNCE",
@@ -17867,6 +17950,141 @@ def _decode_icap_messages(
         if len(messages) > PACKET_MAX_COUNT:
             raise EmulatorInputError(
                 f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} ICAP messages"
+            )
+        position += consumed
+    return messages, payload[position:]
+
+
+def _looks_like_tds_prefix(payload: bytes) -> bool:
+    """Avoid treating arbitrary TCP bytes as TDS on an unknown port."""
+    return (
+        len(payload) >= TDS_PACKET_HEADER_BYTES
+        and payload[0] in TDS_PACKET_TYPES
+        and TDS_PACKET_HEADER_BYTES <= int.from_bytes(payload[2:4], "big") <= TDS_PACKET_MAX_BYTES
+    )
+
+
+def _tds_sql_text(body: bytes) -> str:
+    if not body:
+        return ""
+    if len(body) % 2:
+        return _decode_wire_text(body)
+    try:
+        return body.decode("utf-16-le").rstrip("\x00")
+    except UnicodeDecodeError:
+        return _decode_wire_text(body)
+
+
+def _tds_request_type(sqltext: str) -> tuple[bool, str]:
+    statement = sqltext.lstrip().lower()
+    read_prefixes = (
+        "select ", "select\t", "with ", "show ", "describe ", "exec ",
+        "execute ", "declare ",
+    )
+    is_read = statement.startswith(read_prefixes) or statement in {
+        "select", "show", "describe", "exec", "execute", "declare"
+    }
+    return is_read, "read" if is_read else "write"
+
+
+def _decode_tds_message(
+    payload: bytes, direction: str
+) -> tuple[dict[str, Any], int] | None:
+    """Decode one bounded TDS message made of one or more TDS packets.
+
+    This intentionally stops at the TDS packet/message boundary. It extracts
+    SQL Batch text when present, while leaving login, RPC parameters, result
+    tokens, and database behavior to higher-level fixtures.
+    """
+    if not payload:
+        return None
+    if len(payload) > TDS_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"TDS stream exceeds the {TDS_MAX_MESSAGE_BYTES} byte limit"
+        )
+    position = 0
+    message_type: int | None = None
+    body = bytearray()
+    packet_count = 0
+    while True:
+        if len(payload) - position < TDS_PACKET_HEADER_BYTES:
+            return None
+        packet_type = payload[position]
+        status = payload[position + 1]
+        packet_length = int.from_bytes(payload[position + 2 : position + 4], "big")
+        if packet_type not in TDS_PACKET_TYPES:
+            raise EmulatorInputError(f"unsupported TDS packet type: {packet_type}")
+        if direction == "client_to_server" and packet_type == 4:
+            raise EmulatorInputError(
+                f"TDS client request cannot use server packet type: {packet_type}"
+            )
+        if direction == "server_to_client" and packet_type in {1, 3, 16, 17}:
+            raise EmulatorInputError(
+                f"TDS server response cannot use client packet type: {packet_type}"
+            )
+        if packet_length < TDS_PACKET_HEADER_BYTES:
+            raise EmulatorInputError("TDS packet length is smaller than its header")
+        if packet_length > TDS_PACKET_MAX_BYTES:
+            raise EmulatorInputError("TDS packet length exceeds the 65535-byte limit")
+        packet_end = position + packet_length
+        if packet_end > len(payload):
+            return None
+        if message_type is None:
+            message_type = packet_type
+        elif packet_type != message_type:
+            raise EmulatorInputError("TDS message packets must use one packet type")
+        body.extend(payload[position + TDS_PACKET_HEADER_BYTES : packet_end])
+        position = packet_end
+        packet_count += 1
+        if packet_count > TDS_MAX_MESSAGE_BYTES // TDS_PACKET_HEADER_BYTES:
+            raise EmulatorInputError("TDS message contains too many packets")
+        if len(body) + packet_count * TDS_PACKET_HEADER_BYTES > TDS_MAX_MESSAGE_BYTES:
+            raise EmulatorInputError(
+                f"TDS message exceeds the {TDS_MAX_MESSAGE_BYTES} byte limit"
+            )
+        if status & TDS_EOM_STATUS:
+            break
+    assert message_type is not None
+    sqltext = _tds_sql_text(bytes(body)) if message_type == 1 else ""
+    is_read, request_type = _tds_request_type(sqltext)
+    packet: dict[str, Any] = {
+        "protocol": "tds",
+        "direction": direction,
+        "type": message_type,
+        "length": position,
+        "procid": 0,
+        "procname": "",
+        "sqltext": sqltext,
+        "xacttype": 0,
+        "xactid": 0,
+        "is_read": "1" if is_read else "0",
+        "request_type": request_type,
+        "username": "",
+        "dbname": "",
+        "loginoption": "",
+        "version": "",
+        "_wire_payload": bytes(payload[:position]),
+        "message_length": position,
+    }
+    return packet, position
+
+
+def _decode_tds_messages(
+    payload: bytes, direction: str
+) -> tuple[list[dict[str, Any]], bytes]:
+    messages: list[dict[str, Any]] = []
+    position = 0
+    while position < len(payload):
+        decoded = _decode_tds_message(payload[position:], direction)
+        if decoded is None:
+            break
+        message, consumed = decoded
+        if consumed <= 0:
+            raise EmulatorInputError("TDS decoder returned an invalid message length")
+        messages.append(message)
+        if len(messages) > PACKET_MAX_COUNT:
+            raise EmulatorInputError(
+                f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} TDS messages"
             )
         position += consumed
     return messages, payload[position:]
@@ -21502,6 +21720,9 @@ class EmulatorSession:
         )
         self._icap_raw_active = any(
             str(profile).upper() == "ICAP" for profile in self._profiles
+        )
+        self._tds_raw_active = any(
+            str(profile).upper() == "TDS" for profile in self._profiles
         )
         self._sip_raw_active = any(
             str(profile).upper() in {"SIP", "SIPROUTER", "SIPSESSION"}
@@ -25443,6 +25664,38 @@ class EmulatorSession:
                 self._packet_streams.pop(key, None)
                 raise EmulatorInputError(
                     f"ICAP stream exceeds the {ICAP_MAX_MESSAGE_BYTES} byte limit"
+                )
+            return None, stream.buffered_bytes
+        tds_ports = {
+            packet.get("source", {}).get("port"),
+            packet.get("destination", {}).get("port"),
+        }
+        if self._tds_raw_active and (
+            tds_ports.intersection(TDS_RAW_PORTS)
+            or _looks_like_tds_prefix(combined)
+        ):
+            decoded_messages, remaining = _decode_tds_messages(
+                combined, packet["direction"]
+            )
+            if decoded_messages:
+                stream.buffer = remaining
+                if not has_gap:
+                    stream.segments.clear()
+                for message in decoded_messages:
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            message[field] = packet[field]
+                first = decoded_messages[0]
+                if len(decoded_messages) > 1:
+                    first["_coalesced_packets"] = decoded_messages[1:]
+                return first, len(combined) - len(remaining)
+            stream.buffer = combined
+            if not has_gap:
+                stream.segments.clear()
+            if stream.buffered_bytes > TDS_MAX_MESSAGE_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"TDS stream exceeds the {TDS_MAX_MESSAGE_BYTES} byte limit"
                 )
             return None, stream.buffered_bytes
         ftp_ports = {

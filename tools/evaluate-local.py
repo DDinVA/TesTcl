@@ -135,6 +135,16 @@ def _probe_requests(emulator: Any) -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "TDS::msg",
+            "request": {
+                "command": "TDS::msg",
+                "args": ["sqltext"],
+                "event": "TDS_REQUEST",
+                "profiles": ["TCP", "TDS"],
+                "request": templates("TDS_REQUEST"),
+            },
+        },
+        {
             "name": "FTP::ftps_mode",
             "request": {
                 "command": "FTP::ftps_mode",

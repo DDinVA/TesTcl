@@ -2624,9 +2624,9 @@ The repository includes a dependency-light starter driver at
 `tools/tmos17-protocol-driver.py`, with the local `uv`-enforcing wrapper
 `scripts/tmos17-protocol-driver.sh`. It supports DNS queries, MQTT 3.1.1
 CONNECT plus PUBLISH traffic, generated or raw SIP messages, structured RTSP
-requests, raw or structured ICAP/1.0 requests/responses, FTP control-channel
-commands/responses, LDAP BER messages, and generic raw UDP/TCP payloads, plus
-IMAP/POP3/SMTPS control lines. Protocol
+requests, raw or structured ICAP/1.0 requests/responses, raw or structured TDS
+packet messages, FTP control-channel commands/responses, LDAP BER messages, and
+generic raw UDP/TCP payloads, plus IMAP/POP3/SMTPS control lines. Protocol
 fixtures belong in the plan's optional `request` object. For example, a DNS
 case can use:
 
@@ -2879,8 +2879,11 @@ message; its `request_type` setter records the rule's read/write override.
 the two event types, while message fields reset at each event boundary. The
 resulting state is returned under `semantic.tds` for direct events and in the
 structured trace event state for packets. Structured packets use the same
-bounded event model and TCP lifecycle as other protocol adapters; the emulator
-does not decode arbitrary TDS wire bytes or synthesize a database peer. See the F5
+bounded event model and TCP lifecycle as other protocol adapters. Raw TDS packet
+messages on port 1433 are also reassembled across TCP fragments and coalesced
+messages; SQL Batch type 1 bodies are decoded as UTF-16LE and classified as
+read/write requests. The emulator does not synthesize a database peer, parse
+RPC parameters or result tokens, or negotiate a TDS session. See the F5
 [`TDS::msg`](https://clouddocs.f5.com/api/irules/TDS__msg.html) and
 [`TDS::session`](https://clouddocs.f5.com/api/irules/TDS__session.html)
 references for the production command contract.
