@@ -150,8 +150,10 @@ fragmentation ordering. This first live slice uses a deterministic local peer;
 with `live_data_plane.upstream` it can instead complete a real upstream
 WebSocket upgrade and bridge frames in both directions. Direct `{host, port}`
 and pool-mapped `targets` forms are supported; pool selection follows the
-`WS_REQUEST` iRule lifecycle and failed mapped members are cooled down by the
-live scheduler. Upstream TLS is optional for `ws://` fixtures and uses the
+`WS_REQUEST` iRule lifecycle. A failed mapped member is cooled down, fires
+`LB_FAILED`, and can be replaced by an iRule-selected pool plus
+`LB::reselect`; the live scheduler will not retry an already attempted member.
+Upstream TLS is optional for `ws://` fixtures and uses the
 same explicit verification settings as HTTP/1.1 when configured. TLS
 termination is available with the same `live_data_plane.tls` block described
 above. The checked-in [`live-websocket-upstream-17.5.json`](../examples/scenarios/live-websocket-upstream-17.5.json)

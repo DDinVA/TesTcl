@@ -22360,6 +22360,27 @@ class EmulatorSession:
         self, session: Any, staged: dict[str, Any], cause: str
     ) -> dict[str, Any]:
         """Fire a bounded LB_FAILED event for a failed real upstream attempt."""
+        failure_event = self._fire_live_lb_failure_event_on_worker(session, cause)
+        staged.setdefault("events", []).extend(
+            failure_event["event"].get("events_fired", [])
+        )
+        staged.setdefault("decisions", []).extend(failure_event["decisions"])
+        staged.setdefault("logs", []).extend(failure_event["logs"])
+        staged["live_lb_failure"] = failure_event["failure"]
+        response_committed = failure_event["response_committed"]
+        return {
+            "event": failure_event["event"],
+            "response_committed": response_committed,
+            "selection": failure_event["selection"],
+            "result": self._live_lb_failure_result_on_worker(session, staged)
+            if response_committed
+            else None,
+        }
+
+    def _fire_live_lb_failure_event_on_worker(
+        self, session: Any, cause: str
+    ) -> dict[str, Any]:
+        """Fire LB_FAILED without requiring an HTTP staged-request envelope."""
         if cause not in LB_FAILURE_CAUSES:
             causes = ", ".join(sorted(LB_FAILURE_CAUSES))
             raise EmulatorInputError(f"live LB_FAILED cause must be one of: {causes}")
@@ -22369,15 +22390,10 @@ class EmulatorSession:
         decisions_before = len(session.get_decisions())
         logs_before = len(session.get_logs())
         event_result = self._fire_event_on_worker(session, "LB_FAILED", {})
-        staged.setdefault("events", []).extend(
-            event_result.get("events_fired", [])
-        )
-        staged.setdefault("decisions", []).extend(
-            list(session.get_decisions()[decisions_before:])
-        )
-        staged.setdefault("logs", []).extend(session.get_logs()[logs_before:])
+        decisions = list(session.get_decisions()[decisions_before:])
+        logs = list(session.get_logs()[logs_before:])
         failure_snapshot = _lb_failure_snapshot(session)
-        staged["live_lb_failure"] = {
+        failure = {
             "cause": cause,
             "fired": failure_snapshot.get("fired", "0") == "1",
             "selected": failure_snapshot.get("selected", "0") == "1",
@@ -22391,9 +22407,9 @@ class EmulatorSession:
                 "member": session.eval_tcl("set ::state::lb::pool_member"),
                 "selected": session.eval_tcl("set ::state::lb::selected") == "1",
             },
-            "result": self._live_lb_failure_result_on_worker(session, staged)
-            if committed
-            else None,
+            "failure": failure,
+            "decisions": decisions,
+            "logs": logs,
         }
 
     def _deliver_staged_http_chunked_body_on_worker(
@@ -28703,6 +28719,16 @@ class EmulatorSession:
             )
         )
 
+    def fire_live_lb_failure_event(self, cause: str) -> dict[str, Any]:
+        """Fire LB_FAILED for a live non-HTTP upstream attempt."""
+        if not isinstance(cause, str):
+            raise EmulatorInputError("live LB_FAILED cause must be a string")
+        return self._call(
+            lambda session: self._fire_live_lb_failure_event_on_worker(
+                session, cause
+            )
+        )
+
     def deliver_staged_http_body(
         self, staged: dict[str, Any], body: bytes
     ) -> list[dict[str, Any]]:
@@ -29103,6 +29129,13 @@ class _PersistentEmulatorSession:
             if self._closed:
                 raise EmulatorInputError("emulator session is closed")
             return self._state_session().fire_live_lb_failure(staged, cause)
+
+    def fire_live_lb_failure_event(self, cause: str) -> dict[str, Any]:
+        """Fire LB_FAILED for a live non-HTTP upstream attempt."""
+        with self._lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
+            return self._state_session().fire_live_lb_failure_event(cause)
 
     def deliver_staged_http_body(
         self, staged: dict[str, Any], body: bytes
@@ -33174,14 +33207,25 @@ def _live_websocket_handler(
                 )
                 raise EmulatorInputError("iRule disabled the WebSocket upgrade")
 
-            candidates = _resolve_live_upstream_candidates(
+            pending_candidates = _resolve_live_upstream_candidates(
                 config, manager, session_id, scheduler
             )
             upstream_config = config.get("upstream")
             if not isinstance(upstream_config, dict):
                 raise EmulatorInputError("live WebSocket upstream configuration is missing")
-            last_error: OSError | None = None
-            for selected_pool, member, endpoint in candidates:
+            last_error: OSError | ValueError | None = None
+            attempted_candidates: set[tuple[str, str, str, int]] = set()
+            while pending_candidates:
+                selected_pool, member, endpoint = pending_candidates.pop(0)
+                candidate_key = (
+                    selected_pool,
+                    member,
+                    endpoint["host"],
+                    endpoint["port"],
+                )
+                if candidate_key in attempted_candidates:
+                    continue
+                attempted_candidates.add(candidate_key)
                 if member:
                     manager.execute(
                         session_id,
@@ -33247,7 +33291,7 @@ def _live_websocket_handler(
                     response = self._packet(
                         "response", status=status, response_headers=response_headers
                     )
-                    response_result = manager.execute(
+                    manager.execute(
                         session_id,
                         lambda session: session.run_packet_trace([response]),
                     )
@@ -33272,10 +33316,45 @@ def _live_websocket_handler(
                         upstream_leftover,
                         upstream_bytes,
                     )
-                except OSError as exc:
+                except (OSError, ValueError) as exc:
                     last_error = exc
                     if scheduler is not None and member:
                         scheduler.mark_failure(selected_pool, member)
+                    failure_cause = (
+                        "connection_timeout"
+                        if isinstance(exc, TimeoutError)
+                        else "unreachable"
+                    )
+                    failure = manager.execute(
+                        session_id,
+                        lambda session: session.fire_live_lb_failure_event(
+                            failure_cause
+                        ),
+                    )
+                    if failure.get("response_committed"):
+                        raise EmulatorInputError(
+                            "WebSocket LB_FAILED committed an HTTP response; "
+                            "the upstream upgrade cannot continue"
+                        ) from exc
+                    selection = failure.get("selection", {})
+                    try:
+                        refreshed_candidates = _resolve_live_upstream_candidates(
+                            config, manager, session_id, scheduler
+                        )
+                    except EmulatorInputError:
+                        refreshed_candidates = []
+                    if selection.get("pool") != selected_pool:
+                        pending_candidates = []
+                    pending_candidates.extend(
+                        candidate
+                        for candidate in refreshed_candidates
+                        if (
+                            candidate[0],
+                            candidate[1],
+                            candidate[2]["host"],
+                            candidate[2]["port"],
+                        ) not in attempted_candidates
+                    )
                     if connection is not None:
                         try:
                             connection.close()

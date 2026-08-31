@@ -21646,6 +21646,174 @@ when WS_SERVER_DATA { WS::payload replace 0 7 handled }
             upstream_thread.join(timeout=5)
             upstream_server.server_close()
 
+    def test_live_websocket_upstream_fires_lb_failed_and_reselects_pool(self) -> None:
+        received: list[bytes] = []
+        adapter = self.adapter
+
+        class FallbackHandler(socketserver.BaseRequestHandler):
+            def _read_frame(self) -> dict[str, Any] | None:
+                buffer = bytearray()
+                while True:
+                    decoded = adapter._decode_websocket_frame(
+                        bytes(buffer), "client_to_server"
+                    )
+                    if decoded is not None:
+                        frame, _ = decoded
+                        return frame
+                    chunk = self.request.recv(4096)
+                    if not chunk:
+                        return None
+                    buffer.extend(chunk)
+
+            def handle(self) -> None:  # noqa: D401 - socketserver API
+                self.request.settimeout(2)
+                handshake = bytearray()
+                while b"\r\n\r\n" not in handshake:
+                    chunk = self.request.recv(4096)
+                    if not chunk:
+                        return
+                    handshake.extend(chunk)
+                request_bytes, _ = bytes(handshake).split(b"\r\n\r\n", 1)
+                key = next(
+                    line.split(b":", 1)[1].strip().decode("ascii")
+                    for line in request_bytes.split(b"\r\n")
+                    if line.lower().startswith(b"sec-websocket-key:")
+                )
+                accept = base64.b64encode(
+                    hashlib.sha1(
+                        (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+                    ).digest()
+                ).decode("ascii")
+                self.request.sendall(
+                    (
+                        "HTTP/1.1 101 Switching Protocols\r\n"
+                        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                        f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+                    ).encode("ascii")
+                )
+                frame = self._read_frame()
+                if frame is None:
+                    return
+                if frame["masked"] != "1":
+                    raise AssertionError("fallback bridge did not mask upstream client frames")
+                received.append(frame["_wire_payload"])
+                response_payload = b"fallback-" + frame["_wire_payload"]
+                self.request.sendall(
+                    b"\x81" + bytes([len(response_payload)]) + response_payload
+                )
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+        fallback_server = socketserver.ThreadingTCPServer(
+            ("127.0.0.1", 0), FallbackHandler
+        )
+        fallback_server.daemon_threads = True
+        fallback_thread = threading.Thread(
+            target=fallback_server.serve_forever, daemon=True
+        )
+        fallback_thread.start()
+        unused = socket.socket()
+        unused.bind(("127.0.0.1", 0))
+        failed_port = unused.getsockname()[1]
+        unused.close()
+        scenario = {
+            "profiles": ["TCP", "HTTP", "WS"],
+            "pools": {
+                "primary_pool": ["primary:443"],
+                "fallback_pool": ["fallback:443"],
+            },
+            "irule": """
+when WS_REQUEST { pool primary_pool }
+when LB_FAILED {
+    log local0. "ws-live-failure=[event info]"
+    pool fallback_pool
+    LB::reselect
+}
+when WS_CLIENT_FRAME { WS::collect frame }
+when WS_CLIENT_DATA { WS::payload replace 0 5 retry }
+""",
+            "live_data_plane": {
+                "protocol": "websocket",
+                "read_timeout": 1.0,
+                "upstream": {
+                    "targets": {
+                        "primary:443": {
+                            "host": "127.0.0.1",
+                            "port": failed_port,
+                        },
+                        "fallback:443": {
+                            "host": "127.0.0.1",
+                            "port": fallback_server.server_address[1],
+                        },
+                    },
+                    "connect_timeout": 0.1,
+                    "failure_cooldown": 60.0,
+                },
+            },
+        }
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+        )
+        listener_thread = threading.Thread(target=server.serve_forever)
+        listener_thread.start()
+
+        def client_frame(payload: bytes) -> bytes:
+            mask = bytes.fromhex("01020304")
+            masked = bytes(
+                value ^ mask[index % 4] for index, value in enumerate(payload)
+            )
+            return b"\x81" + bytes([0x80 | len(payload)]) + mask + masked
+
+        client = socket.create_connection(
+            ("127.0.0.1", self.adapter._data_plane_bound_port(server)), timeout=2
+        )
+        try:
+            key = "dGhlIHNhbXBsZSBub25jZQ=="
+            client.sendall(
+                (
+                    "GET /fallback HTTP/1.1\r\nHost: live.example\r\n"
+                    "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+                ).encode("ascii")
+            )
+            handshake = bytearray()
+            while b"\r\n\r\n" not in handshake:
+                chunk = client.recv(4096)
+                self.assertTrue(chunk, "listener closed during fallback handshake")
+                handshake.extend(chunk)
+            self.assertTrue(handshake.startswith(b"HTTP/1.1 101 Switching Protocols"))
+
+            client.sendall(client_frame(b"hello"))
+            response = bytearray()
+            while self.adapter._decode_websocket_frame(
+                bytes(response), "server_to_client"
+            ) is None:
+                chunk = client.recv(4096)
+                self.assertTrue(chunk, "listener closed before fallback response")
+                response.extend(chunk)
+            decoded, _ = self.adapter._decode_websocket_frame(
+                bytes(response), "server_to_client"
+            )
+            assert decoded is not None
+            self.assertEqual(decoded["_wire_payload"], b"fallback-retry")
+            self.assertEqual(received, [b"retry"])
+            scheduler = getattr(server, "_testcl_pool_scheduler")
+            down = scheduler.snapshot()["down"]
+            self.assertEqual(
+                [(entry["pool"], entry["member"]) for entry in down],
+                [("primary_pool", "primary:443")],
+            )
+        finally:
+            client.close()
+            server.shutdown()
+            listener_thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+            fallback_server.shutdown()
+            fallback_thread.join(timeout=5)
+            fallback_server.server_close()
+
     def test_live_websocket_data_plane_bridges_a_tls_upstream(self) -> None:
         received: list[bytes] = []
         adapter = self.adapter
