@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 import json
 import math
 import socket
@@ -39,6 +40,8 @@ DNS_TYPES = {
     "SRV": 33,
     "HTTPS": 65,
 }
+PCP_OPCODES = {"announce": 0, "map": 1, "peer": 2}
+PCP_PROTOCOLS = {"tcp": 6, "udp": 17}
 
 
 class DriverError(RuntimeError):
@@ -287,6 +290,104 @@ def build_sip_message(request: dict[str, Any], event: str) -> bytes:
     return ("\r\n".join(lines) + "\r\n\r\n" + body).encode("utf-8")
 
 
+def _pcp_uint(value: Any, field: str, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise DriverError(f"PCP {field} must be an integer from 0 to {maximum}")
+    if isinstance(value, str) and value.isdigit() and len(value) <= 32:
+        value = int(value, 10)
+    if not isinstance(value, int) or not 0 <= value <= maximum:
+        raise DriverError(f"PCP {field} must be an integer from 0 to {maximum}")
+    return value
+
+
+def _pcp_address(value: Any, field: str) -> bytes:
+    if not isinstance(value, str) or not value:
+        raise DriverError(f"PCP {field} must be a valid IPv4 or IPv6 address")
+    try:
+        parsed = ipaddress.ip_address(value)
+    except ValueError as exc:
+        raise DriverError(f"PCP {field} must be a valid IPv4 or IPv6 address") from exc
+    if parsed.version == 4:
+        return b"\x00" * 10 + b"\xff\xff" + parsed.packed
+    return parsed.packed
+
+
+def _pcp_option(code: int, data: bytes = b"") -> bytes:
+    padded_length = (len(data) + 3) & ~3
+    return bytes([code, 0]) + struct.pack(">H", len(data)) + data + b"\x00" * (padded_length - len(data))
+
+
+def build_pcp_request(request: dict[str, Any]) -> bytes:
+    """Build one bounded PCPv2 request, suitable for UDP port 5351."""
+    pcp = request.get("pcp", {})
+    if not isinstance(pcp, dict):
+        raise DriverError("PCP request pcp must be an object")
+    allowed = {
+        "version", "opcode", "lifetime", "protocol", "client_addr", "internal_port",
+        "suggested_ext_port", "suggested_ext_addr", "prefer_failure", "third_party",
+        "third_party_int_addr",
+    }
+    if any(not isinstance(key, str) for key in pcp):
+        raise DriverError("PCP request field names must be strings")
+    unknown = sorted(set(pcp) - allowed)
+    if unknown:
+        raise DriverError("PCP request unsupported field(s): " + ", ".join(unknown))
+    version = _pcp_uint(pcp.get("version", 2), "version", 255)
+    opcode_value = pcp.get("opcode", "map")
+    if isinstance(opcode_value, str):
+        opcode = PCP_OPCODES.get(opcode_value.lower())
+        if opcode is None and opcode_value.isdigit():
+            opcode = _pcp_uint(opcode_value, "opcode", 127)
+    else:
+        opcode = opcode_value if isinstance(opcode_value, int) and not isinstance(opcode_value, bool) else None
+    if opcode is None or not 0 <= opcode <= 127:
+        raise DriverError("PCP opcode must be announce, map, peer, or an integer from 0 to 127")
+    body_fields = {
+        "protocol", "internal_port", "suggested_ext_port", "suggested_ext_addr",
+    }
+    if opcode == 0 and body_fields & set(pcp):
+        raise DriverError("PCP announce requests cannot contain mapping or peer fields")
+    lifetime = _pcp_uint(pcp.get("lifetime", 3600), "lifetime", 0xFFFFFFFF)
+    protocol_value = pcp.get("protocol", "tcp")
+    if isinstance(protocol_value, str):
+        protocol = PCP_PROTOCOLS.get(protocol_value.lower())
+        if protocol is None and protocol_value.isdigit():
+            protocol = _pcp_uint(protocol_value, "protocol", 255)
+    else:
+        protocol = _pcp_uint(protocol_value, "protocol", 255)
+    if protocol is None:
+        raise DriverError("PCP protocol must be tcp, udp, or an integer from 0 to 255")
+    client_addr = _pcp_address(pcp.get("client_addr", "192.0.2.10"), "client_addr")
+    message = bytearray(bytes([version, opcode, 0, 0]) + struct.pack(">I", lifetime) + client_addr)
+
+    if opcode in {1, 2}:
+        internal_port = _pcp_uint(pcp.get("internal_port", 22), "internal_port", 65535)
+        suggested_port = _pcp_uint(pcp.get("suggested_ext_port", 0), "suggested_ext_port", 65535)
+        suggested_addr = _pcp_address(pcp.get("suggested_ext_addr", "0.0.0.0"), "suggested_ext_addr")
+        message.extend(b"\x00" * 12)
+        message.extend(bytes([protocol, 0, 0, 0]))
+        message.extend(struct.pack(">HH", internal_port, suggested_port))
+        message.extend(suggested_addr)
+        if opcode == 2:
+            message.extend(b"\x00\x00\x00\x00" + _pcp_address("0.0.0.0", "remote_peer_addr"))
+
+    third_party = pcp.get("third_party", False)
+    if not isinstance(third_party, bool):
+        raise DriverError("PCP third_party must be a boolean")
+    if third_party:
+        message.extend(_pcp_option(1, _pcp_address(pcp.get("third_party_int_addr", "0.0.0.0"), "third_party_int_addr")))
+    elif "third_party_int_addr" in pcp:
+        raise DriverError("PCP third_party_int_addr requires third_party=true")
+    prefer_failure = pcp.get("prefer_failure", False)
+    if not isinstance(prefer_failure, bool):
+        raise DriverError("PCP prefer_failure must be a boolean")
+    if prefer_failure:
+        message.extend(_pcp_option(2))
+    if len(message) > 1100:
+        raise DriverError("PCP request exceeds the 1100-byte limit")
+    return bytes(message)
+
+
 def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
     event = _text(trigger.get("event"), "event", required=True)
     assert event is not None
@@ -310,6 +411,12 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
         return (
             endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="udp", default_port=5060),
             build_sip_message(request, event),
+            timeout,
+        )
+    if event == "PCP_REQUEST":
+        return (
+            endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="udp", default_port=5351),
+            build_pcp_request(request),
             timeout,
         )
     payload = _payload_bytes(request)

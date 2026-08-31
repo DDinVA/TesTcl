@@ -3834,6 +3834,19 @@ when HTTP_RESPONSE_RELEASE {
             self.adapter._protocol_request_template("SIP_REQUEST"),
             {"method": "OPTIONS", "uri": "sip:test@example.invalid"},
         )
+        self.assertEqual(
+            self.adapter._protocol_request_template("PCP_REQUEST"),
+            {
+                "pcp": {
+                    "opcode": "map",
+                    "lifetime": 3600,
+                    "protocol": "tcp",
+                    "internal_port": 22,
+                    "suggested_ext_port": 40000,
+                    "suggested_ext_addr": "0.0.0.0",
+                }
+            },
+        )
         self.assertIsNone(self.adapter._protocol_request_template("CLIENT_DATA"))
 
         protocol_plan = self.adapter._build_capture_plan_template(
@@ -3916,6 +3929,24 @@ when HTTP_RESPONSE_RELEASE {
         )
         self.assertEqual(binary_mqtt_probe["execution"]["status"], "ok")
         self.assertEqual(binary_mqtt_probe["execution"]["value"], "2")
+        pcp_request = self.adapter._protocol_request_template("PCP_REQUEST")
+        assert pcp_request is not None
+        pcp_packet = self.adapter._protocol_request_packet("PCP_REQUEST", pcp_request)
+        self.assertEqual(pcp_packet["protocol"], "pcp")
+        self.assertEqual(pcp_packet["pcp"]["opcode"], "map")
+        pcp_probe = self.adapter.run_command_probe(
+            {
+                "command": "PCP::request",
+                "args": ["opcode"],
+                "event": "PCP_REQUEST",
+                "profiles": ["UDP", "PCP"],
+                "request": pcp_request,
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+            allow_external_protocol_request=True,
+        )
+        self.assertEqual(pcp_probe["execution"]["status"], "ok")
+        self.assertEqual(pcp_probe["execution"]["value"], "map")
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "not both"):
             self.adapter._normalise_protocol_request(
                 "MQTT_CLIENT_DATA",
@@ -3925,6 +3956,12 @@ when HTTP_RESPONSE_RELEASE {
             self.adapter._normalise_protocol_request(
                 "MQTT_CLIENT_DATA",
                 {"topic": "testcl/binary", "payload_base64": "not-base64"},
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "require pcp"):
+            self.adapter._normalise_protocol_request("PCP_REQUEST", {})
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "do not accept payload"):
+            self.adapter._normalise_protocol_request(
+                "PCP_REQUEST", {"pcp": {}, "payload": "ignored"}
             )
         sip_message_packet = self.adapter._protocol_request_packet(
             "SIP_REQUEST",

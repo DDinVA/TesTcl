@@ -295,7 +295,7 @@ PROTOCOL_REQUEST_FIELDS = frozenset(
     {
         "destination", "timeout", "payload", "payload_base64", "qname", "qtype",
         "qclass", "transaction_id", "recursion_desired", "client_id", "topic",
-        "keepalive", "message", "method", "uri", "status", "headers", "body",
+        "keepalive", "message", "method", "uri", "status", "headers", "body", "pcp",
     }
 )
 IRULE_ANALYSIS_MAX_SOURCE_BYTES = 512 * 1024
@@ -2922,6 +2922,17 @@ def _protocol_request_template(event: str) -> dict[str, Any] | None:
             "method": "OPTIONS",
             "uri": "sip:test@example.invalid",
         }
+    if event == "PCP_REQUEST":
+        return {
+            "pcp": {
+                "opcode": "map",
+                "lifetime": 3600,
+                "protocol": "tcp",
+                "internal_port": 22,
+                "suggested_ext_port": 40000,
+                "suggested_ext_addr": "0.0.0.0",
+            }
+        }
     return None
 
 
@@ -3296,6 +3307,37 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
                 "protocol driver request payload_base64 is not valid base64"
             ) from exc
 
+    if "pcp" in request:
+        if not isinstance(request["pcp"], dict):
+            raise EmulatorInputError("protocol driver request pcp must be an object")
+        if event != "PCP_REQUEST":
+            raise EmulatorInputError(
+                "protocol driver request pcp is supported only for PCP_REQUEST"
+            )
+        try:
+            _normalise_packets(
+                [
+                    {
+                        "protocol": "pcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.10", "port": 53000},
+                        "destination": {"address": "192.0.2.53", "port": PCP_PORT},
+                        "pcp": request["pcp"],
+                    }
+                ]
+            )
+        except EmulatorInputError as exc:
+            raise EmulatorInputError(
+                f"protocol driver request pcp is invalid: {exc}"
+            ) from exc
+    if event == "PCP_REQUEST":
+        if "pcp" not in request:
+            raise EmulatorInputError("PCP protocol driver requests require pcp")
+        if {"payload", "payload_base64"} & set(request):
+            raise EmulatorInputError(
+                "PCP protocol driver requests do not accept payload or payload_base64"
+            )
+
     headers = request.get("headers")
     if headers is not None:
         if not isinstance(headers, dict):
@@ -3371,7 +3413,7 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
         raise EmulatorInputError("DNS protocol driver requests require qname")
     if event.startswith("MQTT_") and "topic" not in request:
         raise EmulatorInputError("MQTT protocol driver requests require topic")
-    if not event.startswith(("DNS_", "MQTT_", "SIP_")) and not {
+    if not event.startswith(("DNS_", "MQTT_", "SIP_")) and event != "PCP_REQUEST" and not {
         "payload", "payload_base64"
     } & set(request):
         raise EmulatorInputError(
@@ -3450,9 +3492,19 @@ def _protocol_request_packet(event: str, request: dict[str, Any]) -> dict[str, A
                         "protocol driver request SIP status must begin with an integer"
                     ) from exc
                 packet["phrase"] = status_parts[1] if len(status_parts) == 2 else ""
+    elif event == "PCP_REQUEST":
+        pcp_request = request.get("pcp")
+        if not isinstance(pcp_request, dict):
+            raise EmulatorInputError("PCP protocol driver requests require pcp")
+        packet = {
+            **common,
+            "protocol": "pcp",
+            "destination": {"address": "192.0.2.53", "port": PCP_PORT},
+            "pcp": pcp_request,
+        }
     else:
         raise EmulatorInputError(
-            "local protocol replay currently supports DNS, MQTT, and SIP requests"
+            "local protocol replay currently supports HTTP, DNS, MQTT, SIP, and PCP requests"
         )
     try:
         return _normalise_packets([packet])[0]

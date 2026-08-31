@@ -57,6 +57,43 @@ def test_sip_driver_rejects_header_injection_and_adds_content_length() -> None:
         driver.build_sip_message({"uri": "sip:ok\nInjected"}, "SIP_REQUEST")
 
 
+def test_pcp_driver_builds_map_request_and_options() -> None:
+    payload = driver.build_pcp_request(
+        {
+            "pcp": {
+                "opcode": "map",
+                "lifetime": 3600,
+                "protocol": "tcp",
+                "client_addr": "192.0.2.10",
+                "internal_port": 22,
+                "suggested_ext_port": 40000,
+                "suggested_ext_addr": "0.0.0.0",
+                "third_party": True,
+                "third_party_int_addr": "192.0.2.11",
+                "prefer_failure": True,
+            }
+        }
+    )
+    assert payload[:4] == b"\x02\x01\x00\x00"
+    assert len(payload) == 84
+    assert payload[24:36] == b"\x00" * 12
+    assert payload[36] == 6
+    assert payload[-24:-20] == b"\x01\x00\x00\x10"
+    assert payload[-20:-4] == b"\x00" * 10 + b"\xff\xff\xc0\x00\x02\x0b"
+    assert payload[-4:] == b"\x02\x00\x00\x00"
+
+
+def test_pcp_driver_rejects_invalid_nested_fields() -> None:
+    with pytest.raises(driver.DriverError, match="field names"):
+        driver.build_pcp_request({"pcp": {1: "invalid"}})
+    with pytest.raises(driver.DriverError, match="unsupported field"):
+        driver.build_pcp_request({"pcp": {"unknown": 1}})
+    with pytest.raises(driver.DriverError, match="third_party_int_addr"):
+        driver.build_pcp_request({"pcp": {"third_party_int_addr": "192.0.2.11"}})
+    with pytest.raises(driver.DriverError, match="third_party"):
+        driver.build_pcp_request({"pcp": {"third_party": 0}})
+
+
 def test_dns_driver_requires_boolean_recursion_flag() -> None:
     with pytest.raises(driver.DriverError, match="recursion_desired"):
         driver.build_dns_query({"qname": "example.com", "recursion_desired": "yes"})
