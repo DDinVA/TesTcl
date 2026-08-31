@@ -3372,6 +3372,27 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
     "IP::tos": (("clientside",), ("clientside", "16")),
     "IP::ttl": ((),),
     "IP::version": ((),),
+    "CACHE::accept_encoding": (("gzip",),),
+    "CACHE::age": ((),),
+    "CACHE::disable": ((),),
+    "CACHE::disabled": ((),),
+    "CACHE::enable": ((),),
+    "CACHE::expire": ((),),
+    "CACHE::fresh": ((),),
+    "CACHE::header": (
+        ("exists", "X-Test"),
+        ("value", "X-Test"),
+        ("remove", "X-Test"),
+    ),
+    "CACHE::headers": ((),),
+    "CACHE::hits": ((),),
+    "CACHE::payload": ((),),
+    "CACHE::priority": (("5",),),
+    "CACHE::statskey": ((),),
+    "CACHE::trace": ((), ("1",)),
+    "CACHE::uri": (("/testcl/asset",),),
+    "CACHE::useragent": (("testcl-agent",),),
+    "CACHE::userkey": (("tenant-testcl",),),
 }
 _CANDIDATE_EVENT_HINTS = {
     "TCP::recvwnd": "CLIENT_ACCEPTED",
@@ -3431,6 +3452,7 @@ _CANDIDATE_EVENT_HINTS = {
     "X509::verify_cert_error_string": "CLIENTSSL_CLIENTCERT",
     "X509::version": "CLIENTSSL_CLIENTCERT",
     "X509::whole": "CLIENTSSL_CLIENTCERT",
+    "CACHE::header": "CACHE_RESPONSE",
 }
 _CANDIDATE_PROFILE_HINTS = {
     # MQTT::enable has an event-only catalog requirement, but its implementation

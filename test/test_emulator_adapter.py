@@ -5599,6 +5599,39 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["status_counts"], {"ok": 25})
         self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
 
+    def test_cache_candidate_sweep_uses_cache_response_event_and_typed_limits(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 17, namespace="CACHE", variants=1
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        self.assertEqual(
+            by_command["CACHE::header"]["input"]["event"],
+            "CACHE_RESPONSE",
+        )
+        self.assertEqual(
+            by_command["CACHE::priority"]["input"]["args"],
+            ["5"],
+        )
+        self.assertEqual(
+            by_command["CACHE::trace"]["input"]["args"],
+            [],
+        )
+
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 0, 17, namespace="CACHE", variants=8
+        )
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 17)
+        self.assertEqual(sweep["summary"]["variant_count"], 20)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 20})
+        self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(
