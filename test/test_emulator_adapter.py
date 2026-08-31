@@ -5223,6 +5223,51 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["status_counts"], {"ok": 25})
         self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
 
+    def test_diameter_candidate_sweep_uses_protocol_fixtures(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 27, namespace="DIAMETER", variants=1
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        self.assertEqual(
+            by_command["DIAMETER::dynamic_route_insertion"]["event"],
+            "DIAMETER_EGRESS",
+        )
+        self.assertEqual(
+            by_command["DIAMETER::respond"]["input"]["args"],
+            ["1", "1", "0", "0", "0"],
+        )
+        self.assertEqual(
+            by_command["DIAMETER::header"]["input"]["args"],
+            ["version"],
+        )
+        self.assertEqual(
+            len(by_command["DIAMETER::avp"]["argument_candidates"]),
+            10,
+        )
+        for args in (["flags", "get", "268"], ["flags", "set", "268", "0"]):
+            avp_probe = dict(by_command["DIAMETER::avp"]["input"])
+            avp_probe["args"] = args
+            result = self.adapter.run_command_probe(
+                avp_probe,
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+            self.assertEqual(result["execution"]["status"], "ok")
+
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 0, 27, namespace="DIAMETER", variants=8
+        )
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 27)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 51})
+        self.assertEqual(sweep["summary"]["variant_count"], 51)
+        self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(

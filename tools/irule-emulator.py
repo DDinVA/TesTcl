@@ -3041,6 +3041,48 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
     ),
     "PROFILE::exists": (("HTTP",),),
     "PROFILE::httpclass": (("default",),),
+    "DIAMETER::command": ((), ("280",)),
+    "DIAMETER::avp": (
+        ("code", "268"),
+        ("count", "268"),
+        ("length", "268"),
+        ("create", "268", "testcl"),
+        ("data", "268"),
+        ("delete", "268"),
+        ("insert", "0", "268", "testcl"),
+        ("append", "268", "testcl"),
+        ("flags", "get", "268"),
+        ("flags", "set", "268", "0"),
+    ),
+    "DIAMETER::dynamic_route_insertion": (("1",), ("0",)),
+    "DIAMETER::dynamic_route_lookup": (
+        ("connection", "1"),
+        ("connection", "0"),
+        ("message", "1"),
+        ("message", "0"),
+    ),
+    "DIAMETER::header": (
+        ("version",),
+        ("version", "1"),
+        ("rflag",),
+        ("rflag", "1"),
+        ("command_code",),
+        ("command_code", "280"),
+        ("application_id",),
+        ("application_id", "0"),
+    ),
+    "DIAMETER::respond": (("1", "1", "0", "0", "0"),),
+    "DIAMETER::result": ((), ("2001",)),
+    "DIAMETER::retransmission": (
+        (),
+        ("action", "retransmit"),
+        ("action", "disabled"),
+    ),
+    "DIAMETER::retransmission_default": (
+        (),
+        ("action", "retransmit"),
+        ("action", "disabled"),
+    ),
 }
 _CANDIDATE_EVENT_HINTS = {
     "TCP::recvwnd": "CLIENT_ACCEPTED",
@@ -3056,6 +3098,8 @@ _CANDIDATE_EVENT_HINTS = {
     "MQTT::enable": "CLIENT_ACCEPTED",
     "MQTT::release": "MQTT_CLIENT_DATA",
     "MQTT::will": "MQTT_CLIENT_INGRESS",
+    "DIAMETER::dynamic_route_insertion": "DIAMETER_EGRESS",
+    "DIAMETER::retransmission_default": "CLIENT_ACCEPTED",
 }
 _CANDIDATE_PROFILE_HINTS = {
     # MQTT::enable has an event-only catalog requirement, but its implementation
@@ -23191,6 +23235,10 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::traffic_intents_reset_connection")
                 session.eval_tcl("::itest::semantic::diagnostics_reset_connection")
                 session.eval_tcl("::itest::semantic::legacy_fixture_reset_connection")
+                # Direct command probes do not traverse packet replay, so
+                # initialize protocol connection state before any event can
+                # access it. Packet replay resets this again at connection open.
+                session.eval_tcl("::itest::semantic::diameter_reset_connection")
                 for procedure, arguments, body in _extract_irule_procedures(
                     self._root, self._prepared_source
                 ):
