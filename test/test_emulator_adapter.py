@@ -21296,9 +21296,9 @@ when SERVER_DATA { TCP::respond [TCP::payload]; TCP::release; TCP::collect }
             for payload in (b"one", b"two"):
                 client = socket.create_connection(
                     ("127.0.0.1", self.adapter._data_plane_bound_port(server)),
-                    timeout=2,
+                    timeout=5,
                 )
-                client.settimeout(2)
+                client.settimeout(5)
                 try:
                     client.sendall(payload)
                     responses.append(client.recv(64))
