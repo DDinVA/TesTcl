@@ -2459,6 +2459,27 @@ does not turn registration into a claim of TMM semantic parity. This makes it
 safe to inventory getters, setters, and protocol-dependent commands while
 building implementation slices from the complete catalog.
 
+For an executable, bounded next step, `--catalog-smoke` runs a zero-argument
+probe for each safe command in one catalog chunk. The default target filter is
+`available-in-tmos-17.5`, the default CLI chunk is 16, and the hard maximum is
+32 commands per invocation:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --catalog-smoke --namespace HTTP --limit 16
+```
+
+The same report is available from
+`GET /v1/catalog-smoke?namespace=HTTP&limit=16` and the
+`irule_catalog_smoke` MCP tool. Each row records the generated event/profile
+fixture and classifies the result as `ok`, `argument-required`,
+`profile-gated`, `runtime-error`, `fixture-error`, `unregistered`, or
+`skipped-unsafe`. `ok` means the generated fixture completed in this emulator;
+it is deliberately not a TMOS semantic-parity score. `argument-required` is a
+useful queue for the next pass, where a human or collector supplies
+command-specific arguments from the catalog synopsis and captures a TMOS 17.5
+golden vector.
+
 Raw classic PCAP or pcapng replay is available at `POST /v1/simulations/pcap`.
 The request contains an inline `scenario` and a base64-encoded `pcap_base64`
 value:
@@ -2572,6 +2593,8 @@ clients can discover these tools with `tools/list`:
   reference work units, defaulting to commands available in TMOS 17.5.
 - `irule_probe` verifies live command registration for a bounded catalog chunk
   without executing catalog commands.
+- `irule_catalog_smoke` executes safe zero-argument probes for a bounded
+  target catalog chunk and classifies behavior without claiming TMOS parity.
 - `irule_conformance` reports static catalog/runtime and packet-adapter coverage.
 - `irule_session_create`, `irule_session_inspect`, `irule_session_request`,
   `irule_session_trace`, `irule_session_event`, and `irule_session_close` manage

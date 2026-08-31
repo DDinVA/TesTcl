@@ -23425,10 +23425,59 @@ when CLIENT_DATA {
             self.assertEqual(payload["chunk"]["count"], 2)
             self.assertEqual(payload["summary"]["registered_count"], 2)
             self.assertTrue(all(command["registered"] for command in payload["commands"]))
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/v1/catalog-smoke?namespace=HTTP&limit=1"
+            ) as response:
+                smoke_payload = json.loads(response.read())
+            self.assertEqual(smoke_payload["chunk"]["count"], 1)
+            self.assertEqual(smoke_payload["summary"]["smoke_count"], 1)
+            self.assertIn(
+                smoke_payload["commands"][0]["smoke_status"],
+                {"ok", "argument-required", "runtime-error", "profile-gated"},
+            )
         finally:
             server.shutdown()
             thread.join(timeout=5)
             server.server_close()
+
+    def test_catalog_smoke_executes_a_bounded_zero_argument_chunk(self) -> None:
+        result = self.adapter._build_catalog_smoke(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            0,
+            4,
+            namespace="HTTP",
+        )
+
+        self.assertEqual(result["profile"], "tmos-17.5")
+        self.assertEqual(result["probe"]["args"], [])
+        self.assertTrue(result["probe"]["unsafe_commands_skipped"])
+        self.assertEqual(result["summary"]["smoke_count"], 4)
+        self.assertEqual(result["summary"]["registered_count"], 4)
+        self.assertEqual(result["summary"]["execution_status_counts"]["profile-gated"], 0)
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "between 1 and 32"):
+            self.adapter._build_catalog_smoke(
+                self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+                0,
+                33,
+                namespace="HTTP",
+            )
+        self.assertEqual(
+            [command["smoke_status"] for command in result["commands"]],
+            ["ok", "ok", "ok", "argument-required"],
+        )
+        self.assertIn("AUTH", result["commands"][2]["profiles"])
+        self.assertNotIn(
+            "semantic",
+            json.dumps([command["execution"] for command in result["commands"]]),
+        )
+        non_target = self.adapter._build_catalog_smoke(
+            self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
+            0,
+            1,
+            target_status="introduced-after-tmos-17.5",
+        )
+        self.assertEqual(non_target["commands"][0]["smoke_status"], "skipped-target")
+        self.assertEqual(non_target["summary"]["executed_count"], 0)
 
     def test_http_api_exposes_command_workbench(self) -> None:
         server = self.adapter.ThreadingHTTPServer(
@@ -24077,6 +24126,7 @@ when CLIENT_DATA {
         self.assertIn("irule_catalog", tool_names)
         self.assertIn("irule_probe", tool_names)
         self.assertIn("irule_command_probe", tool_names)
+        self.assertIn("irule_catalog_smoke", tool_names)
         self.assertIn("irule_behavior_pack", tool_names)
         self.assertIn("irule_differential_vectors", tool_names)
         self.assertIn("irule_import_observations", tool_names)
@@ -24202,6 +24252,21 @@ when CLIENT_DATA {
             probed_payload = probed["result"]["structuredContent"]
             self.assertEqual(probed_payload["summary"]["registered_count"], 2)
             self.assertTrue(all(command["registered"] for command in probed_payload["commands"]))
+
+            smoked = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 19,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_catalog_smoke",
+                        "arguments": {"namespace": "HTTP", "limit": 1},
+                    },
+                }
+            )
+            smoked_payload = smoked["result"]["structuredContent"]
+            self.assertEqual(smoked_payload["summary"]["smoke_count"], 1)
+            self.assertEqual(smoked_payload["summary"]["registered_count"], 1)
 
             command_probe = server.handle_message(
                 {

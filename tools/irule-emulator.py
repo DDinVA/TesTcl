@@ -305,6 +305,7 @@ MAX_HTTP_PROXY_CHAIN_RETRIES = 1
 COMMAND_PROBE_MAX_ARGS = 64
 COMMAND_PROBE_MAX_ARG_BYTES = 16 * 1024
 COMMAND_PROBE_MAX_TOTAL_ARG_BYTES = 64 * 1024
+CATALOG_SMOKE_MAX_COMMANDS = 32
 PROTOCOL_REQUEST_MAX_FIELDS = 32
 PROTOCOL_REQUEST_MAX_BYTES = 256 * 1024
 PROTOCOL_REQUEST_MAX_TEXT_BYTES = 256 * 1024
@@ -2901,16 +2902,15 @@ def _command_probe_template(
 
     required_profiles = set(requirements.profiles) if requirements is not None else set()
     implied_profiles = set(selected_props.implied_profiles)
-    profile_candidates = required_profiles or implied_profiles
+    profile_candidates = required_profiles | implied_profiles
     # HTTP and FASTHTTP are alternatives; a minimal collector fixture should
     # choose one concrete profile rather than attach both to a virtual server.
     if "HTTP" in profile_candidates:
         add_profile("HTTP")
     elif "FASTHTTP" in profile_candidates:
         add_profile("FASTHTTP")
-    else:
-        for profile in sorted(profile_candidates):
-            add_profile(profile)
+    for profile in sorted(profile_candidates - {"HTTP", "FASTHTTP"}):
+        add_profile(profile)
     if not profiles and selected_name == "RULE_INIT":
         profiles.extend(DEFAULT_PROFILES)
 
@@ -3148,6 +3148,8 @@ def _build_runtime_probe(
             "namespace": command["namespace"],
             "runtime_status": command["runtime_status"],
             "target_status": command["target_status"],
+            "pure": command["pure"],
+            "unsafe": command["unsafe"],
             "registered": rows_by_name[command["name"]]["registered"],
             "resolved_handler": rows_by_name[command["name"]]["resolved_handler"],
         }
@@ -3185,6 +3187,228 @@ def _build_runtime_probe(
         "chunk": capabilities["chunk"],
         "filter": capabilities["filter"],
         "commands": commands,
+    }
+
+
+def _catalog_smoke_status(execution: dict[str, Any]) -> str:
+    """Classify a zero-argument command result without calling it semantic parity."""
+    status = execution.get("status")
+    if status == "ok":
+        return "ok"
+    if status == "profile-gated":
+        return "profile-gated"
+    if status != "error":
+        return "runtime-error"
+    error = str(execution.get("error", "")).lower()
+    if (
+        "wrong # args" in error
+        or "wrong number of arguments" in error
+        or "requires a subcommand" in error
+        or "requires an argument" in error
+        or "missing required" in error
+    ):
+        return "argument-required"
+    return "runtime-error"
+
+
+def _catalog_smoke_execution_snapshot(execution: dict[str, Any]) -> dict[str, Any]:
+    """Keep catalog smoke output bounded while retaining actionable evidence."""
+    raw_value = execution.get("value")
+    value = str(raw_value) if raw_value is not None else ""
+    snapshot: dict[str, Any] = {
+        "status": execution.get("status"),
+        "tcl_return_code": execution.get("tcl_return_code"),
+        "value": value[:4096] if execution.get("status") == "ok" else None,
+        "value_truncated": execution.get("status") == "ok" and len(value) > 4096,
+        "value_bytes": execution.get("value_bytes", 0),
+    }
+    event = execution.get("event")
+    if isinstance(event, dict):
+        compact_event = {
+            key: event[key]
+            for key in ("mode", "event", "fired", "reason")
+            if key in event
+        }
+        for key in ("events_fired", "decisions", "logs"):
+            if key in event:
+                values = event[key]
+                compact_event[key] = values[:32] if isinstance(values, list) else values
+        nested = event.get("result")
+        if isinstance(nested, dict):
+            compact_event["result"] = {
+                key: nested[key]
+                for key in (
+                    "pool", "node", "response_committed", "connection_state",
+                    "events_fired", "decisions", "logs",
+                )
+                if key in nested
+            }
+            response = nested.get("response")
+            if isinstance(response, dict):
+                compact_event["result"]["response"] = {
+                    key: response[key]
+                    for key in ("status", "reason")
+                    if key in response
+                }
+            for key in ("events_fired", "decisions", "logs"):
+                if key in compact_event["result"] and isinstance(
+                    compact_event["result"][key], list
+                ):
+                    compact_event["result"][key] = compact_event["result"][key][:32]
+        snapshot["event"] = compact_event
+    if execution.get("status") == "error":
+        snapshot["error"] = str(execution.get("error", ""))[:2048]
+    return snapshot
+
+
+def _build_catalog_smoke(
+    root: Path,
+    offset: int,
+    limit: int,
+    *,
+    namespace: str | None = None,
+    runtime_status: str | None = None,
+    target_status: str | None = "available-in-tmos-17.5",
+) -> dict[str, Any]:
+    """Execute bounded zero-argument probes for one target catalog chunk.
+
+    This is intentionally a smoke test, not a generated argument solver. It
+    measures whether a catalog command can dispatch and return with the
+    deterministic fixture selected from its event requirements. Commands that
+    need arguments remain useful results: they are reported as
+    ``argument-required`` for the next behavior-vector pass.
+    """
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise EmulatorInputError("catalog smoke offset must be a non-negative integer")
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise EmulatorInputError("catalog smoke limit must be an integer")
+    if not 1 <= limit <= CATALOG_SMOKE_MAX_COMMANDS:
+        raise EmulatorInputError(
+            "catalog smoke limit must be between 1 and "
+            f"{CATALOG_SMOKE_MAX_COMMANDS}"
+        )
+    if target_status is None:
+        target_status = "available-in-tmos-17.5"
+    probe = _build_runtime_probe(
+        root,
+        offset,
+        limit,
+        namespace=namespace,
+        runtime_status=runtime_status,
+        target_status=target_status,
+    )
+    event_inventory = _probe_event_inventory(root)
+    rows: list[dict[str, Any]] = []
+    status_counts: dict[str, int] = {}
+    execution_status_counts = {"ok": 0, "error": 0, "profile-gated": 0}
+
+    for command in probe["commands"]:
+        row = {
+            "name": command["name"],
+            "namespace": command["namespace"],
+            "runtime_status": command["runtime_status"],
+            "target_status": command["target_status"],
+            "registered": command["registered"],
+            "resolved_handler": command["resolved_handler"],
+            "pure": command["pure"],
+            "unsafe": command["unsafe"],
+            "smoke_status": None,
+        }
+        if not command["registered"]:
+            row["smoke_status"] = "unregistered"
+            rows.append(row)
+            status_counts["unregistered"] = status_counts.get("unregistered", 0) + 1
+            continue
+        if command["target_status"] != "available-in-tmos-17.5":
+            row["smoke_status"] = "skipped-target"
+            rows.append(row)
+            status_counts["skipped-target"] = status_counts.get("skipped-target", 0) + 1
+            continue
+        if command["unsafe"]:
+            row["smoke_status"] = "skipped-unsafe"
+            rows.append(row)
+            status_counts["skipped-unsafe"] = status_counts.get("skipped-unsafe", 0) + 1
+            continue
+
+        try:
+            template = _command_probe_template(root, command["name"], event_inventory)
+            row.update(
+                {
+                    "event": template["event"],
+                    "profiles": template["profiles"],
+                    "args": [],
+                }
+            )
+            request: dict[str, Any] = {
+                "command": command["name"],
+                "args": [],
+                "event": template["event"],
+                "profiles": template["profiles"],
+            }
+            protocol_request = _protocol_request_template(template["event"])
+            if protocol_request is not None:
+                request["request"] = protocol_request
+            result = run_command_probe(
+                request,
+                tcl_lsp_root=str(root),
+                allow_external_protocol_request=True,
+            )
+            execution = result["execution"]
+            smoke_status = _catalog_smoke_status(execution)
+            row.update(
+                {
+                    "execution": _catalog_smoke_execution_snapshot(execution),
+                    "smoke_status": smoke_status,
+                }
+            )
+            execution_status = execution.get("status")
+            if execution_status in execution_status_counts:
+                execution_status_counts[execution_status] += 1
+        except (EmulatorInputError, OSError) as exc:
+            row.update(
+                {
+                    "smoke_status": "fixture-error",
+                    "error": str(exc),
+                }
+            )
+        rows.append(row)
+        status_counts[row["smoke_status"]] = status_counts.get(row["smoke_status"], 0) + 1
+
+    summary = dict(probe["summary"])
+    summary.update(
+        {
+            "smoke_count": len(rows),
+            "executed_count": sum(
+                1
+                for row in rows
+                if row["smoke_status"]
+                in {"ok", "argument-required", "runtime-error", "profile-gated"}
+            ),
+            "behavioral_ok_count": status_counts.get("ok", 0),
+            "argument_required_count": status_counts.get("argument-required", 0),
+            "status_counts": dict(sorted(status_counts.items())),
+            "execution_status_counts": execution_status_counts,
+        }
+    )
+    return {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "probe": {
+            "method": "generated-command-probe",
+            "operation": "zero-argument-smoke",
+            "args": [],
+            "unsafe_commands_skipped": True,
+            "interpretation": (
+                "ok proves the generated fixture completed in the emulator; "
+                "it is not a claim of TMOS semantic parity"
+            ),
+        },
+        "summary": summary,
+        "chunk": probe["chunk"],
+        "filter": probe["filter"],
+        "commands": rows,
     }
 
 
@@ -30152,6 +30376,32 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_catalog_smoke",
+                "title": "Smoke-test catalog commands",
+                "description": "Execute a bounded chunk of safe zero-argument TMOS 17.5 command probes and classify behavior, argument requirements, and runtime failures.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "offset": {"type": "integer", "minimum": 0, "default": 0},
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": CATALOG_SMOKE_MAX_COMMANDS,
+                            "default": 16,
+                        },
+                        "namespace": {"type": "string", "minLength": 1},
+                        "runtime_status": {
+                            "type": "string",
+                            "enum": sorted(RUNTIME_STATUS_VALUES),
+                        },
+                        "target_status": {
+                            "type": "string",
+                            "enum": sorted(TARGET_STATUS_VALUES),
+                            "default": "available-in-tmos-17.5",
+                        },
+                    }
+                ),
+            },
+            {
                 "name": "irule_behavior_pack",
                 "title": "Run iRule behavior contracts",
                 "description": "Execute a bounded TMOS 17.5 catalog behavior pack and return pass/fail results with exact mismatches.",
@@ -30481,6 +30731,31 @@ class McpProtocolServer:
                 )
             return self._tool_success(
                 run_command_probe(args, tcl_lsp_root=str(self._root))
+            )
+
+        if name == "irule_catalog_smoke":
+            unknown = sorted(
+                set(args)
+                - {"offset", "limit", "namespace", "runtime_status", "target_status"}
+            )
+            if unknown:
+                raise McpProtocolError(
+                    -32602,
+                    "unsupported irule_catalog_smoke field(s): " + ", ".join(unknown),
+                )
+            offset = args.get("offset", 0)
+            limit = args.get("limit", 16)
+            if isinstance(offset, bool) or not isinstance(offset, int):
+                raise McpProtocolError(-32602, "catalog smoke offset must be an integer")
+            if isinstance(limit, bool) or not isinstance(limit, int):
+                raise McpProtocolError(-32602, "catalog smoke limit must be an integer")
+            filters = {
+                field: args[field]
+                for field in ("namespace", "runtime_status", "target_status")
+                if field in args
+            }
+            return self._tool_success(
+                _build_catalog_smoke(self._root, offset, limit, **filters)
             )
 
         if name == "irule_behavior_pack":
@@ -35556,6 +35831,22 @@ def _http_handler(
                     return
                 _json_response(self, 200, payload)
                 return
+            if parsed.path == "/v1/catalog-smoke":
+                query = parse_qs(parsed.query, strict_parsing=False)
+                try:
+                    offset = int(query.get("offset", ["0"])[0])
+                    limit = int(query.get("limit", ["16"])[0])
+                    filters = {
+                        field: query[field][0]
+                        for field in ("namespace", "runtime_status", "target_status")
+                        if field in query
+                    }
+                    payload = _build_catalog_smoke(root, offset, limit, **filters)
+                except (TypeError, ValueError, EmulatorInputError, OSError) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
             if parsed.path == "/v1/conformance":
                 try:
                     payload = _build_conformance(root)
@@ -36056,6 +36347,11 @@ def main(argv: list[str] | None = None) -> int:
         help="probe live iRule command registration for one bounded catalog chunk",
     )
     mode.add_argument(
+        "--catalog-smoke",
+        action="store_true",
+        help="execute safe zero-argument probes for one bounded TMOS 17.5 catalog chunk",
+    )
+    mode.add_argument(
         "--command-probe",
         action="store_true",
         help="execute one catalogued F5 command from a JSON command-probe request",
@@ -36101,7 +36397,7 @@ def main(argv: list[str] | None = None) -> int:
         help="serve the emulator tools over newline-delimited MCP JSON-RPC on stdin/stdout",
     )
     parser.add_argument("--offset", type=int, default=0, help="capability chunk start")
-    parser.add_argument("--limit", type=int, default=100, help="capability chunk size")
+    parser.add_argument("--limit", type=int, help="capability or catalog chunk size")
     parser.add_argument("--namespace", help="limit capabilities to one exact command namespace")
     parser.add_argument(
         "--runtime-status",
@@ -36203,18 +36499,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.scenario != "-" and (
             direct_pack_path is not None
             or direct_golden_path is not None
-                or direct_observation_path is not None
-                or args.assemble_observations
-                or args.capture_campaign
-                or args.capture_plan_template
+            or direct_observation_path is not None
+            or args.assemble_observations
+            or args.capture_campaign
+            or args.capture_plan_template
+            or args.catalog_smoke
         ):
             raise EmulatorInputError(
-                "use either --scenario PATH or a direct pack path, not both"
+                "use either --scenario PATH or a direct operation input, not both"
             )
         root = _find_tcl_lsp_root(args.tcl_lsp_root)
         if args.pcap and (
             args.serve or args.data_plane or args.mcp or args.capabilities or args.catalog or args.probe
-            or args.capture_campaign or args.command_probe or args.behavior_pack or args.golden_vectors
+            or args.catalog_smoke or args.capture_campaign or args.command_probe or args.behavior_pack or args.golden_vectors
             or args.capture_plan_template or args.import_observations
             or args.assemble_observations or args.conformance
         ):
@@ -36259,7 +36556,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.catalog:
             response = _build_catalog(
                 root,
-                args.limit,
+                100 if args.limit is None else args.limit,
                 namespace=args.namespace,
                 runtime_status=args.runtime_status,
                 target_status=args.target_status,
@@ -36271,7 +36568,7 @@ def main(argv: list[str] | None = None) -> int:
                 if getattr(args, field) is not None
             }
             response = _build_capture_campaign(
-                root, args.offset, args.limit, **campaign_filters
+                root, args.offset, 100 if args.limit is None else args.limit, **campaign_filters
             )
         elif args.capture_plan_template:
             campaign_filters = {
@@ -36282,7 +36579,7 @@ def main(argv: list[str] | None = None) -> int:
             response = _build_capture_plan_template(
                 root,
                 args.offset,
-                args.limit,
+                100 if args.limit is None else args.limit,
                 **campaign_filters,
                 name=args.capture_plan_name,
                 source=args.capture_source,
@@ -36294,7 +36591,7 @@ def main(argv: list[str] | None = None) -> int:
             response = _build_capabilities(
                 root,
                 args.offset,
-                args.limit,
+                100 if args.limit is None else args.limit,
                 namespace=args.namespace,
                 runtime_status=args.runtime_status,
                 target_status=args.target_status,
@@ -36303,10 +36600,19 @@ def main(argv: list[str] | None = None) -> int:
             response = _build_runtime_probe(
                 root,
                 args.offset,
-                args.limit,
+                100 if args.limit is None else args.limit,
                 namespace=args.namespace,
                 runtime_status=args.runtime_status,
                 target_status=args.target_status,
+            )
+        elif args.catalog_smoke:
+            smoke_filters = {
+                field: getattr(args, field)
+                for field in ("namespace", "runtime_status", "target_status")
+                if getattr(args, field) is not None
+            }
+            response = _build_catalog_smoke(
+                root, args.offset, 16 if args.limit is None else args.limit, **smoke_filters
             )
         elif args.conformance:
             response = _build_conformance(root)

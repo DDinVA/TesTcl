@@ -60,6 +60,9 @@ results and use `/v1/live-observations/capture-plan` to export replayable
 HTTP/HTTP2/TCP/WebSocket inputs; run `scripts/live-observation-smoke.sh` for a
 quick HTTP evaluation, or `scripts/live-packet-observation-smoke.sh` for a
 real TCP byte-to-replay-plan check.
+For catalog-wide progress, run `./scripts/emulate-irule.sh --catalog-smoke
+--namespace HTTP --limit 16`; this executes safe zero-argument probes and
+reports which commands work, need arguments, or fail in the current emulator.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:
