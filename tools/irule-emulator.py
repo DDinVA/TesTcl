@@ -327,6 +327,8 @@ BEHAVIOR_PACK_MAX_NAME_BYTES = 256
 BEHAVIOR_PACK_MAX_BYTES = 2 * 1024 * 1024
 BEHAVIOR_COVERAGE_MAX_PACKS = 64
 BEHAVIOR_COVERAGE_MAX_BYTES = 2 * 1024 * 1024
+BEHAVIOR_CANDIDATE_MAX_COMMANDS = 64
+BEHAVIOR_CANDIDATE_MAX_VARIANTS = 8
 GOLDEN_VECTOR_MAX_CASES = 256
 GOLDEN_VECTOR_MAX_NAME_BYTES = 256
 GOLDEN_VECTOR_MAX_BYTES = 2 * 1024 * 1024
@@ -2447,10 +2449,29 @@ def _f5_catalog_command_names(command_registry: Any) -> list[str]:
     """
     names: list[str] = []
     for name in command_registry.command_names(dialect="f5-irules"):
-        spec = command_registry.get_any(name)
-        if spec is not None and getattr(spec, "required_package", None) != "Tk":
+        specs = getattr(command_registry, "specs_by_name", {}).get(name, ())
+        if any(
+            getattr(spec, "required_package", None) != "Tk"
+            and (
+                getattr(spec, "dialects", None) is None
+                or "f5-irules" in getattr(spec, "dialects", ())
+            )
+            for spec in specs
+        ):
             names.append(name)
     return sorted(names)
+
+
+def _f5_catalog_spec(command_registry: Any, name: str) -> Any | None:
+    """Select the F5 spec when Tcl/Tk share a command name such as ``event``."""
+    specs = getattr(command_registry, "specs_by_name", {}).get(name, ())
+    for spec in reversed(specs):
+        if getattr(spec, "required_package", None) == "Tk":
+            continue
+        dialects = getattr(spec, "dialects", None)
+        if dialects is None or "f5-irules" in dialects:
+            return spec
+    return None
 
 
 def _build_capabilities(
@@ -2505,7 +2526,7 @@ def _build_capabilities(
         "unavailable-in-tmos-17.5": 0,
     }
     for name in command_names:
-        spec = REGISTRY.get_any(name)
+        spec = _f5_catalog_spec(REGISTRY, name)
         if spec is None:  # pragma: no cover - registry contract guard
             continue
         proc_name = _mock_proc_name(name)
@@ -2848,7 +2869,7 @@ def _command_probe_template(
             f"could not load tcl-lsp command registry: {exc}"
         ) from exc
 
-    spec = REGISTRY.get_any(command)
+    spec = _f5_catalog_spec(REGISTRY, command)
     if spec is None:  # pragma: no cover - registry contract guard
         raise EmulatorInputError(f"catalog command has no specification: {command}")
     requirements = spec.event_requires
@@ -2923,6 +2944,384 @@ def _command_probe_template(
         "argument_policy": "collector-must-select-command-specific-arguments",
         "argument_source": "catalog.documentation.synopsis",
         "requires_fixture_state": selected_name != "RULE_INIT",
+    }
+
+
+_CANDIDATE_SYNOPSIS_TOKEN_RE = re.compile(
+    r"<|>|\(|\)|\||\?|[+*#]|[A-Za-z_][A-Za-z0-9_:-]*|-[A-Za-z][A-Za-z0-9_-]*|\d+"
+)
+_CANDIDATE_SKIP_WORDS = frozenset({"arg", "args", "command", "subcommand"})
+_CANDIDATE_LITERAL_WORDS = frozenset(
+    {
+        "at", "all", "always", "and", "attribute", "before", "clear", "client",
+        "clientside", "close", "count", "custom", "default", "delete", "dest",
+        "disable", "down", "drop", "enable", "exists", "get", "insert", "key",
+        "length", "member", "name", "names", "node", "off", "on", "pool", "port",
+        "read", "remove", "replace", "request", "response", "relative", "reset",
+        "return", "server", "serverside", "set", "status", "stop", "type", "up",
+        "value", "values", "version", "write",
+    }
+)
+
+
+def _candidate_synopsis_words(synopsis: str, command: str) -> list[tuple[str, bool]]:
+    """Extract one conservative, first-alternative argument shape from a synopsis."""
+    text = synopsis.strip()
+    if text.startswith(command):
+        text = text[len(command) :].strip()
+    raw_tokens = _CANDIDATE_SYNOPSIS_TOKEN_RE.findall(text)
+    tokens: list[tuple[str, bool]] = []
+    in_angle = False
+    for token in raw_tokens:
+        if token == "<":
+            in_angle = True
+        elif token == ">":
+            in_angle = False
+        elif token in {"(", ")", "|", "?", "+", "*", "#"}:
+            tokens.append((token, False))
+        else:
+            tokens.append((token, in_angle))
+
+    def parse_group(index: int, stop_at_close: bool) -> tuple[list[tuple[str, bool]], int]:
+        branches: list[list[tuple[str, bool]]] = [[]]
+        while index < len(tokens):
+            token, placeholder = tokens[index]
+            if token == ")" and stop_at_close:
+                return branches[0], index + 1
+            if token == "|":
+                branches.append([])
+                index += 1
+                continue
+            if token == "(":
+                nested, index = parse_group(index + 1, True)
+                branches[-1].extend(nested)
+                continue
+            if token not in {"<", ">", "?", "+", "*", "#", ")"}:
+                branches[-1].append((token, placeholder))
+            index += 1
+        return branches[0], index
+
+    words, _ = parse_group(0, False)
+    return [
+        (token, placeholder)
+        for token, placeholder in words
+        if token.lower() not in _CANDIDATE_SKIP_WORDS and token != "..."
+    ][:COMMAND_PROBE_MAX_ARGS]
+
+
+def _candidate_argument_value(
+    token: str,
+    placeholder: bool,
+    command: str,
+    index: int,
+) -> str:
+    """Turn a catalog synopsis token into a bounded, non-secret fixture value."""
+    del index
+    clean = token.strip("'\"")
+    key = clean.lower().replace("-", "_")
+    if not placeholder and key in _CANDIDATE_LITERAL_WORDS:
+        return clean
+    if not placeholder and clean.startswith("-"):
+        return clean
+    if not placeholder and not clean.isupper():
+        return clean
+
+    if key in {"enable", "disable", "on", "off", "up", "down", "get", "set", "clear"}:
+        return clean
+    if key in {
+        "addr", "address", "ip", "ip_addr", "ip_address", "client_addr", "server_addr",
+        "remote_addr", "local_addr", "source_addr", "destination_addr", "src", "dst",
+        "node_addr", "node_address",
+    }:
+        return "192.0.2.10"
+    if key in {"port", "client_port", "server_port", "remote_port", "local_port"}:
+        return "80"
+    if key in {"pool", "pool_name", "pool_obj", "pool_object"}:
+        return "api_pool"
+    if key in {"host", "hostname", "virtual_server", "virtual", "vs"}:
+        return "example.test" if key in {"host", "hostname"} else "/Common/irule-test-vs"
+    if key in {"uri", "path", "url", "query", "query_string"}:
+        return "/testcl/command" if key in {"uri", "path"} else "https://example.test/"
+    if key in {"method", "http_method"}:
+        return "GET"
+    if key in {"name", "username", "user", "user_name", "alias", "session_id", "id"}:
+        return "testcl"
+    if key in {"passphrase", "password", "secret", "key"}:
+        return "testcl-secret"
+    if key in {"pattern", "regex", "regexp"}:
+        return ".*"
+    if key in {"boolean", "bool", "flag"}:
+        return "1"
+    if key in {
+        "number", "integer", "count", "length", "size", "offset", "index", "seconds",
+        "content_length", "nonnegative_integer",
+        "timeout", "ttl", "code", "status_code", "priority", "weight", "limit",
+    }:
+        return "1"
+    if key in {"type", "dns_type", "rr_type"} and command.startswith("DNS"):
+        return "A"
+    if key in {"status", "action"}:
+        return "up"
+    if key in {"data", "value", "string", "message", "payload", "body", "text"}:
+        return "testcl"
+    return "testcl"
+
+
+def _candidate_args_from_synopsis(command: str, synopsis: str) -> list[str]:
+    return [
+        _candidate_argument_value(token, placeholder, command, index)
+        for index, (token, placeholder) in enumerate(
+            _candidate_synopsis_words(synopsis, command)
+        )
+    ]
+
+
+def _command_argument_candidates(
+    command: str, spec: Any
+) -> list[dict[str, Any]]:
+    """Build bounded argument variants from registry subcommand/synopsis metadata."""
+    variants: list[dict[str, Any]] = []
+    if spec.subcommands:
+        for subcommand, sub_spec in spec.subcommands.items():
+            synopsis = sub_spec.synopsis or f"{command} {subcommand}"
+            args = _candidate_args_from_synopsis(command, synopsis)
+            if not args or args[0] != subcommand:
+                args.insert(0, subcommand)
+            minimum = getattr(getattr(sub_spec, "arity", None), "min", 0)
+            variants.append(
+                {
+                    "args": args[:COMMAND_PROBE_MAX_ARGS],
+                    "source": "tcl-lsp.subcommand-synopsis",
+                    "synopsis": synopsis,
+                    "minimum_arity": minimum if isinstance(minimum, int) else 0,
+                    "selector": subcommand,
+                }
+            )
+    else:
+        for form in spec.forms:
+            synopsis = form.synopsis or command
+            args = _candidate_args_from_synopsis(command, synopsis)
+            minimum = getattr(getattr(form, "arity", None), "min", 0)
+            variants.append(
+                {
+                    "args": args[:COMMAND_PROBE_MAX_ARGS],
+                    "source": "tcl-lsp.form-synopsis",
+                    "synopsis": synopsis,
+                    "minimum_arity": minimum if isinstance(minimum, int) else 0,
+                }
+            )
+    deduplicated: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for variant in sorted(
+        variants,
+        key=lambda item: (
+            item["minimum_arity"],
+            len(item["args"]),
+            tuple(item["args"]),
+            item.get("synopsis", ""),
+        ),
+    ):
+        key = tuple(variant["args"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(variant)
+        if len(deduplicated) >= BEHAVIOR_CANDIDATE_MAX_VARIANTS:
+            break
+    return deduplicated or [
+        {
+            "args": [],
+            "source": "tcl-lsp.command-synopsis-missing",
+            "synopsis": command,
+            "minimum_arity": 0,
+        }
+    ]
+
+
+def _candidate_fixture_scenario(command: str) -> dict[str, Any] | None:
+    """Supply only generic, non-secret state useful to local and external probes."""
+    if command.startswith("LB::") or command in {"active_members", "persist"}:
+        return {
+            "pools": {"api_pool": ["192.0.2.10:80"]},
+            "backends": {"192.0.2.10:80": {"state": "up"}},
+        }
+    return None
+
+
+def _build_behavior_vector_candidates(
+    root: Path,
+    packs: Any,
+    offset: int,
+    limit: int,
+    *,
+    namespace: str | None = None,
+    runtime_status: str | None = None,
+) -> dict[str, Any]:
+    """Build an executable, reference-free plan for uncovered TMOS 17.5 commands."""
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise EmulatorInputError("behavior candidate offset must be a non-negative integer")
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise EmulatorInputError("behavior candidate limit must be an integer")
+    if not 1 <= limit <= BEHAVIOR_CANDIDATE_MAX_COMMANDS:
+        raise EmulatorInputError(
+            "behavior candidate limit must be between 1 and "
+            f"{BEHAVIOR_CANDIDATE_MAX_COMMANDS}"
+        )
+    if namespace is not None and (not isinstance(namespace, str) or not namespace):
+        raise EmulatorInputError("behavior candidate namespace must be a non-empty string")
+    if runtime_status is not None and runtime_status not in RUNTIME_STATUS_VALUES:
+        raise EmulatorInputError(
+            f"behavior candidate runtime status is unsupported: {runtime_status}"
+        )
+
+    coverage = _build_behavior_coverage(root, packs)
+    uncovered = [
+        command["name"]
+        for command in coverage["commands"]
+        if not command["covered"]
+        and command["target_status"] == "available-in-tmos-17.5"
+        and (namespace is None or command["namespace"] == namespace)
+        and (runtime_status is None or command["runtime_status"] == runtime_status)
+    ]
+    start = min(offset, len(uncovered))
+    selected_names = uncovered[start : start + limit]
+    registry, _ = _runtime_status_map(root)
+    event_inventory = _probe_event_inventory(root)
+    candidate_rows: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    status_counts: dict[str, int] = {}
+
+    for command in selected_names:
+        catalog = _command_probe_catalog_entry(root, command)
+        row: dict[str, Any] = {
+            "id": f"candidate:{command}",
+            "command": command,
+            "namespace": catalog["namespace"],
+            "runtime_status": catalog["runtime_status"],
+            "target_status": catalog["target_status"],
+            "documentation": catalog["documentation"],
+            "event_requirements": catalog["event_requirements"],
+            "pure": catalog["pure"],
+            "unsafe": catalog["unsafe"],
+            "candidate_status": "unavailable-event-template",
+            "argument_candidates": [],
+            "input": None,
+        }
+        try:
+            template = _command_probe_template(root, command, event_inventory)
+            spec = _f5_catalog_spec(registry, command)
+            if spec is None:
+                raise EmulatorInputError(f"catalog command has no specification: {command}")
+            argument_candidates = _command_argument_candidates(command, spec)
+            primary = argument_candidates[0]
+            probe_input: dict[str, Any] = {
+                "command": command,
+                "args": primary["args"],
+                "event": template["event"],
+                "profiles": template["profiles"],
+            }
+            request = _protocol_request_template(template["event"])
+            if request is not None:
+                probe_input["request"] = request
+            scenario = _candidate_fixture_scenario(command)
+            if scenario is not None:
+                probe_input["scenario"] = scenario
+            _normalise_command_probe_request(
+                root,
+                probe_input,
+                allow_external_protocol_request=True,
+            )
+            row.update(
+                {
+                    "candidate_status": "ready-for-reference-capture",
+                    "event": template["event"],
+                    "profiles": template["profiles"],
+                    "input": probe_input,
+                    "argument_candidates": argument_candidates,
+                    "selected_argument_source": primary["source"],
+                    "collector_action": (
+                        "execute this command probe on TMOS 17.5 using the selected "
+                        "event/profile fixture, then retain the observed output"
+                    ),
+                }
+            )
+            observations.append(
+                {
+                    "id": row["id"],
+                    "operation": "command_probe",
+                    "input": probe_input,
+                    "comparisons": [
+                        {
+                            "label": "command status",
+                            "actual_path": ["execution", "status"],
+                            "reference_path": ["status"],
+                        }
+                    ],
+                }
+            )
+        except EmulatorInputError as exc:
+            row["generation_error"] = str(exc)
+        candidate_rows.append(row)
+
+    plan = None
+    if observations:
+        plan = _normalise_capture_plan(
+            root,
+            {
+                "schema_version": 1,
+                "profile": "tmos-17.5",
+                "name": f"tmos-17.5-behavior-candidates-{start:06d}-{len(observations):06d}",
+                "source": "external-bigip-or-vlab",
+                "provenance": {
+                    "collector": "behavior-vector-candidate-generator",
+                    "tmos_build": "17.5",
+                    "capture_id": f"behavior-candidates-{start:06d}",
+                    "generator": "tmos-17.5-behavior-vector-candidates-v1",
+                },
+                "observations": observations,
+            },
+        )
+    for row in candidate_rows:
+        status = row["candidate_status"]
+        status_counts[status] = status_counts.get(status, 0) + 1
+    status_counts = {
+        status: count for status, count in status_counts.items() if count > 0
+    }
+    return {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "source": "behavior-vector-candidates",
+        "summary": {
+            "uncovered_command_count": len(uncovered),
+            "candidate_command_count": len(candidate_rows),
+            "plan_observation_count": len(observations),
+            "candidate_status_counts": dict(sorted(status_counts.items())),
+            "coverage": {
+                key: coverage["summary"][key]
+                for key in (
+                    "target_f5_command_count",
+                    "covered_command_count",
+                    "uncovered_command_count",
+                    "coverage_percent",
+                )
+            },
+        },
+        "chunk": {
+            "offset": offset,
+            "limit": limit,
+            "count": len(selected_names),
+            "total": len(uncovered),
+            "has_more": start + len(selected_names) < len(uncovered),
+        },
+        "interpretation": (
+            "Candidates are registry-derived invocation hypotheses and a reference-free "
+            "capture plan. They are syntactically executable through the local probe "
+            "path, but their results are not TMOS 17.5 evidence until collected externally."
+        ),
+        "candidates": candidate_rows,
+        "capture_plan": plan,
     }
 
 
@@ -3429,7 +3828,7 @@ def _command_probe_catalog_entry(root: Path, command: Any) -> dict[str, Any]:
         raise EmulatorInputError(
             f"command probe requires a command from the pinned F5 catalog: {command}"
         )
-    spec = REGISTRY.get_any(command)
+    spec = _f5_catalog_spec(REGISTRY, command)
     if spec is None:  # pragma: no cover - registry contract guard
         raise EmulatorInputError(f"catalog command has no specification: {command}")
     catalog_kind = _catalog_kind(command, spec)
@@ -4705,7 +5104,7 @@ def _normalise_command_probe_request(
         from compiler.registry.namespace_models import EventProps
     except ImportError as exc:  # pragma: no cover - depends on external checkout
         raise EmulatorInputError(f"could not load tcl-lsp event metadata: {exc}") from exc
-    command_spec = REGISTRY.get_any(command)
+    command_spec = _f5_catalog_spec(REGISTRY, command)
     event_props = get_event_props(event_name)
     if event_props is None and event_name in TMOS_17_5_EVENT_OVERRIDES:
         override = TMOS_17_5_EVENT_OVERRIDES[event_name]
@@ -5027,7 +5426,7 @@ def _build_behavior_coverage(root: Path, packs: Any) -> dict[str, Any]:
     target_names = sorted(
         name
         for name in status_map
-        if _catalog_kind(name, registry.get_any(name)) == "f5-irule"
+        if _catalog_kind(name, _f5_catalog_spec(registry, name)) == "f5-irule"
         if _target_status(
             name,
             TMOS_17_5_POST_TARGET_COMMANDS,
@@ -5198,7 +5597,7 @@ def _build_behavior_coverage(root: Path, packs: Any) -> dict[str, Any]:
     out_of_scope_usage: list[dict[str, Any]] = []
     for name in sorted(set(usage) - target_name_set):
         entry = usage[name]
-        spec = registry.get_any(name)
+        spec = _f5_catalog_spec(registry, name) or registry.get_any(name)
         out_of_scope_usage.append(
             {
                 "name": name,
@@ -30682,6 +31081,34 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_behavior_candidates",
+                "title": "Generate behavior-vector candidates",
+                "description": "Generate a bounded, reference-free TMOS 17.5 command-probe capture plan for uncovered F5 commands using registry-derived argument hypotheses.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "packs": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": BEHAVIOR_COVERAGE_MAX_PACKS,
+                            "items": {"type": "object"},
+                        },
+                        "offset": {"type": "integer", "minimum": 0, "default": 0},
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": BEHAVIOR_CANDIDATE_MAX_COMMANDS,
+                            "default": 16,
+                        },
+                        "namespace": {"type": "string", "minLength": 1},
+                        "runtime_status": {
+                            "type": "string",
+                            "enum": sorted(RUNTIME_STATUS_VALUES),
+                        },
+                    },
+                    ["packs"],
+                ),
+            },
+            {
                 "name": "irule_differential_vectors",
                 "title": "Compare TMOS 17.5 golden vectors",
                 "description": "Run bounded emulator inputs and compare selected observations with independently captured TMOS 17.5 reference output.",
@@ -31046,6 +31473,26 @@ class McpProtocolServer:
                 )
             return self._tool_success(
                 _build_behavior_coverage(self._root, args["packs"])
+            )
+
+        if name == "irule_behavior_candidates":
+            allowed = {"packs", "offset", "limit", "namespace", "runtime_status"}
+            unknown = sorted(set(args) - allowed)
+            if unknown or not isinstance(args.get("packs"), list):
+                details = f": {', '.join(unknown)}" if unknown else ""
+                raise McpProtocolError(
+                    -32602,
+                    "irule_behavior_candidates requires a packs array" + details,
+                )
+            return self._tool_success(
+                _build_behavior_vector_candidates(
+                    self._root,
+                    args["packs"],
+                    args.get("offset", 0),
+                    args.get("limit", 16),
+                    namespace=args.get("namespace"),
+                    runtime_status=args.get("runtime_status"),
+                )
             )
 
         if name == "irule_differential_vectors":
@@ -36163,6 +36610,33 @@ def _http_handler(
                     return
                 _json_response(self, 200, payload)
                 return
+            if parsed.path == "/v1/behavior-candidates":
+                query = parse_qs(parsed.query, strict_parsing=False)
+                try:
+                    offset = int(query.get("offset", ["0"])[0])
+                    limit = int(query.get("limit", ["16"])[0])
+                    filters = {
+                        field: query[field][0]
+                        for field in ("namespace", "runtime_status")
+                        if field in query
+                    }
+                    pack_dir = (
+                        Path(__file__).resolve().parent.parent
+                        / "examples"
+                        / "behavior-packs"
+                    )
+                    payload = _build_behavior_vector_candidates(
+                        root,
+                        _read_behavior_coverage_directory(pack_dir),
+                        offset,
+                        limit,
+                        **filters,
+                    )
+                except (TypeError, ValueError, EmulatorInputError, OSError) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
             if parsed.path == "/v1/conformance":
                 try:
                     payload = _build_conformance(root)
@@ -36238,6 +36712,40 @@ def _http_handler(
                             "behavior coverage request requires a packs array"
                         )
                     payload = _build_behavior_coverage(root, request["packs"])
+                except (
+                    json.JSONDecodeError,
+                    EmulatorInputError,
+                    EmulatorResourceError,
+                    OSError,
+                ) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
+            if parsed.path == "/v1/behavior-candidates":
+                try:
+                    request = self._read_json()
+                    if not isinstance(request, dict):
+                        raise EmulatorInputError(
+                            "behavior candidate request must be a JSON object"
+                        )
+                    allowed = {
+                        "packs", "offset", "limit", "namespace", "runtime_status"
+                    }
+                    unknown = sorted(set(request) - allowed)
+                    if unknown or not isinstance(request.get("packs"), list):
+                        details = f": {', '.join(unknown)}" if unknown else ""
+                        raise EmulatorInputError(
+                            "behavior candidate request requires a packs array" + details
+                        )
+                    payload = _build_behavior_vector_candidates(
+                        root,
+                        request["packs"],
+                        request.get("offset", 0),
+                        request.get("limit", 16),
+                        namespace=request.get("namespace"),
+                        runtime_status=request.get("runtime_status"),
+                    )
                 except (
                     json.JSONDecodeError,
                     EmulatorInputError,
@@ -36708,6 +37216,11 @@ def main(argv: list[str] | None = None) -> int:
         help="measure checked-in behavior-pack coverage of the TMOS 17.5 F5 catalog",
     )
     mode.add_argument(
+        "--behavior-candidates",
+        action="store_true",
+        help="generate a bounded reference-capture plan for uncovered TMOS 17.5 commands",
+    )
+    mode.add_argument(
         "--golden-vectors",
         nargs="?",
         const="-",
@@ -36743,7 +37256,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, help="capability or catalog chunk size")
     parser.add_argument(
         "--behavior-pack-dir",
-        help="directory of JSON behavior packs for --behavior-coverage",
+        help="directory of JSON behavior packs for --behavior-coverage or --behavior-candidates",
     )
     parser.add_argument("--namespace", help="limit capabilities to one exact command namespace")
     parser.add_argument(
@@ -36833,9 +37346,17 @@ def main(argv: list[str] | None = None) -> int:
             raise EmulatorInputError(
                 "--capture-records requires --assemble-observations"
             )
-        if args.behavior_pack_dir is not None and not args.behavior_coverage:
+        if args.behavior_pack_dir is not None and not (
+            args.behavior_coverage or args.behavior_candidates
+        ):
             raise EmulatorInputError(
-                "--behavior-pack-dir requires --behavior-coverage"
+                "--behavior-pack-dir requires --behavior-coverage or --behavior-candidates"
+            )
+        if args.behavior_candidates and args.target_status not in (
+            None, "available-in-tmos-17.5"
+        ):
+            raise EmulatorInputError(
+                "--behavior-candidates only supports available-in-tmos-17.5 commands"
             )
         if (
             args.capture_plan_name is not None
@@ -36856,6 +37377,7 @@ def main(argv: list[str] | None = None) -> int:
             or args.capture_plan_template
             or args.catalog_smoke
             or args.behavior_coverage
+            or args.behavior_candidates
         ):
             raise EmulatorInputError(
                 "use either --scenario PATH or a direct operation input, not both"
@@ -36864,6 +37386,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.pcap and (
             args.serve or args.data_plane or args.mcp or args.capabilities or args.catalog or args.probe
             or args.catalog_smoke or args.behavior_coverage or args.capture_campaign or args.command_probe or args.behavior_pack or args.golden_vectors
+            or args.behavior_candidates
             or args.capture_plan_template or args.import_observations
             or args.assemble_observations or args.conformance
         ):
@@ -36973,6 +37496,23 @@ def main(argv: list[str] | None = None) -> int:
                 pack_dir = Path(args.behavior_pack_dir)
             response = _build_behavior_coverage(
                 root, _read_behavior_coverage_directory(pack_dir)
+            )
+        elif args.behavior_candidates:
+            if args.behavior_pack_dir is None:
+                pack_dir = Path(__file__).resolve().parent.parent / "examples" / "behavior-packs"
+            else:
+                pack_dir = Path(args.behavior_pack_dir)
+            if args.target_status not in (None, "available-in-tmos-17.5"):
+                raise EmulatorInputError(
+                    "--behavior-candidates only supports available-in-tmos-17.5 commands"
+                )
+            response = _build_behavior_vector_candidates(
+                root,
+                _read_behavior_coverage_directory(pack_dir),
+                args.offset,
+                16 if args.limit is None else args.limit,
+                namespace=args.namespace,
+                runtime_status=args.runtime_status,
             )
         elif args.conformance:
             response = _build_conformance(root)

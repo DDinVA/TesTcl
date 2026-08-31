@@ -65,6 +65,8 @@ For catalog-wide progress, run `./scripts/emulate-irule.sh --catalog-smoke
 reports which commands work, need arguments, or fail in the current emulator.
 To see semantic test-input coverage across all checked-in packs, run
 `./scripts/emulate-irule.sh --behavior-coverage`.
+To generate the next executable reference-capture chunk, run
+`./scripts/emulate-irule.sh --behavior-candidates --limit 16`.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:

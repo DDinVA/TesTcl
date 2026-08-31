@@ -4857,6 +4857,65 @@ when HTTP_RESPONSE_RELEASE {
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "duplicate pack name"):
             self.adapter._build_behavior_coverage(root, [packs[0], packs[0]])
 
+    def test_behavior_candidates_build_reference_free_plan_from_uncovered_queue(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 3, namespace="HTTP"
+        )
+
+        self.assertEqual(candidates["profile"], "tmos-17.5")
+        self.assertEqual(candidates["summary"]["coverage"]["target_f5_command_count"], 989)
+        self.assertEqual(candidates["summary"]["coverage"]["uncovered_command_count"], 982)
+        self.assertEqual(candidates["chunk"], {
+            "offset": 0,
+            "limit": 3,
+            "count": 3,
+            "total": 25,
+            "has_more": True,
+        })
+        self.assertEqual(
+            [candidate["command"] for candidate in candidates["candidates"]],
+            ["HTTP::class", "HTTP::close", "HTTP::collect"],
+        )
+        self.assertEqual(candidates["candidates"][0]["input"]["args"], ["select", "testcl"])
+        self.assertEqual(candidates["candidates"][2]["input"]["args"], ["1"])
+        self.assertEqual(
+            candidates["summary"]["candidate_status_counts"],
+            {"ready-for-reference-capture": 3},
+        )
+        self.assertEqual(len(candidates["capture_plan"]["observations"]), 3)
+        self.assertEqual(
+            candidates["capture_plan"]["provenance"]["generator"],
+            "tmos-17.5-behavior-vector-candidates-v1",
+        )
+        for candidate in candidates["candidates"]:
+            execution = self.adapter.run_command_probe(
+                candidate["input"],
+                tcl_lsp_root=self.tcl_lsp_root,
+                allow_external_protocol_request=True,
+            )
+            self.assertIn(
+                execution["execution"]["status"],
+                {"ok", "error", "profile-gated"},
+            )
+
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "between 1 and 64"):
+            self.adapter._build_behavior_vector_candidates(root, [pack], 0, 65)
+
+    def test_f5_catalog_spec_wins_over_tk_duplicate_event(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        self.adapter._load_session_class(root)
+        from compiler.registry import REGISTRY
+
+        spec = self.adapter._f5_catalog_spec(REGISTRY, "event")
+        self.assertIsNotNone(spec)
+        self.assertNotEqual(getattr(spec, "required_package", None), "Tk")
+        self.assertEqual(spec.subcommands, {})
+
     def test_behavior_pack_validation_is_bounded_and_atomic(self) -> None:
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "schema_version"):
             self.adapter.run_behavior_pack(
@@ -23676,6 +23735,26 @@ when CLIENT_DATA {
                 )["covered"]
             )
 
+            candidates_request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/behavior-candidates",
+                data=json.dumps({
+                    "packs": [pack],
+                    "namespace": "HTTP",
+                    "limit": 1,
+                }).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(candidates_request) as response:
+                candidates_payload = json.loads(response.read())
+            self.assertEqual(candidates_payload["status"], "ok")
+            self.assertEqual(
+                candidates_payload["candidates"][0]["command"], "HTTP::class"
+            )
+            self.assertEqual(
+                len(candidates_payload["capture_plan"]["observations"]), 1
+            )
+
             stateful = json.loads(
                 (ROOT / "examples" / "behavior-packs" / "stateful-17.5.json")
                 .read_text(encoding="utf-8")
@@ -24175,6 +24254,7 @@ when CLIENT_DATA {
         self.assertIn("irule_catalog_smoke", tool_names)
         self.assertIn("irule_behavior_pack", tool_names)
         self.assertIn("irule_behavior_coverage", tool_names)
+        self.assertIn("irule_behavior_candidates", tool_names)
         self.assertIn("irule_differential_vectors", tool_names)
         self.assertIn("irule_import_observations", tool_names)
         self.assertIn("irule_assemble_observations", tool_names)
@@ -24336,6 +24416,31 @@ when CLIENT_DATA {
             coverage_payload = coverage["result"]["structuredContent"]
             self.assertEqual(coverage_payload["status"], "ok")
             self.assertEqual(coverage_payload["summary"]["behavior_pack_count"], 1)
+
+            candidates = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 21,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_behavior_candidates",
+                        "arguments": {
+                            "packs": [
+                                json.loads(
+                                    (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+                                    .read_text(encoding="utf-8")
+                                )
+                            ],
+                            "namespace": "HTTP",
+                            "limit": 1,
+                        },
+                    },
+                }
+            )
+            candidates_payload = candidates["result"]["structuredContent"]
+            self.assertEqual(candidates_payload["status"], "ok")
+            self.assertEqual(candidates_payload["summary"]["candidate_command_count"], 1)
+            self.assertEqual(candidates_payload["candidates"][0]["command"], "HTTP::class")
 
             command_probe = server.handle_message(
                 {

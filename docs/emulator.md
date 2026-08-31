@@ -384,6 +384,27 @@ read-only: it analyzes pack inputs and catalog metadata without running the
 cases; use `irule_behavior_pack` or `irule_differential_vectors` to execute
 them.
 
+To turn that uncovered queue into an executable external-reference work unit,
+generate a bounded candidate chunk:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-candidates --namespace HTTP --offset 0 --limit 16 \
+  > behavior-candidates-http-000.json
+```
+
+Each candidate contains a registry-derived argument hypothesis, a target-valid
+event/profile fixture, a protocol starter request when one is available, and a
+reference-free `capture_plan`. The plan can be passed to the existing
+`tools/tmos17-collector.py` workflow; it never fabricates expected TMOS output.
+Candidates are chunked over the uncovered-command queue, with a maximum of 64
+commands per request. The argument hypotheses are intentionally reviewable:
+they are derived from the pinned tcl-lsp synopsis metadata and may need a
+command-specific fixture or protocol driver before collection. Use
+`GET /v1/behavior-candidates` for the checked-in packs or `POST
+/v1/behavior-candidates` with `{"packs":[...]}` for custom packs. The same
+operation is exposed as `irule_behavior_candidates` in MCP.
+
 ### TMOS 17.5 differential vectors
 
 Behavior packs assert values authored inside the emulator project. Differential
@@ -2444,8 +2465,10 @@ curl -X POST -H 'Content-Type: application/json' \
 ```
 
 The service exposes `GET /healthz`, `GET /v1/capabilities`,
-`GET /v1/probes`, `GET /v1/conformance`, `POST /v1/simulations`,
-`POST /v1/analyze`, `POST /v1/command-probes`, `POST /v1/behavior-packs`, and
+`GET /v1/probes`, `GET /v1/catalog-smoke`, `GET /v1/behavior-candidates`,
+`GET /v1/conformance`, `POST /v1/simulations`, `POST /v1/analyze`,
+`POST /v1/command-probes`, `POST /v1/behavior-packs`,
+`POST /v1/behavior-coverage`, `POST /v1/behavior-candidates`, and
 `POST /v1/simulations/pcap`. It also supports persistent sessions through
 `POST /v1/sessions`, `GET /v1/sessions/{session_id}`,
 `POST /v1/sessions/{session_id}/requests`,
@@ -2626,6 +2649,8 @@ clients can discover these tools with `tools/list`:
   target catalog chunk and classifies behavior without claiming TMOS parity.
 - `irule_behavior_coverage` maps supplied behavior packs to the available F5
   catalog and returns the uncovered implementation queue.
+- `irule_behavior_candidates` turns that queue into a bounded, reference-free
+  command-probe capture plan with registry-derived argument hypotheses.
 - `irule_conformance` reports static catalog/runtime and packet-adapter coverage.
 - `irule_session_create`, `irule_session_inspect`, `irule_session_request`,
   `irule_session_trace`, `irule_session_event`, and `irule_session_close` manage

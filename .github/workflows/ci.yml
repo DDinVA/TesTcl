@@ -98,6 +98,11 @@ jobs:
           docker run --rm testcl-irule-emulator:ci --behavior-coverage >/tmp/testcl-behavior-coverage.json
           grep -F '"target_f5_command_count":989' /tmp/testcl-behavior-coverage.json
           grep -F '"covered_command_count":98' /tmp/testcl-behavior-coverage.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-candidates --namespace HTTP --limit 1 \
+            >/tmp/testcl-behavior-candidates.json
+          grep -F '"candidate_command_count":1' /tmp/testcl-behavior-candidates.json
+          grep -F '"plan_observation_count":1' /tmp/testcl-behavior-candidates.json
 
           docker run --detach --name "$raw_container_name" \
             --publish 18082:18082 \
