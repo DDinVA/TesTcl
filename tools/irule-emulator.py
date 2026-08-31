@@ -3283,6 +3283,24 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
     "X509::verify_cert_error_string": (("0",), ("2",), ("50",)),
     "X509::version": (("cert1",),),
     "X509::whole": (("cert1",),),
+    "AUTH::abort": (("auth-1",),),
+    "AUTH::authenticate": (("auth-1",),),
+    "AUTH::authenticate_continue": (("auth-1", "testcl"),),
+    "AUTH::cert_credential": (("auth-1", "testcl-cert"),),
+    "AUTH::cert_issuer_credential": (("auth-1", "testcl-issuer-cert"),),
+    "AUTH::last_event_session_id": ((),),
+    "AUTH::password_credential": (("auth-1", "testcl-password"),),
+    "AUTH::response_data": (("auth-1",),),
+    "AUTH::ssl_cc_ldap_status": (("auth-1",),),
+    "AUTH::ssl_cc_ldap_username": (("auth-1",),),
+    "AUTH::start": (("pam", "default_radius"), ("ldap", "testcl")),
+    "AUTH::status": (("auth-1",),),
+    "AUTH::subscribe": (("auth-1",),),
+    "AUTH::unsubscribe": (("auth-1",),),
+    "AUTH::username_credential": (("auth-1", "testcl-user"),),
+    "AUTH::wantcredential_prompt": (("auth-1",),),
+    "AUTH::wantcredential_prompt_style": (("auth-1",),),
+    "AUTH::wantcredential_type": (("auth-1",),),
 }
 _CANDIDATE_EVENT_HINTS = {
     "TCP::recvwnd": "CLIENT_ACCEPTED",
@@ -3348,6 +3366,27 @@ _CANDIDATE_PROFILE_HINTS = {
     # still needs the MQTT semantic layer when exercised on a connection event.
     "MQTT::enable": ("MQTT",),
 }
+for _auth_command in {
+    "AUTH::abort",
+    "AUTH::authenticate",
+    "AUTH::authenticate_continue",
+    "AUTH::cert_credential",
+    "AUTH::cert_issuer_credential",
+    "AUTH::last_event_session_id",
+    "AUTH::password_credential",
+    "AUTH::response_data",
+    "AUTH::ssl_cc_ldap_status",
+    "AUTH::ssl_cc_ldap_username",
+    "AUTH::start",
+    "AUTH::status",
+    "AUTH::subscribe",
+    "AUTH::unsubscribe",
+    "AUTH::username_credential",
+    "AUTH::wantcredential_prompt",
+    "AUTH::wantcredential_prompt_style",
+    "AUTH::wantcredential_type",
+}:
+    _CANDIDATE_PROFILE_HINTS[_auth_command] = ("AUTH",)
 _CANDIDATE_STATE_HINTS = {
     # MQTT::will reads the current message type; keep this local-only fixture
     # out of external capture plans, which must obtain state from TMOS.
@@ -3620,6 +3659,13 @@ def _command_argument_candidates(
 
 def _candidate_fixture_scenario(command: str) -> dict[str, Any] | None:
     """Supply only generic, non-secret state useful to local probe execution."""
+    if command.startswith("AUTH::"):
+        return {
+            "auth": {
+                "result": "wantcredential",
+                "response_data": {"token": "testcl"},
+            }
+        }
     if command.startswith("DNSMSG::"):
         return {
             "resolvers": {
@@ -4610,7 +4656,24 @@ def _command_probe_irule(event: str, command: str, args: list[str]) -> str:
     """Build the fixed event wrapper used by the safe command workbench."""
     command_words = " ".join([_tcl_quote(command), *(_tcl_quote(arg) for arg in args)])
     fixture_setup = ""
-    if command.startswith("X509::") and command != "X509::verify_cert_error_string":
+    if command.startswith("AUTH::"):
+        # AUTH session commands require a deterministic AUTH_ID. Configure the
+        # fixture to pause at AUTH_WANTCREDENTIAL so continuation and prompt
+        # access have a valid preceding lifecycle state.
+        fixture_setup = "set ::orch::_testcl_auth_fixture [AUTH::start pam default_radius]\n    "
+        if command == "AUTH::response_data":
+            fixture_setup += (
+                "AUTH::subscribe $::orch::_testcl_auth_fixture\n    "
+                "AUTH::authenticate $::orch::_testcl_auth_fixture\n    "
+            )
+        elif command in {
+            "AUTH::authenticate_continue",
+            "AUTH::wantcredential_prompt",
+            "AUTH::wantcredential_prompt_style",
+            "AUTH::wantcredential_type",
+        }:
+            fixture_setup += "AUTH::authenticate $::orch::_testcl_auth_fixture\n    "
+    elif command.startswith("X509::") and command != "X509::verify_cert_error_string":
         # X509 utilities consume the opaque handle returned by SSL::cert. The
         # candidate state fixture supplies one peer certificate at index zero.
         fixture_setup = "set ::orch::_testcl_x509_fixture [SSL::cert 0]\n    "
