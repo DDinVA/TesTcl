@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "dns-controls-17.5",
+  "cases": [
+    {
+      "id": "additional-count",
+      "probe": {
+        "command": "DNS::additional",
+        "args": ["count"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "0", "tcl_return_code": 0}
+    },
+    {
+      "id": "answer-count",
+      "probe": {
+        "command": "DNS::answer",
+        "args": ["count"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "1", "tcl_return_code": 0}
+    },
+    {
+      "id": "authority-count",
+      "probe": {
+        "command": "DNS::authority",
+        "args": ["count"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "0", "tcl_return_code": 0}
+    },
+    {
+      "id": "rr-class",
+      "probe": {
+        "command": "DNS::class",
+        "args": ["example.com. A IN 30 192.0.2.10"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "IN", "tcl_return_code": 0}
+    },
+    {
+      "id": "disable",
+      "probe": {"command": "DNS::disable", "event": "DNS_REQUEST", "profiles": ["UDP", "DNS"], "request": {"qname": "example.com", "qtype": "A", "recursion_desired": true}},
+      "expect": {"status": "ok", "value": "", "tcl_return_code": 0}
+    },
+    {
+      "id": "drop",
+      "probe": {"command": "DNS::drop", "event": "DNS_REQUEST", "profiles": ["UDP", "DNS"], "request": {"qname": "example.com", "qtype": "A", "recursion_desired": true}},
+      "expect": {"status": "ok", "value": "", "tcl_return_code": 0}
+    },
+    {
+      "id": "edns-exists",
+      "probe": {
+        "command": "DNS::edns0",
+        "args": ["exists"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "0", "tcl_return_code": 0}
+    },
+    {
+      "id": "enable",
+      "probe": {"command": "DNS::enable", "event": "DNS_REQUEST", "profiles": ["UDP", "DNS"], "request": {"qname": "example.com", "qtype": "A", "recursion_desired": true}},
+      "expect": {"status": "ok", "value": "", "tcl_return_code": 0}
+    },
+    {
+      "id": "last-action",
+      "probe": {
+        "command": "DNS::last_act",
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "", "tcl_return_code": 0}
+    },
+    {
+      "id": "wire-length",
+      "probe": {
+        "command": "DNS::len",
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "62", "tcl_return_code": 0}
+    },
+    {
+      "id": "log",
+      "probe": {"command": "DNS::log", "event": "DNS_REQUEST", "profiles": ["UDP", "DNS"], "request": {"qname": "example.com", "qtype": "A", "recursion_desired": true}},
+      "expect": {"status": "ok", "value": "", "tcl_return_code": 0}
+    },
+    {
+      "id": "rr-name",
+      "probe": {
+        "command": "DNS::name",
+        "args": ["example.com. A IN 30 192.0.2.10"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "example.com.", "tcl_return_code": 0}
+    },
+    {
+      "id": "origin",
+      "probe": {"command": "DNS::origin", "event": "DNS_REQUEST", "profiles": ["UDP", "DNS"], "request": {"qname": "example.com", "qtype": "A", "recursion_desired": true}},
+      "expect": {"status": "ok", "value": "client", "tcl_return_code": 0}
+    },
+    {
+      "id": "resolver-query",
+      "probe": {
+        "command": "DNS::query",
+        "args": ["dnsx", "example.com.", "A"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "rr1 {} {}", "tcl_return_code": 0}
+    },
+    {
+      "id": "rr-rdata",
+      "probe": {
+        "command": "DNS::rdata",
+        "args": ["example.com. A IN 30 192.0.2.10"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "192.0.2.10", "tcl_return_code": 0}
+    },
+    {
+      "id": "return",
+      "probe": {"command": "DNS::return", "event": "DNS_REQUEST", "profiles": ["UDP", "DNS"], "request": {"qname": "example.com", "qtype": "A", "recursion_desired": true}},
+      "expect": {"status": "ok", "value": "", "tcl_return_code": 0}
+    },
+    {
+      "id": "rpz-policy",
+      "probe": {"command": "DNS::rpz_policy", "event": "DNS_REQUEST", "profiles": ["UDP", "DNS"], "request": {"qname": "example.com", "qtype": "A", "recursion_desired": true}},
+      "expect": {"status": "ok", "value": "", "tcl_return_code": 0}
+    },
+    {
+      "id": "rr-create",
+      "probe": {
+        "command": "DNS::rr",
+        "args": ["example.com. A IN 30 192.0.2.10"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "rr2", "tcl_return_code": 0}
+    },
+    {
+      "id": "scrape-answer-type",
+      "probe": {
+        "command": "DNS::scrape",
+        "args": ["answer", "type"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "A", "tcl_return_code": 0}
+    },
+    {
+      "id": "rr-ttl",
+      "probe": {
+        "command": "DNS::ttl",
+        "args": ["example.com. A IN 30 192.0.2.10"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "30", "tcl_return_code": 0}
+    },
+    {
+      "id": "rr-type",
+      "probe": {
+        "command": "DNS::type",
+        "args": ["example.com. A IN 30 192.0.2.10"],
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "state": {"dns": {"qname": "example.com.", "qtype": "A", "qclass": "IN", "qr": 1, "answers": "{example.com. A IN 30 192.0.2.10}", "authority": "", "additional": ""}}
+      },
+      "expect": {"status": "ok", "value": "A", "tcl_return_code": 0}
+    }
+  ]
+}
