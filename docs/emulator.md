@@ -350,7 +350,8 @@ discarding the passing cases. The same runner is available as
 `POST /v1/behavior-packs` and the MCP tool `irule_behavior_pack`. The checked-in
 packs cover HTTP, HTTP/2, DNS, TCP, TLS/SSL, UDP/datagram, WebSocket, RTSP,
 SIP/SDP/SIPALG, load-balancing, URI, stream filtering, route metrics, TMM CMP
-topology, FLOWTABLE queries, classification lifecycle, profile introspection, and stateful
+topology, FLOWTABLE queries, classification lifecycle, profile introspection,
+Message Routing controls, and stateful
 session/table contracts for
 the pinned 17.5 profile. The SIP pack exercises all 16 catalogued `SIP::`
 commands, nine SDP accessors, and three SIPALG controls across command probes
@@ -373,7 +374,7 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 174 of 989 target F5 commands (17.59%). This is test-input
+current report covers 197 of 989 target F5 commands (19.92%). This is test-input
 coverage, not a semantic-fidelity score.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
@@ -419,6 +420,13 @@ profile-setting command dispatch:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/profile-17.5.json
+```
+
+Run the MR behavior pack to verify Message Routing Framework state controls:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/mr-17.5.json
 ```
 
 For service clients, submit the packs as one bounded JSON request to

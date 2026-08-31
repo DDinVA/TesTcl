@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "mr-17.5",
+  "cases": [
+    {"id": "always-match-port", "probe": {"command": "MR::always_match_port", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "false", "event_fired": true}},
+    {"id": "available-for-routing", "probe": {"command": "MR::available_for_routing", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "true", "event_fired": true}},
+    {"id": "collect-default", "probe": {"command": "MR::collect", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "-1", "event_fired": true}},
+    {"id": "connect-back-port-default", "probe": {"command": "MR::connect_back_port", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "0", "event_fired": true}},
+    {"id": "connection-instance", "probe": {"command": "MR::connection_instance", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "0 of 1", "event_fired": true}},
+    {"id": "connection-mode", "probe": {"command": "MR::connection_mode", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "per-peer", "event_fired": true}},
+    {"id": "equivalent-transport-default", "probe": {"command": "MR::equivalent_transport", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "", "event_fired": true}},
+    {"id": "flow-id", "probe": {"command": "MR::flow_id", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "flow-0", "event_fired": true}},
+    {"id": "ignore-peer-port-default", "probe": {"command": "MR::ignore_peer_port", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "false", "event_fired": true}},
+    {"id": "instance", "probe": {"command": "MR::instance", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "/Common/mr_router", "event_fired": true}},
+    {"id": "max-retries", "probe": {"command": "MR::max_retries", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "3", "event_fired": true}},
+    {"id": "message-clone", "probe": {"command": "MR::message", "args": ["clone", "1"], "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "1", "event_fired": true}},
+    {"id": "payload-default", "probe": {"command": "MR::payload", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "", "event_fired": true}},
+    {"id": "peer", "probe": {"command": "MR::peer", "args": ["testcl"], "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "testcl", "event_fired": true}},
+    {"id": "prime-route", "probe": {"command": "MR::prime", "args": ["virtual", "testcl", "pool", "api_pool"], "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "protocol", "probe": {"command": "MR::protocol", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "generic", "event_fired": true}},
+    {"id": "release", "probe": {"command": "MR::release", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "retry", "probe": {"command": "MR::retry", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "return", "probe": {"command": "MR::return", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "store", "probe": {"command": "MR::store", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "stream", "probe": {"command": "MR::stream", "args": ["testcl"], "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "transport", "probe": {"command": "MR::transport", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "value": "config /Common/mr_router", "event_fired": true}},
+    {"id": "restore", "probe": {"command": "MR::restore", "event": "MR_INGRESS", "profiles": ["TCP", "MR"]}, "expect": {"status": "ok", "event_fired": true}}
+  ]
+}
