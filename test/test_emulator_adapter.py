@@ -5042,6 +5042,20 @@ when HTTP_RESPONSE_RELEASE {
         )
         self.assertEqual(by_command["TCP::notify"]["event"], "CLIENT_DATA")
 
+        all_candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 52, namespace="TCP", variants=1
+        )
+        all_by_command = {
+            candidate["command"]: candidate
+            for candidate in all_candidates["candidates"]
+        }
+        self.assertEqual(all_by_command["TCP::recvwnd"]["event"], "CLIENT_ACCEPTED")
+        self.assertEqual(all_by_command["TCP::recvwnd"]["input"]["args"], ["auto"])
+        self.assertEqual(all_by_command["TCP::release"]["event"], "CLIENT_DATA")
+        self.assertEqual(all_by_command["TCP::release"]["input"]["args"], [])
+        self.assertEqual(all_by_command["TCP::sendbuf"]["event"], "CLIENT_ACCEPTED")
+        self.assertEqual(all_by_command["TCP::sendbuf"]["input"]["args"], ["auto"])
+
         sweep = self.adapter._build_behavior_vector_sweep(
             root, [pack], 0, 32, namespace="TCP", variants=8
         )

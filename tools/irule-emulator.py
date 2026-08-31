@@ -2986,12 +2986,18 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
     "TCP::notify": (("request",), ("eom",)),
     "TCP::pacing": ((), ("enable",), ("disable",)),
     "TCP::proxybuffer": (("10000", "2000"),),
+    "TCP::recvwnd": (("auto",), ("65535",)),
+    "TCP::release": ((), ("1",)),
+    "TCP::sendbuf": (("auto",), ("65535",)),
     "HTTP::retry": (
         ("GET /testcl/command HTTP/1.1\r\nHost: example.test\r\n\r\n",),
         ("-reset", "GET /testcl/command HTTP/1.1\r\nHost: example.test\r\n\r\n"),
     ),
 }
 _CANDIDATE_EVENT_HINTS = {
+    "TCP::recvwnd": "CLIENT_ACCEPTED",
+    "TCP::release": "CLIENT_DATA",
+    "TCP::sendbuf": "CLIENT_ACCEPTED",
     "TCP::notify": "CLIENT_DATA",
     "HTTP::release": "HTTP_REQUEST_DATA",
     "HTTP::retry": "HTTP_RESPONSE",

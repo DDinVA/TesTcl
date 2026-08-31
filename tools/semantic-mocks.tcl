@@ -20678,9 +20678,19 @@ namespace eval ::itest::semantic {
         return [set ::state::tcp::$name]
     }
 
+    proc tcp_buffer_setting {name args} {
+        if {[llength $args] > 1} { error "TCP::$name accepts an optional auto or non-negative integer" }
+        if {[llength $args] == 1 && [lindex $args 0] eq "auto"} {
+            # The bounded emulator represents automatic TCP buffer tuning as
+            # zero, matching the reset value and numeric getter contract.
+            return [tcp_numeric_setting $name 0]
+        }
+        return [tcp_numeric_setting $name {*}$args]
+    }
+
     proc tcp_keepalive_command {args} { return [tcp_numeric_setting keepalive {*}$args] }
-    proc tcp_sendbuf_command {args} { return [tcp_numeric_setting sendbuf {*}$args] }
-    proc tcp_recvwnd_command {args} { return [tcp_numeric_setting recvwnd {*}$args] }
+    proc tcp_sendbuf_command {args} { return [tcp_buffer_setting sendbuf {*}$args] }
+    proc tcp_recvwnd_command {args} { return [tcp_buffer_setting recvwnd {*}$args] }
 
     proc tcp_idletime_command {args} {
         if {[llength $args] != 1} { error "TCP::idletime requires a non-negative integer" }
