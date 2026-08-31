@@ -31,6 +31,17 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --tmos-build 17.5.4 --capture-id run-001 > capture-plan-000.json
 ```
 
+The optional BIG-IP collector can inspect that plan without touching a device:
+
+```sh
+./scripts/collect-tmos17.sh --plan capture-plan-000.json
+```
+
+Live execution is deliberately explicit and requires `BIGIP_USERNAME`,
+`BIGIP_PASSWORD`, `--execute`, and `--allow-device-write`; see
+[`docs/emulator.md`](../docs/emulator.md) for the virtual-server and traffic
+requirements.
+
 The `scenarios/multi-irule-17.5.json` fixture demonstrates multiple attached
 iRules with priority ordering and a shared pool fixture.
 

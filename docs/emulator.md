@@ -2514,6 +2514,40 @@ pagination and filtering parameters as the campaign endpoint plus
 `source`, `collector`, `tmos_build`, `capture_id`, and `name`. The MCP
 equivalent is `irule_capture_plan_template`.
 
+### Optional BIG-IP observation collector
+
+The repository includes a separate, standard-library collector at
+`tools/tmos17-collector.py` and `scripts/collect-tmos17.sh`. It is dry-run by
+default and does not need BIG-IP credentials for plan inspection:
+
+```sh
+./scripts/collect-tmos17.sh --plan capture-plan-000.json
+```
+
+For an explicit live run, set `BIGIP_USERNAME` and `BIGIP_PASSWORD`, then
+provide an existing virtual server and a URL that reaches it:
+
+```sh
+BIGIP_USERNAME=admin BIGIP_PASSWORD='…' \
+  ./scripts/collect-tmos17.sh \
+  --plan capture-plan-000.json \
+  --execute --allow-device-write \
+  --bigip-url https://bigip.example \
+  --virtual /Common/irule-test-vs \
+  --traffic-url http://198.18.0.1:18080 \
+  > records.ndjson
+```
+
+The collector creates one temporary diagnostic iRule per case, attaches it to
+the selected virtual, drives `HTTP_REQUEST` cases (and observes `RULE_INIT`),
+reads a structured `/var/log/ltm` record through iControl REST, and restores
+the virtual before deleting the temporary rule. Both `--execute` and
+`--allow-device-write` are required. TLS verification is enabled by default;
+`--insecure` is an explicit opt-out. Plans containing events outside this
+collector's triggerable subset are rejected before any device mutation unless
+`--allow-partial` is supplied. Partial output must be paired with a matching
+subset plan before assembly.
+
 ## Structured packet traces
 
 One-shot scenarios may use `packets` instead of `request`/`requests`. A trace
