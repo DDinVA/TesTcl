@@ -84,6 +84,39 @@
         "request": {"uri": "/"}
       },
       "expect": {"status": "ok", "value": "a b"}
+    },
+    {
+      "id": "compare-normalizes-default-http-port-and-case",
+      "probe": {
+        "command": "URI::compare",
+        "args": ["http://Example.com", "HTTP://example.com:80/"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "/"}
+      },
+      "expect": {"status": "ok", "value": "1"}
+    },
+    {
+      "id": "encode-preserves-uri-delimiters",
+      "probe": {
+        "command": "URI::encode",
+        "args": ["a b/c?x=1"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "/"}
+      },
+      "expect": {"status": "ok", "value": "a%20b/c?x=1"}
+    },
+    {
+      "id": "escape-aliases-encode",
+      "probe": {
+        "command": "URI::escape",
+        "args": ["a b/c?x=1"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "/"}
+      },
+      "expect": {"status": "ok", "value": "a%20b/c?x=1"}
     }
   ]
 }
