@@ -390,7 +390,18 @@ generate a bounded candidate chunk:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-candidates --namespace HTTP --offset 0 --limit 16 \
-  > behavior-candidates-http-000.json
+> behavior-candidates-http-000.json
+```
+
+To validate only the external portion before using a BIG-IP or vLab, extract
+the plan and run the collector in its default dry-run mode. This performs no
+device mutation:
+
+```sh
+jq '.capture_plan' behavior-candidates-http-000.json \
+  > behavior-capture-plan-http-000.json
+uv run --python 3.13 python tools/tmos17-collector.py \
+  --plan behavior-capture-plan-http-000.json
 ```
 
 Each candidate contains a registry-derived argument hypothesis, a target-valid
