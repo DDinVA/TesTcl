@@ -39,6 +39,7 @@ from tools.http2_wire import HTTP2_CLIENT_PREFACE, Http2ConnectionDecoder
 
 ROOT = Path(__file__).resolve().parents[1]
 ADAPTER_PATH = ROOT / "tools" / "irule-emulator.py"
+COLLECTOR_PATH = ROOT / "tools" / "tmos17-collector.py"
 FIXTURE_PATH = ROOT / "test" / "fixtures" / "emulator_http.json"
 
 
@@ -519,6 +520,18 @@ def _load_adapter():
     if spec is None or spec.loader is None:
         raise RuntimeError(f"could not load {ADAPTER_PATH}")
     module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_collector():
+    spec = importlib.util.spec_from_file_location(
+        "testcl_tmos17_collector", COLLECTOR_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load {COLLECTOR_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -4905,6 +4918,25 @@ when HTTP_RESPONSE_RELEASE {
 
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "between 1 and 64"):
             self.adapter._build_behavior_vector_candidates(root, [pack], 0, 65)
+
+    def test_behavior_candidate_plan_separates_local_fixtures_from_collector_input(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 1, namespace="LB"
+        )
+
+        local_input = candidates["candidates"][0]["input"]
+        external_input = candidates["capture_plan"]["observations"][0]["input"]
+        self.assertIn("scenario", local_input)
+        self.assertNotIn("scenario", external_input)
+
+        collector = _load_collector()
+        validated = collector.validate_plan(candidates["capture_plan"])
+        self.assertEqual(len(validated["observations"]), 1)
 
     def test_f5_catalog_spec_wins_over_tk_duplicate_event(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)

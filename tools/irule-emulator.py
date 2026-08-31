@@ -3140,13 +3140,23 @@ def _command_argument_candidates(
 
 
 def _candidate_fixture_scenario(command: str) -> dict[str, Any] | None:
-    """Supply only generic, non-secret state useful to local and external probes."""
+    """Supply only generic, non-secret state useful to local probe execution."""
     if command.startswith("LB::") or command in {"active_members", "persist"}:
         return {
             "pools": {"api_pool": ["192.0.2.10:80"]},
             "backends": {"192.0.2.10:80": {"state": "up"}},
         }
     return None
+
+
+def _capture_plan_probe_input(probe_input: dict[str, Any]) -> dict[str, Any]:
+    """Return only fields that the external TMOS collector is allowed to consume."""
+    allowed_fields = {"command", "args", "event", "profiles", "request"}
+    return {
+        field: value
+        for field, value in probe_input.items()
+        if field in allowed_fields
+    }
 
 
 def _build_behavior_vector_candidates(
@@ -3250,7 +3260,7 @@ def _build_behavior_vector_candidates(
                 {
                     "id": row["id"],
                     "operation": "command_probe",
-                    "input": probe_input,
+                    "input": _capture_plan_probe_input(probe_input),
                     "comparisons": [
                         {
                             "label": "command status",

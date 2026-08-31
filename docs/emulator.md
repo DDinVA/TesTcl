@@ -397,6 +397,10 @@ Each candidate contains a registry-derived argument hypothesis, a target-valid
 event/profile fixture, a protocol starter request when one is available, and a
 reference-free `capture_plan`. The plan can be passed to the existing
 `tools/tmos17-collector.py` workflow; it never fabricates expected TMOS output.
+The candidate's `input` may also contain a generic emulator-only fixture (for
+example, a bounded pool/member state for `LB::*` commands); that fixture stays
+available for the local sweep, while the generated `capture_plan` removes it so
+the plan remains valid at the external collector boundary.
 Candidates are chunked over the uncovered-command queue, with a maximum of 64
 commands per request. The argument hypotheses are intentionally reviewable:
 they are derived from the pinned tcl-lsp synopsis metadata and may need a
