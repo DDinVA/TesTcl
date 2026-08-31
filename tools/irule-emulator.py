@@ -343,6 +343,7 @@ OBSERVATION_PROVENANCE_MAX_FIELDS = 16
 OBSERVATION_PROVENANCE_MAX_VALUE_BYTES = 256
 CAPTURE_RECORD_MAX_BYTES = 512 * 1024
 CAPTURE_MAX_RECORDS = GOLDEN_VECTOR_MAX_CASES
+BEHAVIOR_CANDIDATE_MAX_PLAN_OBSERVATIONS = CAPTURE_MAX_RECORDS
 CAPTURE_REQUIRED_PROVENANCE_FIELDS = frozenset(
     {"collector", "tmos_build", "capture_id"}
 )
@@ -3167,6 +3168,7 @@ def _build_behavior_vector_candidates(
     *,
     namespace: str | None = None,
     runtime_status: str | None = None,
+    variants: int = 1,
 ) -> dict[str, Any]:
     """Build an executable, reference-free plan for uncovered TMOS 17.5 commands."""
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
@@ -3177,6 +3179,13 @@ def _build_behavior_vector_candidates(
         raise EmulatorInputError(
             "behavior candidate limit must be between 1 and "
             f"{BEHAVIOR_CANDIDATE_MAX_COMMANDS}"
+        )
+    if isinstance(variants, bool) or not isinstance(variants, int):
+        raise EmulatorInputError("behavior candidate variants must be an integer")
+    if not 1 <= variants <= BEHAVIOR_CANDIDATE_MAX_VARIANTS:
+        raise EmulatorInputError(
+            "behavior candidate variants must be between 1 and "
+            f"{BEHAVIOR_CANDIDATE_MAX_VARIANTS}"
         )
     if namespace is not None and (not isinstance(namespace, str) or not namespace):
         raise EmulatorInputError("behavior candidate namespace must be a non-empty string")
@@ -3196,6 +3205,12 @@ def _build_behavior_vector_candidates(
     ]
     start = min(offset, len(uncovered))
     selected_names = uncovered[start : start + limit]
+    if len(selected_names) * variants > BEHAVIOR_CANDIDATE_MAX_PLAN_OBSERVATIONS:
+        raise EmulatorInputError(
+            "behavior candidate chunk would create more than "
+            f"{BEHAVIOR_CANDIDATE_MAX_PLAN_OBSERVATIONS} capture observations; "
+            "reduce limit or variants"
+        )
     registry, _ = _runtime_status_map(root)
     event_inventory = _probe_event_inventory(root)
     candidate_rows: list[dict[str, Any]] = []
@@ -3256,20 +3271,32 @@ def _build_behavior_vector_candidates(
                     ),
                 }
             )
-            observations.append(
-                {
-                    "id": row["id"],
-                    "operation": "command_probe",
-                    "input": _capture_plan_probe_input(probe_input),
-                    "comparisons": [
-                        {
-                            "label": "command status",
-                            "actual_path": ["execution", "status"],
-                            "reference_path": ["status"],
-                        }
-                    ],
-                }
-            )
+            capture_variant_ids: list[str] = []
+            for variant_index, argument_candidate in enumerate(
+                argument_candidates[:variants]
+            ):
+                variant_input = dict(probe_input)
+                variant_input["args"] = list(argument_candidate["args"])
+                observation_id = row["id"] if variant_index == 0 else (
+                    f"{row['id']}:variant:{variant_index + 1}"
+                )
+                capture_variant_ids.append(observation_id)
+                observations.append(
+                    {
+                        "id": observation_id,
+                        "operation": "command_probe",
+                        "input": _capture_plan_probe_input(variant_input),
+                        "comparisons": [
+                            {
+                                "label": "command status",
+                                "actual_path": ["execution", "status"],
+                                "reference_path": ["status"],
+                            }
+                        ],
+                    }
+                )
+            row["capture_variant_count"] = len(capture_variant_ids)
+            row["capture_observation_ids"] = capture_variant_ids
         except EmulatorInputError as exc:
             row["generation_error"] = str(exc)
         candidate_rows.append(row)
@@ -3307,6 +3334,9 @@ def _build_behavior_vector_candidates(
         "summary": {
             "uncovered_command_count": len(uncovered),
             "candidate_command_count": len(candidate_rows),
+            "candidate_variant_count": sum(
+                row.get("capture_variant_count", 0) for row in candidate_rows
+            ),
             "plan_observation_count": len(observations),
             "candidate_status_counts": dict(sorted(status_counts.items())),
             "coverage": {
@@ -3322,6 +3352,7 @@ def _build_behavior_vector_candidates(
         "chunk": {
             "offset": offset,
             "limit": limit,
+            "variants": variants,
             "count": len(selected_names),
             "total": len(uncovered),
             "has_more": start + len(selected_names) < len(uncovered),
@@ -3368,6 +3399,7 @@ def _build_behavior_vector_sweep(
         limit,
         namespace=namespace,
         runtime_status=runtime_status,
+        variants=variants,
     )
     rows: list[dict[str, Any]] = []
     status_counts: dict[str, int] = {}
@@ -31255,6 +31287,12 @@ class McpProtocolServer:
                             "type": "string",
                             "enum": sorted(RUNTIME_STATUS_VALUES),
                         },
+                        "variants": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": BEHAVIOR_CANDIDATE_MAX_VARIANTS,
+                            "default": 1,
+                        },
                     },
                     ["packs"],
                 ),
@@ -31661,7 +31699,9 @@ class McpProtocolServer:
             )
 
         if name == "irule_behavior_candidates":
-            allowed = {"packs", "offset", "limit", "namespace", "runtime_status"}
+            allowed = {
+                "packs", "offset", "limit", "variants", "namespace", "runtime_status"
+            }
             unknown = sorted(set(args) - allowed)
             if unknown or not isinstance(args.get("packs"), list):
                 details = f": {', '.join(unknown)}" if unknown else ""
@@ -31677,6 +31717,7 @@ class McpProtocolServer:
                     args.get("limit", 16),
                     namespace=args.get("namespace"),
                     runtime_status=args.get("runtime_status"),
+                    variants=args.get("variants", 1),
                 )
             )
 
@@ -36823,6 +36864,7 @@ def _http_handler(
                 try:
                     offset = int(query.get("offset", ["0"])[0])
                     limit = int(query.get("limit", ["16"])[0])
+                    variants = int(query.get("variants", ["1"])[0])
                     filters = {
                         field: query[field][0]
                         for field in ("namespace", "runtime_status")
@@ -36838,6 +36880,7 @@ def _http_handler(
                         _read_behavior_coverage_directory(pack_dir),
                         offset,
                         limit,
+                        variants=variants,
                         **filters,
                     )
                 except (TypeError, ValueError, EmulatorInputError, OSError) as exc:
@@ -36967,7 +37010,7 @@ def _http_handler(
                             "behavior candidate request must be a JSON object"
                         )
                     allowed = {
-                        "packs", "offset", "limit", "namespace", "runtime_status"
+                        "packs", "offset", "limit", "variants", "namespace", "runtime_status"
                     }
                     unknown = sorted(set(request) - allowed)
                     if unknown or not isinstance(request.get("packs"), list):
@@ -36982,6 +37025,7 @@ def _http_handler(
                         request.get("limit", 16),
                         namespace=request.get("namespace"),
                         runtime_status=request.get("runtime_status"),
+                        variants=request.get("variants", 1),
                     )
                 except (
                     json.JSONDecodeError,
@@ -37535,7 +37579,7 @@ def main(argv: list[str] | None = None) -> int:
         "--variants",
         type=int,
         default=1,
-        help="number of argument hypotheses to execute per behavior-sweep command (1-8)",
+        help="number of argument hypotheses to include or execute per behavior command (1-8)",
     )
     parser.add_argument(
         "--behavior-pack-dir",
@@ -37800,6 +37844,7 @@ def main(argv: list[str] | None = None) -> int:
                 16 if args.limit is None else args.limit,
                 namespace=args.namespace,
                 runtime_status=args.runtime_status,
+                variants=args.variants,
             )
         elif args.behavior_sweep:
             if args.behavior_pack_dir is None:

@@ -349,7 +349,8 @@ when HTTP_RESPONSE {
     };
     const renderBehavior = (data, operation) => {
       const summary = data.summary || {};
-      const count = summary.variant_count ?? summary.candidate_command_count ?? 0;
+      const count = summary.variant_count ?? summary.candidate_variant_count ??
+        summary.candidate_command_count ?? 0;
       const executed = summary.executed_count ?? summary.plan_observation_count ?? 0;
       $("behavior-summary").textContent =
         `${operation} · ${count} candidate variants · ${executed} executed/planned · ` +
@@ -359,7 +360,7 @@ when HTTP_RESPONSE {
     };
     $("generate-behavior").addEventListener("click", () => {
       Promise.resolve().then(async () => {
-        const data = await request(`/v1/behavior-candidates?${behaviorOptions(false)}`);
+        const data = await request(`/v1/behavior-candidates?${behaviorOptions(true)}`);
         renderBehavior(data, "Candidates");
       }).catch((error) => {
         $("behavior-summary").textContent = error.message;

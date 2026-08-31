@@ -389,7 +389,7 @@ generate a bounded candidate chunk:
 
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
-  --behavior-candidates --namespace HTTP --offset 0 --limit 16 \
+  --behavior-candidates --namespace HTTP --offset 0 --limit 16 --variants 8 \
 > behavior-candidates-http-000.json
 ```
 
@@ -412,6 +412,10 @@ The candidate's `input` may also contain a generic emulator-only fixture (for
 example, a bounded pool/member state for `LB::*` commands); that fixture stays
 available for the local sweep, while the generated `capture_plan` removes it so
 the plan remains valid at the external collector boundary.
+The `--variants 8` option places all bounded registry-derived argument forms
+in the capture plan; reduce either `--limit` or `--variants` when the resulting
+plan would exceed the 256-observation capture limit. The default is one primary
+argument form per command.
 Candidates are chunked over the uncovered-command queue, with a maximum of 64
 commands per request. The argument hypotheses are intentionally reviewable:
 they are derived from the pinned tcl-lsp synopsis metadata and may need a

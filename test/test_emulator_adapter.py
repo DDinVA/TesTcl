@@ -4886,6 +4886,7 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(candidates["chunk"], {
             "offset": 0,
             "limit": 3,
+            "variants": 1,
             "count": 3,
             "total": 25,
             "has_more": True,
@@ -4918,6 +4919,52 @@ when HTTP_RESPONSE_RELEASE {
 
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "between 1 and 64"):
             self.adapter._build_behavior_vector_candidates(root, [pack], 0, 65)
+
+    def test_behavior_candidates_export_all_requested_argument_variants(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 7, 1, namespace="HTTP", variants=4
+        )
+
+        self.assertEqual(candidates["summary"]["candidate_variant_count"], 4)
+        self.assertEqual(candidates["summary"]["plan_observation_count"], 4)
+        self.assertEqual(
+            candidates["candidates"][0]["capture_observation_ids"],
+            [
+                "candidate:HTTP::hsts",
+                "candidate:HTTP::hsts:variant:2",
+                "candidate:HTTP::hsts:variant:3",
+                "candidate:HTTP::hsts:variant:4",
+            ],
+        )
+        self.assertEqual(
+            [
+                observation["input"]["args"]
+                for observation in candidates["capture_plan"]["observations"]
+            ],
+            [
+                ["include-subdomains", "enable"],
+                ["maximum-age", "1"],
+                ["mode", "enable"],
+                ["preload", "enable"],
+            ],
+        )
+        self.assertEqual(
+            len(_load_collector().validate_plan(candidates["capture_plan"])["observations"]),
+            4,
+        )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "between 1 and 8"):
+            self.adapter._build_behavior_vector_candidates(
+                root, [pack], 0, 1, namespace="HTTP", variants=9
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "more than 256"):
+            self.adapter._build_behavior_vector_candidates(
+                root, [pack], 0, 64, variants=8
+            )
 
     def test_behavior_candidate_plan_separates_local_fixtures_from_collector_input(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
@@ -4984,6 +5031,7 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["candidate_command_count"], 1)
         self.assertEqual(sweep["summary"]["variant_count"], 4)
         self.assertEqual(sweep["summary"]["executed_count"], 4)
+        self.assertEqual(len(sweep["capture_plan"]["observations"]), 4)
         self.assertEqual(sweep["summary"]["execution_status_counts"]["ok"], 4)
         self.assertEqual(len(sweep["candidates"][0]["variants"]), 4)
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "between 1 and 8"):
@@ -23815,7 +23863,9 @@ when CLIENT_DATA {
                 data=json.dumps({
                     "packs": [pack],
                     "namespace": "HTTP",
+                    "offset": 7,
                     "limit": 1,
+                    "variants": 4,
                 }).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
@@ -23823,11 +23873,12 @@ when CLIENT_DATA {
             with urllib.request.urlopen(candidates_request) as response:
                 candidates_payload = json.loads(response.read())
             self.assertEqual(candidates_payload["status"], "ok")
+            self.assertEqual(candidates_payload["summary"]["candidate_variant_count"], 4)
             self.assertEqual(
-                candidates_payload["candidates"][0]["command"], "HTTP::class"
+                candidates_payload["candidates"][0]["command"], "HTTP::hsts"
             )
             self.assertEqual(
-                len(candidates_payload["capture_plan"]["observations"]), 1
+                len(candidates_payload["capture_plan"]["observations"]), 4
             )
 
             sweep_request = urllib.request.Request(
@@ -24528,7 +24579,9 @@ when CLIENT_DATA {
                                 )
                             ],
                             "namespace": "HTTP",
+                            "offset": 7,
                             "limit": 1,
+                            "variants": 4,
                         },
                     },
                 }
@@ -24536,7 +24589,8 @@ when CLIENT_DATA {
             candidates_payload = candidates["result"]["structuredContent"]
             self.assertEqual(candidates_payload["status"], "ok")
             self.assertEqual(candidates_payload["summary"]["candidate_command_count"], 1)
-            self.assertEqual(candidates_payload["candidates"][0]["command"], "HTTP::class")
+            self.assertEqual(candidates_payload["summary"]["candidate_variant_count"], 4)
+            self.assertEqual(candidates_payload["candidates"][0]["command"], "HTTP::hsts")
 
             sweep = server.handle_message(
                 {

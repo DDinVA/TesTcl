@@ -65,8 +65,9 @@ For catalog-wide progress, run `./scripts/emulate-irule.sh --catalog-smoke
 reports which commands work, need arguments, or fail in the current emulator.
 To see semantic test-input coverage across all checked-in packs, run
 `./scripts/emulate-irule.sh --behavior-coverage`.
-To generate the next executable reference-capture chunk, run
-`./scripts/emulate-irule.sh --behavior-candidates --limit 16`.
+To generate the next executable reference-capture chunk, including up to eight
+registry-derived argument forms per command, run
+`./scripts/emulate-irule.sh --behavior-candidates --limit 16 --variants 8`.
 To execute that generated chunk locally and inspect dispatch/semantic outcomes,
 run `./scripts/emulate-irule.sh --behavior-sweep --namespace HTTP --limit 16`.
 Add `--variants 8` to exercise every bounded argument hypothesis per command.
