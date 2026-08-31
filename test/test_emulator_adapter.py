@@ -21085,6 +21085,128 @@ when HTTP_RESPONSE { HTTP::header insert X-Processed by-irule }
                 upstream_thread.join(timeout=5)
                 upstream_server.server_close()
 
+    def test_live_http2_data_plane_runs_staged_irule_request(self) -> None:
+        certificate_pem, private_key = _valid_server_material()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            certificate_path = Path(temporary_directory) / "server.pem"
+            key_path = Path(temporary_directory) / "server.key"
+            certificate_path.write_text(certificate_pem, encoding="ascii")
+            key_path.write_bytes(private_key)
+            scenario = {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    HTTP::header insert X-Rule-Path [HTTP::path]
+}
+when HTTP_RESPONSE {
+    HTTP::header insert X-Processed h2
+}
+""",
+                "live_origin": {
+                    "status": 200,
+                    "headers": {"X-Origin": "h2-fixture"},
+                    "body": "h2-origin",
+                },
+                "live_data_plane": {
+                    "protocol": "http2",
+                    "tls": {
+                        "certfile": str(certificate_path),
+                        "keyfile": str(key_path),
+                    },
+                },
+            }
+            server, manager = self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+            )
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            client_context.check_hostname = False
+            client_context.verify_mode = ssl.CERT_NONE
+            client_context.set_alpn_protocols(["h2"])
+            client = socket.create_connection(
+                ("127.0.0.1", self.adapter._data_plane_bound_port(server)), timeout=2
+            )
+            secure_client = client_context.wrap_socket(
+                client, server_hostname="localhost"
+            )
+            try:
+                self.assertEqual(secure_client.selected_alpn_protocol(), "h2")
+                request_headers = Encoder().encode(
+                    [
+                        (":method", "GET"),
+                        (":scheme", "https"),
+                        (":authority", "live.example"),
+                        (":path", "/h2"),
+                    ]
+                )
+                secure_client.sendall(
+                    HTTP2_CLIENT_PREFACE
+                    + _http2_frame(0x4, 0, 0)
+                    + _http2_frame(0x1, 0x5, 1, request_headers)
+                )
+                decoder = Http2ConnectionDecoder()
+                events: list[dict[str, Any]] = []
+                secure_client.settimeout(2)
+                while not any(
+                    event.get("kind") == "data" and event.get("end_stream")
+                    for event in events
+                ):
+                    payload = secure_client.recv(65535)
+                    self.assertTrue(payload, "HTTP/2 server closed before response")
+                    events.extend(decoder.feed(payload, "server_to_client"))
+                response_headers = next(
+                    event for event in events if event.get("kind") == "headers"
+                )
+                response_data = next(
+                    event for event in events if event.get("kind") == "data"
+                )
+                self.assertEqual(
+                    response_headers["pseudo_headers"].get(":status"), "200"
+                )
+                self.assertEqual(response_headers["headers"].get("x-origin"), "h2-fixture")
+                self.assertEqual(response_headers["headers"].get("x-processed"), "h2")
+                self.assertEqual(response_data["data"], b"h2-origin")
+                self.assertEqual(getattr(server, "_testcl_protocol"), "https")
+            finally:
+                secure_client.close()
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                manager.close_all()
+
+    def test_live_http2_data_plane_requires_tls_and_rejects_upstream(self) -> None:
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "requires"):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "",
+                    "live_origin": {"body": "fixture"},
+                    "live_data_plane": {"protocol": "http2"},
+                },
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "not supported"):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "",
+                    "live_data_plane": {
+                        "protocol": "http2",
+                        "tls": {
+                            "certfile": "/tmp/missing-cert.pem",
+                            "keyfile": "/tmp/missing-key.pem",
+                        },
+                        "upstream": {"host": "127.0.0.1", "port": 1},
+                    },
+                },
+            )
+
     def test_live_http_upstream_failure_fires_lb_failed_and_uses_fallback_pool(self) -> None:
         class FallbackHandler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API

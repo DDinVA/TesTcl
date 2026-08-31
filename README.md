@@ -34,8 +34,12 @@ HTTP bridge for testing a real backend peer; it is not a kernel TCP stack, TLS
 terminator, or database emulator. Protocol-specific TDS, FTP,
 LDAP, and similar wire parsers remain available through the packet/API drivers.
 The HTTP data plane can also terminate TLS 1.2+ with mounted `certfile` and
-`keyfile` material, and can use an explicitly configured HTTPS upstream; it
-supports HTTP/1.1 only and does not reproduce BIG-IP SSL profile semantics.
+`keyfile` material, and can use an explicitly configured HTTPS upstream. Set
+`live_data_plane.protocol` to `http2` to exercise a bounded TLS/ALPN `h2`
+listener against the deterministic `live_origin` fixture; HTTP/2 upstream
+bridging and BIG-IP SSL profile semantics are not reproduced.
+See `examples/scenarios/live-http2-17.5.json` for a certificate-mounted
+HTTP/2 listener template.
 Pool-aware raw TCP scenarios can map pools member names to local backend targets
 through live_data_plane.upstream.targets; the iRule's pool command then
 determines which mapped peer is opened. Set pool_modes to round_robin to rotate

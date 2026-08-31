@@ -54,6 +54,11 @@ except ModuleNotFoundError:  # test modules load this script by absolute path
     Http2DecodeError = _http2_module.Http2DecodeError
     HTTP2_CLIENT_PREFACE = _http2_module.HTTP2_CLIENT_PREFACE
 
+try:
+    from hpack import Encoder as HpackEncoder
+except ModuleNotFoundError:  # pragma: no cover - requirements install guard
+    HpackEncoder = None  # type: ignore[assignment,misc]
+
 
 TMOS_VERSION = "17.5"
 MAX_IRULE_SOURCES = 64
@@ -61,6 +66,7 @@ LIVE_HTTP_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 LIVE_RAW_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 LIVE_RAW_READ_SIZE = 64 * 1024
 LIVE_RAW_READ_TIMEOUT_SECONDS = 1.0
+LIVE_HTTP2_MAX_STREAMS = 128
 ADAPT_FIXTURE_RESULTS = frozenset({"noop", "modified", "response", "error"})
 ADAPT_FIXTURE_RESULT_ALIASES = {
     "noop": "noop",
@@ -32111,15 +32117,15 @@ def _normalise_live_data_plane_scenario(
             "unsupported live_data_plane field(s): " + ", ".join(unknown)
         )
     protocol = config.get("protocol", "http")
-    if not isinstance(protocol, str) or protocol.lower() not in {"http", "tcp"}:
-        raise EmulatorInputError("live_data_plane.protocol must be http or tcp")
+    if not isinstance(protocol, str) or protocol.lower() not in {"http", "http2", "tcp"}:
+        raise EmulatorInputError("live_data_plane.protocol must be http, http2, or tcp")
     protocol = protocol.lower()
 
     scenario = dict(raw)
     scenario.pop("live_data_plane", None)
     origin: dict[str, Any] | None = None
     server_tls = None
-    if protocol == "http":
+    if protocol in {"http", "http2"}:
         if "upstream" in config and "live_origin" in scenario:
             raise EmulatorInputError(
                 "live_origin cannot be combined with a live HTTP upstream"
@@ -32127,6 +32133,14 @@ def _normalise_live_data_plane_scenario(
         scenario, origin = _normalise_live_http_scenario(scenario)
         if "tls" in config and config["tls"] is not None:
             server_tls = _normalise_live_server_tls(config["tls"])
+        if protocol == "http2" and server_tls is None:
+            raise EmulatorInputError(
+                "live_data_plane.protocol http2 requires live_data_plane.tls"
+            )
+        if protocol == "http2" and "upstream" in config:
+            raise EmulatorInputError(
+                "live_data_plane.upstream is not supported for live HTTP/2"
+            )
     elif "live_origin" in scenario:
         raise EmulatorInputError("live_origin is only valid for the HTTP data plane")
     elif "tls" in config and config["tls"] is not None:
@@ -32340,13 +32354,15 @@ def _normalise_live_data_plane_scenario(
         "upstream": upstream,
         "tls": server_tls,
     }
-    if protocol == "http":
+    if protocol in {"http", "http2"}:
         assert origin is not None
         result["origin"] = origin
     return scenario, result
 
 
-def _build_live_server_tls_context(settings: dict[str, Any]) -> ssl.SSLContext:
+def _build_live_server_tls_context(
+    settings: dict[str, Any], *, alpn_protocols: list[str]
+) -> ssl.SSLContext:
     """Build a bounded TLS server context for the live HTTP listener."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -32357,7 +32373,7 @@ def _build_live_server_tls_context(settings: dict[str, Any]) -> ssl.SSLContext:
         context.verify_mode = (
             ssl.CERT_REQUIRED if client_auth == "required" else ssl.CERT_OPTIONAL
         )
-    context.set_alpn_protocols(["http/1.1"])
+    context.set_alpn_protocols(alpn_protocols)
     return context
 
 
@@ -33188,6 +33204,263 @@ def _live_tcp_handler(
     return LiveTCPHandler
 
 
+def _live_http2_frame(
+    frame_type: int, flags: int, stream_id: int, payload: bytes = b""
+) -> bytes:
+    """Encode one bounded HTTP/2 frame for the live adapter."""
+    if len(payload) > 0x00FF_FFFF:
+        raise EmulatorResourceError("live HTTP/2 frame exceeds the wire limit")
+    return (
+        len(payload).to_bytes(3, "big")
+        + bytes((frame_type, flags))
+        + (stream_id & 0x7FFF_FFFF).to_bytes(4, "big")
+        + payload
+    )
+
+
+def _live_http2_handler(
+    scenario: dict[str, Any],
+    config: dict[str, Any],
+    origin_defaults: dict[str, Any],
+    manager: "SessionManager",
+) -> type[socketserver.BaseRequestHandler]:
+    """Build a bounded TLS HTTP/2 real-client adapter over iRule sessions."""
+
+    class LiveHTTP2Handler(socketserver.BaseRequestHandler):
+        def _respond(
+            self, encoder: Any, stream_id: int, result: dict[str, Any]
+        ) -> None:
+            response = result.get("response", {})
+            status = response.get("status", 500)
+            if isinstance(status, bool) or not isinstance(status, int) or not 200 <= status <= 599:
+                raise EmulatorInputError("emulator returned an invalid HTTP/2 status")
+            body = response.get("body", "")
+            if not isinstance(body, str):
+                raise EmulatorInputError("emulator returned an invalid HTTP/2 body")
+            body_bytes = body.encode("utf-8")
+            if len(body_bytes) > config["max_read_bytes"]:
+                raise EmulatorResourceError(
+                    "live HTTP/2 response body exceeds the configured byte limit"
+                )
+            headers = response.get("headers", {})
+            if not isinstance(headers, dict):
+                raise EmulatorInputError("emulator returned invalid HTTP/2 headers")
+            request = result.get("request", {})
+            request_method = request.get("method", "") if isinstance(request, dict) else ""
+            wire_body = b"" if (
+                request_method.upper() == "HEAD"
+                or status in {204, 304}
+                or 100 <= status < 200
+            ) else body_bytes
+            header_pairs: list[tuple[str, str]] = [(":status", str(status))]
+            has_content_length = False
+            hop_by_hop = {
+                "connection",
+                "keep-alive",
+                "proxy-connection",
+                "transfer-encoding",
+                "upgrade",
+            }
+            for name, value in headers.items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or not isinstance(value, str)
+                    or any(character in name + value for character in "\r\n\x00")
+                ):
+                    raise EmulatorInputError("emulator returned unsafe HTTP/2 headers")
+                lower_name = name.lower()
+                if lower_name in hop_by_hop:
+                    continue
+                if lower_name == "content-length":
+                    has_content_length = True
+                header_pairs.append((lower_name, value))
+            if not has_content_length:
+                header_pairs.append(("content-length", str(len(body_bytes))))
+            encoded_headers = encoder.encode(header_pairs)
+            flags = 0x4
+            if not wire_body:
+                flags |= 0x1
+            self.request.sendall(_live_http2_frame(0x1, flags, stream_id, encoded_headers))
+            if wire_body:
+                offset = 0
+                while offset < len(wire_body):
+                    end = min(offset + 16 * 1024, len(wire_body))
+                    data_flags = 0x1 if end == len(wire_body) else 0
+                    self.request.sendall(
+                        _live_http2_frame(0x0, data_flags, stream_id, wire_body[offset:end])
+                    )
+                    offset = end
+
+        def _run_stream(
+            self, session_id: str, stream: dict[str, Any]
+        ) -> dict[str, Any]:
+            header_event = stream["headers"]
+            pseudo_headers = header_event.get("pseudo_headers", {})
+            method = pseudo_headers.get(":method")
+            uri = pseudo_headers.get(":path")
+            if not isinstance(method, str) or not method:
+                raise EmulatorInputError("HTTP/2 request is missing :method")
+            if not isinstance(uri, str) or not uri:
+                raise EmulatorInputError("HTTP/2 request is missing :path")
+            request = {
+                "method": method,
+                "uri": uri,
+                "host": pseudo_headers.get(":authority", ""),
+                "headers": dict(header_event.get("headers", {})),
+            }
+            staged = manager.execute(
+                session_id,
+                lambda session: session.start_staged_http_request(request),
+            )
+            if not isinstance(staged, dict):
+                raise EmulatorInputError("emulator returned invalid staged HTTP state")
+            staged["initial_result"] = dict(staged)
+            staged["request"] = dict(request)
+            staged["events"] = list(staged.get("events_fired", []))
+            staged["decisions"] = list(staged.get("decisions", []))
+            staged["logs"] = list(staged.get("logs", []))
+            body = bytes(stream["body"])
+            staged["expected"] = len(body)
+            staged["body"] = bytearray()
+            if body:
+                if staged.get("collect_requested"):
+                    manager.execute(
+                        session_id,
+                        lambda session: session.deliver_staged_http_body(staged, body),
+                    )
+                else:
+                    staged["body"] = bytearray(body)
+            return manager.execute(
+                session_id,
+                lambda session: session.complete_staged_http_request(
+                    staged, origin_defaults
+                ),
+            )
+
+        def handle(self) -> None:  # noqa: D401 - socketserver API
+            session_id: str | None = None
+            decoder = Http2ConnectionDecoder()
+            if HpackEncoder is None:
+                raise EmulatorInputError("live HTTP/2 requires hpack")
+            encoder = HpackEncoder()
+            streams: dict[int, dict[str, Any]] = {}
+            preface_buffer = bytearray()
+            preface_seen = False
+            stream_count = 0
+            total_bytes = 0
+            try:
+                session_id = manager.create(scenario)
+                self.request.settimeout(config["read_timeout"])
+                self.request.sendall(_live_http2_frame(0x4, 0, 0))
+                while True:
+                    remaining = config["max_read_bytes"] - total_bytes
+                    if remaining <= 0:
+                        raise EmulatorResourceError(
+                            "live HTTP/2 connection exceeds the configured byte limit"
+                        )
+                    payload = self.request.recv(min(LIVE_RAW_READ_SIZE, remaining))
+                    if not payload:
+                        break
+                    total_bytes += len(payload)
+                    if total_bytes > config["max_read_bytes"]:
+                        raise EmulatorResourceError(
+                            "live HTTP/2 connection exceeds the configured byte limit"
+                        )
+                    wire_payload = payload
+                    if not preface_seen:
+                        preface_buffer.extend(payload)
+                        if len(preface_buffer) < len(HTTP2_CLIENT_PREFACE):
+                            if not HTTP2_CLIENT_PREFACE.startswith(preface_buffer):
+                                raise EmulatorInputError(
+                                    "live HTTP/2 client preface is invalid"
+                                )
+                            continue
+                        if bytes(preface_buffer[: len(HTTP2_CLIENT_PREFACE)]) != HTTP2_CLIENT_PREFACE:
+                            raise EmulatorInputError(
+                                "live HTTP/2 client preface is invalid"
+                            )
+                        preface_seen = True
+                        wire_payload = bytes(preface_buffer)
+                        preface_buffer.clear()
+                    events = decoder.feed(wire_payload, "client_to_server")
+                    for event in events:
+                        if event.get("kind") == "control":
+                            frame_type = event.get("frame_type")
+                            if frame_type == "SETTINGS":
+                                self.request.sendall(_live_http2_frame(0x4, 0x1, 0))
+                            elif frame_type == "PING" and not event.get("ack"):
+                                opaque = bytes.fromhex(event["opaque_data_hex"])
+                                self.request.sendall(_live_http2_frame(0x6, 0x1, 0, opaque))
+                            elif frame_type == "GOAWAY":
+                                return
+                            continue
+                        stream_id = event.get("stream_id")
+                        if (
+                            isinstance(stream_id, bool)
+                            or not isinstance(stream_id, int)
+                            or stream_id <= 0
+                            or stream_id % 2 == 0
+                        ):
+                            raise EmulatorInputError(
+                                "live HTTP/2 client stream IDs must be positive odd integers"
+                            )
+                        if event.get("kind") == "headers":
+                            if stream_id in streams:
+                                raise EmulatorInputError(
+                                    "live HTTP/2 stream received duplicate headers"
+                                )
+                            if len(streams) >= LIVE_HTTP2_MAX_STREAMS:
+                                raise EmulatorResourceError(
+                                    "live HTTP/2 connection has too many open streams"
+                                )
+                            stream_count += 1
+                            if stream_count > LIVE_HTTP2_MAX_STREAMS:
+                                raise EmulatorResourceError(
+                                    "live HTTP/2 connection exceeded the stream limit"
+                                )
+                            streams[stream_id] = {
+                                "headers": event,
+                                "body": bytearray(),
+                            }
+                            if event.get("end_stream"):
+                                result = self._run_stream(session_id, streams.pop(stream_id))
+                                self._respond(encoder, stream_id, result)
+                        elif event.get("kind") == "data":
+                            stream = streams.get(stream_id)
+                            if stream is None:
+                                raise EmulatorInputError(
+                                    "live HTTP/2 DATA frame has no open request stream"
+                                )
+                            stream["body"].extend(event.get("data", b""))
+                            if len(stream["body"]) > config["max_read_bytes"]:
+                                raise EmulatorResourceError(
+                                    "live HTTP/2 request body exceeds the configured byte limit"
+                                )
+                            if event.get("end_stream"):
+                                result = self._run_stream(session_id, streams.pop(stream_id))
+                                self._respond(encoder, stream_id, result)
+            except (
+                EmulatorInputError,
+                EmulatorResourceError,
+                Http2DecodeError,
+                KeyError,
+                TypeError,
+                ValueError,
+                UnicodeError,
+                OSError,
+            ) as exc:
+                print(f"testcl live HTTP/2 connection closed: {exc}", file=sys.stderr)
+            finally:
+                if session_id is not None:
+                    try:
+                        manager.close(session_id)
+                    except EmulatorNotFoundError:
+                        pass
+
+    return LiveHTTP2Handler
+
+
 class _LiveHTTPServer(ThreadingHTTPServer):
     """HTTP listener that can reject bad TLS handshakes without dying."""
 
@@ -33244,18 +33517,28 @@ def _data_plane_server(
             scenario, float(upstream["failure_cooldown"])
         )
     try:
-        if config["protocol"] == "http":
+        if config["protocol"] in {"http", "http2"}:
             tls_settings = config.get("tls")
             tls_context = (
-                _build_live_server_tls_context(tls_settings)
+                _build_live_server_tls_context(
+                    tls_settings,
+                    alpn_protocols=["h2"] if config["protocol"] == "http2" else ["http/1.1"],
+                )
                 if tls_settings is not None
                 else None
             )
-            server = _LiveHTTPServer(
+            server_class = _LiveHTTPServer
+            handler = _live_http_handler(
+                root, scenario, config["origin"], manager, config, scheduler
+            )
+            if config["protocol"] == "http2":
+                server_class = _LiveHTTPServer
+                handler = _live_http2_handler(
+                    scenario, config, config["origin"], manager
+                )
+            server = server_class(
                 (host, port),
-                _live_http_handler(
-                    root, scenario, config["origin"], manager, config, scheduler
-                ),
+                handler,
                 tls_context=tls_context,
                 handshake_timeout=config.get(
                     "read_timeout", LIVE_RAW_READ_TIMEOUT_SECONDS
@@ -33271,7 +33554,9 @@ def _data_plane_server(
     setattr(
         server,
         "_testcl_protocol",
-        "https" if config["protocol"] == "http" and config.get("tls") else config["protocol"],
+        "https"
+        if config["protocol"] in {"http", "http2"} and config.get("tls")
+        else config["protocol"],
     )
     setattr(server, "_testcl_pool_scheduler", scheduler)
     server.daemon_threads = True

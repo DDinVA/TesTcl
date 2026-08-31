@@ -67,9 +67,20 @@ are rejected explicitly, and response hop-by-hop headers are normalized by the
 listener. This is a deterministic HTTP data-plane adapter, not a kernel TCP
 stack or full live proxy. It can terminate bounded HTTPS with a configured
 certificate and key, and can connect to an HTTPS upstream with explicit
-certificate verification settings. The listener and upstream use HTTP/1.1 with
-TLS 1.2 or newer; HTTP/2 negotiation, TLS session resumption, and BIG-IP SSL
-profile semantics remain outside this adapter.
+certificate verification settings. HTTP/1.1 uses TLS 1.2 or newer when enabled.
+
+For a real TLS client using HTTP/2, set `live_data_plane.protocol` to `http2`.
+The listener advertises ALPN `h2`, decodes the client preface plus bounded
+HEADERS/DATA frames with HPACK, and runs the same staged `HTTP_REQUEST`,
+optional body collection, origin, and `HTTP_RESPONSE` lifecycle. HTTP/2 is
+currently limited to the deterministic `live_origin` fixture: cleartext
+prior-knowledge mode and HTTP/2 upstream bridging are rejected explicitly.
+The listener caps each connection at 2 MiB and 128 concurrent request streams;
+TLS session resumption and BIG-IP SSL profile semantics remain outside this
+adapter. The checked-in
+[`live-http2-17.5.json`](../examples/scenarios/live-http2-17.5.json) scenario
+shows the certificate paths expected when running the container with mounted
+secrets.
 
 To exercise a real HTTP backend, replace `live_origin` with
 `live_data_plane.upstream`. The direct `{host, port}` form sends the
