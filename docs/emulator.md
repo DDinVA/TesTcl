@@ -350,7 +350,7 @@ discarding the passing cases. The same runner is available as
 `POST /v1/behavior-packs` and the MCP tool `irule_behavior_pack`. The checked-in
 packs cover HTTP, HTTP/2, DNS, TCP, TLS/SSL, UDP/datagram, WebSocket, RTSP,
 SIP/SDP/SIPALG, load-balancing, URI, stream filtering, route metrics, TMM CMP
-topology, and stateful
+topology, FLOWTABLE queries, classification lifecycle, and stateful
 session/table contracts for
 the pinned 17.5 profile. The SIP pack exercises all 16 catalogued `SIP::`
 commands, nine SDP accessors, and three SIPALG controls across command probes
@@ -373,7 +373,7 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 133 of 989 target F5 commands (13.45%). This is test-input
+current report covers 149 of 989 target F5 commands (15.07%). This is test-input
 coverage, not a semantic-fidelity score.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
@@ -396,6 +396,21 @@ Run the TMM behavior pack to verify deterministic CMP topology values:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/tmm-17.5.json
+```
+
+Run the FLOWTABLE behavior pack to verify bounded count and limit queries:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/flowtable-17.5.json
+```
+
+Run the classification behavior pack to verify detection fields and
+classification controls:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/classification-17.5.json
 ```
 
 For service clients, submit the packs as one bounded JSON request to
@@ -1017,7 +1032,7 @@ The six TMOS 17.5 `CLASSIFY::*` controls integrate with that same state:
 application, category, and URL-category `set`/`add` commands overlay the next
 supplied classification result, `CLASSIFY::username` assigns flow metadata,
 `CLASSIFY::disable` suppresses detection, and `CLASSIFY::defer` may be used in
-`FLOW_INIT` before an explicitly marked server-side classification packet.
+`HTTP_REQUEST` before an explicitly marked server-side classification packet.
 This is deterministic classification control state; it does not run a PEM
 classifier or infer results from payloads.
 The legacy `urlcatquery` and `urlcatblindquery` commands use exact-match

@@ -29963,6 +29963,40 @@ class EmulatorSession:
                 finish_packet_connection(packet, entry, index)
                 continue
             elif protocol == "classification":
+                # A direct HTTP packet is held pending so a later HTTP
+                # response can drive HTTP_RESPONSE.  Classification can be
+                # deferred from HTTP_REQUEST, however, so a server-side
+                # classification notification must observe that request
+                # event before its own direction-specific gate is evaluated.
+                if pending_http is not None and staged_http is None and direction == "server_to_client":
+                    request = dict(pending_http[0])
+                    stage_result = self._start_staged_http_request_on_worker(
+                        session, request
+                    )
+                    body_bytes = str(request.get("body", "")).encode("utf-8")
+                    staged_http = {
+                        "request": request,
+                        "initial_result": stage_result,
+                        "body_mode": "content-length",
+                        "expected": len(body_bytes),
+                        "body": bytearray(),
+                        "wire_body": bytearray(body_bytes),
+                        "collect_requested": bool(
+                            stage_result["staged"]["collect_requested"]
+                        ),
+                        "collect_length": int(
+                            stage_result["staged"]["collect_length"]
+                        ),
+                        "collect_offset": 0,
+                        "events": list(stage_result.get("events_fired", [])),
+                        "decisions": list(stage_result.get("decisions", [])),
+                        "logs": list(stage_result.get("logs", [])),
+                        "data_events": [],
+                    }
+                    if body_bytes:
+                        self._deliver_staged_http_body_on_worker(
+                            session, staged_http, body_bytes
+                        )
                 self._activate_packet_connection(session, packet, entry["events"])
                 if packet["direction"] == "server_to_client":
                     deferred = session.eval_tcl(

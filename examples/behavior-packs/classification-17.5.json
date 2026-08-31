@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "classification-17.5",
+  "cases": [
+    {
+      "id": "classification-detected-fields",
+      "scenario": {
+        "profiles": ["TCP", "CLASSIFICATION"],
+        "irule": "when CLASSIFICATION_DETECTED { log local0. \"app=[CLASSIFICATION::app] category=[CLASSIFICATION::category] protocol=[CLASSIFICATION::protocol] result=[CLASSIFICATION::result] urlcat=[CLASSIFICATION::urlcat] username=[CLASSIFICATION::username]\" }",
+        "packets": [{"protocol": "classification", "app": "streaming", "category": "media", "classification_protocol": "https", "result": ["streaming", "media"], "urlcat": "entertainment", "username": "alice"}]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "state", "classification", "app"], "equals": "streaming"},
+          {"path": ["trace", 0, "events", 2, "state", "classification", "category"], "equals": "media"},
+          {"path": ["trace", 0, "events", 2, "state", "classification", "protocol"], "equals": "https"},
+          {"path": ["trace", 0, "events", 2, "state", "classification", "result"], "equals": "{\"streaming\" \"media\"}"},
+          {"path": ["trace", 0, "events", 2, "state", "classification", "urlcat"], "equals": "entertainment"},
+          {"path": ["trace", 0, "events", 2, "state", "classification", "username"], "equals": "alice"},
+          {"path": ["trace", 0, "classification_result"], "equals": "{\"streaming\" \"media\"}"}
+        ]
+      }
+    },
+    {
+      "id": "classification-enable",
+      "probe": {"command": "CLASSIFICATION::enable", "event": "CLIENT_ACCEPTED", "profiles": ["TCP", "CLASSIFICATION"]},
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "classification-disable",
+      "probe": {"command": "CLASSIFICATION::disable", "event": "CLIENT_ACCEPTED", "profiles": ["TCP", "CLASSIFICATION"]},
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "classify-application-set",
+      "probe": {"command": "CLASSIFY::application", "args": ["set", "forced-app"], "event": "HTTP_REQUEST", "profiles": ["TCP", "FASTHTTP"]},
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "classify-category-add",
+      "probe": {"command": "CLASSIFY::category", "args": ["add", "manual-category"], "event": "HTTP_REQUEST", "profiles": ["TCP", "FASTHTTP"]},
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "classify-defer",
+      "probe": {"command": "CLASSIFY::defer", "event": "HTTP_REQUEST", "profiles": ["TCP", "FASTHTTP"]},
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "classify-disable",
+      "probe": {"command": "CLASSIFY::disable", "event": "CLIENT_ACCEPTED", "profiles": ["TCP"]},
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "classify-urlcat-add",
+      "probe": {"command": "CLASSIFY::urlcat", "args": ["add", "manual-urlcat"], "event": "HTTP_REQUEST", "profiles": ["TCP", "FASTHTTP"]},
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "classify-username",
+      "probe": {"command": "CLASSIFY::username", "args": ["alice", "auth-context"], "event": "CLIENT_ACCEPTED", "profiles": ["TCP"]},
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "defer-http-request-before-server-classification",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "CLASSIFICATION"],
+        "irule": "when HTTP_REQUEST { CLASSIFY::defer } when CLASSIFICATION_DETECTED { log local0. \"deferred=[CLASSIFICATION::result]\" }",
+        "packets": [
+          {"protocol": "http", "direction": "client_to_server", "method": "GET", "uri": "/", "headers": {}},
+          {"protocol": "classification", "direction": "server_to_client", "deferred": true, "result": ["response-app"]}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 1, "events", 0, "event"], "equals": "CLASSIFICATION_DETECTED"},
+          {"path": ["trace", 1, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 1, "classification_result"], "equals": "{\"response-app\"}"}
+        ]
+      }
+    }
+  ]
+}

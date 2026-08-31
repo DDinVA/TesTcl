@@ -4749,6 +4749,8 @@ when HTTP_RESPONSE_RELEASE {
             "stream-17.5.json": 8,
             "route-17.5.json": 10,
             "tmm-17.5.json": 5,
+            "flowtable-17.5.json": 7,
+            "classification-17.5.json": 10,
             "stateful-17.5.json": 2,
             "ssl-tls-17.5.json": 16,
             "http2-17.5.json": 11,
@@ -9158,6 +9160,30 @@ when CLASSIFICATION_DETECTED { log local0. "app=[CLASSIFICATION::app] result=[CL
         self.assertEqual(forced["state"]["classification"]["app"], "forced-app")
         self.assertEqual(forced["state"]["classification"]["result"], "forced-app")
 
+        client_accepted = self.adapter.EmulatorSession(
+            self.tcl_lsp_root,
+            {
+                "profiles": ["TCP", "FASTHTTP"],
+                "irule": "when CLIENT_ACCEPTED { CLASSIFY::application set accepted-app; CLASSIFY::category add accepted-category; CLASSIFY::urlcat add accepted-urlcat }",
+            },
+            allow_irule_file=True,
+            allow_requests=False,
+            allow_packets=False,
+        )
+        try:
+            accepted = client_accepted.fire_event("CLIENT_ACCEPTED", {})
+        finally:
+            client_accepted.close()
+        self.assertEqual(accepted["fired"], True)
+        self.assertEqual(
+            accepted["decisions"],
+            [
+                "classify application_set accepted-app",
+                "classify category_add_ignored accepted-category",
+                "classify urlcat_add_ignored accepted-urlcat",
+            ],
+        )
+
         disabled = self.adapter.run_scenario(
             {
                 "profiles": ["TCP", "CLASSIFICATION"],
@@ -9171,19 +9197,17 @@ when CLASSIFICATION_DETECTED { log local0. "app=[CLASSIFICATION::app] result=[CL
 
         deferred = self.adapter.run_scenario(
             {
-                "profiles": ["TCP", "FLOW", "CLASSIFICATION"],
-                "irule": "when FLOW_INIT { CLASSIFY::defer } when CLASSIFICATION_DETECTED { log local0. \"deferred=[CLASSIFICATION::result]\" }",
-                "packets": [{
-                    "protocol": "classification",
-                    "direction": "server_to_client",
-                    "deferred": True,
-                    "result": ["response-app"],
-                }],
+                "profiles": ["TCP", "HTTP", "CLASSIFICATION"],
+                "irule": "when HTTP_REQUEST { CLASSIFY::defer } when CLASSIFICATION_DETECTED { log local0. \"deferred=[CLASSIFICATION::result]\" }",
+                "packets": [
+                    {"protocol": "http", "direction": "client_to_server", "method": "GET", "uri": "/", "headers": {}},
+                    {"protocol": "classification", "direction": "server_to_client", "deferred": True, "result": ["response-app"]},
+                ],
             },
             tcl_lsp_root=self.tcl_lsp_root,
         )
         deferred_event = next(
-            event for event in deferred["trace"][0]["events"]
+            event for event in deferred["trace"][1]["events"]
             if event["event"] == "CLASSIFICATION_DETECTED"
         )
         self.assertTrue(deferred_event["fired"])
@@ -9191,7 +9215,48 @@ when CLASSIFICATION_DETECTED { log local0. "app=[CLASSIFICATION::app] result=[CL
             deferred_event["state"]["classification"]["deferred"], "1"
         )
         self.assertEqual(
-            deferred["trace"][0]["classification_result"], '{"response-app"}'
+            deferred["trace"][1]["classification_result"], '{"response-app"}'
+        )
+
+        collected = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP", "CLASSIFICATION"],
+                "irule": "when HTTP_REQUEST { HTTP::collect 3; CLASSIFY::defer } when HTTP_REQUEST_DATA { log local0. \\\"data=[HTTP::payload]\\\" } when CLASSIFICATION_DETECTED { log local0. \\\"classification=[CLASSIFICATION::result]\\\" } when HTTP_RESPONSE { HTTP::header replace X-After-Classification yes }",
+                "packets": [
+                    {
+                        "protocol": "http",
+                        "direction": "client_to_server",
+                        "method": "POST",
+                        "uri": "/",
+                        "headers": {},
+                        "body": "abcdef",
+                    },
+                    {
+                        "protocol": "classification",
+                        "direction": "server_to_client",
+                        "deferred": True,
+                        "result": ["response-app"],
+                    },
+                    {
+                        "protocol": "http",
+                        "direction": "server_to_client",
+                        "status": 200,
+                        "response_headers": {},
+                        "response_body": "ok",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertIn("HTTP_REQUEST_DATA", collected["results"][0]["events_fired"])
+        self.assertEqual(
+            collected["results"][0]["response"]["headers"][
+                "x-after-classification"
+            ],
+            "yes",
+        )
+        self.assertEqual(
+            collected["trace"][1]["classification_result"], '{"response-app"}'
         )
 
         with self.assertRaisesRegex(

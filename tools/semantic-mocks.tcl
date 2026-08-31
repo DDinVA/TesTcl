@@ -19912,8 +19912,8 @@ namespace eval ::itest::semantic {
         return [classification_field_command username CLASSIFICATION::username {*}$args]
     }
 
-    proc _classify_require_http {command_name} {
-        if {$::itest::current_event ni {HTTP_REQUEST HTTP_RESPONSE}} {
+    proc _classify_require_event {command_name} {
+        if {$::itest::current_event ni {CLIENT_ACCEPTED HTTP_REQUEST HTTP_RESPONSE}} {
             error "$command_name is not valid during $::itest::current_event"
         }
     }
@@ -19925,7 +19925,7 @@ namespace eval ::itest::semantic {
     }
 
     proc _classify_set_or_add {kind command_name args} {
-        _classify_require_http $command_name
+        _classify_require_event $command_name
         if {[llength $args] != 2} {
             error "$command_name requires set or add and a value"
         }
@@ -19968,7 +19968,7 @@ namespace eval ::itest::semantic {
     }
 
     proc classify_defer_command {args} {
-        if {$::itest::current_event ne "FLOW_INIT"} {
+        if {$::itest::current_event ne "HTTP_REQUEST"} {
             error "CLASSIFY::defer is not valid during $::itest::current_event"
         }
         if {[llength $args] != 0} {
