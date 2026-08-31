@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "route-17.5",
+  "cases": [
+    {
+      "id": "age",
+      "probe": {
+        "command": "ROUTE::age",
+        "args": ["192.0.2.10", "192.0.2.1"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"route": {"domain": "7", "metrics": [{"destination": "192.0.2.10", "gateway": "192.0.2.1", "age": 12, "expiration": 300, "mtu": 1500, "rtt": 3200, "rttvar": 400, "cwnd": 14600, "bandwidth": 3650}]}}
+      },
+      "expect": {"status": "ok", "value": "12"}
+    },
+    {
+      "id": "bandwidth",
+      "probe": {
+        "command": "ROUTE::bandwidth",
+        "args": ["192.0.2.10", "192.0.2.1"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"route": {"domain": "7", "metrics": [{"destination": "192.0.2.10", "gateway": "192.0.2.1", "age": 12, "expiration": 300, "mtu": 1500, "rtt": 3200, "rttvar": 400, "cwnd": 14600, "bandwidth": 3650}]}}
+      },
+      "expect": {"status": "ok", "value": "3650"}
+    },
+    {
+      "id": "clear",
+      "probe": {
+        "command": "ROUTE::clear",
+        "args": ["192.0.2.10", "192.0.2.1"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"route": {"domain": "7", "metrics": [{"destination": "192.0.2.10", "gateway": "192.0.2.1", "age": 12, "expiration": 300, "mtu": 1500, "rtt": 3200, "rttvar": 400, "cwnd": 14600, "bandwidth": 3650}]}}
+      },
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "cwnd",
+      "probe": {
+        "command": "ROUTE::cwnd",
+        "args": ["192.0.2.10", "192.0.2.1"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"route": {"domain": "7", "metrics": [{"destination": "192.0.2.10", "gateway": "192.0.2.1", "age": 12, "expiration": 300, "mtu": 1500, "rtt": 3200, "rttvar": 400, "cwnd": 14600, "bandwidth": 3650}]}}
+      },
+      "expect": {"status": "ok", "value": "14600"}
+    },
+    {
+      "id": "domain",
+      "probe": {
+        "command": "ROUTE::domain",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"route": {"domain": "7"}}
+      },
+      "expect": {"status": "ok", "value": "7"}
+    },
+    {
+      "id": "expiration",
+      "probe": {
+        "command": "ROUTE::expiration",
+        "args": ["192.0.2.10", "192.0.2.1"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"route": {"domain": "7", "metrics": [{"destination": "192.0.2.10", "gateway": "192.0.2.1", "age": 12, "expiration": 300, "mtu": 1500, "rtt": 3200, "rttvar": 400, "cwnd": 14600, "bandwidth": 3650}]}}
+      },
+      "expect": {"status": "ok", "value": "300"}
+    },
+    {
+      "id": "mtu",
+      "probe": {
+        "command": "ROUTE::mtu",
+        "args": ["192.0.2.10", "192.0.2.1"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"route": {"domain": "7", "metrics": [{"destination": "192.0.2.10", "gateway": "192.0.2.1", "age": 12, "expiration": 300, "mtu": 1500, "rtt": 3200, "rttvar": 400, "cwnd": 14600, "bandwidth": 3650}]}}
+      },
+      "expect": {"status": "ok", "value": "1500"}
+    },
+    {
+      "id": "rtt",
+      "probe": {
+        "command": "ROUTE::rtt",
+        "args": ["192.0.2.10", "192.0.2.1"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"route": {"domain": "7", "metrics": [{"destination": "192.0.2.10", "gateway": "192.0.2.1", "age": 12, "expiration": 300, "mtu": 1500, "rtt": 3200, "rttvar": 400, "cwnd": 14600, "bandwidth": 3650}]}}
+      },
+      "expect": {"status": "ok", "value": "3200"}
+    },
+    {
+      "id": "rttvar",
+      "probe": {
+        "command": "ROUTE::rttvar",
+        "args": ["192.0.2.10", "192.0.2.1"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"route": {"domain": "7", "metrics": [{"destination": "192.0.2.10", "gateway": "192.0.2.1", "age": 12, "expiration": 300, "mtu": 1500, "rtt": 3200, "rttvar": 400, "cwnd": 14600, "bandwidth": 3650}]}}
+      },
+      "expect": {"status": "ok", "value": "400"}
+    },
+    {
+      "id": "clear-removes-entry-for-later-request",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "route": {"domain": "7", "metrics": [{"destination": "192.0.2.10", "gateway": "192.0.2.1", "age": 12, "expiration": 300, "mtu": 1500, "rtt": 3200, "rttvar": 400, "cwnd": 14600, "bandwidth": 3650}]},
+        "irule": "when HTTP_REQUEST { set before [ROUTE::age 192.0.2.10 192.0.2.1]; ROUTE::clear 192.0.2.10 192.0.2.1; HTTP::respond 200 content \"before=$before after=[ROUTE::age 192.0.2.10 192.0.2.1] domain=[ROUTE::domain]\" }",
+        "requests": [
+          {"method": "GET", "uri": "/one", "headers": {"Host": "example.test"}},
+          {"method": "GET", "uri": "/two", "headers": {"Host": "example.test"}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "body"], "equals": "before=12 after=0 domain=7"},
+          {"path": ["results", 1, "response", "body"], "equals": "before=0 after=0 domain=7"},
+          {"path": ["results", 0, "decisions", 0], "equals": "route clear {{destination 192.0.2.10 gateway 192.0.2.1}}"}
+        ]
+      }
+    }
+  ]
+}

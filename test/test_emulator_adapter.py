@@ -4747,6 +4747,7 @@ when HTTP_RESPONSE_RELEASE {
             "lb-17.5.json": 5,
             "uri-17.5.json": 11,
             "stream-17.5.json": 8,
+            "route-17.5.json": 10,
             "stateful-17.5.json": 2,
             "ssl-tls-17.5.json": 16,
             "http2-17.5.json": 11,
