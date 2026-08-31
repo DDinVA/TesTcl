@@ -296,7 +296,7 @@ PROTOCOL_REQUEST_FIELDS = frozenset(
         "destination", "timeout", "payload", "payload_base64", "qname", "qtype",
         "qclass", "transaction_id", "recursion_desired", "client_id", "topic",
         "keepalive", "message", "method", "uri", "version", "status", "headers", "body", "pcp",
-        "radius", "websocket",
+        "radius", "websocket", "ldap",
     }
 )
 IRULE_ANALYSIS_MAX_SOURCE_BYTES = 512 * 1024
@@ -1081,12 +1081,21 @@ EVENT_STATE_FIELDS = {
     "ldap": {
         "activation_mode",
         "command",
+        "diagnostic",
+        "dn",
         "disabled",
         "enabled",
+        "message_hex",
+        "message_id",
+        "message_length",
+        "operation",
         "payload",
         "payload_length",
+        "result_code",
+        "scope",
         "tls_active",
         "type",
+        "version",
     },
     "smtps": {
         "activation_mode",
@@ -3414,6 +3423,95 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
             raise EmulatorInputError(
                 f"protocol driver request radius is invalid: {exc}"
             ) from exc
+    if "ldap" in request:
+        ldap_request = request["ldap"]
+        if not isinstance(ldap_request, dict):
+            raise EmulatorInputError("protocol driver request ldap must be an object")
+        allowed_ldap_fields = {
+            "operation", "message_id", "message_hex", "message_base64", "version", "dn",
+            "password", "scope", "size_limit", "time_limit", "types_only", "attribute",
+            "request_name", "request_value", "result_code", "diagnostic",
+        }
+        unknown_ldap_fields = sorted(set(ldap_request) - allowed_ldap_fields)
+        if unknown_ldap_fields:
+            raise EmulatorInputError(
+                "protocol driver request ldap unsupported field(s): "
+                + ", ".join(unknown_ldap_fields)
+            )
+        if event not in {"CLIENT_DATA", "SERVER_DATA"}:
+            raise EmulatorInputError(
+                "protocol driver request ldap is supported only for CLIENT_DATA and SERVER_DATA"
+            )
+        if "message_hex" in ldap_request and "message_base64" in ldap_request:
+            raise EmulatorInputError(
+                "protocol driver request ldap message_hex and message_base64 are mutually exclusive"
+            )
+        for field in ("dn", "password", "attribute", "request_name", "request_value", "diagnostic"):
+            value = ldap_request.get(field)
+            if value is not None:
+                if not isinstance(value, str) or "\x00" in value:
+                    raise EmulatorInputError(
+                        f"protocol driver request ldap {field} must be a string without NUL"
+                    )
+                try:
+                    if len(value.encode("utf-8")) > PROTOCOL_REQUEST_MAX_TEXT_BYTES:
+                        raise EmulatorInputError(
+                            f"protocol driver request ldap {field} is too long"
+                        )
+                except UnicodeEncodeError as exc:
+                    raise EmulatorInputError(
+                        f"protocol driver request ldap {field} must be valid UTF-8"
+                    ) from exc
+        if "types_only" in ldap_request and not isinstance(ldap_request["types_only"], bool):
+            raise EmulatorInputError(
+                "protocol driver request ldap types_only must be a boolean"
+            )
+        for field, minimum, maximum in (
+            ("message_id", 0, 0x7FFF_FFFF),
+            ("version", 0, 127),
+            ("scope", 0, 2),
+            ("size_limit", 0, 0x7FFF_FFFF),
+            ("time_limit", 0, 0x7FFF_FFFF),
+            ("result_code", 0, 0xFF),
+        ):
+            value = ldap_request.get(field)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum
+            ):
+                raise EmulatorInputError(
+                    f"protocol driver request ldap {field} must be an integer from {minimum} to {maximum}"
+                )
+        if "message_hex" in ldap_request:
+            message_hex = ldap_request["message_hex"]
+            if not isinstance(message_hex, str) or not message_hex or len(message_hex) % 2:
+                raise EmulatorInputError(
+                    "protocol driver request ldap message_hex must contain complete bytes"
+                )
+            try:
+                raw_message = bytes.fromhex(message_hex)
+            except ValueError as exc:
+                raise EmulatorInputError(
+                    "protocol driver request ldap message_hex must be hexadecimal"
+                ) from exc
+            if len(raw_message) > LDAP_MAX_MESSAGE_BYTES:
+                raise EmulatorInputError(
+                    "protocol driver request ldap message_hex exceeds the 2 MiB limit"
+                )
+        if "message_base64" in ldap_request:
+            if not isinstance(ldap_request["message_base64"], str):
+                raise EmulatorInputError(
+                    "protocol driver request ldap message_base64 must be a string"
+                )
+            try:
+                raw_message = base64.b64decode(ldap_request["message_base64"], validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise EmulatorInputError(
+                    "protocol driver request ldap message_base64 is not valid base64"
+                ) from exc
+            if len(raw_message) > LDAP_MAX_MESSAGE_BYTES:
+                raise EmulatorInputError(
+                    "protocol driver request ldap message_base64 exceeds the 2 MiB limit"
+                )
     if "websocket" in request:
         if event != "WS_REQUEST":
             raise EmulatorInputError(
@@ -3819,6 +3917,57 @@ def _protocol_request_packet(event: str, request: dict[str, Any]) -> dict[str, A
             "host": websocket_request.get("host", "example.test"),
             "headers": headers,
         }
+    elif event in {"CLIENT_DATA", "SERVER_DATA"} and "ldap" in request:
+        ldap_request = request.get("ldap")
+        if not isinstance(ldap_request, dict):
+            raise EmulatorInputError("protocol driver request ldap must be an object")
+        direction = "client_to_server" if event == "CLIENT_DATA" else "server_to_client"
+        packet = {
+            **common,
+            "protocol": "ldap",
+            "direction": direction,
+            "source": (
+                {"address": "192.0.2.10", "port": 53000}
+                if event == "CLIENT_DATA"
+                else {"address": "192.0.2.53", "port": 389}
+            ),
+            "destination": (
+                {"address": "192.0.2.53", "port": 389}
+                if event == "CLIENT_DATA"
+                else {"address": "192.0.2.10", "port": 53000}
+            ),
+        }
+        if "message_hex" in ldap_request:
+            packet["payload_hex"] = ldap_request["message_hex"]
+        elif "message_base64" in ldap_request:
+            try:
+                packet["payload_hex"] = base64.b64decode(
+                    ldap_request["message_base64"], validate=True
+                ).hex()
+            except (binascii.Error, ValueError) as exc:
+                raise EmulatorInputError(
+                    "protocol driver request ldap message_base64 is not valid base64"
+                ) from exc
+        else:
+            operation = str(
+                ldap_request.get(
+                    "operation",
+                    "bindRequest" if event == "CLIENT_DATA" else "bindResponse",
+                )
+            )
+            packet.update(
+                {
+                    "type": "command" if event == "CLIENT_DATA" else "response",
+                    "command": operation,
+                    "operation": operation,
+                    "message_id": ldap_request.get("message_id", 1),
+                    "dn": ldap_request.get("dn", ""),
+                    "result_code": ldap_request.get("result_code", 0),
+                    "diagnostic": ldap_request.get("diagnostic", ""),
+                    "version": ldap_request.get("version", 0),
+                    "scope": ldap_request.get("scope", 0),
+                }
+            )
     elif event.startswith("RTSP_"):
         if event not in {"RTSP_REQUEST", "RTSP_REQUEST_DATA"}:
             raise EmulatorInputError(
@@ -3877,7 +4026,7 @@ def _protocol_request_packet(event: str, request: dict[str, Any]) -> dict[str, A
         }
     else:
         raise EmulatorInputError(
-            "local protocol replay currently supports HTTP, DNS, MQTT, SIP, RTSP, PCP, RADIUS, and WebSocket requests"
+            "local protocol replay currently supports HTTP, DNS, MQTT, SIP, RTSP, PCP, RADIUS, LDAP, and WebSocket requests"
         )
     try:
         return _normalise_packets([packet])[0]
@@ -12109,6 +12258,16 @@ PACKET_PROTOCOL_FIELDS = {
         "payload_hex",
         "type",
         "command",
+        "message",
+        "message_hex",
+        "message_id",
+        "message_length",
+        "operation",
+        "dn",
+        "result_code",
+        "diagnostic",
+        "version",
+        "scope",
         "tls_active",
     },
     "smtps": {
@@ -16589,6 +16748,38 @@ STARTTLS_RAW_PORTS = {
     "pop3": frozenset({110}),
     "smtps": frozenset({25, 465, 587}),
 }
+LDAP_RAW_PORTS = frozenset({389})
+LDAP_MAX_MESSAGE_BYTES = 2 * 1024 * 1024
+LDAP_MAX_TAG_BYTES = 4
+LDAP_OPERATION_NAMES = {
+    0xA0: "bindRequest",
+    0xA1: "bindResponse",
+    0x42: "unbindRequest",
+    0xA3: "searchRequest",
+    0x64: "searchResEntry",
+    0x65: "searchResDone",
+    0x73: "searchResRef",
+    0x66: "modifyRequest",
+    0x67: "modifyResponse",
+    0x68: "addRequest",
+    0x69: "addResponse",
+    0x4A: "delRequest",
+    0x6B: "delResponse",
+    0x6C: "modDNRequest",
+    0x6D: "modDNResponse",
+    0x6E: "compareRequest",
+    0x6F: "compareResponse",
+    0x50: "abandonRequest",
+    0x77: "extendedReq",
+    0x78: "extendedResp",
+    0x79: "intermediateResponse",
+}
+LDAP_REQUEST_OPERATION_TAGS = frozenset(
+    {0xA0, 0x42, 0xA3, 0x66, 0x68, 0x4A, 0x6C, 0x6E, 0x50, 0x77}
+)
+LDAP_RESPONSE_OPERATION_TAGS = frozenset(
+    {0xA1, 0x64, 0x65, 0x73, 0x67, 0x69, 0x6B, 0x6D, 0x6F, 0x78, 0x79}
+)
 STARTTLS_COMMAND_PREFIXES = {
     "pop3": frozenset({"APOP", "AUTH", "CAPA", "DELE", "LIST", "NOOP", "PASS", "QUIT", "RETR", "RSET", "STAT", "STLS", "TOP", "UIDL", "USER"}),
     "smtps": frozenset({"AUTH", "DATA", "EHLO", "HELO", "MAIL", "NOOP", "QUIT", "RCPT", "RSET", "STARTTLS", "VRFY"}),
@@ -16742,6 +16933,225 @@ def _decode_starttls_messages(
         if len(messages) > PACKET_MAX_COUNT:
             raise EmulatorInputError(
                 f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} {protocol.upper()} messages"
+            )
+        position += consumed
+    return messages, payload[position:]
+
+
+def _ldap_tlv(payload: bytes, offset: int = 0) -> tuple[int, bytes, int] | None:
+    """Read one bounded, definite-length LDAP BER TLV."""
+    if offset < 0 or offset > len(payload):
+        raise EmulatorInputError("LDAP TLV offset is invalid")
+    if offset == len(payload):
+        return None
+    tag = payload[offset]
+    position = offset + 1
+    if (tag & 0x1F) == 0x1F:
+        tag_bytes = 1
+        while position < len(payload) and payload[position] & 0x80:
+            tag_bytes += 1
+            if tag_bytes >= LDAP_MAX_TAG_BYTES:
+                raise EmulatorInputError("LDAP high-tag-number is too long")
+            position += 1
+        if position >= len(payload):
+            return None
+        tag_bytes += 1
+        if tag_bytes > LDAP_MAX_TAG_BYTES:
+            raise EmulatorInputError("LDAP high-tag-number is too long")
+        raise EmulatorInputError("LDAP high-tag-number tags are not supported")
+    if position >= len(payload):
+        return None
+    length_octet = payload[position]
+    position += 1
+    if length_octet == 0x80:
+        raise EmulatorInputError("LDAP indefinite BER lengths are not supported")
+    if length_octet & 0x80:
+        length_bytes = length_octet & 0x7F
+        if length_bytes == 0 or length_bytes > 4:
+            raise EmulatorInputError("LDAP BER length is invalid")
+        if position + length_bytes > len(payload):
+            return None
+        if payload[position] == 0:
+            raise EmulatorInputError("LDAP BER length is not minimally encoded")
+        length = int.from_bytes(payload[position : position + length_bytes], "big")
+        position += length_bytes
+    else:
+        length = length_octet
+    end = position + length
+    if end > LDAP_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"LDAP message exceeds the {LDAP_MAX_MESSAGE_BYTES} byte limit"
+        )
+    if end > len(payload):
+        return None
+    return tag, bytes(payload[position:end]), end
+
+
+def _ldap_integer(value: bytes, field: str, *, non_negative: bool = False) -> int:
+    if not value or len(value) > 8:
+        raise EmulatorInputError(f"LDAP {field} integer is invalid")
+    if len(value) > 1 and value[0] == 0 and not value[1] & 0x80:
+        raise EmulatorInputError(f"LDAP {field} integer is not minimally encoded")
+    number = int.from_bytes(value, "big", signed=True)
+    if non_negative and number < 0:
+        raise EmulatorInputError(f"LDAP {field} must be non-negative")
+    return number
+
+
+def _ldap_text(value: bytes, field: str) -> str:
+    if b"\x00" in value:
+        raise EmulatorInputError(f"LDAP {field} contains a NUL byte")
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EmulatorInputError(f"LDAP {field} must be valid UTF-8") from exc
+
+
+def _ldap_children(value: bytes, field: str) -> list[tuple[int, bytes, int]]:
+    children: list[tuple[int, bytes, int]] = []
+    position = 0
+    while position < len(value):
+        child = _ldap_tlv(value, position)
+        if child is None:
+            raise EmulatorInputError(f"LDAP {field} contains a truncated BER field")
+        children.append(child)
+        position = child[2]
+    return children
+
+
+def _ldap_operation_fields(operation_tag: int, operation_value: bytes) -> dict[str, Any]:
+    """Extract stable, rule-visible fields from common LDAP operations."""
+    fields: dict[str, Any] = {}
+    if operation_tag == 0x50:  # AbandonRequest uses an implicit INTEGER tag.
+        _ldap_integer(operation_value, "abandon message ID", non_negative=True)
+        return fields
+    children = _ldap_children(operation_value, LDAP_OPERATION_NAMES[operation_tag])
+    if operation_tag == 0xA0:  # BindRequest
+        if len(children) != 3 or children[0][0] != 0x02 or children[1][0] != 0x04:
+            raise EmulatorInputError("LDAP bindRequest has an invalid BER structure")
+        if children[2][0] not in {0x80, 0xA3}:
+            raise EmulatorInputError("LDAP bindRequest has an invalid authentication choice")
+        fields["version"] = _ldap_integer(children[0][1], "version", non_negative=True)
+        if fields["version"] > 127:
+            raise EmulatorInputError("LDAP bind version is out of range")
+        fields["dn"] = _ldap_text(children[1][1], "bind DN")
+    elif operation_tag == 0xA3:  # SearchRequest
+        if len(children) != 8 or children[0][0] != 0x04 or children[1][0] != 0x0A:
+            raise EmulatorInputError("LDAP searchRequest has an invalid BER structure")
+        if children[2][0] != 0x0A or children[3][0] != 0x02 or children[4][0] != 0x02:
+            raise EmulatorInputError("LDAP searchRequest has an invalid BER structure")
+        if children[5][0] != 0x01 or children[7][0] != 0x30:
+            raise EmulatorInputError("LDAP searchRequest has an invalid BER structure")
+        fields["dn"] = _ldap_text(children[0][1], "search base DN")
+        fields["scope"] = _ldap_integer(children[1][1], "search scope", non_negative=True)
+        if fields["scope"] > 2:
+            raise EmulatorInputError("LDAP search scope is out of range")
+    elif operation_tag in {0x66, 0x68, 0x4A, 0x6C, 0x6E}:  # DN-bearing requests
+        if not children or children[0][0] != 0x04:
+            raise EmulatorInputError("LDAP request has an invalid DN field")
+        fields["dn"] = _ldap_text(children[0][1], "request DN")
+    elif operation_tag in {0xA1, 0x65, 0x67, 0x69, 0x6B, 0x6D, 0x6F, 0x78}:
+        if len(children) < 3 or children[0][0] != 0x0A or children[1][0] != 0x04 or children[2][0] != 0x04:
+            raise EmulatorInputError("LDAP result operation has an invalid BER structure")
+        fields["result_code"] = _ldap_integer(children[0][1], "result code", non_negative=True)
+        fields["dn"] = _ldap_text(children[1][1], "matched DN")
+        fields["diagnostic"] = _ldap_text(children[2][1], "diagnostic message")
+    elif operation_tag == 0x42:
+        if children:
+            raise EmulatorInputError("LDAP unbindRequest must not contain fields")
+    elif operation_tag == 0x77:
+        if any(child[0] not in {0x80, 0x81} for child in children):
+            raise EmulatorInputError("LDAP extendedReq has an invalid BER structure")
+    return fields
+
+
+def _looks_like_ldap_prefix(payload: bytes) -> bool:
+    return bool(payload) and payload[0] == 0x30
+
+
+def _decode_ldap_message(
+    payload: bytes, direction: str
+) -> tuple[dict[str, Any], int] | None:
+    """Decode one LDAPMessage from a TCP stream, preserving its BER bytes."""
+    if len(payload) > LDAP_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"LDAP control stream exceeds the {LDAP_MAX_MESSAGE_BYTES} byte limit"
+        )
+    if payload and payload[0] != 0x30:
+        raise EmulatorInputError("LDAP message must be a BER SEQUENCE")
+    outer = _ldap_tlv(payload)
+    if outer is None:
+        return None
+    if outer[0] != 0x30:
+        raise EmulatorInputError("LDAP message must be a BER SEQUENCE")
+    message_value = outer[1]
+    message_id = _ldap_tlv(message_value)
+    if message_id is None or message_id[0] != 0x02:
+        raise EmulatorInputError("LDAP message must begin with an INTEGER message ID")
+    message_id_value = _ldap_integer(
+        message_id[1], "message ID", non_negative=True
+    )
+    operation = _ldap_tlv(message_value, message_id[2])
+    if operation is None or operation[0] not in LDAP_OPERATION_NAMES:
+        raise EmulatorInputError("LDAP message has an unsupported protocol operation")
+    operation_tags = (
+        LDAP_REQUEST_OPERATION_TAGS
+        if direction == "client_to_server"
+        else LDAP_RESPONSE_OPERATION_TAGS
+    )
+    if operation[0] not in operation_tags:
+        raise EmulatorInputError(
+            f"LDAP {direction} message has an invalid protocol operation direction"
+        )
+    if message_id_value > 0x7FFF_FFFF:
+        raise EmulatorInputError("LDAP message ID must be at most 2147483647")
+    trailing = _ldap_tlv(message_value, operation[2])
+    if operation[2] < len(message_value) and trailing is None:
+        raise EmulatorInputError("LDAP message has a truncated trailing field")
+    if trailing is not None and trailing[0] != 0xA0:
+        raise EmulatorInputError("LDAP message has an invalid trailing field")
+    if trailing is not None and trailing[2] != len(message_value):
+        raise EmulatorInputError("LDAP message has bytes after its controls")
+    operation_name = LDAP_OPERATION_NAMES[operation[0]]
+    fields = _ldap_operation_fields(operation[0], operation[1])
+    packet_type = "command" if direction == "client_to_server" else "response"
+    return {
+        "protocol": "ldap",
+        "direction": direction,
+        "type": packet_type,
+        "command": operation_name,
+        "operation": operation_name,
+        "message_id": message_id_value,
+        "dn": fields.get("dn", ""),
+        "result_code": fields.get("result_code", 0),
+        "diagnostic": fields.get("diagnostic", ""),
+        "version": fields.get("version", 0),
+        "scope": fields.get("scope", 0),
+        "tls_active": "0",
+        "payload": _decode_wire_text(payload[: outer[2]]),
+        "message": _decode_wire_text(payload[: outer[2]]),
+        "message_hex": payload[: outer[2]].hex(),
+        "message_length": outer[2],
+        "_wire_payload": bytes(payload[: outer[2]]),
+    }, outer[2]
+
+
+def _decode_ldap_messages(
+    payload: bytes, direction: str
+) -> tuple[list[dict[str, Any]], bytes]:
+    messages: list[dict[str, Any]] = []
+    position = 0
+    while position < len(payload):
+        decoded = _decode_ldap_message(payload[position:], direction)
+        if decoded is None:
+            break
+        message, consumed = decoded
+        if consumed <= 0:
+            raise EmulatorInputError("LDAP decoder returned an invalid message length")
+        messages.append(message)
+        if len(messages) > PACKET_MAX_COUNT:
+            raise EmulatorInputError(
+                f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} LDAP messages"
             )
         position += consumed
     return messages, payload[position:]
@@ -18521,6 +18931,44 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = value
             elif protocol == "ftp" and field in {"tls_active", "tls_session_reused"}:
                 normalised[field] = _packet_bool(packet[field], f"packet {index} {field}")
+            elif protocol == "ldap" and field in {
+                "dn",
+                "diagnostic",
+                "operation",
+                "message",
+            }:
+                normalised[field] = _require_string(
+                    packet[field], f"packet {index} {field}"
+                )
+            elif protocol == "ldap" and field == "message_hex":
+                normalised[field] = _require_string(
+                    packet[field], f"packet {index} message_hex"
+                )
+            elif protocol == "ldap" and field in {
+                "message_id",
+                "message_length",
+                "result_code",
+                "scope",
+                "version",
+            }:
+                value = packet[field]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise EmulatorInputError(
+                        f"packet {index} LDAP {field} must be a non-negative integer"
+                    )
+                if field == "message_id" and value > 0x7FFF_FFFF:
+                    raise EmulatorInputError(
+                        f"packet {index} LDAP message_id must be at most 2147483647"
+                    )
+                if field == "result_code" and value > 0xFFFF:
+                    raise EmulatorInputError(
+                        f"packet {index} LDAP result_code must be at most 65535"
+                    )
+                if field == "message_length" and value > LDAP_MAX_MESSAGE_BYTES:
+                    raise EmulatorInputError(
+                        f"packet {index} LDAP message_length exceeds {LDAP_MAX_MESSAGE_BYTES} bytes"
+                    )
+                normalised[field] = value
             elif protocol == "tds" and field in {
                 "type",
                 "length",
@@ -18931,6 +19379,72 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 )
             normalised.setdefault("command", "")
             normalised.setdefault("tls_active", "0")
+        if protocol == "ldap":
+            normalised.setdefault("message_id", 0)
+            normalised.setdefault("operation", normalised.get("command", ""))
+            normalised.setdefault("dn", "")
+            normalised.setdefault("result_code", 0)
+            normalised.setdefault("diagnostic", "")
+            normalised.setdefault("version", 0)
+            normalised.setdefault("scope", 0)
+            raw_ldap = normalised.get("_wire_payload")
+            if raw_ldap is None and "payload" in normalised:
+                try:
+                    raw_ldap = normalised["payload"].encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise EmulatorInputError(
+                        f"packet {index} LDAP payload must be valid UTF-8"
+                    ) from exc
+            if "message_hex" in packet:
+                if "payload_hex" in packet or "payload" in packet:
+                    raise EmulatorInputError(
+                        f"packet {index} LDAP message_hex cannot be combined with payload"
+                    )
+                message_hex = _require_string(
+                    packet["message_hex"], f"packet {index} message_hex"
+                )
+                if len(message_hex) % 2:
+                    raise EmulatorInputError(
+                        f"packet {index} LDAP message_hex must contain complete bytes"
+                    )
+                try:
+                    raw_ldap = bytes.fromhex(message_hex)
+                except ValueError as exc:
+                    raise EmulatorInputError(
+                        f"packet {index} LDAP message_hex must be hexadecimal"
+                    ) from exc
+                normalised["_wire_payload"] = raw_ldap
+            has_wire_input = "payload_hex" in packet or "message_hex" in packet or (
+                "payload" in packet and isinstance(raw_ldap, (bytes, bytearray))
+                and raw_ldap.startswith(b"0")
+            )
+            if has_wire_input:
+                if not isinstance(raw_ldap, (bytes, bytearray)) or not raw_ldap:
+                    raise EmulatorInputError(
+                        f"packet {index} LDAP message must not be empty"
+                    )
+                decoded = _decode_ldap_message(bytes(raw_ldap), direction)
+                if decoded is None or decoded[1] != len(raw_ldap):
+                    raise EmulatorInputError(
+                        f"packet {index} LDAP payload must contain exactly one complete message"
+                    )
+                parsed, _ = decoded
+                for field in (
+                    "type",
+                    "command",
+                    "operation",
+                    "message_id",
+                    "dn",
+                    "result_code",
+                    "diagnostic",
+                    "version",
+                    "scope",
+                ):
+                    if field in packet and str(normalised[field]) != str(parsed[field]):
+                        raise EmulatorInputError(
+                            f"packet {index} LDAP {field} conflicts with payload"
+                        )
+                normalised.update(parsed)
         if protocol == "ntlm":
             normalised.setdefault("payload_hex", "")
         if protocol == "qoe":
@@ -20101,6 +20615,9 @@ class EmulatorSession:
             )
             for protocol in ("imap", "pop3", "smtps")
         }
+        self._ldap_raw_active = any(
+            str(profile).upper() == "LDAP" for profile in self._profiles
+        )
         self._sip_raw_active = any(
             str(profile).upper() in {"SIP", "SIPROUTER", "SIPSESSION"}
             for profile in self._profiles
@@ -23977,6 +24494,38 @@ class EmulatorSession:
                 self._packet_streams.pop(key, None)
                 raise EmulatorInputError(
                     f"FTP control stream exceeds the {FTP_MAX_MESSAGE_BYTES} byte limit"
+                )
+            return None, stream.buffered_bytes
+        ldap_ports = {
+            packet.get("source", {}).get("port"),
+            packet.get("destination", {}).get("port"),
+        }
+        if self._ldap_raw_active and (
+            ldap_ports.intersection(LDAP_RAW_PORTS)
+            or _looks_like_ldap_prefix(combined)
+        ):
+            decoded_messages, remaining = _decode_ldap_messages(
+                combined, packet["direction"]
+            )
+            if decoded_messages:
+                stream.buffer = remaining
+                if not has_gap:
+                    stream.segments.clear()
+                for message in decoded_messages:
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            message[field] = packet[field]
+                first = decoded_messages[0]
+                if len(decoded_messages) > 1:
+                    first["_coalesced_packets"] = decoded_messages[1:]
+                return first, len(combined) - len(remaining)
+            stream.buffer = combined
+            if not has_gap:
+                stream.segments.clear()
+            if stream.buffered_bytes > LDAP_MAX_MESSAGE_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"LDAP control stream exceeds the {LDAP_MAX_MESSAGE_BYTES} byte limit"
                 )
             return None, stream.buffered_bytes
         starttls_ports = {

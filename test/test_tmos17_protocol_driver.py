@@ -258,6 +258,58 @@ def test_ftp_driver_rejects_wrong_direction_and_line_injection() -> None:
         )
 
 
+def test_ldap_driver_builds_bind_search_and_response_messages() -> None:
+    bind = driver.build_ldap_message(
+        {"ldap": {"operation": "bindRequest", "message_id": 7, "dn": "cn=alice", "password": "secret"}},
+        "CLIENT_DATA",
+    )
+    assert bind == bytes.fromhex("301a020107a0150201030408636e3d616c6963658006736563726574")
+    search = driver.build_ldap_message(
+        {"ldap": {"operation": "searchRequest", "message_id": 8, "dn": "dc=example,dc=test", "scope": 2}},
+        "CLIENT_DATA",
+    )
+    assert search == bytes.fromhex("3037020108a332041264633d6578616d706c652c64633d746573740a01020a0100020100020100010100870b6f626a656374436c6173733000")
+    response = driver.build_ldap_message(
+        {"ldap": {"operation": "bindResponse", "message_id": 7, "result_code": 49, "diagnostic": "invalid credentials"}},
+        "SERVER_DATA",
+    )
+    assert response == bytes.fromhex("301f020107a11a0a013104000413696e76616c69642063726564656e7469616c73")
+    endpoint, payload, timeout = driver.build_payload(
+        {
+            "event": "CLIENT_DATA",
+            "traffic_url": "tcp://192.0.2.20:1389",
+            "request": {"ldap": {"operation": "unbindRequest", "message_id": 9}},
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 1389)
+    assert payload == bytes.fromhex("30050201094200")
+    assert timeout == 10.0
+
+
+def test_ldap_driver_rejects_invalid_direction_and_raw_message() -> None:
+    with pytest.raises(driver.DriverError, match="operation must be one of"):
+        driver.build_ldap_message(
+            {"ldap": {"operation": "bindRequest"}}, "SERVER_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="protocol operation is truncated"):
+        driver.build_ldap_message(
+            {"ldap": {"message_hex": "3003020101"}}, "CLIENT_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="cannot be combined"):
+        driver.build_ldap_message(
+            {"ldap": {"message_hex": "3003020101", "message_id": 1}}, "CLIENT_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="at most 2147483647"):
+        driver.build_ldap_message(
+            {"ldap": {"message_hex": "300702050080000000"}}, "CLIENT_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="invalid protocol operation direction"):
+        driver.build_ldap_message(
+            {"ldap": {"message_hex": "301f020107a11a0a013104000413696e76616c69642063726564656e7469616c73"}},
+            "CLIENT_DATA",
+        )
+
+
 def test_starttls_driver_builds_imap_and_pop3_control_lines() -> None:
     imap = driver.build_starttls_message(
         {"starttls": {"protocol": "imap", "command": "A001 STARTTLS"}},

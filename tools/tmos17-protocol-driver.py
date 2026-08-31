@@ -30,6 +30,7 @@ MAX_TEXT_BYTES = 256 * 1024
 MAX_HTTP_HEADERS = 128
 MAX_HTTP_LINE_BYTES = 8 * 1024
 MAX_FTP_LINE_BYTES = 64 * 1024
+MAX_LDAP_MESSAGE_BYTES = 2 * 1024 * 1024
 MAX_WEBSOCKET_FRAME_BYTES = MAX_PAYLOAD_BYTES
 DEFAULT_TIMEOUT = 10.0
 MAX_TIMEOUT = 60.0
@@ -76,6 +77,17 @@ RADIUS_ATTRIBUTE_CODES = {
     "event-timestamp": 55,
     "nas-port-type": 61,
     "connect-info": 77,
+}
+LDAP_CLIENT_OPERATIONS = {
+    "bindrequest": ("bindRequest", 0xA0),
+    "unbindrequest": ("unbindRequest", 0x42),
+    "searchrequest": ("searchRequest", 0xA3),
+    "extendedreq": ("extendedReq", 0x77),
+}
+LDAP_SERVER_OPERATIONS = {
+    "bindresponse": ("bindResponse", 0xA1),
+    "searchresdone": ("searchResDone", 0x65),
+    "extendedresp": ("extendedResp", 0x78),
 }
 
 
@@ -625,6 +637,237 @@ def build_ftp_message(request: dict[str, Any], event: str) -> bytes:
     return encoded
 
 
+def _ldap_length(length: int) -> bytes:
+    if not 0 <= length <= MAX_LDAP_MESSAGE_BYTES:
+        raise DriverError("LDAP BER value length is out of range")
+    if length < 0x80:
+        return bytes([length])
+    encoded = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(encoded)]) + encoded
+
+
+def _ldap_tlv(tag: int, value: bytes) -> bytes:
+    if not 0 <= tag <= 0xFF:
+        raise DriverError("LDAP BER tag must be a single octet")
+    return bytes([tag]) + _ldap_length(len(value)) + value
+
+
+def _ldap_integer(value: Any, field: str, *, minimum: int = 0, maximum: int = 0x7FFF_FFFF) -> bytes:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise DriverError(f"LDAP {field} must be an integer from {minimum} to {maximum}")
+    if value == 0:
+        encoded = b"\x00"
+    else:
+        encoded = value.to_bytes((value.bit_length() + 7) // 8, "big")
+        if encoded[0] & 0x80:
+            encoded = b"\x00" + encoded
+    return _ldap_tlv(0x02, encoded)
+
+
+def _ldap_enumerated(value: Any, field: str, *, minimum: int = 0, maximum: int = 255) -> bytes:
+    integer = _ldap_integer(value, field, minimum=minimum, maximum=maximum)
+    return bytes([0x0A]) + integer[1:]
+
+
+def _ldap_text(value: Any, field: str, *, required: bool = False) -> bytes:
+    if value is None:
+        if required:
+            raise DriverError(f"{field} must be a non-empty string")
+        text = ""
+    elif not isinstance(value, str):
+        raise DriverError(f"{field} must be a string")
+    else:
+        text = value
+    if "\x00" in text:
+        raise DriverError(f"{field} must not contain NUL")
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise DriverError(f"LDAP {field} must be valid UTF-8") from exc
+    if len(encoded) > MAX_LDAP_MESSAGE_BYTES:
+        raise DriverError(f"LDAP {field} is too long")
+    return encoded
+
+
+def _ldap_read_tlv(raw: bytes, offset: int, field: str) -> tuple[int, bytes, int]:
+    if offset >= len(raw):
+        raise DriverError(f"LDAP {field} is truncated")
+    tag = raw[offset]
+    if (tag & 0x1F) == 0x1F:
+        raise DriverError(f"LDAP {field} uses an unsupported high-tag-number")
+    position = offset + 1
+    if position >= len(raw):
+        raise DriverError(f"LDAP {field} length is truncated")
+    length_octet = raw[position]
+    position += 1
+    if length_octet == 0x80:
+        raise DriverError("LDAP indefinite BER lengths are not supported")
+    if length_octet & 0x80:
+        length_bytes = length_octet & 0x7F
+        if length_bytes == 0 or length_bytes > 4 or position + length_bytes > len(raw):
+            raise DriverError(f"LDAP {field} length is invalid")
+        if raw[position] == 0:
+            raise DriverError(f"LDAP {field} length is not minimally encoded")
+        length = int.from_bytes(raw[position : position + length_bytes], "big")
+        position += length_bytes
+    else:
+        length = length_octet
+    end = position + length
+    if end > len(raw):
+        raise DriverError(f"LDAP {field} is truncated")
+    return tag, raw[position:end], end
+
+
+def _ldap_one_message(raw: bytes, event: str) -> bytes:
+    if not raw or len(raw) > MAX_LDAP_MESSAGE_BYTES:
+        raise DriverError("LDAP message must contain 1 byte to 2 MiB")
+    outer_tag, outer_value, outer_end = _ldap_read_tlv(raw, 0, "message")
+    if outer_tag != 0x30:
+        raise DriverError("LDAP message must be a BER SEQUENCE")
+    if outer_end != len(raw):
+        raise DriverError("LDAP message must contain exactly one complete BER message")
+    message_id_tag, message_id_value, message_id_end = _ldap_read_tlv(
+        outer_value, 0, "message ID"
+    )
+    if message_id_tag != 0x02 or not message_id_value:
+        raise DriverError("LDAP message must begin with an INTEGER message ID")
+    if len(message_id_value) > 1 and message_id_value[0] == 0 and not message_id_value[1] & 0x80:
+        raise DriverError("LDAP message ID is not minimally encoded")
+    message_id = int.from_bytes(message_id_value, "big", signed=True)
+    if message_id < 0:
+        raise DriverError("LDAP message ID must be non-negative")
+    if message_id > 0x7FFF_FFFF:
+        raise DriverError("LDAP message ID must be at most 2147483647")
+    operation_tag, _operation_value, operation_end = _ldap_read_tlv(
+        outer_value, message_id_end, "protocol operation"
+    )
+    if operation_tag not in {
+        0xA0, 0xA1, 0x42, 0xA3, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x4A,
+        0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x50, 0x73, 0x77, 0x78, 0x79,
+    }:
+        raise DriverError("LDAP message has an unsupported protocol operation")
+    expected_tags = {
+        tag for _name, tag in (
+            LDAP_CLIENT_OPERATIONS.values()
+            if event == "CLIENT_DATA"
+            else LDAP_SERVER_OPERATIONS.values()
+        )
+    }
+    if operation_tag not in expected_tags:
+        raise DriverError(f"LDAP {event} raw message has an invalid protocol operation direction")
+    if operation_end < len(outer_value):
+        controls_tag, _controls_value, controls_end = _ldap_read_tlv(
+            outer_value, operation_end, "controls"
+        )
+        if controls_tag != 0xA0 or controls_end != len(outer_value):
+            raise DriverError("LDAP message has an invalid trailing field")
+    return raw
+
+
+def build_ldap_message(request: dict[str, Any], event: str) -> bytes:
+    """Build one bounded LDAPMessage for CLIENT_DATA or SERVER_DATA."""
+    if event not in {"CLIENT_DATA", "SERVER_DATA"}:
+        raise DriverError("LDAP protocol driver supports CLIENT_DATA and SERVER_DATA")
+    ldap = request.get("ldap", {})
+    if not isinstance(ldap, dict):
+        raise DriverError("LDAP request ldap must be an object")
+    allowed = {
+        "operation", "message_id", "message_hex", "message_base64", "version", "dn",
+        "password", "scope", "size_limit", "time_limit", "types_only", "attribute",
+        "request_name", "request_value", "result_code", "diagnostic",
+    }
+    unknown = sorted(set(ldap) - allowed)
+    if unknown:
+        raise DriverError("LDAP request unsupported field(s): " + ", ".join(unknown))
+    raw_hex = ldap.get("message_hex")
+    raw_base64 = ldap.get("message_base64")
+    if raw_hex is not None and raw_base64 is not None:
+        raise DriverError("LDAP message_hex and message_base64 are mutually exclusive")
+    if raw_hex is not None or raw_base64 is not None:
+        if set(ldap) - {"message_hex", "message_base64"}:
+            raise DriverError("LDAP raw message cannot be combined with structured fields")
+        if raw_hex is not None:
+            if not isinstance(raw_hex, str) or not raw_hex or len(raw_hex) % 2:
+                raise DriverError("LDAP message_hex must contain complete hexadecimal bytes")
+            try:
+                raw = bytes.fromhex(raw_hex)
+            except ValueError as exc:
+                raise DriverError("LDAP message_hex must be hexadecimal") from exc
+        else:
+            if not isinstance(raw_base64, str):
+                raise DriverError("LDAP message_base64 must be a string")
+            try:
+                raw = base64.b64decode(raw_base64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise DriverError("LDAP message_base64 is not valid base64") from exc
+        return _ldap_one_message(raw, event)
+
+    expected = LDAP_CLIENT_OPERATIONS if event == "CLIENT_DATA" else LDAP_SERVER_OPERATIONS
+    operation_value = ldap.get("operation")
+    if operation_value is None:
+        operation_value = "bindRequest" if event == "CLIENT_DATA" else "bindResponse"
+    if not isinstance(operation_value, str):
+        raise DriverError("LDAP operation must be a string")
+    operation_key = operation_value.lower()
+    operation = expected.get(operation_key)
+    if operation is None:
+        allowed_names = ", ".join(name for name, _ in expected.values())
+        raise DriverError(f"LDAP {event} operation must be one of: {allowed_names}")
+    operation_name, operation_tag = operation
+    message_id = _ldap_integer(ldap.get("message_id", 1), "message_id")
+
+    if operation_name == "bindRequest":
+        version = _ldap_integer(ldap.get("version", 3), "version", maximum=127)
+        dn = _ldap_tlv(0x04, _ldap_text(ldap.get("dn", ""), "dn"))
+        password = _ldap_tlv(0x80, _ldap_text(ldap.get("password", ""), "password"))
+        operation_bytes = _ldap_tlv(operation_tag, version + dn + password)
+    elif operation_name == "unbindRequest":
+        operation_bytes = _ldap_tlv(operation_tag, b"")
+    elif operation_name == "searchRequest":
+        scope = ldap.get("scope", 0)
+        size_limit = ldap.get("size_limit", 0)
+        time_limit = ldap.get("time_limit", 0)
+        scope_bytes = _ldap_enumerated(scope, "scope", maximum=2)
+        size_bytes = _ldap_integer(size_limit, "size_limit")
+        time_bytes = _ldap_integer(time_limit, "time_limit")
+        types_only = ldap.get("types_only", False)
+        if not isinstance(types_only, bool):
+            raise DriverError("LDAP types_only must be a boolean")
+        attribute = _ldap_text(ldap.get("attribute", "objectClass"), "attribute", required=True)
+        filter_bytes = _ldap_tlv(0x87, attribute)
+        attrs = _ldap_tlv(0x30, b"")
+        operation_bytes = _ldap_tlv(
+            operation_tag,
+            _ldap_tlv(0x04, _ldap_text(ldap.get("dn", ""), "dn"))
+            + scope_bytes + _ldap_tlv(0x0A, b"\x00") + size_bytes + time_bytes
+            + _ldap_tlv(0x01, b"\xFF" if types_only else b"\x00") + filter_bytes + attrs,
+        )
+    elif operation_name == "extendedReq":
+        request_name = _ldap_text(
+            ldap.get("request_name", "1.3.6.1.4.1.1466.20037"),
+            "request_name",
+            required=True,
+        )
+        request_value = ldap.get("request_value")
+        operation_value_bytes = _ldap_tlv(0x80, request_name)
+        if request_value is not None:
+            operation_value_bytes += _ldap_tlv(0x81, _ldap_text(request_value, "request_value"))
+        operation_bytes = _ldap_tlv(operation_tag, operation_value_bytes)
+    else:
+        result_code = ldap.get("result_code", 0)
+        diagnostic = _ldap_text(ldap.get("diagnostic", ""), "diagnostic")
+        operation_bytes = _ldap_tlv(
+            operation_tag,
+            _ldap_enumerated(result_code, "result_code", maximum=0xFF)
+            + _ldap_tlv(0x04, _ldap_text(ldap.get("dn", ""), "dn"))
+            + _ldap_tlv(0x04, diagnostic),
+        )
+    message = _ldap_tlv(0x30, message_id + operation_bytes)
+    if len(message) > MAX_LDAP_MESSAGE_BYTES:
+        raise DriverError("LDAP message exceeds the 2 MiB limit")
+    return message
+
+
 def build_starttls_message(request: dict[str, Any], event: str) -> bytes:
     """Build one bounded IMAP, POP3, or SMTPS control-channel line."""
     if event not in {"CLIENT_DATA", "SERVER_DATA"}:
@@ -1149,6 +1392,17 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
                 default_port=21,
             ),
             build_ftp_message(request, event),
+            timeout,
+        )
+    if event in {"CLIENT_DATA", "SERVER_DATA"} and "ldap" in request:
+        return (
+            endpoint_from_request(
+                request,
+                trigger.get("traffic_url"),
+                default_scheme="tcp",
+                default_port=389,
+            ),
+            build_ldap_message(request, event),
             timeout,
         )
     if event in {"CLIENT_DATA", "SERVER_DATA"} and "starttls" in request:

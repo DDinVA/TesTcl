@@ -195,14 +195,19 @@ control-channel traces, including active-mode permission, FTP handler state,
 FTPS activation mode, TLS session-reuse enforcement, and passive-port range
 selection. It dispatches the client-accepted, client-data, server-connected,
 and server-data path and preserves those controls across messages on one
-connection. It does not parse FTP commands, negotiate TLS, create a data
-channel, or allocate live passive ports.
+connection. Raw port-21 control streams are reassembled into bounded command
+and single- or multi-line response messages. It does not negotiate TLS, create
+a data channel, or allocate live passive ports.
 The IMAP, POP3, LDAP, and SMTPS adapters model their TMOS 17.5 STARTTLS control
-commands over structured TCP lifecycle traces. Activation modes (`none`,
-`allow`, and `require`) and protocol-handler enable/disable state persist per
-connection, with bounded command text, TLS-active metadata, and payload
-snapshots. They intentionally do not parse the protocol wire formats,
-negotiate TLS, or enforce STARTTLS against a real peer.
+commands over TCP lifecycle traces. Activation modes (`none`, `allow`, and
+`require`) and protocol-handler enable/disable state persist per connection,
+with bounded payload snapshots. IMAP, POP3, and SMTPS raw control lines are
+reassembled from TCP fragments. LDAP additionally decodes definite-length BER
+`LDAPMessage` frames for common bind, search, unbind, extended, and result
+operations, exposing the operation, message ID, DN, result code, diagnostic
+text, and wire bytes. These adapters do not negotiate TLS or enforce STARTTLS
+against a real peer; LDAP indefinite-length and high-tag-number BER are
+rejected.
 The ICAP adapter models the four 17.5 `ICAP::*` commands and dispatches
 `ICAP_REQUEST`/`ICAP_RESPONSE` for structured messages with an `ICAP` profile.
 It supports method, URI, status, and case-insensitive header reads and

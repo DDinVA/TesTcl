@@ -7175,6 +7175,86 @@ when SERVER_DATA { log local0. "mode=[FTP::ftps_mode]" }
                 server_data["state"][profile.lower()]["type"], "response"
             )
 
+    def test_raw_ldap_messages_are_reassembled_and_decoded(self) -> None:
+        bind_request = bytes.fromhex(
+            "301a020107a0150201030408636e3d616c6963658006736563726574"
+        )
+        bind_response = bytes.fromhex(
+            "301f020107a11a0a013104000413696e76616c69642063726564656e7469616c73"
+        )
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "LDAP"],
+                "irule": "when CLIENT_DATA { log local0. ldap-client } when SERVER_DATA { log local0. ldap-server }",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "source": {"address": "192.0.2.10", "port": 40000},
+                        "destination": {"address": "198.51.100.20", "port": 389},
+                        "payload_hex": bind_request[:9].hex(),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "source": {"address": "192.0.2.10", "port": 40000},
+                        "destination": {"address": "198.51.100.20", "port": 389},
+                        "payload_hex": bind_request[9:].hex(),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": {"address": "198.51.100.20", "port": 389},
+                        "destination": {"address": "192.0.2.10", "port": 40000},
+                        "payload_hex": (bind_response + bind_response).hex(),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        client_data = next(
+            event
+            for trace in result["trace"]
+            for event in trace["events"]
+            if event["event"] == "CLIENT_DATA"
+        )
+        server_data = next(
+            event
+            for trace in result["trace"]
+            for event in trace["events"]
+            if event["event"] == "SERVER_DATA"
+        )
+        client_ldap = client_data["state"]["ldap"]
+        server_ldap = server_data["state"]["ldap"]
+        self.assertEqual(client_ldap["operation"], "bindRequest")
+        self.assertEqual(client_ldap["message_id"], "7")
+        self.assertEqual(client_ldap["dn"], "cn=alice")
+        self.assertEqual(client_ldap["version"], "3")
+        self.assertEqual(server_ldap["operation"], "bindResponse")
+        self.assertEqual(server_ldap["message_id"], "7")
+        self.assertEqual(server_ldap["result_code"], "49")
+        self.assertEqual(server_ldap["diagnostic"], "invalid credentials")
+        self.assertEqual(server_ldap["message_length"], str(len(bind_response)))
+        self.assertEqual(len([event for trace in result["trace"] for event in trace["events"] if event["event"] == "SERVER_DATA"]), 2)
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "LDAP message must be a BER SEQUENCE",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "LDAP"],
+                    "irule": "when CLIENT_DATA { log local0. invalid }",
+                    "packets": [
+                        {
+                            "protocol": "tcp",
+                            "source": {"address": "192.0.2.10", "port": 40000},
+                            "destination": {"address": "198.51.100.20", "port": 389},
+                            "payload_hex": "ff020101",
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_icap_request_response_events_and_headers(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -9626,6 +9706,26 @@ when HTTP_REQUEST {
                     },
                     tcl_lsp_root=self.tcl_lsp_root,
                 )
+
+    def test_crypto_cipher_accepts_dash_prefixed_binary_payload(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST {
+    set keyhex 000102030405060708090a0b0c0d0e0f
+    set ivhex 101112131415161718191a1b1c1d1e1f
+    # The payload is deliberately supplied as a final word beginning with '-'.
+    set ciphertext [CRYPTO::encrypt -alg aes-128-cbc -keyhex $keyhex -ivhex $ivhex "-not-an-option"]
+    set plaintext [CRYPTO::decrypt -alg aes-128-cbc -keyhex $keyhex -ivhex $ivhex $ciphertext]
+    log local0. "cipher=[string length $ciphertext] plaintext=$plaintext"
+}
+""",
+                "request": {"uri": "/"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(any("plaintext=-not-an-option" in entry for entry in result["results"][0]["logs"]))
 
     def test_asn1_element_encode_decode_and_payload_replacement(self) -> None:
         result = self.adapter.run_scenario(

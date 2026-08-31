@@ -649,14 +649,17 @@ expose their TMOS 17.5 STARTTLS controls. `IMAP::activation_mode`,
 `require`; each namespace also models its `enable` and `disable` command.
 Protocol-control state persists for the emulated connection, while packet
 inputs can seed the message type, command text, TLS-active flag, and payload.
-When the matching `IMAP`, `POP3`, or `SMTPS` profile is attached, raw TCP
+When the matching `IMAP`, `POP3`, `LDAP`, or `SMTPS` profile is attached, raw TCP
 control lines are reassembled from packet fragments and dispatched as
 `CLIENT_DATA`/`SERVER_DATA`; IMAP tags and continuation markers, POP3
-`+OK`/`-ERR`, and SMTP three-digit replies are recognized. The bundled
-protocol driver can generate the corresponding bounded control lines. LDAP
-remains structured-only because its wire format is BER rather than a line
-protocol. None of these adapters negotiates TLS or enforces STARTTLS policy
-against a live peer.
+`+OK`/`-ERR`, and SMTP three-digit replies are recognized. LDAP BER
+`LDAPMessage` frames are reassembled by their definite-length outer sequence;
+common bind, search, unbind, extended, and result operations expose their
+operation name, message ID, DN, result code, diagnostic text, and bounded wire
+hex. The bundled protocol driver can generate the corresponding control
+messages. LDAP indefinite-length BER and high-tag-number encodings are
+rejected explicitly. None of these adapters negotiates TLS or enforces
+STARTTLS policy against a live peer.
 Structured ICAP packet traces dispatch `ICAP_REQUEST` and `ICAP_RESPONSE` when
 the `ICAP` profile is attached. The four TMOS 17.5 `ICAP::*` commands expose
 request method and URI, response status, and case-insensitive ICAP header
@@ -2596,9 +2599,10 @@ The repository includes a dependency-light starter driver at
 `tools/tmos17-protocol-driver.py`, with the local `uv`-enforcing wrapper
 `scripts/tmos17-protocol-driver.sh`. It supports DNS queries, MQTT 3.1.1
 CONNECT plus PUBLISH traffic, generated or raw SIP messages, structured RTSP
-requests, FTP control-channel commands/responses, and generic raw UDP/TCP
-payloads, plus IMAP/POP3/SMTPS control lines. Protocol fixtures belong in the
-plan's optional `request` object. For example, a DNS case can use:
+requests, FTP control-channel commands/responses, LDAP BER messages, and
+generic raw UDP/TCP payloads, plus IMAP/POP3/SMTPS control lines. Protocol
+fixtures belong in the plan's optional `request` object. For example, a DNS
+case can use:
 
 For `RTSP_REQUEST_DATA`, the collector adds a short `RTSP_REQUEST` primer that
 requests collection before invoking the target data event. The driver sends
@@ -2641,6 +2645,11 @@ For IMAP, POP3, or SMTPS control traffic, use the same data events with
 `request.starttls.protocol` and either `request.starttls.command` for client
 traffic or a raw `request.starttls.message` for server traffic. The default
 ports are 143, 110, and 465 respectively.
+For LDAP control traffic, use the same data events with
+`request.ldap.operation` (for example `bindRequest`, `searchRequest`, or
+`bindResponse`) and its structured fields, or provide `message_hex`/
+`message_base64` for an independently prepared BER message. The default
+destination port is 389.
 In a local checkout, use `--trigger-command ./scripts/tmos17-protocol-driver.sh`;
 in the emulator image, use
 `--trigger-command /opt/testcl/tools/tmos17-protocol-driver.py`.

@@ -141,6 +141,14 @@ def _probe_requests(emulator: Any) -> list[dict[str, Any]]:
                 "profiles": ["TCP", "IMAP"],
             },
         },
+        {
+            "name": "LDAP::activation_mode",
+            "request": {
+                "command": "LDAP::activation_mode",
+                "event": "CLIENT_ACCEPTED",
+                "profiles": ["TCP", "LDAP"],
+            },
+        },
     ]
 
 

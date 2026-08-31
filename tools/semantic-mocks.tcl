@@ -832,12 +832,21 @@ namespace eval ::itest::semantic {
     namespace eval ::state::ldap {
         variable activation_mode none
         variable command ""
+        variable diagnostic ""
+        variable dn ""
         variable disabled 0
         variable enabled 1
+        variable message_hex ""
+        variable message_id 0
+        variable message_length 0
+        variable operation ""
         variable payload ""
         variable payload_length 0
+        variable result_code 0
+        variable scope 0
         variable tls_active 0
         variable type command
+        variable version 0
     }
 
     namespace eval ::state::smtps {
@@ -19500,12 +19509,21 @@ namespace eval ::itest::semantic {
         foreach {name value} {
             activation_mode none
             command ""
+            diagnostic ""
+            dn ""
             disabled 0
             enabled 1
+            message_hex ""
+            message_id 0
+            message_length 0
+            operation ""
             payload ""
             payload_length 0
+            result_code 0
+            scope 0
             tls_active 0
             type command
+            version 0
         } {
             set ::state::${protocol}::$name $value
         }
@@ -25164,7 +25182,27 @@ namespace eval ::itest::semantic {
                         }
                     }
                     -final { dict set parsed final 1 }
-                    default { error "$command_name does not support option $token" }
+                    default {
+                        # Ciphertext and plaintext are binary-safe Tcl words. A
+                        # valid payload can therefore begin with "-" and must
+                        # not be mistaken for an option when it is the single
+                        # final argument after the required options/context.
+                        set has_required_material [dict get $parsed context_set]
+                        if {!$has_required_material} {
+                            set has_required_material [expr {
+                                [dict get $parsed algorithm_set] &&
+                                [dict get $parsed key_set]
+                            }]
+                        }
+                        if {$has_required_material &&
+                            $index == [expr {[llength $args] - 1}] &&
+                            ![dict get $parsed has_data]} {
+                            dict set parsed data $token
+                            dict set parsed has_data 1
+                        } else {
+                            error "$command_name does not support option $token"
+                        }
+                    }
                 }
             } else {
                 if {[dict get $parsed has_data]} { error "$command_name accepts at most one data value" }

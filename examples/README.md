@@ -55,12 +55,15 @@ subset plan before assembly.
 
 The bundled stdlib-only protocol driver can provide initial HTTP/1.1,
 WebSocket-over-HTTP/1.1, DNS, SIP, RTSP, FTP control-channel, IMAP/POP3/SMTPS
-STARTTLS control lines, MQTT, PCP, RADIUS, and raw UDP/TCP stimuli.
+STARTTLS control lines, LDAP BER messages, MQTT, PCP, RADIUS, and raw UDP/TCP
+stimuli.
 Put the destination and protocol fixture in each
 plan case's `input.request`; use
 `--trigger-command ./scripts/tmos17-protocol-driver.sh` locally. The wrapper
 requires the repo's uv-managed Python 3.13 environment. The container can use
 `/opt/testcl/tools/tmos17-protocol-driver.py` directly.
+The `behavior-packs/ldap-17.5.json` fixture additionally exercises BER-framed
+LDAP bind request/response traffic split across TCP packets.
 
 The `scenarios/multi-irule-17.5.json` fixture demonstrates multiple attached
 iRules with priority ordering and a shared pool fixture.
