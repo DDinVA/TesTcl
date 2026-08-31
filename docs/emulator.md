@@ -2578,6 +2578,44 @@ subset are rejected before any device mutation. `--allow-partial` may instead
 skip those cases. Partial output must be paired with a matching subset plan
 before assembly.
 
+The repository includes a dependency-light starter driver at
+`tools/tmos17-protocol-driver.py`, with the local `uv`-enforcing wrapper
+`scripts/tmos17-protocol-driver.sh`. It supports DNS queries, MQTT 3.1.1
+CONNECT plus PUBLISH traffic, generated or raw SIP messages, and generic raw
+UDP/TCP payloads. Protocol fixtures belong in the plan's optional `request`
+object. For example, a DNS case can use:
+
+```json
+{
+  "id": "dns-request-example",
+  "operation": "command_probe",
+  "input": {
+    "command": "DNS::question",
+    "args": [],
+    "event": "DNS_REQUEST",
+    "profiles": ["UDP", "DNS"],
+    "request": {
+      "destination": "udp://198.18.0.53:53",
+      "qname": "example.com",
+      "qtype": "A"
+    }
+  },
+  "comparisons": [{
+    "label": "status",
+    "actual_path": ["execution", "status"],
+    "reference_path": ["status"]
+  }]
+}
+```
+
+For generic protocol events, provide `request.destination` as `udp://` or
+`tcp://` and either `payload_base64` or a UTF-8 `payload`. The driver does not
+wait for or synthesize a response; it only produces the stimulus needed to
+reach the virtual and returns non-zero when validation or transmission fails.
+In a local checkout, use `--trigger-command ./scripts/tmos17-protocol-driver.sh`;
+in the emulator image, use
+`--trigger-command /opt/testcl/tools/tmos17-protocol-driver.py`.
+
 ## Structured packet traces
 
 One-shot scenarios may use `packets` instead of `request`/`requests`. A trace
