@@ -4755,6 +4755,7 @@ when HTTP_RESPONSE_RELEASE {
             "tcp-17.5.json": 6,
             "ssl-controls-17.5.json": 2,
             "lb-17.5.json": 5,
+            "lb-controls-17.5.json": 5,
             "uri-17.5.json": 11,
             "stream-17.5.json": 8,
             "route-17.5.json": 10,
@@ -5663,6 +5664,7 @@ when HTTP_RESPONSE_RELEASE {
         packs = [
             json.loads(path.read_text(encoding="utf-8"))
             for path in sorted((ROOT / "examples" / "behavior-packs").glob("*.json"))
+            if path.name != "lb-controls-17.5.json"
         ]
         candidates = self.adapter._build_behavior_vector_candidates(
             root, packs, 0, 20, namespace="LB", variants=1
@@ -5694,6 +5696,20 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["variant_count"], 32)
         self.assertEqual(sweep["summary"]["status_counts"], {"ok": 32})
         self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
+
+        all_packs = packs + [
+            json.loads(
+                (ROOT / "examples" / "behavior-packs" / "lb-controls-17.5.json")
+                .read_text(encoding="utf-8")
+            )
+        ]
+        covered = self.adapter._build_behavior_vector_candidates(
+            root, all_packs, 0, 20, namespace="LB", variants=1
+        )
+        self.assertEqual(covered["candidates"], [])
+        self.assertIsNone(covered["capture_plan"])
+        self.assertEqual(covered["summary"]["candidate_command_count"], 0)
+        self.assertEqual(covered["summary"]["plan_observation_count"], 0)
 
     def test_http2_candidate_sweep_uses_active_transaction_fixtures(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)

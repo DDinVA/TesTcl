@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "lb-controls-17.5",
+  "cases": [
+    {
+      "id": "connection-and-selection-controls",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "pools": {"api_pool": ["192.0.2.10:80", "192.0.2.11:80"]},
+        "irule": "when CLIENT_ACCEPTED {\n  LB::context_id context-a\n  LB::src_tag source-a\n  LB::dst_tag destination-a\n  LB::bias 3\n  LB::enable_decisionlog\n}\nwhen HTTP_REQUEST {\n  pool api_pool\n  LB::mode roundrobin\n  LB::connlimit virtual limit 10 key tenant-a\n  LB::select pool api_pool\n  LB::connect\n  LB::detach disable\n  LB::command transparent_port\n  LB::prime\n  snat automap\n  log local0. \"mode=[LB::mode] snat=[LB::snat] class=[LB::class] server=[LB::server addr] selected=[LB::server]\"\n}",
+        "requests": [{"uri": "/health"}]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "pool"], "equals": "api_pool"},
+          {"path": ["results", 0, "node"], "equals": "192.0.2.10"},
+          {"path": ["results", 0, "semantic", "lb", "bias"], "equals": "3"},
+          {"path": ["results", 0, "semantic", "lb", "context_id"], "equals": "context-a"},
+          {"path": ["results", 0, "semantic", "lb", "src_tag"], "equals": "source-a"},
+          {"path": ["results", 0, "semantic", "lb", "dst_tag"], "equals": "destination-a"},
+          {"path": ["results", 0, "semantic", "lb", "decisionlog_enabled"], "equals": "1"},
+          {"path": ["results", 0, "semantic", "lb", "connect_requested"], "equals": "1"},
+          {"path": ["results", 0, "semantic", "lb", "prime_requested"], "equals": "1"},
+          {"path": ["results", 0, "semantic", "lb", "command"], "equals": "transparent_port"},
+          {"path": ["results", 0, "semantic", "lb", "connlimits"], "equals": "virtual {limit 10 key tenant-a}"}
+        ]
+      }
+    },
+    {
+      "id": "member-status-and-reselection",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "pools": {"api_pool": ["192.0.2.10:443", "192.0.2.11:443"]},
+        "irule": "when HTTP_REQUEST {\n  pool api_pool\n  LB::down node 192.0.2.10 443\n  set status [LB::status pool api_pool member 192.0.2.10:443]\n  LB::reselect\n  HTTP::header insert X-Down $status\n  log local0. \"selected=[LB::server] status=$status\"\n  LB::up pool api_pool\n}",
+        "request": {"uri": "/health"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "pool"], "equals": "api_pool"},
+          {"path": ["results", 0, "node"], "equals": "192.0.2.11"},
+          {"path": ["results", 0, "request", "headers", "x-down"], "equals": "down"},
+          {"path": ["results", 0, "semantic", "lb_status", "192.0.2.10:443"], "equals": "down"},
+          {"path": ["results", 0, "semantic", "lb_status", "pool:api_pool"], "equals": "up"}
+        ]
+      }
+    },
+    {
+      "id": "failure-fallback",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "pools": {
+          "primary_pool": ["192.0.2.10:443"],
+          "fallback_pool": ["192.0.2.20:443"]
+        },
+        "irule": "when HTTP_REQUEST {\n  pool primary_pool\n}\nwhen LB_FAILED {\n  log local0. \"failure=[event info] before=[LB::server]\"\n  pool fallback_pool\n  LB::reselect\n}\nwhen LB_SELECTED {\n  log local0. \"selected=[LB::server addr]:[LB::server port]\"\n}\nwhen LB_QUEUED {\n  log local0. \"queued=[LB::queue queued] depth=[LB::queue depth one fallback_pool] limit=[LB::queue limit depth fallback_pool]\"\n}",
+        "requests": [
+          {
+            "uri": "/health",
+            "lb_failure": "connection_timeout"
+          },
+          {"uri": "/healthy"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired"], "equals": ["HTTP_REQUEST", "LB_FAILED", "LB_SELECTED"]},
+          {"path": ["results", 0, "pool"], "equals": "fallback_pool"},
+          {"path": ["results", 0, "node"], "equals": "192.0.2.20"},
+          {"path": ["results", 0, "lb_failure", "cause"], "equals": "connection_timeout"},
+          {"path": ["results", 1, "events_fired"], "equals": ["HTTP_REQUEST", "LB_SELECTED"]}
+        ]
+      }
+    },
+    {
+      "id": "queue-events-and-inspection",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "pools": {"api_pool": ["192.0.2.10:443"]},
+        "irule": "when HTTP_REQUEST { pool api_pool }\nwhen LB_SELECTED { log local0. \"selected=[LB::server]\" }\nwhen LB_QUEUED { log local0. \"queued=[LB::queue queued] depth=[LB::queue depth one api_pool] limit=[LB::queue limit depth api_pool]\" }",
+        "request": {
+          "uri": "/health",
+          "lb_queue": {"queued": true, "depth": 2, "limit_depth": 5, "limit_time": 30, "age_head": 4}
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired"], "equals": ["HTTP_REQUEST", "LB_SELECTED", "LB_QUEUED"]},
+          {"path": ["results", 0, "semantic", "lb_events", "queue_event_fired"], "equals": "1"},
+          {"path": ["results", 0, "semantic", "lb", "queue_queued"], "equals": "1"},
+          {"path": ["results", 0, "semantic", "lb", "queue_depth"], "equals": "2"},
+          {"path": ["results", 0, "semantic", "lb", "queue_limit_depth"], "equals": "5"}
+        ]
+      }
+    },
+    {
+      "id": "persistence-and-server-introspection",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "pools": {"api_pool": ["192.0.2.10:443", "192.0.2.11:443"]},
+        "irule": "when HTTP_REQUEST {\n  if {[HTTP::uri] eq \"/seed\"} {\n    pool api_pool\n    persist add uie client-key 60 api_pool 192.0.2.10:443\n  } elseif {[HTTP::uri] eq \"/restore\"} {\n    set member [LB::persist client-key]\n    HTTP::header insert X-Persisted $member\n    HTTP::header insert X-Server [LB::server]\n  } elseif {[HTTP::uri] eq \"/delete\"} {\n    persist delete uie client-key\n  } else {\n    HTTP::header insert X-Persisted [LB::persist client-key]\n  }\n}",
+        "requests": [
+          {"uri": "/seed"},
+          {"uri": "/restore"},
+          {"uri": "/delete"},
+          {"uri": "/missing"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "node"], "equals": "192.0.2.10"},
+          {"path": ["results", 1, "node"], "equals": "192.0.2.10"},
+          {"path": ["results", 1, "request", "headers", "x-persisted"], "equals": "192.0.2.10:443"},
+          {"path": ["results", 1, "request", "headers", "x-server"], "equals": "api_pool 192.0.2.10 443"},
+          {"path": ["results", 2, "node"], "equals": ""},
+          {"path": ["results", 3, "request", "headers", "x-persisted"], "equals": ""}
+        ]
+      }
+    }
+  ]
+}
