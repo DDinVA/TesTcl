@@ -1992,9 +1992,28 @@ by `FIX_MESSAGE` for each packet, preserving tag values across both handlers:
 }
 ```
 
-The packet adapter consumes supplied parsed tags and does not parse or validate
-FIX wire bytes. This models rule-visible FIX metadata and mapping state, not a
-complete FIX wire parser or data-group evaluator. See the F5
+Raw FIX/TCP captures are also decoded when the `FIX` profile is attached. The
+decoder reassembles split and coalesced messages, validates tags 8/9/10,
+`BodyLength`, and the modulo-256 `CheckSum`, then feeds the resulting tag map
+through the same `FIX_HEADER` and `FIX_MESSAGE` handlers. Use `payload_hex` when
+the capture contains SOH (`0x01`) delimiters:
+
+```json
+{
+  "protocol": "tcp",
+  "direction": "client_to_server",
+  "source": {"address": "192.0.2.10", "port": 51000},
+  "destination": {"address": "192.0.2.20", "port": 9876},
+  "payload_hex": "383d4649582e342e3401393d..."
+}
+```
+
+The raw decoder is intentionally bounded and exposes tags as the existing map
+state: repeating tags retain their final value. It does not implement FIX
+session negotiation, a data dictionary, repeating-group structure, or a live
+counterparty. The bundled protocol driver can generate a valid framed message
+from `request.fix.tags`, or send independently prepared `message_hex`/
+`message_base64` bytes to a collector. See the F5
 [`FIX::tag`](https://clouddocs.f5.com/api/irules/FIX__tag.html) reference.
 
 ### FLOWTABLE query inputs
@@ -2652,6 +2671,10 @@ For LDAP control traffic, use the same data events with
 `bindResponse`) and its structured fields, or provide `message_hex`/
 `message_base64` for an independently prepared BER message. The default
 destination port is 389.
+For FIX control traffic, use `event: "FIX_MESSAGE"` or a client/server data
+event with `request.fix.tags` to generate a checksummed message; use
+`request.fix.message_hex` or `request.fix.message_base64` to send prepared raw
+bytes. The default destination port is 9876.
 In a local checkout, use `--trigger-command ./scripts/tmos17-protocol-driver.sh`;
 in the emulator image, use
 `--trigger-command /opt/testcl/tools/tmos17-protocol-driver.py`.

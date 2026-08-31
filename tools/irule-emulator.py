@@ -296,7 +296,7 @@ PROTOCOL_REQUEST_FIELDS = frozenset(
         "destination", "timeout", "payload", "payload_base64", "qname", "qtype",
         "qclass", "transaction_id", "recursion_desired", "client_id", "topic",
         "keepalive", "message", "method", "uri", "version", "status", "headers", "body", "pcp",
-        "radius", "websocket", "ldap",
+        "radius", "websocket", "ldap", "fix",
     }
 )
 IRULE_ANALYSIS_MAX_SOURCE_BYTES = 512 * 1024
@@ -2939,6 +2939,17 @@ def _protocol_request_template(event: str) -> dict[str, Any] | None:
             "version": "RTSP/1.0",
             "headers": {"CSeq": "1"},
         }
+    if event in {"FIX_HEADER", "FIX_MESSAGE"}:
+        return {
+            "fix": {
+                "tags": {
+                    "35": "D",
+                    "49": "testcl",
+                    "56": "target",
+                    "11": "order-1",
+                }
+            }
+        }
     if event == "WS_REQUEST":
         return {
             "websocket": {
@@ -3512,6 +3523,127 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
                 raise EmulatorInputError(
                     "protocol driver request ldap message_base64 exceeds the 2 MiB limit"
                 )
+    if "fix" in request:
+        fix_request = request["fix"]
+        if not isinstance(fix_request, dict):
+            raise EmulatorInputError("protocol driver request fix must be an object")
+        allowed_fix_fields = {"message_hex", "message_base64", "begin_string", "tags"}
+        unknown_fix_fields = sorted(set(fix_request) - allowed_fix_fields)
+        if unknown_fix_fields:
+            raise EmulatorInputError(
+                "protocol driver request fix unsupported field(s): "
+                + ", ".join(unknown_fix_fields)
+            )
+        if event not in {"CLIENT_DATA", "SERVER_DATA", "FIX_HEADER", "FIX_MESSAGE"}:
+            raise EmulatorInputError(
+                "protocol driver request fix is supported only for CLIENT_DATA, SERVER_DATA, FIX_HEADER, and FIX_MESSAGE"
+            )
+        if "message_hex" in fix_request and "message_base64" in fix_request:
+            raise EmulatorInputError(
+                "protocol driver request fix message_hex and message_base64 are mutually exclusive"
+            )
+        raw_fields = {"message_hex", "message_base64"} & set(fix_request)
+        if raw_fields and set(fix_request) - raw_fields:
+            raise EmulatorInputError(
+                "protocol driver request fix raw message cannot be combined with structured fields"
+            )
+        if "message_hex" in fix_request:
+            message_hex = fix_request["message_hex"]
+            if not isinstance(message_hex, str) or not message_hex or len(message_hex) % 2:
+                raise EmulatorInputError(
+                    "protocol driver request fix message_hex must contain complete bytes"
+                )
+            try:
+                raw_message = bytes.fromhex(message_hex)
+            except ValueError as exc:
+                raise EmulatorInputError(
+                    "protocol driver request fix message_hex must be hexadecimal"
+                ) from exc
+            if len(raw_message) > FIX_MAX_MESSAGE_BYTES:
+                raise EmulatorInputError(
+                    "protocol driver request fix message_hex exceeds the 2 MiB limit"
+                )
+        if "message_base64" in fix_request:
+            if not isinstance(fix_request["message_base64"], str):
+                raise EmulatorInputError(
+                    "protocol driver request fix message_base64 must be a string"
+                )
+            try:
+                raw_message = base64.b64decode(
+                    fix_request["message_base64"], validate=True
+                )
+            except (binascii.Error, ValueError) as exc:
+                raise EmulatorInputError(
+                    "protocol driver request fix message_base64 is not valid base64"
+                ) from exc
+            if len(raw_message) > FIX_MAX_MESSAGE_BYTES:
+                raise EmulatorInputError(
+                    "protocol driver request fix message_base64 exceeds the 2 MiB limit"
+                )
+        if "begin_string" in fix_request:
+            begin_string = fix_request["begin_string"]
+            if not isinstance(begin_string, str) or not begin_string:
+                raise EmulatorInputError(
+                    "protocol driver request fix begin_string must be a non-empty string"
+                )
+            try:
+                begin_bytes = begin_string.encode("ascii")
+            except UnicodeEncodeError as exc:
+                raise EmulatorInputError(
+                    "protocol driver request fix begin_string must contain ASCII bytes"
+                ) from exc
+            if (
+                len(begin_bytes) > 256
+                or b"=" in begin_bytes
+                or any(byte < 0x20 or byte == 0x7F for byte in begin_bytes)
+            ):
+                raise EmulatorInputError(
+                    "protocol driver request fix begin_string contains invalid bytes"
+                )
+        if "tags" in fix_request:
+            tags = fix_request["tags"]
+            if not isinstance(tags, dict) or not tags:
+                raise EmulatorInputError(
+                    "protocol driver request fix tags must be a non-empty object"
+                )
+            if len(tags) > FIX_MAX_FIELDS:
+                raise EmulatorInputError(
+                    f"protocol driver request fix tags cannot contain more than {FIX_MAX_FIELDS} fields"
+                )
+            canonical_tags: set[str] = set()
+            for tag, value in tags.items():
+                if not isinstance(tag, str) or not tag.isdigit() or len(tag) > 8:
+                    raise EmulatorInputError(
+                        "protocol driver request fix tag names must be decimal integers of at most 8 digits"
+                    )
+                canonical_tag = str(int(tag, 10))
+                if canonical_tag in {"8", "9", "10"}:
+                    raise EmulatorInputError(
+                        "protocol driver request fix tags must not include reserved tags 8, 9, or 10"
+                    )
+                if canonical_tag in canonical_tags:
+                    raise EmulatorInputError(
+                        f"protocol driver request fix tags contain duplicate tag {canonical_tag}"
+                    )
+                if not isinstance(value, str) or "\x00" in value or "\x01" in value:
+                    raise EmulatorInputError(
+                        f"protocol driver request fix tag {canonical_tag} value must be a string without NUL or SOH"
+                    )
+                try:
+                    value_bytes = value.encode("ascii")
+                except UnicodeEncodeError as exc:
+                    raise EmulatorInputError(
+                        f"protocol driver request fix tag {canonical_tag} value must contain ASCII bytes"
+                    ) from exc
+                if len(value_bytes) > PROTOCOL_REQUEST_MAX_TEXT_BYTES:
+                    raise EmulatorInputError(
+                        f"protocol driver request fix tag {canonical_tag} value is too long"
+                    )
+                canonical_tags.add(canonical_tag)
+            if "35" not in canonical_tags:
+                raise EmulatorInputError(
+                    "protocol driver request fix tags must include message type tag 35"
+                )
     if "websocket" in request:
         if event != "WS_REQUEST":
             raise EmulatorInputError(
@@ -3762,12 +3894,10 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
         not event.startswith(("DNS_", "MQTT_", "SIP_", "RTSP_"))
         and event not in {
             "PCP_REQUEST", "RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST",
-            "WS_REQUEST",
+            "WS_REQUEST", "FIX_HEADER", "FIX_MESSAGE",
         }
-        and not {
-        "payload", "payload_base64"
-        }
-        & set(request)
+        and "fix" not in request
+        and not {"payload", "payload_base64"} & set(request)
     ):
         raise EmulatorInputError(
             "raw protocol driver requests require payload or payload_base64"
@@ -3917,6 +4047,25 @@ def _protocol_request_packet(event: str, request: dict[str, Any]) -> dict[str, A
             "host": websocket_request.get("host", "example.test"),
             "headers": headers,
         }
+    elif event in {"FIX_HEADER", "FIX_MESSAGE"}:
+        fix_request = request.get("fix")
+        if not isinstance(fix_request, dict):
+            raise EmulatorInputError(
+                f"{event} protocol driver requests require fix"
+            )
+        if "message_hex" in fix_request or "message_base64" in fix_request:
+            raise EmulatorInputError(
+                "local FIX replay accepts structured tags; use the external driver for raw message bytes"
+            )
+        tags = fix_request.get("tags")
+        if not isinstance(tags, dict):
+            raise EmulatorInputError("FIX protocol driver requests require fix.tags")
+        packet = {
+            **common,
+            "protocol": "fix",
+            "destination": {"address": "192.0.2.53", "port": 9876},
+            "fix": {"tags": tags},
+        }
     elif event in {"CLIENT_DATA", "SERVER_DATA"} and "ldap" in request:
         ldap_request = request.get("ldap")
         if not isinstance(ldap_request, dict):
@@ -4026,7 +4175,7 @@ def _protocol_request_packet(event: str, request: dict[str, Any]) -> dict[str, A
         }
     else:
         raise EmulatorInputError(
-            "local protocol replay currently supports HTTP, DNS, MQTT, SIP, RTSP, PCP, RADIUS, LDAP, and WebSocket requests"
+            "local protocol replay currently supports HTTP, DNS, MQTT, SIP, RTSP, PCP, RADIUS, LDAP, FIX, and WebSocket requests"
         )
     try:
         return _normalise_packets([packet])[0]
@@ -12506,13 +12655,13 @@ PACKET_EVENT_ADAPTERS = {
     "ECA_REQUEST_ALLOWED": "injected NTLM/ECA authentication success",
     "ECA_REQUEST_DENIED": "injected NTLM/ECA authentication failure",
     "PROTOCOL_INSPECTION_MATCH": "protocol inspection match packet",
-    "FIX_MESSAGE": "structured FIX message event",
+    "FIX_MESSAGE": "structured or raw FIX message event",
     "SERVER_DATA": "server payload (TCP or generic UDP)",
     "TDS_REQUEST": "structured TDS request message",
     "TDS_RESPONSE": "structured TDS response message",
     "L7CHECK_CLIENT_DATA": "L7 check client ingress data",
     "L7CHECK_SERVER_DATA": "L7 check server ingress data",
-    "FIX_HEADER": "structured FIX header event",
+    "FIX_HEADER": "structured or raw FIX header event",
     "CLIENTSSL_CLIENTHELLO": "TLS client hello",
     "CLIENTSSL_CLIENTCERT": "TLS client certificate",
     "CLIENTSSL_HANDSHAKE": "TLS client handshake",
@@ -16755,6 +16904,9 @@ RTSP_RAW_PORTS = frozenset({554, 8554})
 RTSP_MAX_MESSAGE_BYTES = 2 * 1024 * 1024
 RTSP_MAX_LINE_BYTES = 64 * 1024
 RTSP_MAX_HEADERS = 128
+FIX_RAW_PORTS = frozenset({9876, 9880})
+FIX_MAX_MESSAGE_BYTES = 2 * 1024 * 1024
+FIX_MAX_FIELDS = 512
 RTSP_METHODS = frozenset(
     {
         "ANNOUNCE",
@@ -17340,6 +17492,167 @@ def _decode_rtsp_messages(
         if len(messages) > PACKET_MAX_COUNT:
             raise EmulatorInputError(
                 f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} RTSP messages"
+            )
+        position += consumed
+    return messages, payload[position:]
+
+
+def _looks_like_fix_prefix(payload: bytes) -> bool:
+    """Avoid treating arbitrary TCP bytes as FIX when the port is unknown."""
+    if not payload:
+        return False
+    prefix = b"8=FIX"
+    return prefix.startswith(payload) or payload.startswith(prefix)
+
+
+def _fix_ascii(value: bytes, field: str, *, allow_empty: bool = False) -> str:
+    if not value and not allow_empty:
+        raise EmulatorInputError(f"FIX {field} cannot be empty")
+    try:
+        text = value.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise EmulatorInputError(f"FIX {field} must contain ASCII bytes") from exc
+    if "\x00" in text:
+        raise EmulatorInputError(f"FIX {field} cannot contain NUL bytes")
+    return text
+
+
+def _decode_fix_message(
+    payload: bytes, direction: str
+) -> tuple[dict[str, Any], int] | None:
+    """Decode one bounded FIX message from a TCP stream.
+
+    FIX frames are delimited by BeginString (8), BodyLength (9), and the
+    checksum field (10).  The emulator exposes the existing tag-map state, so
+    repeated tags are represented by their final value in that map while the
+    wire length and checksum are still validated.
+    """
+    if not payload:
+        return None
+    if len(payload) > FIX_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"FIX stream exceeds the {FIX_MAX_MESSAGE_BYTES} byte limit"
+        )
+    first_separator = payload.find(b"\x01")
+    if first_separator < 0:
+        return None
+    second_separator = payload.find(b"\x01", first_separator + 1)
+    if second_separator < 0:
+        return None
+    begin_field = payload[:first_separator]
+    body_length_field = payload[first_separator + 1 : second_separator]
+    if not begin_field.startswith(b"8="):
+        raise EmulatorInputError("FIX message must begin with tag 8 BeginString")
+    if not body_length_field.startswith(b"9="):
+        raise EmulatorInputError("FIX message must contain tag 9 BodyLength after tag 8")
+    _fix_ascii(begin_field[2:], "BeginString")
+    body_length_text = _fix_ascii(body_length_field[2:], "BodyLength")
+    if not body_length_text.isdigit():
+        raise EmulatorInputError("FIX BodyLength must be a non-negative integer")
+    try:
+        body_length = int(body_length_text, 10)
+    except ValueError as exc:
+        raise EmulatorInputError("FIX BodyLength is too large") from exc
+    body_start = second_separator + 1
+    checksum_start = body_start + body_length
+    if checksum_start > FIX_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"FIX message exceeds the {FIX_MAX_MESSAGE_BYTES} byte limit"
+        )
+    if checksum_start + 7 > len(payload):
+        return None
+    if not payload[checksum_start:].startswith(b"10="):
+        raise EmulatorInputError("FIX message BodyLength does not end at tag 10")
+    checksum_end = payload.find(b"\x01", checksum_start + 3)
+    if checksum_end < 0:
+        return None
+    checksum_field = payload[checksum_start:checksum_end]
+    checksum_text = checksum_field[3:]
+    if len(checksum_text) != 3 or not checksum_text.isdigit():
+        raise EmulatorInputError("FIX CheckSum must contain exactly three digits")
+    checksum = int(checksum_text, 10)
+    computed_checksum = sum(payload[:checksum_start]) % 256
+    if checksum != computed_checksum:
+        raise EmulatorInputError(
+            f"FIX CheckSum mismatch: expected {computed_checksum:03d}, got {checksum_text.decode('ascii')}"
+        )
+    total_length = checksum_end + 1
+    if total_length > FIX_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"FIX message exceeds the {FIX_MAX_MESSAGE_BYTES} byte limit"
+        )
+    if body_length != checksum_start - body_start:
+        raise EmulatorInputError("FIX BodyLength does not match the wire body")
+
+    fields: list[tuple[str, str]] = []
+    position = 0
+    while position < total_length:
+        separator = payload.find(b"\x01", position, total_length)
+        if separator < 0:
+            raise EmulatorInputError("FIX field is not SOH-terminated")
+        raw_field = payload[position:separator]
+        if b"=" not in raw_field:
+            raise EmulatorInputError("FIX field is missing an equals sign")
+        tag_bytes, value_bytes = raw_field.split(b"=", 1)
+        if not tag_bytes.isdigit():
+            raise EmulatorInputError("FIX tag names must be decimal integers")
+        if len(tag_bytes) > 8:
+            raise EmulatorInputError("FIX tag name is too long")
+        try:
+            tag_number = int(tag_bytes, 10)
+        except ValueError as exc:
+            raise EmulatorInputError("FIX tag number is too large") from exc
+        if tag_number < 0:
+            raise EmulatorInputError("FIX tag number must be non-negative")
+        fields.append(
+            (str(tag_number), _fix_ascii(value_bytes, f"tag {tag_number} value", allow_empty=True))
+        )
+        if len(fields) > FIX_MAX_FIELDS:
+            raise EmulatorInputError(
+                f"FIX message contains more than {FIX_MAX_FIELDS} fields"
+            )
+        position = separator + 1
+    if position != total_length:
+        raise EmulatorInputError("FIX message contains bytes after the final field")
+    if len(fields) < 3 or fields[0][0] != "8" or fields[1][0] != "9" or fields[-1][0] != "10":
+        raise EmulatorInputError("FIX message must end with tag 10 and start with tags 8 and 9")
+    if not any(tag == "35" for tag, _ in fields[2:-1]):
+        raise EmulatorInputError("FIX message must contain message type tag 35")
+    if any(tag in {"8", "9", "10"} for tag, _ in fields[2:-1]):
+        raise EmulatorInputError("FIX framing tags 8, 9, and 10 cannot appear in the message body")
+    if fields[1][1] != body_length_text:
+        raise EmulatorInputError("FIX BodyLength field was not parsed consistently")
+    tags: dict[str, str] = {}
+    for tag, value in fields:
+        tags[tag] = value
+    message = bytes(payload[:total_length])
+    return {
+        "protocol": "fix",
+        "direction": direction,
+        "type": "message",
+        "fix": {"tags": _tcl_dict_value(tags)},
+        "payload": _decode_wire_text(message),
+        "message_length": total_length,
+        "_wire_payload": message,
+    }, total_length
+
+
+def _decode_fix_messages(
+    payload: bytes, direction: str
+) -> tuple[list[dict[str, Any]], bytes]:
+    messages: list[dict[str, Any]] = []
+    position = 0
+    while position < len(payload):
+        decoded = _decode_fix_message(payload[position:], direction)
+        if decoded is None:
+            break
+        message, consumed = decoded
+        if consumed <= 0:
+            raise EmulatorInputError("FIX decoder returned an invalid message length")
+        messages.append(message)
+        if len(messages) > PACKET_MAX_COUNT:
+            raise EmulatorInputError(
+                f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} FIX messages"
             )
         position += consumed
     return messages, payload[position:]
@@ -20808,6 +21121,9 @@ class EmulatorSession:
         )
         self._rtsp_raw_active = any(
             str(profile).upper() == "RTSP" for profile in self._profiles
+        )
+        self._fix_raw_active = any(
+            str(profile).upper() == "FIX" for profile in self._profiles
         )
         self._sip_raw_active = any(
             str(profile).upper() in {"SIP", "SIPROUTER", "SIPSESSION"}
@@ -24687,6 +25003,38 @@ class EmulatorSession:
                     f"RTSP control stream exceeds the {RTSP_MAX_MESSAGE_BYTES} byte limit"
                 )
             return None, stream.buffered_bytes
+        fix_ports = {
+            packet.get("source", {}).get("port"),
+            packet.get("destination", {}).get("port"),
+        }
+        if self._fix_raw_active and (
+            fix_ports.intersection(FIX_RAW_PORTS)
+            or _looks_like_fix_prefix(combined)
+        ):
+            decoded_messages, remaining = _decode_fix_messages(
+                combined, packet["direction"]
+            )
+            if decoded_messages:
+                stream.buffer = remaining
+                if not has_gap:
+                    stream.segments.clear()
+                for message in decoded_messages:
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            message[field] = packet[field]
+                first = decoded_messages[0]
+                if len(decoded_messages) > 1:
+                    first["_coalesced_packets"] = decoded_messages[1:]
+                return first, len(combined) - len(remaining)
+            stream.buffer = combined
+            if not has_gap:
+                stream.segments.clear()
+            if stream.buffered_bytes > FIX_MAX_MESSAGE_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"FIX stream exceeds the {FIX_MAX_MESSAGE_BYTES} byte limit"
+                )
+            return None, stream.buffered_bytes
         ftp_ports = {
             packet.get("source", {}).get("port"),
             packet.get("destination", {}).get("port"),
@@ -25614,6 +25962,7 @@ class EmulatorSession:
                 "version",
                 "proto",
                 "fields",
+                "fix",
                 "payload_length",
                 "peer",
                 "route_status",

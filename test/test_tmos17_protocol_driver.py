@@ -203,6 +203,66 @@ def test_rtsp_driver_normalises_raw_message_line_endings() -> None:
     assert payload == b"OPTIONS rtsp://media.example/live RTSP/1.0\r\nCSeq: 3\r\n\r\n"
 
 
+def test_fix_driver_builds_framed_tags_and_accepts_raw_bytes() -> None:
+    payload = driver.build_fix_message(
+        {
+            "fix": {
+                "begin_string": "FIX.4.4",
+                "tags": {
+                    "35": "D",
+                    "49": "CLIENT",
+                    "56": "TARGET",
+                    "11": "ORDER-1",
+                    "55": "AAPL",
+                },
+            }
+        },
+        "CLIENT_DATA",
+    )
+    assert payload == (
+        b"8=FIX.4.4\x019=44\x0135=D\x0149=CLIENT\x0156=TARGET\x0111=ORDER-1\x0155=AAPL\x0110=004\x01"
+    )
+    raw = base64.b64encode(payload).decode("ascii")
+    assert driver.build_fix_message(
+        {"fix": {"message_base64": raw}}, "SERVER_DATA"
+    ) == payload
+    endpoint, generated, timeout = driver.build_payload(
+        {
+            "event": "FIX_MESSAGE",
+            "traffic_url": "tcp://192.0.2.20:9876",
+            "request": {
+                "fix": {"tags": {"35": "0", "49": "CLIENT", "56": "TARGET"}}
+            },
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 9876)
+    assert generated.startswith(b"8=FIX.4.4\x019=")
+    assert timeout == 10.0
+
+
+def test_fix_driver_rejects_ambiguous_or_unsafe_fields() -> None:
+    with pytest.raises(driver.DriverError, match="mutually exclusive"):
+        driver.build_fix_message(
+            {"fix": {"message_hex": "00", "message_base64": "AA=="}},
+            "CLIENT_DATA",
+        )
+    with pytest.raises(driver.DriverError, match="message type"):
+        driver.build_fix_message(
+            {"fix": {"tags": {"49": "CLIENT", "56": "TARGET"}}},
+            "CLIENT_DATA",
+        )
+    with pytest.raises(driver.DriverError, match="SOH"):
+        driver.build_fix_message(
+            {"fix": {"tags": {"35": "D", "58": "bad\x01value"}}},
+            "CLIENT_DATA",
+        )
+    with pytest.raises(driver.DriverError, match="reserved"):
+        driver.build_fix_message(
+            {"fix": {"tags": {"8": "FIX.4.4", "35": "D"}}},
+            "CLIENT_DATA",
+        )
+
+
 def test_ftp_driver_builds_command_response_and_multiline_reply() -> None:
     command = driver.build_ftp_message(
         {"ftp": {"command": "USER alice"}}, "CLIENT_DATA"

@@ -3472,6 +3472,105 @@ when FIX_MESSAGE {
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+    def test_fix_tcp_adapter_reassembles_wire_messages_and_coalescing(self) -> None:
+        wire_hex = (
+            "383d4649582e342e3401393d37350133353d440134393d434c49454e5401"
+            "35363d5441524745540133343d320135323d32303236303833312d31323a"
+            "30303a30300131313d4f524445522d310135353d4141504c0135343d3101"
+            "31303d31383201"
+        )
+        wire = bytes.fromhex(wire_hex)
+        split_at = len(wire) // 2
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "FIX"],
+                "irule": """
+when FIX_HEADER { log local0. "header=[FIX::tag get 35]/[FIX::tag get 11]" }
+when FIX_MESSAGE { log local0. "message=[FIX::tag get 49]/[FIX::tag get 55]" }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.10", "port": 51000},
+                        "destination": {"address": "192.0.2.20", "port": 9876},
+                        "payload_hex": wire[:split_at].hex(),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.10", "port": 51000},
+                        "destination": {"address": "192.0.2.20", "port": 9876},
+                        "payload_hex": wire[split_at:].hex(),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(result["trace"][0]["buffered"])
+        decoded = result["trace"][1]
+        self.assertEqual(decoded["protocol"], "fix")
+        self.assertEqual(
+            [
+                event["event"]
+                for event in decoded["events"]
+                if event["event"] in {"FIX_HEADER", "FIX_MESSAGE"}
+            ],
+            ["FIX_HEADER", "FIX_MESSAGE"],
+        )
+        fix_events = [
+            event
+            for event in decoded["events"]
+            if event["event"] in {"FIX_HEADER", "FIX_MESSAGE"}
+        ]
+        self.assertTrue(any("header=D/ORDER-1" in log for log in fix_events[0]["logs"]))
+        self.assertTrue(any("message=CLIENT/AAPL" in log for log in fix_events[1]["logs"]))
+        self.assertTrue(
+            fix_events[1]["state"]["fix"]["tags"].startswith('"8" "FIX.4.4"')
+        )
+
+        coalesced = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "FIX"],
+                "irule": "when FIX_MESSAGE { log local0. [FIX::tag get 11] }",
+                "packets": [{
+                    "protocol": "tcp",
+                    "direction": "client_to_server",
+                    "source": {"address": "192.0.2.10", "port": 51000},
+                    "destination": {"address": "192.0.2.20", "port": 9876},
+                    "payload_hex": (wire + wire).hex(),
+                }],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        message_traces = [
+            entry for entry in coalesced["trace"]
+            if any(event["event"] == "FIX_MESSAGE" for event in entry["events"])
+        ]
+        self.assertEqual(len(message_traces), 2)
+        self.assertTrue(all(
+            any("ORDER-1" in log for event in entry["events"] for log in event["logs"])
+            for entry in message_traces
+        ))
+
+        invalid = bytearray(wire)
+        invalid[-4] = ord("2")
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "CheckSum mismatch"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "FIX"],
+                    "irule": "when FIX_MESSAGE { return }",
+                    "packets": [{
+                        "protocol": "tcp",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.10", "port": 51000},
+                        "destination": {"address": "192.0.2.20", "port": 9876},
+                        "payload_hex": bytes(invalid).hex(),
+                    }],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_lsn_translation_controls_and_mapping_lifecycle(self) -> None:
         session = self.adapter.EmulatorSession(
             self.adapter._find_tcl_lsp_root(self.tcl_lsp_root),
@@ -4171,6 +4270,26 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(
             result["execution"]["event"]["result"]["request"]["uri"], "/probe"
         )
+
+    def test_command_probe_executes_fix_tag_with_structured_protocol_fixture(self) -> None:
+        result = self.adapter.run_command_probe(
+            {
+                "command": "FIX::tag",
+                "args": ["get", "49"],
+                "event": "FIX_MESSAGE",
+                "profiles": ["TCP", "FIX"],
+                "request": {
+                    "fix": {
+                        "tags": {"35": "D", "49": "CLIENT", "56": "TARGET"}
+                    }
+                },
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+            allow_external_protocol_request=True,
+        )
+        self.assertEqual(result["execution"]["status"], "ok")
+        self.assertEqual(result["execution"]["value"], "CLIENT")
+        self.assertTrue(result["execution"]["event"]["fired"])
 
     def test_command_probe_quotes_arguments_and_reports_command_errors(self) -> None:
         result = self.adapter.run_command_probe(
@@ -5548,7 +5667,9 @@ when HTTP_REQUEST {
         self.assertIn("PEM_SUBS_SESS_CREATED", packet_adapters)
         self.assertIn("PEM_SUBS_SESS_UPDATED", packet_adapters)
         self.assertIn("PEM_SUBS_SESS_DELETED", packet_adapters)
-        self.assertEqual(packet_adapters["FIX_MESSAGE"], "structured FIX message event")
+        self.assertEqual(
+            packet_adapters["FIX_MESSAGE"], "structured or raw FIX message event"
+        )
         self.assertEqual(
             packet_adapters["PROTOCOL_INSPECTION_MATCH"],
             "protocol inspection match packet",

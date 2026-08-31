@@ -31,6 +31,10 @@ MAX_HTTP_HEADERS = 128
 MAX_HTTP_LINE_BYTES = 8 * 1024
 MAX_FTP_LINE_BYTES = 64 * 1024
 MAX_LDAP_MESSAGE_BYTES = 2 * 1024 * 1024
+MAX_FIX_MESSAGE_BYTES = 2 * 1024 * 1024
+# Three framing tags (8, 9, and 10) are added to structured input.  Keep the
+# generated message within the emulator's total field bound.
+MAX_FIX_FIELDS = 509
 MAX_WEBSOCKET_FRAME_BYTES = MAX_PAYLOAD_BYTES
 DEFAULT_TIMEOUT = 10.0
 MAX_TIMEOUT = 60.0
@@ -508,6 +512,96 @@ def build_rtsp_message(request: dict[str, Any], event: str) -> bytes:
     if len(encoded) > MAX_PAYLOAD_BYTES:
         raise DriverError("RTSP request exceeds the 2 MiB limit")
     return encoded
+
+
+def build_fix_message(request: dict[str, Any], event: str) -> bytes:
+    """Build one FIX message, preserving raw bytes or framing tag fields."""
+    if event not in {"CLIENT_DATA", "SERVER_DATA", "FIX_HEADER", "FIX_MESSAGE"}:
+        raise DriverError(
+            "FIX protocol driver supports CLIENT_DATA, SERVER_DATA, FIX_HEADER, and FIX_MESSAGE"
+        )
+    fix = request.get("fix", {})
+    if not isinstance(fix, dict):
+        raise DriverError("FIX request fix must be an object")
+    allowed = {"message_hex", "message_base64", "begin_string", "tags"}
+    unknown = sorted(set(fix) - allowed)
+    if unknown:
+        raise DriverError("FIX request unsupported field(s): " + ", ".join(unknown))
+    raw_hex = fix.get("message_hex")
+    raw_base64 = fix.get("message_base64")
+    if raw_hex is not None and raw_base64 is not None:
+        raise DriverError("FIX message_hex and message_base64 are mutually exclusive")
+    if raw_hex is not None or raw_base64 is not None:
+        if set(fix) - {"message_hex", "message_base64"}:
+            raise DriverError("FIX raw message cannot be combined with structured fields")
+        if raw_hex is not None:
+            if not isinstance(raw_hex, str) or not raw_hex or len(raw_hex) % 2:
+                raise DriverError("FIX message_hex must contain complete hexadecimal bytes")
+            try:
+                raw = bytes.fromhex(raw_hex)
+            except ValueError as exc:
+                raise DriverError("FIX message_hex must be hexadecimal") from exc
+        else:
+            if not isinstance(raw_base64, str):
+                raise DriverError("FIX message_base64 must be a string")
+            try:
+                raw = base64.b64decode(raw_base64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise DriverError("FIX message_base64 is not valid base64") from exc
+        if not raw or len(raw) > MAX_FIX_MESSAGE_BYTES:
+            raise DriverError("FIX raw message must be between 1 byte and 2 MiB")
+        return raw
+
+    begin_string = fix.get("begin_string", "FIX.4.4")
+    if not isinstance(begin_string, str) or not begin_string:
+        raise DriverError("FIX begin_string must be a non-empty string")
+    try:
+        begin_bytes = _text(begin_string, "FIX begin_string", required=True).encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise DriverError("FIX begin_string must contain ASCII bytes") from exc
+    if (
+        b"\x01" in begin_bytes
+        or b"=" in begin_bytes
+        or any(byte < 0x20 or byte == 0x7F for byte in begin_bytes)
+    ):
+        raise DriverError("FIX begin_string cannot contain control bytes, SOH, or equals signs")
+    tags = fix.get("tags")
+    if not isinstance(tags, dict) or not tags:
+        raise DriverError("FIX tags must be a non-empty object")
+    if len(tags) > MAX_FIX_FIELDS:
+        raise DriverError(f"FIX tags cannot contain more than {MAX_FIX_FIELDS} fields")
+    normalised: list[tuple[str, bytes]] = []
+    seen: set[str] = set()
+    for tag, value in tags.items():
+        if not isinstance(tag, str) or not tag.isdigit() or len(tag) > 8:
+            raise DriverError("FIX tag names must be decimal integers of at most 8 digits")
+        canonical_tag = str(int(tag, 10))
+        if canonical_tag in {"8", "9", "10"}:
+            raise DriverError("FIX tags must not include reserved tags 8, 9, or 10")
+        if canonical_tag in seen:
+            raise DriverError(f"FIX tags contain duplicate tag {canonical_tag}")
+        if not isinstance(value, str):
+            raise DriverError(f"FIX tag {canonical_tag} value must be a string")
+        try:
+            value_bytes = value.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise DriverError(f"FIX tag {canonical_tag} value must contain ASCII bytes") from exc
+        if b"\x00" in value_bytes or b"\x01" in value_bytes:
+            raise DriverError(f"FIX tag {canonical_tag} value cannot contain NUL or SOH")
+        seen.add(canonical_tag)
+        normalised.append((canonical_tag, value_bytes))
+    if "35" not in seen:
+        raise DriverError("FIX tags must include message type tag 35")
+    if not dict(normalised).get("35"):
+        raise DriverError("FIX message type tag 35 must not be empty")
+    normalised.sort(key=lambda item: item[0] != "35")
+    body = b"".join(tag.encode("ascii") + b"=" + value + b"\x01" for tag, value in normalised)
+    header = b"8=" + begin_bytes + b"\x01" + b"9=" + str(len(body)).encode("ascii") + b"\x01"
+    message = header + body
+    message += b"10=" + f"{sum(message) % 256:03d}".encode("ascii") + b"\x01"
+    if len(message) > MAX_FIX_MESSAGE_BYTES:
+        raise DriverError("FIX message exceeds the 2 MiB limit")
+    return message
 
 
 def _ftp_encode(value: str, field: str) -> bytes:
@@ -1431,6 +1525,17 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
         return (
             endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="tcp", default_port=554),
             build_rtsp_message(request, event),
+            timeout,
+        )
+    if event in {"CLIENT_DATA", "SERVER_DATA", "FIX_HEADER", "FIX_MESSAGE"} and "fix" in request:
+        return (
+            endpoint_from_request(
+                request,
+                trigger.get("traffic_url"),
+                default_scheme="tcp",
+                default_port=9876,
+            ),
+            build_fix_message(request, event),
             timeout,
         )
     if event == "PCP_REQUEST":

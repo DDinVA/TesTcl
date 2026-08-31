@@ -750,9 +750,13 @@ retain unresolved IP targets as intent rather than performing ARP or route
 resolution.
 This models iRule-visible state and command validation, not live Ethernet,
 ARP, VLAN, route, QoS, or TMM forwarding behavior.
-The structured `protocol: "fix"` packet adapter emits `FIX_HEADER` and then
-`FIX_MESSAGE` from caller-supplied parsed FIX tags. It does not parse FIX wire
-bytes; direct FIX events and tag-map mutation remain available through the
+The `protocol: "fix"` packet adapter emits `FIX_HEADER` and then `FIX_MESSAGE`
+from caller-supplied parsed FIX tags. Raw TCP traffic is also decoded when the
+FIX profile is attached: bounded stream reassembly validates FIX tags 8/9/10,
+`BodyLength`, and `CheckSum` before exposing the tag map to both events. Raw
+repeating tags are represented by their final value, and the adapter does not
+implement FIX session negotiation, data dictionaries, or repeating-group
+structure. Direct FIX events and tag-map mutation remain available through the
 event-state API.
 The TMOS 17.5 `SOCKS::allowed`, `SOCKS::destination`, and `SOCKS::version`
 commands are modeled on a structured `SOCKS_REQUEST` state. They support
