@@ -7100,6 +7100,81 @@ when SERVER_DATA { log local0. "mode=[FTP::ftps_mode]" }
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+    def test_raw_starttls_control_messages_are_reassembled(self) -> None:
+        cases = [
+            (
+                "IMAP",
+                143,
+                "A001 STARTTLS",
+                "A001 ST",
+                "ARTTLS\r\n",
+                "* OK IMAP4 ready\r\n",
+            ),
+            (
+                "POP3",
+                110,
+                "STLS",
+                "ST",
+                "LS\r\n",
+                "+OK Begin TLS negotiation\r\n",
+            ),
+            (
+                "SMTPS",
+                587,
+                "EHLO example.test",
+                "EHLO ex",
+                "ample.test\r\n",
+                "220-smtp.example.test ready\r\n220-STARTTLS\r\n220 SMTPUTF8\r\n",
+            ),
+        ]
+        for profile, port, expected_command, first_chunk, second_chunk, response in cases:
+            result = self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", profile],
+                    "irule": "when CLIENT_DATA { log local0. data } when SERVER_DATA { log local0. data }",
+                    "packets": [
+                        {
+                            "protocol": "tcp",
+                            "source": {"address": "192.0.2.10", "port": 40000},
+                            "destination": {"address": "198.51.100.20", "port": port},
+                            "payload": first_chunk,
+                        },
+                        {
+                            "protocol": "tcp",
+                            "source": {"address": "192.0.2.10", "port": 40000},
+                            "destination": {"address": "198.51.100.20", "port": port},
+                            "payload": second_chunk,
+                        },
+                        {
+                            "protocol": "tcp",
+                            "direction": "server_to_client",
+                            "source": {"address": "198.51.100.20", "port": port},
+                            "destination": {"address": "192.0.2.10", "port": 40000},
+                            "payload": response,
+                        },
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+            client_data = next(
+                event
+                for trace in result["trace"]
+                for event in trace["events"]
+                if event["event"] == "CLIENT_DATA"
+            )
+            server_data = next(
+                event
+                for trace in result["trace"]
+                for event in trace["events"]
+                if event["event"] == "SERVER_DATA"
+            )
+            self.assertEqual(
+                client_data["state"][profile.lower()]["command"], expected_command
+            )
+            self.assertEqual(
+                server_data["state"][profile.lower()]["type"], "response"
+            )
+
     def test_icap_request_response_events_and_headers(self) -> None:
         result = self.adapter.run_scenario(
             {

@@ -16584,6 +16584,169 @@ def _decode_ftp_messages(
     return messages, payload[position:]
 
 
+STARTTLS_RAW_PORTS = {
+    "imap": frozenset({143}),
+    "pop3": frozenset({110}),
+    "smtps": frozenset({25, 465, 587}),
+}
+STARTTLS_COMMAND_PREFIXES = {
+    "pop3": frozenset({"APOP", "AUTH", "CAPA", "DELE", "LIST", "NOOP", "PASS", "QUIT", "RETR", "RSET", "STAT", "STLS", "TOP", "UIDL", "USER"}),
+    "smtps": frozenset({"AUTH", "DATA", "EHLO", "HELO", "MAIL", "NOOP", "QUIT", "RCPT", "RSET", "STARTTLS", "VRFY"}),
+}
+
+
+def _starttls_line(payload: bytes, protocol: str) -> tuple[bytes, int] | None:
+    if len(payload) > STARTTLS_PAYLOAD_MAX_BYTES:
+        raise EmulatorInputError(
+            f"{protocol.upper()} control stream exceeds the {STARTTLS_PAYLOAD_MAX_BYTES} byte limit"
+        )
+    newline = payload.find(b"\n")
+    if newline < 0:
+        if b"\r" in payload and not payload.endswith(b"\r"):
+            raise EmulatorInputError(
+                f"{protocol.upper()} control line contains a bare carriage return"
+            )
+        return None
+    line = payload[:newline]
+    if line.endswith(b"\r"):
+        line = line[:-1]
+    elif b"\r" in line:
+        raise EmulatorInputError(
+            f"{protocol.upper()} control line contains a bare carriage return"
+        )
+    if len(line) > STARTTLS_COMMAND_MAX_BYTES:
+        raise EmulatorInputError(
+            f"{protocol.upper()} control line exceeds the {STARTTLS_COMMAND_MAX_BYTES} byte limit"
+        )
+    return line, newline + 1
+
+
+def _starttls_text(value: bytes, protocol: str) -> str:
+    if b"\x00" in value:
+        raise EmulatorInputError(f"{protocol.upper()} control line contains a NUL byte")
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EmulatorInputError(
+            f"{protocol.upper()} control line must be valid UTF-8"
+        ) from exc
+
+
+def _looks_like_starttls_payload(
+    protocol: str, payload: bytes, direction: str
+) -> bool:
+    if not payload:
+        return False
+    if direction == "server_to_client":
+        if protocol == "imap":
+            return payload.startswith((b"* ", b"+ ")) or bool(
+                re.match(rb"[A-Za-z0-9]+ ", payload)
+            )
+        if protocol == "pop3":
+            return payload.startswith((b"+OK", b"-ERR"))
+        return bool(re.match(rb"[0-9]{3}[ -]", payload))
+    token = payload.split(None, 1)
+    if not token:
+        return False
+    try:
+        command = token[0].decode("ascii").upper()
+    except UnicodeDecodeError:
+        return False
+    if protocol == "imap":
+        return bool(re.fullmatch(r"[A-Z0-9]+", command))
+    return command in STARTTLS_COMMAND_PREFIXES[protocol]
+
+
+def _decode_starttls_message(
+    protocol: str, payload: bytes, direction: str
+) -> tuple[dict[str, Any], int] | None:
+    first = _starttls_line(payload, protocol)
+    if first is None:
+        return None
+    line, consumed = first
+    if not line:
+        raise EmulatorInputError(f"{protocol.upper()} control message cannot be empty")
+    text = _starttls_text(line, protocol)
+    if direction == "client_to_server":
+        if protocol == "imap" and not re.match(r"^[A-Za-z0-9]+(?:\s|$)", text):
+            raise EmulatorInputError("IMAP command must begin with a tag")
+        if protocol != "imap":
+            parts = text.split(None, 1)
+            if not parts:
+                raise EmulatorInputError(
+                    f"{protocol.upper()} command cannot be empty"
+                )
+            token = parts[0].upper()
+            if token not in STARTTLS_COMMAND_PREFIXES[protocol]:
+                raise EmulatorInputError(
+                    f"{protocol.upper()} command must begin with a recognized command"
+                )
+        packet_type = "command"
+    else:
+        if protocol == "imap":
+            if not (text.startswith(("* ", "+ ")) or re.match(r"^[A-Za-z0-9]+ ", text)):
+                raise EmulatorInputError("IMAP response must begin with a tag or continuation marker")
+        elif not re.match(r"^[0-9]{3}[ -]", text):
+            if protocol == "pop3" and not text.startswith(("+OK", "-ERR")):
+                raise EmulatorInputError("POP3 response must begin with +OK or -ERR")
+            if protocol == "smtps":
+                raise EmulatorInputError("SMTPS response must begin with a three-digit code")
+        packet_type = "response"
+        if protocol == "smtps" and re.match(r"^[0-9]{3}-", text):
+            response_code = text[:3]
+            lines = 1
+            position = consumed
+            while True:
+                next_line = _starttls_line(payload[position:], protocol)
+                if next_line is None:
+                    return None
+                continuation, width = next_line
+                continuation_text = _starttls_text(continuation, protocol)
+                position += width
+                lines += 1
+                if lines > FTP_MAX_MULTILINE_LINES:
+                    raise EmulatorInputError(
+                        f"SMTPS multiline response exceeds {FTP_MAX_MULTILINE_LINES} lines"
+                    )
+                if continuation_text.startswith(f"{response_code} "):
+                    consumed = position
+                    break
+    return {
+        "protocol": protocol,
+        "direction": direction,
+        "type": packet_type,
+        "command": text,
+        "tls_active": "0",
+        "payload": _decode_wire_text(payload[:consumed]),
+        "message": _decode_wire_text(payload[:consumed]),
+        "message_length": consumed,
+        "_wire_payload": bytes(payload[:consumed]),
+    }, consumed
+
+
+def _decode_starttls_messages(
+    protocol: str, payload: bytes, direction: str
+) -> tuple[list[dict[str, Any]], bytes]:
+    messages: list[dict[str, Any]] = []
+    position = 0
+    while position < len(payload):
+        decoded = _decode_starttls_message(protocol, payload[position:], direction)
+        if decoded is None:
+            break
+        message, consumed = decoded
+        if consumed <= 0:
+            raise EmulatorInputError(
+                f"{protocol.upper()} decoder returned an invalid message length"
+            )
+        messages.append(message)
+        if len(messages) > PACKET_MAX_COUNT:
+            raise EmulatorInputError(
+                f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} {protocol.upper()} messages"
+            )
+        position += consumed
+    return messages, payload[position:]
+
+
 def _decode_sip_message(
     payload: bytes, direction: str
 ) -> tuple[dict[str, Any], int] | None:
@@ -19932,6 +20095,12 @@ class EmulatorSession:
         self._ftp_raw_active = any(
             str(profile).upper() in {"FTP", "FTPS"} for profile in self._profiles
         )
+        self._starttls_raw_active = {
+            protocol: any(
+                str(profile).upper() == protocol.upper() for profile in self._profiles
+            )
+            for protocol in ("imap", "pop3", "smtps")
+        }
         self._sip_raw_active = any(
             str(profile).upper() in {"SIP", "SIPROUTER", "SIPSESSION"}
             for profile in self._profiles
@@ -23808,6 +23977,45 @@ class EmulatorSession:
                 self._packet_streams.pop(key, None)
                 raise EmulatorInputError(
                     f"FTP control stream exceeds the {FTP_MAX_MESSAGE_BYTES} byte limit"
+                )
+            return None, stream.buffered_bytes
+        starttls_ports = {
+            packet.get("source", {}).get("port"),
+            packet.get("destination", {}).get("port"),
+        }
+        for starttls_protocol, active in self._starttls_raw_active.items():
+            if not active:
+                continue
+            if not (
+                starttls_ports.intersection(STARTTLS_RAW_PORTS[starttls_protocol])
+                or _looks_like_starttls_payload(
+                    starttls_protocol, combined, packet["direction"]
+                )
+            ):
+                continue
+            decoded_messages, remaining = _decode_starttls_messages(
+                starttls_protocol, combined, packet["direction"]
+            )
+            if decoded_messages:
+                stream.buffer = remaining
+                if not has_gap:
+                    stream.segments.clear()
+                for message in decoded_messages:
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            message[field] = packet[field]
+                first = decoded_messages[0]
+                if len(decoded_messages) > 1:
+                    first["_coalesced_packets"] = decoded_messages[1:]
+                return first, len(combined) - len(remaining)
+            stream.buffer = combined
+            if not has_gap:
+                stream.segments.clear()
+            if stream.buffered_bytes > STARTTLS_PAYLOAD_MAX_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"{starttls_protocol.upper()} control stream exceeds the "
+                    f"{STARTTLS_PAYLOAD_MAX_BYTES} byte limit"
                 )
             return None, stream.buffered_bytes
         looks_like_mqtt = self._mqtt_raw_active and self._looks_like_mqtt_prefix(combined)

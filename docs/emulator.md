@@ -649,8 +649,14 @@ expose their TMOS 17.5 STARTTLS controls. `IMAP::activation_mode`,
 `require`; each namespace also models its `enable` and `disable` command.
 Protocol-control state persists for the emulated connection, while packet
 inputs can seed the message type, command text, TLS-active flag, and payload.
-The adapter does not parse IMAP, POP3, LDAP, or SMTPS wire messages, negotiate
-TLS, or enforce STARTTLS policy against a live peer.
+When the matching `IMAP`, `POP3`, or `SMTPS` profile is attached, raw TCP
+control lines are reassembled from packet fragments and dispatched as
+`CLIENT_DATA`/`SERVER_DATA`; IMAP tags and continuation markers, POP3
+`+OK`/`-ERR`, and SMTP three-digit replies are recognized. The bundled
+protocol driver can generate the corresponding bounded control lines. LDAP
+remains structured-only because its wire format is BER rather than a line
+protocol. None of these adapters negotiates TLS or enforces STARTTLS policy
+against a live peer.
 Structured ICAP packet traces dispatch `ICAP_REQUEST` and `ICAP_RESPONSE` when
 the `ICAP` profile is attached. The four TMOS 17.5 `ICAP::*` commands expose
 request method and URI, response status, and case-insensitive ICAP header
@@ -2591,7 +2597,7 @@ The repository includes a dependency-light starter driver at
 `scripts/tmos17-protocol-driver.sh`. It supports DNS queries, MQTT 3.1.1
 CONNECT plus PUBLISH traffic, generated or raw SIP messages, structured RTSP
 requests, FTP control-channel commands/responses, and generic raw UDP/TCP
-payloads. Protocol fixtures belong in the
+payloads, plus IMAP/POP3/SMTPS control lines. Protocol fixtures belong in the
 plan's optional `request` object. For example, a DNS case can use:
 
 For `RTSP_REQUEST_DATA`, the collector adds a short `RTSP_REQUEST` primer that
@@ -2631,6 +2637,10 @@ For FTP control traffic, use `event: "CLIENT_DATA"` with
 `request.ftp.response_code` and `request.ftp.text`/`lines`; the default
 destination port is 21. The driver adds CRLF framing and can emit bounded
 multiline replies.
+For IMAP, POP3, or SMTPS control traffic, use the same data events with
+`request.starttls.protocol` and either `request.starttls.command` for client
+traffic or a raw `request.starttls.message` for server traffic. The default
+ports are 143, 110, and 465 respectively.
 In a local checkout, use `--trigger-command ./scripts/tmos17-protocol-driver.sh`;
 in the emulator image, use
 `--trigger-command /opt/testcl/tools/tmos17-protocol-driver.py`.

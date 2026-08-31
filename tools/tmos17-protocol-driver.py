@@ -15,6 +15,7 @@ import binascii
 import ipaddress
 import json
 import math
+import re
 import socket
 import struct
 import sys
@@ -624,6 +625,57 @@ def build_ftp_message(request: dict[str, Any], event: str) -> bytes:
     return encoded
 
 
+def build_starttls_message(request: dict[str, Any], event: str) -> bytes:
+    """Build one bounded IMAP, POP3, or SMTPS control-channel line."""
+    if event not in {"CLIENT_DATA", "SERVER_DATA"}:
+        raise DriverError(
+            "STARTTLS protocol driver supports CLIENT_DATA and SERVER_DATA"
+        )
+    starttls = request.get("starttls", {})
+    if not isinstance(starttls, dict):
+        raise DriverError("STARTTLS request starttls must be an object")
+    allowed = {"protocol", "message", "command"}
+    unknown = sorted(set(starttls) - allowed)
+    if unknown:
+        raise DriverError(
+            "STARTTLS request unsupported field(s): " + ", ".join(unknown)
+        )
+    protocol = starttls.get("protocol")
+    if not isinstance(protocol, str) or protocol.lower() not in {"imap", "pop3", "smtps"}:
+        raise DriverError("STARTTLS protocol must be imap, pop3, or smtps")
+    protocol = protocol.lower()
+    message = starttls.get("message")
+    if message is not None:
+        if set(starttls) - {"protocol", "message"}:
+            raise DriverError("STARTTLS message cannot be combined with command")
+        raw = _text(message, "STARTTLS message", required=True)
+        assert raw is not None
+        normalised = raw.replace("\r\n", "\n").replace("\r", "\n").replace(
+            "\n", "\r\n"
+        )
+        if not normalised.endswith("\r\n"):
+            normalised += "\r\n"
+        encoded = _ftp_line_encode(normalised, "STARTTLS message")
+        if len(encoded) > MAX_PAYLOAD_BYTES:
+            raise DriverError("STARTTLS message exceeds the 2 MiB limit")
+        return encoded
+    if event != "CLIENT_DATA":
+        raise DriverError("SERVER_DATA requires a STARTTLS message")
+    command = _text(starttls.get("command"), "STARTTLS command", required=True)
+    assert command is not None
+    command = _single_line(command, "STARTTLS command")
+    parts = command.split(None, 1)
+    if not parts:
+        raise DriverError("STARTTLS command must not be blank")
+    token = parts[0].upper()
+    if protocol == "imap":
+        if not re.fullmatch(r"[A-Za-z0-9]+", token):
+            raise DriverError("IMAP command must begin with an ASCII tag")
+    elif token not in {"APOP", "AUTH", "CAPA", "DELE", "LIST", "NOOP", "PASS", "QUIT", "RETR", "RSET", "STAT", "STLS", "TOP", "UIDL", "USER"}:
+        raise DriverError(f"{protocol.upper()} command is not recognized")
+    return _ftp_line_encode(command + "\r\n", "STARTTLS command")
+
+
 WEBSOCKET_OPCODES = {
     "continuation": 0x0,
     "text": 0x1,
@@ -1097,6 +1149,22 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
                 default_port=21,
             ),
             build_ftp_message(request, event),
+            timeout,
+        )
+    if event in {"CLIENT_DATA", "SERVER_DATA"} and "starttls" in request:
+        starttls = request.get("starttls")
+        protocol = starttls.get("protocol") if isinstance(starttls, dict) else None
+        default_port = {"imap": 143, "pop3": 110, "smtps": 465}.get(
+            str(protocol).lower(), 0
+        )
+        return (
+            endpoint_from_request(
+                request,
+                trigger.get("traffic_url"),
+                default_scheme="tcp",
+                default_port=default_port,
+            ),
+            build_starttls_message(request, event),
             timeout,
         )
     if event.startswith("SIP_"):

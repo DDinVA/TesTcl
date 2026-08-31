@@ -258,6 +258,44 @@ def test_ftp_driver_rejects_wrong_direction_and_line_injection() -> None:
         )
 
 
+def test_starttls_driver_builds_imap_and_pop3_control_lines() -> None:
+    imap = driver.build_starttls_message(
+        {"starttls": {"protocol": "imap", "command": "A001 STARTTLS"}},
+        "CLIENT_DATA",
+    )
+    assert imap == b"A001 STARTTLS\r\n"
+    pop3 = driver.build_starttls_message(
+        {"starttls": {"protocol": "pop3", "message": "+OK Begin TLS"}},
+        "SERVER_DATA",
+    )
+    assert pop3 == b"+OK Begin TLS\r\n"
+    endpoint, payload, timeout = driver.build_payload(
+        {
+            "event": "CLIENT_DATA",
+            "traffic_url": "tcp://192.0.2.20:1110",
+            "request": {
+                "starttls": {"protocol": "pop3", "command": "STLS"}
+            },
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 1110)
+    assert payload == b"STLS\r\n"
+    assert timeout == 10.0
+
+
+def test_starttls_driver_rejects_wrong_direction_and_invalid_command() -> None:
+    with pytest.raises(driver.DriverError, match="SERVER_DATA requires"):
+        driver.build_starttls_message(
+            {"starttls": {"protocol": "imap", "command": "A001 NOOP"}},
+            "SERVER_DATA",
+        )
+    with pytest.raises(driver.DriverError, match="not recognized"):
+        driver.build_starttls_message(
+            {"starttls": {"protocol": "pop3", "command": "BOGUS"}},
+            "CLIENT_DATA",
+        )
+
+
 def test_sip_driver_rejects_header_injection_and_adds_content_length() -> None:
     payload = driver.build_sip_message(
         {"method": "OPTIONS", "uri": "sip:test@example.com", "body": "hello"},

@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "starttls-17.5",
+  "cases": [
+    {
+      "id": "imap-activation-default",
+      "probe": {
+        "command": "IMAP::activation_mode",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP", "IMAP"]
+      },
+      "expect": {"status": "ok", "value": "none"}
+    },
+    {
+      "id": "pop3-activation-default",
+      "probe": {
+        "command": "POP3::activation_mode",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP", "POP3"]
+      },
+      "expect": {"status": "ok", "value": "none"}
+    },
+    {
+      "id": "smtps-activation-default",
+      "probe": {
+        "command": "SMTPS::activation_mode",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP", "SMTPS"]
+      },
+      "expect": {"status": "ok", "value": "none"}
+    },
+    {
+      "id": "imap-raw-starttls",
+      "scenario": {
+        "profiles": ["TCP", "IMAP"],
+        "irule": "when CLIENT_DATA { log local0. imap } when SERVER_DATA { log local0. imap }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "source": {"address": "192.0.2.10", "port": 40000},
+            "destination": {"address": "198.51.100.20", "port": 143},
+            "payload": "A001 ST"
+          },
+          {
+            "protocol": "tcp",
+            "source": {"address": "192.0.2.10", "port": 40000},
+            "destination": {"address": "198.51.100.20", "port": 143},
+            "payload": "ARTTLS\r\n"
+          },
+          {
+            "protocol": "tcp",
+            "direction": "server_to_client",
+            "source": {"address": "198.51.100.20", "port": 143},
+            "destination": {"address": "192.0.2.10", "port": 40000},
+            "payload": "* OK ready\r\n"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 1, "events", 2, "state", "imap", "type"], "equals": "command"},
+          {"path": ["trace", 1, "events", 2, "state", "imap", "command"], "equals": "A001 STARTTLS"},
+          {"path": ["trace", 2, "events", 2, "state", "imap", "type"], "equals": "response"}
+        ]
+      }
+    },
+    {
+      "id": "pop3-raw-starttls",
+      "scenario": {
+        "profiles": ["TCP", "POP3"],
+        "irule": "when CLIENT_DATA { log local0. pop3 } when SERVER_DATA { log local0. pop3 }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "source": {"address": "192.0.2.10", "port": 40000},
+            "destination": {"address": "198.51.100.20", "port": 110},
+            "payload": "STLS\r\n"
+          },
+          {
+            "protocol": "tcp",
+            "direction": "server_to_client",
+            "source": {"address": "198.51.100.20", "port": 110},
+            "destination": {"address": "192.0.2.10", "port": 40000},
+            "payload": "+OK Begin TLS\r\n"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "state", "pop3", "command"], "equals": "STLS"},
+          {"path": ["trace", 1, "events", 2, "state", "pop3", "command"], "equals": "+OK Begin TLS"}
+        ]
+      }
+    },
+    {
+      "id": "smtps-raw-starttls",
+      "scenario": {
+        "profiles": ["TCP", "SMTPS"],
+        "irule": "when CLIENT_DATA { log local0. smtp } when SERVER_DATA { log local0. smtp }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "source": {"address": "192.0.2.10", "port": 40000},
+            "destination": {"address": "198.51.100.20", "port": 587},
+            "payload": "EHLO example.test\r\n"
+          },
+          {
+            "protocol": "tcp",
+            "direction": "server_to_client",
+            "source": {"address": "198.51.100.20", "port": 587},
+            "destination": {"address": "192.0.2.10", "port": 40000},
+            "payload": "220 smtp.example.test ready\r\n"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "state", "smtps", "command"], "equals": "EHLO example.test"},
+          {"path": ["trace", 1, "events", 2, "state", "smtps", "type"], "equals": "response"}
+        ]
+      }
+    }
+  ]
+}

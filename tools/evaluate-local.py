@@ -133,6 +133,14 @@ def _probe_requests(emulator: Any) -> list[dict[str, Any]]:
                 "profiles": ["TCP", "FTP"],
             },
         },
+        {
+            "name": "IMAP::activation_mode",
+            "request": {
+                "command": "IMAP::activation_mode",
+                "event": "CLIENT_ACCEPTED",
+                "profiles": ["TCP", "IMAP"],
+            },
+        },
     ]
 
 
