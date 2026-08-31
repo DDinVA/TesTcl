@@ -3039,6 +3039,8 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("device_id", "1"),
         ("device_id", "0"),
     ),
+    "PROFILE::exists": (("HTTP",),),
+    "PROFILE::httpclass": (("default",),),
 }
 _CANDIDATE_EVENT_HINTS = {
     "TCP::recvwnd": "CLIENT_ACCEPTED",

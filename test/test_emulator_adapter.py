@@ -5198,6 +5198,31 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["status_counts"], {"ok": 29})
         self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
 
+    def test_profile_candidate_sweep_uses_supported_attribute_fixtures(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 25, namespace="PROFILE", variants=1
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        self.assertEqual(by_command["PROFILE::exists"]["input"]["args"], ["HTTP"])
+        self.assertEqual(
+            by_command["PROFILE::httpclass"]["input"]["args"], ["default"]
+        )
+
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 0, 25, namespace="PROFILE", variants=8
+        )
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 25)
+        self.assertEqual(sweep["summary"]["variant_count"], 25)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 25})
+        self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(
