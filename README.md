@@ -47,6 +47,11 @@ through live_data_plane.upstream.targets; the iRule's pool command then
 determines which mapped peer is opened. Set pool_modes to round_robin to rotate
 members across real client connections; failed targets are skipped during their
 bounded failure cooldown.
+Set `live_data_plane.protocol` to `websocket` to run a real RFC 6455 upgrade and
+frame loop through the `WS_*` iRule events. The live WebSocket peer is a bounded
+deterministic local echo endpoint that supports payload mutation, frame/message
+drops, ping/pong, close, fragmentation ordering, and optional TLS termination.
+WebSocket upstream tunneling is not enabled yet.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:

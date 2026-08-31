@@ -129,6 +129,27 @@ enabled. Actual SSL certificate fields are not automatically injected into
 iRule `SSL::cert` state; use the packet-level TLS adapters or explicit
 scenario state for those semantics.
 
+## Real-client WebSocket data plane
+
+Set `live_data_plane.protocol` to `websocket` to accept a real RFC 6455 client:
+
+```json
+{
+  "profiles": ["TCP", "HTTP", "WS"],
+  "irule": "when WS_CLIENT_FRAME { WS::collect frame } when WS_CLIENT_DATA { WS::payload replace 0 5 world }",
+  "live_data_plane": {"protocol": "websocket", "read_timeout": 1.0}
+}
+```
+
+The listener validates the HTTP/1.1 upgrade and client masking, runs the
+persistent `WS_REQUEST`/`WS_RESPONSE` and frame/data/done lifecycle, echoes
+text/binary/continuation frames after iRule payload mutation, answers pings
+with pongs, and honors `WS::frame drop`, `WS::message drop`, and close
+emissions. It enforces bounded headers, frames, control-frame rules, and
+fragmentation ordering. This first live slice uses a deterministic local peer;
+WebSocket upstream tunneling is intentionally not enabled yet. TLS termination
+is available with the same `live_data_plane.tls` block described above.
+
 For raw TCP clients, add an explicit `live_data_plane` object to the scenario:
 
 ```json

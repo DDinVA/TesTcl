@@ -12759,6 +12759,7 @@ PACKET_PROTOCOL_FIELDS = {
         "fin",
         "masked",
         "mask",
+        "payload_hex",
     },
     "mqtt": {
         "payload_hex",
@@ -16251,6 +16252,31 @@ def _decode_websocket_frames(
             )
         position += consumed
     return frames, payload[position:]
+
+
+def _encode_live_websocket_frame(
+    frame_type: str, payload: bytes, *, fin: bool = True
+) -> bytes:
+    """Encode one unmasked server-to-client RFC 6455 frame."""
+    opcode_by_type = {name: opcode for opcode, name in WEBSOCKET_OPCODE_NAMES.items()}
+    opcode = opcode_by_type.get(frame_type)
+    if opcode is None:
+        raise EmulatorInputError(f"unsupported WebSocket frame type {frame_type!r}")
+    if len(payload) > WEBSOCKET_MAX_FRAME_BYTES:
+        raise EmulatorResourceError("WebSocket payload exceeds the configured frame limit")
+    if frame_type in {"close", "ping", "pong"}:
+        if not fin:
+            raise EmulatorInputError("WebSocket control frames must not be fragmented")
+        if len(payload) > 125:
+            raise EmulatorInputError("WebSocket control frame exceeds 125 bytes")
+    first = opcode | (0x80 if fin else 0)
+    if len(payload) < 126:
+        length = bytes([len(payload)])
+    elif len(payload) <= 0xFFFF:
+        length = b"\x7e" + len(payload).to_bytes(2, "big")
+    else:
+        length = b"\x7f" + len(payload).to_bytes(8, "big")
+    return bytes([first]) + length + payload
 
 
 MQTT_PACKET_TYPES = {
@@ -19823,7 +19849,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     else:
                         options[canonical_id] = _packet_scalar(option_value, "options")
                 normalised[field] = options
-            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ike", "ftp", "icap", "tds", "socks", "l7check", "fix", "mqtt", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
+            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ike", "ftp", "icap", "tds", "socks", "l7check", "fix", "mqtt", "websocket", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
                 value = _require_string(packet[field], f"packet {index} payload_hex")
                 if len(value) % 2:
                     raise EmulatorInputError(
@@ -28554,6 +28580,30 @@ class EmulatorSession:
         normalised = _normalise_packets(packets)
         return self._run_normalised_packet_trace(normalised)
 
+    def websocket_runtime_state(self) -> dict[str, Any]:
+        """Return bounded post-event state for a live WebSocket adapter."""
+        def read_state(session: Any) -> dict[str, Any]:
+            payload_hex = session.eval_tcl(
+                "binary encode hex $::state::websocket::payload"
+            )
+            try:
+                payload = bytes.fromhex(payload_hex)
+            except ValueError as exc:
+                raise EmulatorInputError(
+                    "emulator returned invalid WebSocket payload"
+                ) from exc
+            return {
+                "payload": payload,
+                "enabled": session.eval_tcl(
+                    "set ::itest::semantic::ws_enabled"
+                ) == "1",
+                "upgraded": session.eval_tcl(
+                    "set ::itest::semantic::ws_upgrade_seen"
+                ) == "1",
+            }
+
+        return self._call(read_state)
+
     def open_packet_server_connection(self, packet: Any) -> dict[str, Any]:
         """Open the modeled serverside lifecycle for a live TCP peer."""
         normalised = _normalise_packets([packet])
@@ -29183,6 +29233,13 @@ class _PersistentEmulatorSession:
                 elif self._base_flow_key == flow_key:
                     self._base_flow_key = None
                 raise
+
+    def websocket_runtime_state(self) -> dict[str, Any]:
+        """Return bounded post-event state for a persistent WebSocket flow."""
+        with self._lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
+            return self._state_session().websocket_runtime_state()
 
     def close(self) -> None:
         with self._lock:
@@ -32130,18 +32187,28 @@ def _normalise_live_data_plane_scenario(
             "unsupported live_data_plane field(s): " + ", ".join(unknown)
         )
     protocol = config.get("protocol", "http")
-    if not isinstance(protocol, str) or protocol.lower() not in {"http", "http2", "tcp"}:
-        raise EmulatorInputError("live_data_plane.protocol must be http, http2, or tcp")
+    if not isinstance(protocol, str) or protocol.lower() not in {"http", "http2", "websocket", "tcp"}:
+        raise EmulatorInputError(
+            "live_data_plane.protocol must be http, http2, websocket, or tcp"
+        )
     protocol = protocol.lower()
 
     scenario = dict(raw)
     scenario.pop("live_data_plane", None)
     origin: dict[str, Any] | None = None
     server_tls = None
-    if protocol in {"http", "http2"}:
+    if protocol in {"http", "http2", "websocket"}:
         if "upstream" in config and "live_origin" in scenario:
             raise EmulatorInputError(
                 "live_origin cannot be combined with a live HTTP upstream"
+            )
+        if protocol == "websocket" and "upstream" in config:
+            raise EmulatorInputError(
+                "live WebSocket currently supports the deterministic local peer only; upstream is not supported"
+            )
+        if protocol == "websocket" and "live_origin" in scenario:
+            raise EmulatorInputError(
+                "live_origin is not valid for the WebSocket data plane"
             )
         scenario, origin = _normalise_live_http_scenario(scenario)
         if "tls" in config and config["tls"] is not None:
@@ -32154,7 +32221,7 @@ def _normalise_live_data_plane_scenario(
         raise EmulatorInputError("live_origin is only valid for the HTTP data plane")
     elif "tls" in config and config["tls"] is not None:
         raise EmulatorInputError(
-            "live_data_plane.tls is only valid for the HTTP data plane"
+            "live_data_plane.tls is only valid for the HTTP data plane or WebSocket data plane"
         )
     if protocol == "tcp" and any(
         field in scenario for field in ("request", "requests", "packets")
@@ -32339,7 +32406,7 @@ def _normalise_live_data_plane_scenario(
             )
         upstream_tls = None
         if "tls" in upstream_config and upstream_config["tls"] is not None:
-            if protocol == "tcp":
+            if protocol not in {"http", "http2"}:
                 raise EmulatorInputError(
                     "live_data_plane.upstream.tls is only valid for HTTP"
                 )
@@ -32854,6 +32921,307 @@ def _live_http_handler(
             self._handle_live_request()
 
     return LiveEmulatorHandler
+
+
+def _live_websocket_handler(
+    scenario: dict[str, Any],
+    config: dict[str, Any],
+    manager: "SessionManager",
+) -> type[socketserver.BaseRequestHandler]:
+    """Build a real-client WebSocket adapter over the packet iRule engine.
+
+    This is intentionally a local deterministic peer: it performs the HTTP
+    upgrade, feeds every client frame through the WS_* lifecycle, and echoes
+    the resulting payload back after iRule mutation. Backend WebSocket
+    tunneling is a separate slice because it needs bidirectional lifetime and
+    fragmentation coordination.
+    """
+
+    class LiveWebSocketHandler(socketserver.BaseRequestHandler):
+        def _read_upgrade(self) -> tuple[str, dict[str, str], bytes, int]:
+            buffer = bytearray()
+            marker = b"\r\n\r\n"
+            bytes_read = 0
+            while marker not in buffer:
+                remaining = config["max_read_bytes"] - bytes_read
+                if remaining <= 0:
+                    raise EmulatorResourceError(
+                        "WebSocket upgrade exceeds the configured byte limit"
+                    )
+                chunk = self.request.recv(min(LIVE_RAW_READ_SIZE, remaining))
+                if not chunk:
+                    raise EmulatorInputError("WebSocket client closed during upgrade")
+                buffer.extend(chunk)
+                bytes_read += len(chunk)
+            raw_headers, _ = bytes(buffer).split(marker, 1)
+            lines = raw_headers.split(b"\r\n")
+            if not lines:
+                raise EmulatorInputError("WebSocket upgrade is missing a request line")
+            try:
+                request_line = lines[0].decode("ascii")
+            except UnicodeDecodeError as exc:
+                raise EmulatorInputError("WebSocket request line must be ASCII") from exc
+            parts = request_line.split(" ")
+            if len(parts) != 3 or parts[0] != "GET" or parts[2] != "HTTP/1.1":
+                raise EmulatorInputError("WebSocket upgrade must be an HTTP/1.1 GET")
+            target = parts[1]
+            if not target or any(character in target for character in "\r\n\x00"):
+                raise EmulatorInputError("WebSocket request target is invalid")
+            headers: dict[str, str] = {}
+            for raw_line in lines[1:]:
+                if not raw_line or b":" not in raw_line:
+                    raise EmulatorInputError("WebSocket upgrade contains an invalid header")
+                raw_name, raw_value = raw_line.split(b":", 1)
+                try:
+                    name = raw_name.decode("ascii").strip()
+                    value = raw_value.decode("iso-8859-1").strip()
+                except UnicodeDecodeError as exc:
+                    raise EmulatorInputError("WebSocket upgrade header is invalid") from exc
+                if (
+                    not name
+                    or not re.fullmatch(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", name)
+                    or any(character in name for character in "\r\n\x00")
+                    or any(character in value for character in "\r\n\x00")
+                ):
+                    raise EmulatorInputError("WebSocket upgrade header is unsafe")
+                lower_name = name.lower()
+                if lower_name in headers:
+                    if lower_name == "sec-websocket-key":
+                        raise EmulatorInputError("WebSocket upgrade contains duplicate Sec-WebSocket-Key")
+                    headers[lower_name] = headers[lower_name] + ", " + value
+                else:
+                    headers[lower_name] = value
+            if not _websocket_header_has_token(headers, "upgrade", "websocket"):
+                raise EmulatorInputError("WebSocket upgrade header is missing Upgrade: websocket")
+            if not _websocket_header_has_token(headers, "connection", "upgrade"):
+                raise EmulatorInputError("WebSocket upgrade header is missing Connection: Upgrade")
+            if _websocket_header_value(headers, "sec-websocket-version") != "13":
+                raise EmulatorInputError("only WebSocket version 13 is supported")
+            key = _websocket_header_value(headers, "sec-websocket-key")
+            try:
+                decoded_key = base64.b64decode(key, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise EmulatorInputError("Sec-WebSocket-Key is not valid base64") from exc
+            if len(decoded_key) != 16:
+                raise EmulatorInputError("Sec-WebSocket-Key must decode to 16 bytes")
+            return target, headers, bytes(buffer[buffer.index(marker) + len(marker) :]), bytes_read
+
+        def _packet(self, packet_type: str, **values: Any) -> dict[str, Any]:
+            server_address = self.server.server_address
+            if packet_type == "request":
+                source = {"address": self.client_address[0], "port": self.client_address[1]}
+                destination = {"address": server_address[0], "port": server_address[1]}
+            else:
+                source = {"address": server_address[0], "port": server_address[1]}
+                destination = {"address": self.client_address[0], "port": self.client_address[1]}
+            return {
+                "protocol": "websocket",
+                "direction": (
+                    "client_to_server" if packet_type == "request" else "server_to_client"
+                ),
+                "source": source,
+                "destination": destination,
+                "type": packet_type,
+                **values,
+            }
+
+        def _upgrade(self, session_id: str) -> tuple[bytes, int]:
+            target, headers, leftover, bytes_read = self._read_upgrade()
+            key = _websocket_header_value(headers, "sec-websocket-key")
+            accept = base64.b64encode(
+                hashlib.sha1(
+                    (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+                ).digest()
+            ).decode("ascii")
+            request = self._packet(
+                "request",
+                method="GET",
+                uri=target,
+                host=_websocket_header_value(headers, "host"),
+                headers={name: value for name, value in headers.items()},
+            )
+            response_headers = {
+                "Upgrade": "websocket",
+                "Connection": "Upgrade",
+                "Sec-WebSocket-Accept": accept,
+            }
+            requested_protocol = _websocket_header_value(headers, "sec-websocket-protocol")
+            if requested_protocol:
+                # A real BIG-IP can select a protocol. The deterministic peer
+                # selects the first offered token and exposes it to WS::response.
+                response_headers["Sec-WebSocket-Protocol"] = requested_protocol.split(",", 1)[0].strip()
+            response = self._packet(
+                "response", status=101, response_headers=response_headers
+            )
+
+            def process(session: Any) -> dict[str, Any]:
+                result = session.run_packet_trace([request, response])
+                runtime = session.websocket_runtime_state()
+                return {
+                    "result": result,
+                    "enabled": runtime["enabled"],
+                    "upgraded": runtime["upgraded"],
+                }
+
+            state = manager.execute(session_id, process)
+            if not state["enabled"] or not state["upgraded"]:
+                self.request.sendall(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                raise EmulatorInputError("iRule disabled the WebSocket upgrade")
+            self.request.sendall(
+                (
+                    "HTTP/1.1 101 Switching Protocols\r\n"
+                    + "".join(f"{name}: {value}\r\n" for name, value in response_headers.items())
+                    + "\r\n"
+                ).encode("ascii")
+            )
+            return leftover, bytes_read
+
+        def _process_frame(self, session_id: str, frame: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
+            def process(session: Any) -> tuple[dict[str, Any], bytes]:
+                packet = dict(frame)
+                wire_payload = packet.pop("_wire_payload", b"")
+                packet.pop("payload", None)
+                packet["payload_hex"] = bytes(wire_payload).hex()
+                packet["source"] = {
+                    "address": self.client_address[0],
+                    "port": self.client_address[1],
+                }
+                packet["destination"] = {
+                    "address": self.server.server_address[0],
+                    "port": self.server.server_address[1],
+                }
+                result = session.run_packet_trace([packet])
+                transformed = bytes(wire_payload)
+                for trace_entry in result.get("trace", []):
+                    for event in trace_entry.get("events", []):
+                        if event.get("event") not in {"WS_CLIENT_DATA", "WS_SERVER_DATA"}:
+                            continue
+                        event_payload = event.get("state", {}).get("websocket", {}).get("payload")
+                        if isinstance(event_payload, (bytes, bytearray)):
+                            transformed = bytes(event_payload)
+                        elif isinstance(event_payload, str):
+                            transformed = event_payload.encode("utf-8")
+                return result, transformed
+
+            return manager.execute(session_id, process)
+
+        def _frame_response(self, frame: dict[str, Any], payload: bytes) -> bytes:
+            frame_type = frame["frame_type"]
+            if frame_type == "ping":
+                return _encode_live_websocket_frame("pong", payload)
+            if frame_type in {"text", "binary", "continuation"}:
+                return _encode_live_websocket_frame(frame_type, payload, fin=frame["fin"] == "1")
+            return b""
+
+        def handle(self) -> None:  # noqa: D401 - socketserver API
+            session_id: str | None = None
+            buffer = bytearray()
+            fragmented = False
+            total_bytes = 0
+            try:
+                session_id = manager.create(scenario)
+                self.request.settimeout(config["read_timeout"])
+                upgrade_leftover, total_bytes = self._upgrade(session_id)
+                buffer.extend(upgrade_leftover)
+                while True:
+                    remaining = config["max_read_bytes"] - total_bytes
+                    if remaining <= 0:
+                        raise EmulatorResourceError(
+                            "WebSocket connection exceeds the configured byte limit"
+                        )
+                    payload = self.request.recv(min(LIVE_RAW_READ_SIZE, remaining))
+                    if not payload:
+                        return
+                    total_bytes += len(payload)
+                    buffer.extend(payload)
+                    if len(buffer) > config["max_read_bytes"]:
+                        raise EmulatorResourceError(
+                            "WebSocket buffered frames exceed the configured byte limit"
+                        )
+                    while buffer:
+                        decoded = _decode_websocket_frame(bytes(buffer), "client_to_server")
+                        if decoded is None:
+                            break
+                        frame, consumed = decoded
+                        del buffer[:consumed]
+                        if frame["masked"] != "1":
+                            raise EmulatorInputError("client WebSocket frames must be masked")
+                        frame_type = frame["frame_type"]
+                        if frame_type in {"close", "ping", "pong"}:
+                            if frame["fin"] != "1":
+                                raise EmulatorInputError("WebSocket control frames must not be fragmented")
+                            if len(frame["_wire_payload"]) > 125:
+                                raise EmulatorInputError("WebSocket control frame exceeds 125 bytes")
+                        elif frame_type == "continuation":
+                            if not fragmented:
+                                raise EmulatorInputError("WebSocket continuation has no open message")
+                            if frame["fin"] == "1":
+                                fragmented = False
+                        elif frame["fin"] != "1":
+                            if fragmented:
+                                raise EmulatorInputError("WebSocket data message is already fragmented")
+                            fragmented = True
+                        elif fragmented:
+                            raise EmulatorInputError("WebSocket data frame starts before the prior message ended")
+                        result, transformed = self._process_frame(session_id, frame)
+                        trace = result.get("trace", [])
+                        entry = trace[-1] if trace and isinstance(trace[-1], dict) else {}
+                        if entry.get("dropped"):
+                            if frame_type == "close":
+                                return
+                            continue
+                        emissions = result.get("emitted", [])
+                        close_emission = next(
+                            (
+                                emission
+                                for emission in emissions
+                                if isinstance(emission, dict)
+                                and emission.get("protocol") == "websocket"
+                                and emission.get("direction") == "server_to_client"
+                                and emission.get("frame_type") == "close"
+                            ),
+                            None,
+                        )
+                        if close_emission is not None:
+                            close_hex = close_emission.get("payload_hex")
+                            if not isinstance(close_hex, str):
+                                raise EmulatorInputError("emulator returned an invalid WebSocket close emission")
+                            try:
+                                close_payload = bytes.fromhex(close_hex)
+                            except ValueError as exc:
+                                raise EmulatorInputError(
+                                    "emulator returned an invalid WebSocket close payload"
+                                ) from exc
+                            self.request.sendall(
+                                _encode_live_websocket_frame("close", close_payload)
+                            )
+                            return
+                        if frame_type == "close":
+                            self.request.sendall(
+                                _encode_live_websocket_frame("close", frame["_wire_payload"])
+                            )
+                            return
+                        response = self._frame_response(frame, transformed)
+                        if response:
+                            self.request.sendall(response)
+            except (
+                EmulatorInputError,
+                EmulatorResourceError,
+                EmulatorNotFoundError,
+                OSError,
+                UnicodeError,
+            ) as exc:
+                print(f"testcl live WebSocket connection closed: {exc}", file=sys.stderr)
+            finally:
+                if session_id is not None:
+                    try:
+                        manager.close(session_id)
+                    except EmulatorNotFoundError:
+                        pass
+
+    return LiveWebSocketHandler
 
 
 def _live_tcp_handler(
@@ -33878,7 +34246,7 @@ def _data_plane_server(
             scenario, float(upstream["failure_cooldown"])
         )
     try:
-        if config["protocol"] in {"http", "http2"}:
+        if config["protocol"] in {"http", "http2", "websocket"}:
             tls_settings = config.get("tls")
             tls_context = (
                 _build_live_server_tls_context(
@@ -33889,9 +34257,11 @@ def _data_plane_server(
                 else None
             )
             server_class = _LiveHTTPServer
-            handler = _live_http_handler(
-                root, scenario, config["origin"], manager, config, scheduler
-            )
+            handler = _live_websocket_handler(scenario, config, manager)
+            if config["protocol"] in {"http", "http2"}:
+                handler = _live_http_handler(
+                    root, scenario, config["origin"], manager, config, scheduler
+                )
             if config["protocol"] == "http2":
                 server_class = _LiveHTTPServer
                 handler = _live_http2_handler(
@@ -33916,7 +34286,7 @@ def _data_plane_server(
         server,
         "_testcl_protocol",
         "https"
-        if config["protocol"] in {"http", "http2"} and config.get("tls")
+        if config["protocol"] in {"http", "http2", "websocket"} and config.get("tls")
         else config["protocol"],
     )
     setattr(server, "_testcl_pool_scheduler", scheduler)

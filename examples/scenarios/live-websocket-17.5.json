@@ -1,0 +1,8 @@
+{
+  "profiles": ["TCP", "HTTP", "WS"],
+  "irule": "when WS_REQUEST { log local0. \"websocket-version=[WS::request version]\" }\nwhen WS_CLIENT_FRAME { WS::collect frame }\nwhen WS_CLIENT_DATA { if {[WS::payload] eq \"hello\"} { WS::payload replace 0 5 world } }",
+  "live_data_plane": {
+    "protocol": "websocket",
+    "read_timeout": 1.0
+  }
+}

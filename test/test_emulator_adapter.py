@@ -21401,6 +21401,100 @@ when HTTP_RESPONSE { HTTP::header insert X-Processed h2-upstream }
                 upstream_thread.join(timeout=5)
                 upstream_server.server_close()
 
+    def test_live_websocket_data_plane_runs_upgrade_and_mutates_frames(self) -> None:
+        scenario = {
+            "profiles": ["TCP", "HTTP", "WS"],
+            "irule": """
+when WS_REQUEST { log local0. "upgrade=[WS::request version]" }
+when WS_RESPONSE { log local0. "accept-valid=[WS::response valid]" }
+when WS_CLIENT_FRAME {
+    WS::collect frame
+    if {[WS::frame type] eq "ping"} { WS::frame drop }
+}
+when WS_CLIENT_DATA { WS::payload replace 0 5 world }
+""",
+            "live_data_plane": {"protocol": "websocket", "read_timeout": 1.0},
+        }
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+
+        def client_frame(opcode: int, payload: bytes, *, fin: bool = True) -> bytes:
+            mask = bytes.fromhex("01020304")
+            first = opcode | (0x80 if fin else 0)
+            if len(payload) >= 126:
+                raise AssertionError("test frame helper only needs short payloads")
+            masked = bytes(
+                value ^ mask[index % 4] for index, value in enumerate(payload)
+            )
+            return bytes([first, 0x80 | len(payload)]) + mask + masked
+
+        client = socket.create_connection(
+            ("127.0.0.1", self.adapter._data_plane_bound_port(server)), timeout=2
+        )
+        try:
+            key = "dGhlIHNhbXBsZSBub25jZQ=="
+            client.sendall(
+                (
+                    "GET /socket HTTP/1.1\r\n"
+                    "Host: live.example\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: {key}\r\n"
+                    "Sec-WebSocket-Version: 13\r\n\r\n"
+                ).encode("ascii") + client_frame(0x9, b"probe")
+            )
+            handshake = bytearray()
+            while b"\r\n\r\n" not in handshake:
+                chunk = client.recv(4096)
+                self.assertTrue(chunk, "server closed during WebSocket handshake")
+                handshake.extend(chunk)
+            self.assertTrue(handshake.startswith(b"HTTP/1.1 101 Switching Protocols"))
+            self.assertIn(b"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", handshake)
+
+            client.settimeout(0.25)
+            with self.assertRaises(socket.timeout):
+                client.recv(4096)
+            client.settimeout(2)
+
+            client.sendall(client_frame(0x1, b"hello"))
+            response = bytearray()
+            while self.adapter._decode_websocket_frame(bytes(response), "server_to_client") is None:
+                chunk = client.recv(4096)
+                self.assertTrue(chunk, "server closed before WebSocket response frame")
+                response.extend(chunk)
+            decoded, consumed = self.adapter._decode_websocket_frame(
+                bytes(response), "server_to_client"
+            )
+            assert decoded is not None
+            self.assertEqual(consumed, len(response))
+            self.assertEqual(decoded["frame_type"], "text")
+            self.assertEqual(decoded["_wire_payload"], b"world")
+            self.assertEqual(decoded["masked"], "0")
+
+            client.sendall(client_frame(0x8, (1000).to_bytes(2, "big")))
+            close_response = bytearray()
+            while self.adapter._decode_websocket_frame(
+                bytes(close_response), "server_to_client"
+            ) is None:
+                chunk = client.recv(4096)
+                self.assertTrue(chunk, "server closed before WebSocket close frame")
+                close_response.extend(chunk)
+            close_frame, _ = self.adapter._decode_websocket_frame(
+                bytes(close_response), "server_to_client"
+            )
+            assert close_frame is not None
+            self.assertEqual(close_frame["frame_type"], "close")
+            self.assertEqual(close_frame["_wire_payload"], (1000).to_bytes(2, "big"))
+        finally:
+            client.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+
     def test_live_http2_upstream_failure_fires_lb_failed_response(self) -> None:
         unused = socket.socket()
         unused.bind(("127.0.0.1", 0))
