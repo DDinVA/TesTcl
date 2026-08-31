@@ -3083,6 +3083,8 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("action", "retransmit"),
         ("action", "disabled"),
     ),
+    "ASM::payload": ((), ("length",), ("0", "0"), ("replace", "0", "0", "testcl")),
+    "ASM::raise": (("violation",), ("violation", "field value")),
 }
 _CANDIDATE_EVENT_HINTS = {
     "TCP::recvwnd": "CLIENT_ACCEPTED",
