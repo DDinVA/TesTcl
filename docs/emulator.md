@@ -2964,8 +2964,54 @@ CONNECT plus PUBLISH traffic, generated or raw SIP messages, structured RTSP
 requests, raw or structured ICAP/1.0 requests/responses, raw or structured TDS
 packet messages, FTP control-channel commands/responses, LDAP BER messages, and
 generic raw UDP/TCP payloads, plus IMAP/POP3/SMTPS control lines. Protocol
-fixtures belong in the plan's optional `request` object. For example, a DNS
-case can use:
+fixtures belong in the plan's optional `request` object. HTTP/2 `HTTP_REQUEST`
+fixtures additionally include an `http2` object; the driver emits the client
+prior-knowledge preface, SETTINGS, and HPACK-encoded HEADERS/DATA frames. Use
+`http://` or `tcp://` destinations for cleartext h2c, or `https://` for TLS
+with ALPN `h2`; certificate verification remains enabled. For example, an
+HTTP/2 case can use:
+
+```json
+{
+  "id": "http2-active-example",
+  "operation": "command_probe",
+  "input": {
+    "command": "HTTP2::active",
+    "args": [],
+    "event": "HTTP_REQUEST",
+    "profiles": ["TCP", "HTTP"],
+    "request": {
+      "method": "GET",
+      "uri": "/testcl/command",
+      "host": "vip.example.test",
+      "http2": {
+        "active": true,
+        "version": 2,
+        "stream_id": 3,
+        "pseudo_headers": {
+          ":authority": "vip.example.test",
+          ":method": "GET",
+          ":path": "/testcl/command",
+          ":scheme": "https"
+        }
+      }
+    },
+    "comparisons": [{
+      "label": "status",
+      "actual_path": ["execution", "status"],
+      "reference_path": ["status"]
+    }]
+  }
+}
+```
+
+Set the destination with the collector's `--traffic-url` (for example,
+`https://198.18.0.10:443`) and use the protocol-driver trigger shown above;
+the request fixture is intentionally limited to transaction fields so the
+capture plan remains portable between BIG-IP/vLab targets.
+
+The driver validates and transmits the fixture but does not implement a full
+HTTP/2 client or wait for a complete response. A DNS case can use:
 
 For `RTSP_REQUEST_DATA`, the collector adds a short `RTSP_REQUEST` primer that
 requests collection before invoking the target data event. The driver sends

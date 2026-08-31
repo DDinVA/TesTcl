@@ -91,6 +91,69 @@ def test_http_driver_rejects_header_injection_and_conflicting_body_sources() -> 
         )
 
 
+def test_http2_driver_builds_h2c_request_with_hpack_and_metadata() -> None:
+    request = {
+        "method": "GET",
+        "uri": "/testcl/command",
+        "host": "h2.example.test",
+        "http2": {
+            "active": True,
+            "version": 2,
+            "stream_id": 3,
+            "pseudo_headers": {
+                ":authority": "h2.example.test",
+                ":method": "GET",
+                ":path": "/testcl/command",
+                ":scheme": "http",
+            },
+        },
+    }
+    payload = driver.build_http2_request(request)
+    assert payload.startswith(driver.HTTP2_CLIENT_PREFACE)
+    settings_offset = len(driver.HTTP2_CLIENT_PREFACE)
+    assert payload[settings_offset : settings_offset + 9] == b"\x00\x00\x00\x04\x00\x00\x00\x00\x00"
+    headers_offset = settings_offset + 9
+    assert payload[headers_offset + 3] == 0x1
+    assert payload[headers_offset + 4] == 0x5  # END_HEADERS | END_STREAM
+    assert int.from_bytes(payload[headers_offset + 5 : headers_offset + 9], "big") == 3
+    endpoint, encoded, timeout = driver.build_payload(
+        {
+            "event": "HTTP_REQUEST",
+            "traffic_url": "tcp://192.0.2.20:8080",
+            "request": request,
+        }
+    )
+    assert endpoint == driver.Endpoint("h2c", "192.0.2.20", 8080, "h2.example.test")
+    assert encoded == payload
+    assert timeout == 10.0
+
+
+def test_http2_driver_rejects_inactive_streams_and_forbidden_headers() -> None:
+    with pytest.raises(driver.DriverError, match="active"):
+        driver.build_http2_request({"http2": {"active": False}})
+    with pytest.raises(driver.DriverError, match="positive odd"):
+        driver.build_http2_request({"http2": {"active": True, "stream_id": 2}})
+    with pytest.raises(driver.DriverError, match="forbids"):
+        driver.build_http2_request(
+            {
+                "http2": {"active": True},
+                "headers": {"connection": "keep-alive"},
+            }
+        )
+    with pytest.raises(driver.DriverError, match="conflicts"):
+        driver.build_http2_request(
+            {
+                "method": "GET",
+                "uri": "/expected",
+                "http2": {"pseudo_headers": {":path": "/different"}},
+            }
+        )
+    with pytest.raises(driver.DriverError, match="valid scheme"):
+        driver.build_http2_request(
+            {"http2": {"pseudo_headers": {":scheme": "not a scheme"}}}
+        )
+
+
 def test_websocket_driver_builds_upgrade_and_masked_client_frame() -> None:
     payload = driver.build_websocket_request(
         {

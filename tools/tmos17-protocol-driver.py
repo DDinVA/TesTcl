@@ -2,10 +2,11 @@
 """Send bounded protocol stimuli for the TMOS 17.5 observation collector.
 
 This executable consumes one JSON object on stdin, matching the contract sent
-by ``tools/tmos17-collector.py --trigger-command``.  It is deliberately
-standard-library-only and does not attempt to inspect BIG-IP state.  The
-collector remains responsible for the temporary iRule and observation log;
-this driver only generates traffic toward the requested endpoint.
+by ``tools/tmos17-collector.py --trigger-command``.  It does not attempt to
+inspect BIG-IP state.  The collector remains responsible for the temporary
+iRule and observation log; this driver only generates bounded traffic toward
+the requested endpoint.  HTTP/2 request generation uses the pinned ``hpack``
+dependency installed by the uv-managed environment and container image.
 """
 
 from __future__ import annotations
@@ -17,11 +18,17 @@ import json
 import math
 import re
 import socket
+import ssl
 import struct
 import sys
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
+
+try:
+    from hpack import Encoder as HpackEncoder
+except ImportError:  # pragma: no cover - dependency is installed by uv/container builds
+    HpackEncoder = None  # type: ignore[assignment,misc]
 
 
 MAX_INPUT_BYTES = 512 * 1024
@@ -109,6 +116,7 @@ class Endpoint:
     scheme: str
     host: str
     port: int
+    server_name: str | None = None
 
 
 def _reject_constant(value: str) -> None:
@@ -397,6 +405,198 @@ def build_http_request(request: dict[str, Any]) -> bytes:
     if len(encoded) > MAX_PAYLOAD_BYTES:
         raise DriverError("HTTP request exceeds the 2 MiB limit")
     return encoded
+
+
+HTTP2_CLIENT_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+HTTP2_FRAME_MAX_BYTES = 0x00FF_FFFF
+HTTP2_STREAM_MAX_ID = 0x7FFF_FFFF
+
+
+def _http2_endpoint(trigger: dict[str, Any], request: dict[str, Any]) -> Endpoint:
+    destination = request.get("destination", trigger.get("traffic_url"))
+    if not isinstance(destination, str) or not destination:
+        raise DriverError("HTTP/2 request.destination or traffic_url is required")
+    parsed = urlparse(destination)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https", "tcp"}:
+        raise DriverError("HTTP/2 destinations must use http://, https://, or tcp://")
+    if not parsed.hostname:
+        raise DriverError("HTTP/2 destination must include a host")
+    try:
+        port = parsed.port or (443 if scheme == "https" else 80)
+    except ValueError as exc:
+        raise DriverError("HTTP/2 destination has an invalid port") from exc
+    if not 1 <= port <= 65535:
+        raise DriverError("HTTP/2 destination port must be between 1 and 65535")
+    server_name = request.get("tls_server_name")
+    if server_name is None:
+        server_name = request.get("host", parsed.hostname)
+    if not isinstance(server_name, str) or not server_name or any(
+        character in server_name for character in "\r\n\x00"
+    ):
+        raise DriverError("HTTP/2 tls_server_name must be a non-empty single-line string")
+    server_name = _http2_header_value(server_name, "tls_server_name")
+    try:
+        server_name.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise DriverError("HTTP/2 tls_server_name must contain ASCII characters") from exc
+    return Endpoint(
+        scheme="h2s" if scheme == "https" else "h2c",
+        host=parsed.hostname,
+        port=port,
+        server_name=server_name,
+    )
+
+
+def _http2_frame(frame_type: int, flags: int, stream_id: int, payload: bytes = b"") -> bytes:
+    if not 0 <= frame_type <= 0xFF or not 0 <= flags <= 0xFF:
+        raise DriverError("HTTP/2 frame type and flags must be one-byte values")
+    if not 0 <= stream_id <= HTTP2_STREAM_MAX_ID:
+        raise DriverError("HTTP/2 stream id is out of range")
+    if len(payload) > HTTP2_FRAME_MAX_BYTES:
+        raise DriverError("HTTP/2 frame payload exceeds the 16 MiB limit")
+    return (
+        len(payload).to_bytes(3, "big")
+        + bytes([frame_type, flags])
+        + stream_id.to_bytes(4, "big")
+        + payload
+    )
+
+
+def build_http2_request(request: dict[str, Any]) -> bytes:
+    """Build one bounded HTTP/2 request with HPACK-encoded headers."""
+    if HpackEncoder is None:
+        raise DriverError("HTTP/2 support requires the pinned hpack package")
+    metadata = request.get("http2")
+    if not isinstance(metadata, dict):
+        raise DriverError("HTTP/2 request http2 must be an object")
+    allowed_metadata = {
+        "active", "version", "stream_id", "stream_priority", "concurrency",
+        "requests", "enabled", "clientside_enabled", "serverside_enabled",
+        "disconnected", "discarded", "pseudo_headers",
+    }
+    unknown = sorted(set(metadata) - allowed_metadata)
+    if unknown:
+        raise DriverError("HTTP/2 request unsupported metadata: " + ", ".join(unknown))
+    if metadata.get("active", True) is not True:
+        raise DriverError("HTTP/2 request active must be true")
+    if metadata.get("version", 2) != 2:
+        raise DriverError("HTTP/2 request version must be 2")
+    stream_id = metadata.get("stream_id", 1)
+    if isinstance(stream_id, bool) or not isinstance(stream_id, int):
+        raise DriverError("HTTP/2 stream_id must be an integer")
+    if not 1 <= stream_id <= HTTP2_STREAM_MAX_ID or stream_id % 2 == 0:
+        raise DriverError("HTTP/2 client stream_id must be a positive odd integer")
+
+    method = request.get("method", "GET")
+    if not isinstance(method, str) or not method or not method.isascii() or not method.isalpha():
+        raise DriverError("HTTP/2 method must contain ASCII letters")
+    uri = request.get("uri", "/")
+    if not isinstance(uri, str) or not uri.startswith("/"):
+        raise DriverError("HTTP/2 uri must be an absolute path")
+    _http2_header_value(uri, "uri")
+    host = request.get("host", "example.test")
+    _http2_header_value(host, "authority")
+
+    raw_pseudo_headers = metadata.get("pseudo_headers", {})
+    if not isinstance(raw_pseudo_headers, dict):
+        raise DriverError("HTTP/2 pseudo_headers must be an object")
+    pseudo_headers: dict[str, str] = {}
+    for name, value in raw_pseudo_headers.items():
+        if not isinstance(name, str) or not re.fullmatch(r":[a-z0-9-]+", name):
+            raise DriverError("HTTP/2 pseudo-header names must be lowercase :names")
+        pseudo_headers[name] = _http2_header_value(value, "pseudo-header value")
+    pseudo_headers.setdefault(":method", method)
+    pseudo_headers.setdefault(":scheme", "https")
+    pseudo_headers.setdefault(":authority", host)
+    pseudo_headers.setdefault(":path", uri)
+    allowed_request_pseudo = {":method", ":scheme", ":authority", ":path", ":protocol"}
+    unsupported_pseudo = sorted(set(pseudo_headers) - allowed_request_pseudo)
+    if unsupported_pseudo:
+        raise DriverError(
+            "HTTP/2 request contains unsupported pseudo-header(s): "
+            + ", ".join(unsupported_pseudo)
+        )
+    for name, expected in (
+        (":method", method),
+        (":authority", host),
+        (":path", uri),
+    ):
+        if pseudo_headers[name] != expected:
+            raise DriverError(
+                f"HTTP/2 {name} conflicts with the top-level request {name[1:]}"
+            )
+    if not re.fullmatch(
+        r"[!#$%&'*+-.^_`|~0-9A-Za-z]+", pseudo_headers[":method"]
+    ):
+        raise DriverError("HTTP/2 :method must be an ASCII HTTP token")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9+.-]*", pseudo_headers[":scheme"]):
+        raise DriverError("HTTP/2 :scheme must be a valid scheme")
+
+    headers = request.get("headers", {})
+    if not isinstance(headers, dict) or len(headers) > MAX_HTTP_HEADERS:
+        raise DriverError(
+            f"HTTP/2 headers must be an object with at most {MAX_HTTP_HEADERS} items"
+        )
+    normalised_headers: list[tuple[str, str]] = []
+    header_names: set[str] = set()
+    for name, value in headers.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[!#$%&'*+-.^_`|~0-9A-Za-z]+", name):
+            raise DriverError("HTTP/2 header names must be valid HTTP tokens")
+        lowered = name.lower()
+        if lowered.startswith(":") or lowered in header_names:
+            raise DriverError(f"HTTP/2 header {name!r} is repeated or pseudo")
+        if lowered == "connection":
+            raise DriverError("HTTP/2 forbids the connection header")
+        header_names.add(lowered)
+        normalised_headers.append((lowered, _http2_header_value(value, "header value", allow_empty=True)))
+
+    body_sources = [field for field in ("body", "payload", "payload_base64") if field in request]
+    if len(body_sources) > 1:
+        raise DriverError("HTTP/2 request must use exactly one of body, payload, or payload_base64")
+    if body_sources and body_sources[0] in {"payload", "payload_base64"}:
+        body = _payload_bytes(request)
+    else:
+        body_value = request.get("body", "")
+        if not isinstance(body_value, str):
+            raise DriverError("HTTP/2 body must be a string when payload_base64 is not used")
+        try:
+            body = body_value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise DriverError("HTTP/2 body must be valid UTF-8") from exc
+        if len(body) > MAX_PAYLOAD_BYTES:
+            raise DriverError("HTTP/2 body exceeds the 2 MiB limit")
+    if body and "content-length" not in header_names:
+        normalised_headers.append(("content-length", str(len(body))))
+
+    header_block = HpackEncoder().encode(
+        [(name, value) for name, value in pseudo_headers.items()] + normalised_headers
+    )
+    if len(header_block) > HTTP2_FRAME_MAX_BYTES:
+        raise DriverError("HTTP/2 encoded headers exceed the 16 MiB limit")
+    flags = 0x4 | (0x1 if not body else 0)
+    frames = bytearray(HTTP2_CLIENT_PREFACE)
+    frames.extend(_http2_frame(0x4, 0, 0))  # SETTINGS
+    frames.extend(_http2_frame(0x1, flags, stream_id, header_block))  # HEADERS
+    if body:
+        frames.extend(_http2_frame(0x0, 0x1, stream_id, body))  # DATA, END_STREAM
+    if len(frames) > MAX_PAYLOAD_BYTES:
+        raise DriverError("HTTP/2 request exceeds the 2 MiB limit")
+    return bytes(frames)
+
+
+def _http2_header_value(value: Any, field: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise DriverError(f"HTTP/2 {field} must be a non-empty string")
+    if "\x00" in value or "\r" in value or "\n" in value:
+        raise DriverError(f"HTTP/2 {field} cannot contain NUL or line breaks")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise DriverError(f"HTTP/2 {field} must be valid UTF-8") from exc
+    if len(encoded) > MAX_HTTP_LINE_BYTES:
+        raise DriverError(f"HTTP/2 {field} is too long")
+    return value
 
 
 def _rtsp_header_name(value: Any, field: str) -> str:
@@ -1704,6 +1904,12 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
     if not isinstance(request, dict):
         raise DriverError("request must be an object")
     timeout = _timeout(request)
+    if event == "HTTP_REQUEST" and "http2" in request:
+        return (
+            _http2_endpoint(trigger, request),
+            build_http2_request(request),
+            timeout,
+        )
     if event.startswith("HTTP_") and any(
         field in request
         for field in ("method", "uri", "host", "headers", "body", "payload_base64")
@@ -1863,6 +2069,32 @@ def send_payload(endpoint: Endpoint, payload: bytes, timeout: float) -> None:
             with socket.socket(family, socktype, proto) as sock:
                 sock.settimeout(timeout)
                 sock.sendto(payload, sockaddr)
+        elif endpoint.scheme in {"h2c", "h2s"}:
+            with socket.create_connection(
+                (endpoint.host, endpoint.port), timeout=timeout
+            ) as raw_sock:
+                if endpoint.scheme == "h2s":
+                    context = ssl.create_default_context()
+                    context.set_alpn_protocols(["h2"])
+                    with context.wrap_socket(
+                        raw_sock,
+                        server_hostname=endpoint.server_name or endpoint.host,
+                    ) as sock:
+                        if sock.selected_alpn_protocol() != "h2":
+                            raise DriverError("HTTP/2 TLS endpoint did not negotiate ALPN h2")
+                        sock.sendall(payload)
+                        sock.settimeout(min(timeout, 1.0))
+                        try:
+                            sock.recv(4096)
+                        except TimeoutError:
+                            pass
+                else:
+                    raw_sock.sendall(payload)
+                    raw_sock.settimeout(min(timeout, 1.0))
+                    try:
+                        raw_sock.recv(4096)
+                    except TimeoutError:
+                        pass
         else:
             with socket.create_connection((endpoint.host, endpoint.port), timeout=timeout) as sock:
                 sock.sendall(payload)

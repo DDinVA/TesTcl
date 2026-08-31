@@ -248,6 +248,12 @@ def validate_plan(plan: Any) -> dict[str, Any]:
         comparisons = observation["comparisons"]
         if not isinstance(comparisons, list) or not comparisons:
             raise CollectorError(f"observation {case_id!r} comparisons must be non-empty")
+        request_fixture = request.get("request")
+        http2_request = (
+            event == "HTTP_REQUEST"
+            and isinstance(request_fixture, dict)
+            and isinstance(request_fixture.get("http2"), dict)
+        )
         normalised.append(
             {
                 "id": case_id,
@@ -257,9 +263,11 @@ def validate_plan(plan: Any) -> dict[str, Any]:
                     "args": normalised_args,
                     "event": event,
                     "profiles": list(profiles),
-                    **({"request": request["request"]} if "request" in request else {}),
+                    **({"request": request_fixture} if "request" in request else {}),
                 },
-                "event_supported": event in SUPPORTED_EVENTS,
+                # HTTP/2 request fixtures require a protocol-aware trigger;
+                # urllib's built-in path can only generate HTTP/1.1.
+                "event_supported": event in SUPPORTED_EVENTS and not http2_request,
             }
         )
     return {"profile": TMOS_PROFILE, "observations": normalised}
@@ -629,7 +637,10 @@ class PlanCollector:
                 request_data = case["input"].get("request", {})
                 if not isinstance(request_data, dict):
                     raise CollectorError("HTTP command probe request must be an object")
-                self._send_http(request_data)
+                if isinstance(request_data.get("http2"), dict):
+                    self._run_trigger(case)
+                else:
+                    self._send_http(request_data)
             elif case["input"]["event"] != "RULE_INIT":
                 self._run_trigger(case)
             if self.settle_seconds:

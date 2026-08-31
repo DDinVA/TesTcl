@@ -5683,18 +5683,30 @@ when HTTP_RESPONSE_RELEASE {
         by_command = {
             candidate["command"]: candidate for candidate in candidates["candidates"]
         }
-        http2_state = by_command["HTTP2::push"]["input"]["state"]["http2"]
+        http2_request = by_command["HTTP2::push"]["input"]["request"]
+        http2_state = http2_request["http2"]
         self.assertTrue(http2_state["active"])
         self.assertEqual(http2_state["version"], 2)
         self.assertEqual(
             http2_state["pseudo_headers"][":authority"], "h2.example.test"
         )
+        self.assertEqual(http2_request["host"], "h2.example.test")
         self.assertEqual(
             by_command["HTTP2::push"]["input"]["args"][:3],
             ["/static/app.js", "-priority", "16"],
         )
         self.assertEqual(
             by_command["HTTP2::header"]["input"]["args"], [":authority"]
+        )
+        external_http2_request = next(
+            observation["input"]["request"]
+            for observation in candidates["capture_plan"]["observations"]
+            if observation["id"] == "candidate:HTTP2::push"
+        )
+        self.assertEqual(external_http2_request["http2"]["stream_id"], 3)
+        self.assertEqual(
+            external_http2_request["http2"]["pseudo_headers"][":authority"],
+            "h2.example.test",
         )
 
         sweep = self.adapter._build_behavior_vector_sweep(

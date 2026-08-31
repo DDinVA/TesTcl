@@ -187,6 +187,47 @@ def test_send_http_rejects_unsafe_declared_host() -> None:
         runner._send_http({"uri": "/testcl/command", "host": "bad\ud800"})
 
 
+def test_http2_plan_requires_a_trigger_driver_instead_of_http11_fallback() -> None:
+    plan = _plan("HTTP_REQUEST")
+    plan["observations"][0]["input"]["request"] = {
+        "method": "GET",
+        "uri": "/testcl/command",
+        "host": "h2.example.test",
+        "http2": {"active": True, "version": 2, "stream_id": 3},
+    }
+    validated = collector.validate_plan(plan)
+    assert validated["observations"][0]["event_supported"] is False
+
+    fake = _FakeRest()
+    runner = collector.PlanCollector(
+        fake,
+        "/Common/test-vs",
+        "https://traffic.example.test/",
+        trigger_command="/opt/drivers/http2-driver",
+        settle_seconds=0,
+    )
+    with patch.object(runner, "_send_http") as send_http, patch.object(
+        runner, "_run_trigger"
+    ) as run_trigger, patch.object(
+        runner,
+        "_find_log_result",
+        return_value={"status": "ok", "tcl_return_code": 0},
+    ):
+        result = runner.collect_case(validated["observations"][0])
+    assert result["output"]["status"] == "ok"
+    send_http.assert_not_called()
+    run_trigger.assert_called_once_with(validated["observations"][0])
+
+    no_driver = collector.PlanCollector(
+        _FakeRest(),
+        "/Common/test-vs",
+        "https://traffic.example.test/",
+        settle_seconds=0,
+    )
+    with pytest.raises(collector.CollectorError, match="cannot drive"):
+        no_driver.collect(plan)
+
+
 def test_collect_refuses_unsupported_event_before_device_mutation() -> None:
     fake = _FakeRest()
     runner = collector.PlanCollector(

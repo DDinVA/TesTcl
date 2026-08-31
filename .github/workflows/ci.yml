@@ -99,6 +99,11 @@ jobs:
           grep -F '"target_f5_command_count":989' /tmp/testcl-behavior-coverage.json
           grep -F '"covered_command_count":108' /tmp/testcl-behavior-coverage.json
           docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/http2-17.5.json \
+            >/tmp/testcl-http2-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-http2-pack.json
+          grep -F '"case_count":11' /tmp/testcl-http2-pack.json
+          docker run --rm testcl-irule-emulator:ci \
             --behavior-candidates --namespace HTTP --limit 1 \
             >/tmp/testcl-behavior-candidates.json
           grep -F '"candidate_command_count":1' /tmp/testcl-behavior-candidates.json

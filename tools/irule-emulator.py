@@ -3574,6 +3574,22 @@ _HTTP2_CANDIDATE_STATE = {
         },
     }
 }
+
+
+def _http2_candidate_request() -> dict[str, Any]:
+    """Return an isolated HTTP request fixture for external HTTP/2 drivers."""
+    state = _HTTP2_CANDIDATE_STATE["http2"]
+    return {
+        "method": "GET",
+        "uri": "/testcl/command",
+        "host": "h2.example.test",
+        "http2": {
+            field: dict(value) if field == "pseudo_headers" else value
+            for field, value in state.items()
+        },
+    }
+
+
 for _http2_command in {
     "HTTP2::active",
     "HTTP2::concurrency",
@@ -4013,9 +4029,15 @@ def _build_behavior_vector_candidates(
             }
             state_hint = _CANDIDATE_STATE_HINTS.get(command)
             if state_hint is not None:
-                probe_input["state"] = {
-                    layer: dict(values) for layer, values in state_hint.items()
-                }
+                if command.startswith("HTTP2::") and template["event"] in {
+                    "HTTP_REQUEST",
+                    "HTTP_RESPONSE",
+                }:
+                    probe_input["request"] = _http2_candidate_request()
+                else:
+                    probe_input["state"] = {
+                        layer: dict(values) for layer, values in state_hint.items()
+                    }
             else:
                 request = _protocol_request_template(template["event"])
                 if request is not None:
