@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "cache-controls-17.5",
+  "cases": [
+    {
+      "id": "cache-hit-and-response-controls",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "CACHE"],
+        "irule": "when HTTP_REQUEST {\n  CACHE::userkey tenant-a\n  CACHE::accept_encoding gzip\n  CACHE::uri /canonical-asset.js\n  CACHE::useragent cache-test-agent\n  CACHE::priority 5\n}\nwhen CACHE_REQUEST {\n  log local0. \"lookup age=[CACHE::age] hits=[CACHE::hits] fresh=[CACHE::fresh]\"\n}\nwhen CACHE_RESPONSE {\n  if {[CACHE::header exists content-type]} {\n    log local0. \"hit payload=[CACHE::payload] headers=[CACHE::headers] type=[CACHE::header value CONTENT-TYPE]\"\n  }\n  CACHE::header replace X-Cache HIT\n  CACHE::header insert X-Temporary remove-me\n  CACHE::header remove X-Temporary\n  log local0. \"cache-header=[CACHE::header value x-cache] exists=[CACHE::header exists X-CACHE HIT] removed=[CACHE::header exists X-Temporary] trace=[CACHE::trace 1]\"\n}\nwhen CACHE_UPDATE {\n  log local0. \"update stats=[CACHE::statskey] uri=[CACHE::uri] ua=[CACHE::useragent] encoding=[CACHE::accept_encoding] priority=[CACHE::priority]\"\n}",
+        "requests": [
+          {
+            "method": "GET",
+            "host": "cache.example",
+            "uri": "/asset.js",
+            "response_headers": {"Content-Type": "application/javascript"},
+            "response_body": "console.log(1)"
+          },
+          {
+            "method": "GET",
+            "host": "cache.example",
+            "uri": "/asset.js",
+            "response_status": 503,
+            "response_body": "origin-unavailable"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 1, "response", "body"], "equals": "console.log(1)"},
+          {"path": ["results", 1, "response", "headers", "x-cache"], "equals": "HIT"},
+          {"path": ["results", 1, "semantic", "cache", "age"], "equals": "1"},
+          {"path": ["results", 1, "semantic", "cache", "hits"], "equals": "1"},
+          {"path": ["results", 1, "semantic", "cache", "fresh"], "equals": "1"},
+          {"path": ["results", 0, "semantic", "cache", "uri"], "equals": "/canonical-asset.js"},
+          {"path": ["results", 0, "semantic", "cache", "userkey"], "equals": "tenant-a"},
+          {"path": ["results", 0, "semantic", "cache", "useragent"], "equals": "cache-test-agent"},
+          {"path": ["results", 0, "semantic", "cache", "accept_encoding"], "equals": "gzip"},
+          {"path": ["results", 0, "semantic", "cache", "priority"], "equals": "5"},
+          {"path": ["results", 1, "semantic", "cache", "object_count"], "equals": "1"}
+        ]
+      }
+    },
+    {
+      "id": "cache-expiration-and-refresh",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "CACHE"],
+        "irule": "when CACHE_REQUEST {\n  if {[CACHE::hits] > 1} { CACHE::expire }\n}\nwhen CACHE_RESPONSE { }\nwhen CACHE_UPDATE { }",
+        "requests": [
+          {"uri": "/revalidate", "response_body": "version-1"},
+          {"uri": "/revalidate", "response_body": "origin-not-used"},
+          {"uri": "/revalidate", "response_body": "version-2"},
+          {"uri": "/revalidate", "response_body": "origin-not-used-again"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "body"], "equals": "version-1"},
+          {"path": ["results", 1, "response", "body"], "equals": "version-1"},
+          {"path": ["results", 2, "response", "body"], "equals": "version-2"},
+          {"path": ["results", 3, "response", "body"], "equals": "version-2"},
+          {"path": ["results", 2, "semantic", "cache", "hit"], "equals": "0"},
+          {"path": ["results", 3, "semantic", "cache", "fresh"], "equals": "1"}
+        ]
+      }
+    },
+    {
+      "id": "cache-enable-disable-and-forced-method",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "CACHE"],
+        "irule": "when HTTP_REQUEST {\n  if {[HTTP::uri] eq \"/private\"} {\n    CACHE::disable\n    log local0. \"disabled=[CACHE::disabled]\"\n  } else {\n    CACHE::enable\n    log local0. \"disabled=[CACHE::disabled]\"\n  }\n}\nwhen CACHE_RESPONSE { }\nwhen CACHE_UPDATE { }",
+        "requests": [
+          {"uri": "/private", "response_body": "private"},
+          {"uri": "/private", "response_body": "private-again"},
+          {"method": "POST", "uri": "/forced", "response_body": "post-1"},
+          {"method": "POST", "uri": "/forced", "response_body": "origin-not-used"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "cache", "disabled"], "equals": "1"},
+          {"path": ["results", 1, "response", "body"], "equals": "private-again"},
+          {"path": ["results", 1, "semantic", "cache", "disabled"], "equals": "1"},
+          {"path": ["results", 2, "response", "body"], "equals": "post-1"},
+          {"path": ["results", 3, "response", "body"], "equals": "post-1"},
+          {"path": ["results", 3, "semantic", "cache", "forced"], "equals": "1"},
+          {"path": ["results", 3, "semantic", "cache", "disabled"], "equals": "0"}
+        ]
+      }
+    }
+  ]
+}
