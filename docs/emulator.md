@@ -348,7 +348,7 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 The command exits non-zero when a case fails and prints every mismatch without
 discarding the passing cases. The same runner is available as
 `POST /v1/behavior-packs` and the MCP tool `irule_behavior_pack`. The checked-in
-packs cover AAA, AUTH, CACHE, CATEGORY, HTTP, HTTP/2, DNS, TCP, TLS/SSL, X509, UDP/datagram, WebSocket, RTSP,
+packs cover AAA, AUTH, CACHE, CATEGORY, DHCPv4, HTTP, HTTP/2, DNS, TCP, TLS/SSL, X509, UDP/datagram, WebSocket, RTSP,
 SIP/SDP/SIPALG, load-balancing, URI, stream filtering, route metrics, TMM CMP
 topology, FLOWTABLE queries, classification lifecycle, profile introspection,
 Message Routing controls, HTTP edge controls, MQTT protocol controls, and stateful
@@ -374,7 +374,7 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 560 of 989 target F5 commands (56.62%). This is test-input
+current report covers 576 of 989 target F5 commands (58.24%). This is test-input
 coverage, not a semantic-fidelity score.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
@@ -415,6 +415,14 @@ validity, issuer/subject fields, PEM conversion, and public-key accessors:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/x509-controls-17.5.json
+```
+
+Run the DHCPv4 controls behavior pack to verify BOOTP header fields, option
+mutation, client discovery drop, and server offer rejection:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/dhcpv4-controls-17.5.json
 ```
 
 Run the CATEGORY behavior pack to verify categorization controls, match results,

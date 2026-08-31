@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "dhcpv4-controls-17.5",
+  "cases": [
+    {
+      "id": "client-discovery-fields-and-options",
+      "scenario": {
+        "profiles": ["UDP"],
+        "irule": "when CLIENT_DATA {\n  set fields [list [DHCPv4::chaddr] [DHCPv4::ciaddr] [DHCPv4::giaddr] [DHCPv4::hlen] [DHCPv4::hops] [DHCPv4::htype] [DHCPv4::len] [DHCPv4::opcode] [DHCPv4::secs] [DHCPv4::siaddr] [DHCPv4::type] [DHCPv4::xid] [DHCPv4::yiaddr]]\n  set option [DHCPv4::option 53]\n  DHCPv4::option 12 updated-host\n  log local0. \"fields=$fields option=$option\"\n  DHCPv4::drop\n}",
+        "packets": [
+          {
+            "protocol": "dhcpv4",
+            "direction": "client_to_server",
+            "source": {"address": "0.0.0.0", "port": 68},
+            "destination": {"address": "255.255.255.255", "port": 67},
+            "type": "DISCOVER",
+            "opcode": 1,
+            "xid": 42,
+            "secs": 3,
+            "chaddr": "00:11:22:33:44:55",
+            "ciaddr": "192.0.2.2",
+            "yiaddr": "192.0.2.50",
+            "siaddr": "192.0.2.1",
+            "giaddr": "192.0.2.1",
+            "hlen": 6,
+            "hops": 2,
+            "len": 300,
+            "htype": 1,
+            "options": {"53": "DISCOVER", "12": "client host"}
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "CLIENT_DATA"},
+          {"path": ["trace", 0, "events", 2, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 2, "state", "dhcp", "version"], "equals": "4"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "type"], "equals": "DISCOVER"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "chaddr"], "equals": "00:11:22:33:44:55"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "ciaddr"], "equals": "192.0.2.2"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "giaddr"], "equals": "192.0.2.1"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "hlen"], "equals": "6"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "hops"], "equals": "2"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "htype"], "equals": "1"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "len"], "equals": "300"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "opcode"], "equals": "1"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "secs"], "equals": "3"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "siaddr"], "equals": "192.0.2.1"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "xid"], "equals": "42"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "yiaddr"], "equals": "192.0.2.50"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "options"], "equals": "12 updated-host 53 DISCOVER"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv4", "drop"], "equals": "1"},
+          {"path": ["trace", 0, "drop_reason"], "equals": "dhcpv4"}
+        ]
+      }
+    },
+    {
+      "id": "server-offer-reject",
+      "scenario": {
+        "profiles": ["UDP"],
+        "irule": "when SERVER_DATA {\n  log local0. \"offer=[DHCPv4::type] address=[DHCPv4::yiaddr] xid=[DHCPv4::xid]\"\n  DHCPv4::reject\n}",
+        "packets": [
+          {
+            "protocol": "dhcpv4",
+            "direction": "server_to_client",
+            "source": {"address": "192.0.2.1", "port": 67},
+            "destination": {"address": "192.0.2.50", "port": 68},
+            "type": "OFFER",
+            "opcode": 2,
+            "xid": 42,
+            "yiaddr": "192.0.2.50",
+            "siaddr": "192.0.2.1",
+            "options": {"53": "OFFER", "51": "3600"}
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 3, "event"], "equals": "SERVER_DATA"},
+          {"path": ["trace", 0, "events", 3, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 3, "state", "dhcpv4", "type"], "equals": "OFFER"},
+          {"path": ["trace", 0, "events", 3, "state", "dhcpv4", "yiaddr"], "equals": "192.0.2.50"},
+          {"path": ["trace", 0, "events", 3, "state", "dhcpv4", "reject"], "equals": "1"},
+          {"path": ["trace", 0, "drop_reason"], "equals": "dhcpv4 reject"}
+        ]
+      }
+    }
+  ]
+}
