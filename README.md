@@ -33,6 +33,9 @@ fixtures by adding `"live_data_plane": {"protocol": "tcp"}` to the scenario.
 HTTP bridge for testing a real backend peer; it is not a kernel TCP stack, TLS
 terminator, or database emulator. Protocol-specific TDS, FTP,
 LDAP, and similar wire parsers remain available through the packet/API drivers.
+The HTTP data plane can also terminate TLS 1.2+ with mounted `certfile` and
+`keyfile` material, and can use an explicitly configured HTTPS upstream; it
+supports HTTP/1.1 only and does not reproduce BIG-IP SSL profile semantics.
 Pool-aware raw TCP scenarios can map pools member names to local backend targets
 through live_data_plane.upstream.targets; the iRule's pool command then
 determines which mapped peer is opened. Set pool_modes to round_robin to rotate

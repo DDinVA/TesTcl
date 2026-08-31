@@ -27,6 +27,7 @@ import secrets
 import select
 import socket
 import socketserver
+import ssl
 import struct
 import sys
 import threading
@@ -31880,6 +31881,107 @@ def _normalise_live_http_scenario(
     }
 
 
+def _normalise_tls_path(value: Any, field: str) -> str:
+    """Validate a local TLS material path without reading it during parsing."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\x00" in value
+        or "\r" in value
+        or "\n" in value
+    ):
+        raise EmulatorInputError(f"{field} must be a non-empty local path")
+    try:
+        path_bytes = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise EmulatorInputError(f"{field} must be valid UTF-8") from exc
+    if len(path_bytes) > 4096:
+        raise EmulatorInputError(f"{field} cannot exceed 4096 UTF-8 bytes")
+    return value
+
+
+def _normalise_live_server_tls(raw: Any) -> dict[str, Any]:
+    """Validate TLS termination settings for the real-client HTTP listener."""
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("live_data_plane.tls must be an object")
+    unknown = sorted(set(raw) - {"certfile", "keyfile", "cafile", "client_auth"})
+    if unknown:
+        raise EmulatorInputError(
+            "unsupported live_data_plane.tls field(s): " + ", ".join(unknown)
+        )
+    if "certfile" not in raw or "keyfile" not in raw:
+        raise EmulatorInputError(
+            "live_data_plane.tls requires certfile and keyfile"
+        )
+    certfile = _normalise_tls_path(
+        raw["certfile"], "live_data_plane.tls.certfile"
+    )
+    keyfile = _normalise_tls_path(
+        raw["keyfile"], "live_data_plane.tls.keyfile"
+    )
+    cafile = None
+    if "cafile" in raw and raw["cafile"] is not None:
+        cafile = _normalise_tls_path(
+            raw["cafile"], "live_data_plane.tls.cafile"
+        )
+    client_auth = raw.get("client_auth", "none")
+    if client_auth not in {"none", "optional", "required"}:
+        raise EmulatorInputError(
+            "live_data_plane.tls.client_auth must be none, optional, or required"
+        )
+    if client_auth != "none" and cafile is None:
+        raise EmulatorInputError(
+            "live_data_plane.tls.cafile is required for client authentication"
+        )
+    return {
+        "certfile": certfile,
+        "keyfile": keyfile,
+        "cafile": cafile,
+        "client_auth": client_auth,
+    }
+
+
+def _normalise_live_upstream_tls(raw: Any) -> dict[str, Any]:
+    """Validate bounded TLS client settings for an HTTP upstream."""
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("live_data_plane.upstream.tls must be an object")
+    unknown = sorted(set(raw) - {"verify", "cafile", "certfile", "keyfile"})
+    if unknown:
+        raise EmulatorInputError(
+            "unsupported live_data_plane.upstream.tls field(s): "
+            + ", ".join(unknown)
+        )
+    verify = raw.get("verify", True)
+    if not isinstance(verify, bool):
+        raise EmulatorInputError(
+            "live_data_plane.upstream.tls.verify must be a boolean"
+        )
+    cafile = None
+    if "cafile" in raw and raw["cafile"] is not None:
+        cafile = _normalise_tls_path(
+            raw["cafile"], "live_data_plane.upstream.tls.cafile"
+        )
+    certfile = None
+    keyfile = None
+    if "certfile" in raw or "keyfile" in raw:
+        if "certfile" not in raw or "keyfile" not in raw:
+            raise EmulatorInputError(
+                "live_data_plane.upstream.tls requires both certfile and keyfile"
+            )
+        certfile = _normalise_tls_path(
+            raw["certfile"], "live_data_plane.upstream.tls.certfile"
+        )
+        keyfile = _normalise_tls_path(
+            raw["keyfile"], "live_data_plane.upstream.tls.keyfile"
+        )
+    return {
+        "verify": verify,
+        "cafile": cafile,
+        "certfile": certfile,
+        "keyfile": keyfile,
+    }
+
+
 def _normalise_live_data_plane_scenario(
     raw: Any,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -31893,7 +31995,8 @@ def _normalise_live_data_plane_scenario(
     if not isinstance(config, dict):
         raise EmulatorInputError("live_data_plane must be an object")
     unknown = sorted(
-        set(config) - {"protocol", "read_timeout", "max_read_bytes", "upstream"}
+        set(config)
+        - {"protocol", "read_timeout", "max_read_bytes", "upstream", "tls"}
     )
     if unknown:
         raise EmulatorInputError(
@@ -31907,14 +32010,21 @@ def _normalise_live_data_plane_scenario(
     scenario = dict(raw)
     scenario.pop("live_data_plane", None)
     origin: dict[str, Any] | None = None
+    server_tls = None
     if protocol == "http":
         if "upstream" in config and "live_origin" in scenario:
             raise EmulatorInputError(
                 "live_origin cannot be combined with a live HTTP upstream"
             )
         scenario, origin = _normalise_live_http_scenario(scenario)
+        if "tls" in config and config["tls"] is not None:
+            server_tls = _normalise_live_server_tls(config["tls"])
     elif "live_origin" in scenario:
         raise EmulatorInputError("live_origin is only valid for the HTTP data plane")
+    elif "tls" in config and config["tls"] is not None:
+        raise EmulatorInputError(
+            "live_data_plane.tls is only valid for the HTTP data plane"
+        )
     if protocol == "tcp" and any(
         field in scenario for field in ("request", "requests", "packets")
     ):
@@ -31953,6 +32063,7 @@ def _normalise_live_data_plane_scenario(
                 "targets",
                 "connect_timeout",
                 "failure_cooldown",
+                "tls",
             }
         )
         if unknown_upstream:
@@ -32095,6 +32206,13 @@ def _normalise_live_data_plane_scenario(
             raise EmulatorInputError(
                 "live_data_plane.upstream.connect_timeout must be between 0.05 and 60 seconds"
             )
+        upstream_tls = None
+        if "tls" in upstream_config and upstream_config["tls"] is not None:
+            if protocol != "http":
+                raise EmulatorInputError(
+                    "live_data_plane.upstream.tls is only valid for HTTP"
+                )
+            upstream_tls = _normalise_live_upstream_tls(upstream_config["tls"])
         upstream = {
             "endpoint": endpoint,
             "pool": pool_name,
@@ -32103,6 +32221,8 @@ def _normalise_live_data_plane_scenario(
         }
         if targets is not None:
             upstream["failure_cooldown"] = float(failure_cooldown)
+        if upstream_tls is not None:
+            upstream["tls"] = upstream_tls
     else:
         upstream = None
     result: dict[str, Any] = {
@@ -32110,11 +32230,44 @@ def _normalise_live_data_plane_scenario(
         "read_timeout": float(timeout),
         "max_read_bytes": max_read_bytes,
         "upstream": upstream,
+        "tls": server_tls,
     }
     if protocol == "http":
         assert origin is not None
         result["origin"] = origin
     return scenario, result
+
+
+def _build_live_server_tls_context(settings: dict[str, Any]) -> ssl.SSLContext:
+    """Build a bounded TLS server context for the live HTTP listener."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(settings["certfile"], settings["keyfile"])
+    client_auth = settings["client_auth"]
+    if client_auth != "none":
+        context.load_verify_locations(cafile=settings["cafile"])
+        context.verify_mode = (
+            ssl.CERT_REQUIRED if client_auth == "required" else ssl.CERT_OPTIONAL
+        )
+    context.set_alpn_protocols(["http/1.1"])
+    return context
+
+
+def _build_live_upstream_tls_context(settings: dict[str, Any]) -> ssl.SSLContext:
+    """Build a TLS client context with explicit verification behavior."""
+    if settings["verify"]:
+        context = ssl.create_default_context()
+        if settings["cafile"] is not None:
+            context.load_verify_locations(cafile=settings["cafile"])
+    else:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    if settings["certfile"] is not None:
+        context.load_cert_chain(settings["certfile"], settings["keyfile"])
+    context.set_alpn_protocols(["http/1.1"])
+    return context
 
 
 def _resolve_live_upstream_candidates(
@@ -32347,11 +32500,20 @@ def _live_http_handler(
                     )
                 connection: http.client.HTTPConnection | None = None
                 try:
-                    connection = http.client.HTTPConnection(
-                        endpoint["host"],
-                        endpoint["port"],
-                        timeout=upstream_config["connect_timeout"],
-                    )
+                    upstream_tls = upstream_config.get("tls")
+                    if upstream_tls is None:
+                        connection = http.client.HTTPConnection(
+                            endpoint["host"],
+                            endpoint["port"],
+                            timeout=upstream_config["connect_timeout"],
+                        )
+                    else:
+                        connection = http.client.HTTPSConnection(
+                            endpoint["host"],
+                            endpoint["port"],
+                            timeout=upstream_config["connect_timeout"],
+                            context=_build_live_upstream_tls_context(upstream_tls),
+                        )
                     connection.request(method, uri, body=body or None, headers=headers)
                     response = connection.getresponse()
                     response_body = response.read(LIVE_HTTP_MAX_REQUEST_BYTES + 1)
@@ -32872,6 +33034,39 @@ def _live_tcp_handler(
     return LiveTCPHandler
 
 
+class _LiveHTTPServer(ThreadingHTTPServer):
+    """HTTP listener that can reject bad TLS handshakes without dying."""
+
+    allow_reuse_address = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        request_handler: type[BaseHTTPRequestHandler],
+        *,
+        tls_context: ssl.SSLContext | None = None,
+        handshake_timeout: float = 1.0,
+    ) -> None:
+        self._tls_context = tls_context
+        self._tls_handshake_timeout = handshake_timeout
+        super().__init__(server_address, request_handler)
+
+    def get_request(self) -> tuple[socket.socket, Any]:
+        while True:
+            request_socket, client_address = self.socket.accept()
+            if self._tls_context is None:
+                return request_socket, client_address
+            request_socket.settimeout(self._tls_handshake_timeout)
+            try:
+                secure_socket = self._tls_context.wrap_socket(
+                    request_socket, server_side=True
+                )
+            except (OSError, ssl.SSLError):
+                request_socket.close()
+                continue
+            return secure_socket, client_address
+
+
 class _LiveTCPServer(socketserver.ThreadingTCPServer):
     """TCP listener with safe rapid restart behavior for local test runs."""
 
@@ -32896,10 +33091,20 @@ def _data_plane_server(
         )
     try:
         if config["protocol"] == "http":
-            server = ThreadingHTTPServer(
+            tls_settings = config.get("tls")
+            tls_context = (
+                _build_live_server_tls_context(tls_settings)
+                if tls_settings is not None
+                else None
+            )
+            server = _LiveHTTPServer(
                 (host, port),
                 _live_http_handler(
                     root, scenario, config["origin"], manager, config, scheduler
+                ),
+                tls_context=tls_context,
+                handshake_timeout=config.get(
+                    "read_timeout", LIVE_RAW_READ_TIMEOUT_SECONDS
                 ),
             )
         else:
@@ -32909,7 +33114,11 @@ def _data_plane_server(
     except BaseException:
         manager.close_all()
         raise
-    setattr(server, "_testcl_protocol", config["protocol"])
+    setattr(
+        server,
+        "_testcl_protocol",
+        "https" if config["protocol"] == "http" and config.get("tls") else config["protocol"],
+    )
     setattr(server, "_testcl_pool_scheduler", scheduler)
     server.daemon_threads = True
     return server, manager

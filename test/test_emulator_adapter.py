@@ -14,6 +14,7 @@ import os
 import re
 import socket
 import socketserver
+import ssl
 import struct
 import subprocess
 import sys
@@ -111,6 +112,40 @@ def _valid_client_certificate() -> tuple[str, bytes]:
     der = certificate.public_bytes(serialization.Encoding.DER)
     pem = certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
     return pem, der
+
+
+def _valid_server_material(host: str = "localhost") -> tuple[str, bytes]:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "TesTcl"),
+        x509.NameAttribute(NameOID.COMMON_NAME, host),
+    ])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(0x040506)
+        .not_valid_before(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        .not_valid_after(datetime(2027, 1, 1, tzinfo=timezone.utc))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.SubjectAlternativeName([
+                x509.DNSName(host),
+                x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+            ]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    certificate_pem = certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
+    private_key = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    )
+    return certificate_pem, private_key
 
 
 def _tls_certificate_payload(
@@ -20962,6 +20997,94 @@ when HTTP_RESPONSE {
             upstream_thread.join(timeout=5)
             upstream_server.server_close()
 
+    def test_live_https_data_plane_terminates_and_bridges_https_upstream(self) -> None:
+        received: list[str] = []
+
+        class UpstreamHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+                received.append(self.headers.get("X-From-Rule", ""))
+                body = b"secure-backend"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+        certificate_pem, private_key = _valid_server_material()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            certificate_path = Path(temporary_directory) / "server.pem"
+            key_path = Path(temporary_directory) / "server.key"
+            certificate_path.write_text(certificate_pem, encoding="ascii")
+            key_path.write_bytes(private_key)
+
+            upstream_server = http.server.ThreadingHTTPServer(
+                ("127.0.0.1", 0), UpstreamHandler
+            )
+            upstream_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            upstream_context.minimum_version = ssl.TLSVersion.TLSv1_2
+            upstream_context.load_cert_chain(certificate_path, key_path)
+            upstream_server.socket = upstream_context.wrap_socket(
+                upstream_server.socket, server_side=True
+            )
+            upstream_server.daemon_threads = True
+            upstream_thread = threading.Thread(target=upstream_server.serve_forever)
+            upstream_thread.start()
+            scenario = {
+                "profiles": ["TCP", "HTTP"],
+                "irule": """
+when HTTP_REQUEST { HTTP::header insert X-From-Rule encrypted }
+when HTTP_RESPONSE { HTTP::header insert X-Processed by-irule }
+""",
+                "live_data_plane": {
+                    "protocol": "http",
+                    "tls": {
+                        "certfile": str(certificate_path),
+                        "keyfile": str(key_path),
+                    },
+                    "upstream": {
+                        "host": "127.0.0.1",
+                        "port": upstream_server.server_port,
+                        "tls": {
+                            "verify": True,
+                            "cafile": str(certificate_path),
+                        },
+                    },
+                },
+            }
+            server, manager = self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+            )
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            client_context.check_hostname = False
+            client_context.verify_mode = ssl.CERT_NONE
+            connection = http.client.HTTPSConnection(
+                "127.0.0.1",
+                server.server_port,
+                timeout=2,
+                context=client_context,
+            )
+            try:
+                connection.request("GET", "/secure", headers={"Host": "live.example"})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read(), b"secure-backend")
+                self.assertEqual(response.getheader("X-Processed"), "by-irule")
+                self.assertEqual(received, ["encrypted"])
+                self.assertEqual(getattr(server, "_testcl_protocol"), "https")
+            finally:
+                connection.close()
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                manager.close_all()
+                upstream_server.shutdown()
+                upstream_thread.join(timeout=5)
+                upstream_server.server_close()
+
     def test_live_http_data_plane_validates_origin_and_request_limits(self) -> None:
         with self.assertRaisesRegex(
             self.adapter.EmulatorInputError, "unsupported live_origin field"
@@ -21535,6 +21658,58 @@ when SERVER_DATA { TCP::respond [TCP::payload]; TCP::release; TCP::collect }
                             "host": "127.0.0.1",
                             "port": 19000,
                             "pool": "app_pool",
+                        },
+                    },
+                },
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "requires certfile and keyfile"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "irule": "",
+                    "live_data_plane": {
+                        "protocol": "http",
+                        "tls": {"certfile": "/tmp/server.pem"},
+                    },
+                },
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "only valid for the HTTP data plane"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "irule": "",
+                    "live_data_plane": {
+                        "protocol": "tcp",
+                        "tls": {
+                            "certfile": "/tmp/server.pem",
+                            "keyfile": "/tmp/server.key",
+                        },
+                    },
+                },
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "must be a boolean"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "irule": "",
+                    "live_data_plane": {
+                        "protocol": "http",
+                        "upstream": {
+                            "host": "127.0.0.1",
+                            "port": 19000,
+                            "tls": {"verify": "no"},
                         },
                     },
                 },

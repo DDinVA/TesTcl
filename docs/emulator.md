@@ -64,8 +64,12 @@ fields. Actual request fields are supplied by the client; origin fields are
 defaults that the iRule may inspect or replace with `HTTP::respond` or
 `HTTP::redirect`. Request bodies are limited to 2 MiB, chunked request bodies
 are rejected explicitly, and response hop-by-hop headers are normalized by the
-listener. This is a deterministic HTTP data-plane adapter, not a TLS listener,
-kernel TCP stack, or live upstream proxy.
+listener. This is a deterministic HTTP data-plane adapter, not a kernel TCP
+stack or full live proxy. It can terminate bounded HTTPS with a configured
+certificate and key, and can connect to an HTTPS upstream with explicit
+certificate verification settings. The listener and upstream use HTTP/1.1 with
+TLS 1.2 or newer; HTTP/2 negotiation, TLS session resumption, and BIG-IP SSL
+profile semantics remain outside this adapter.
 
 To exercise a real HTTP backend, replace `live_origin` with
 `live_data_plane.upstream`. The direct `{host, port}` form sends the
@@ -76,6 +80,31 @@ backend reply is received. Backend response bodies are capped at 2 MiB and
 hop-by-hop headers are not forwarded through the adapter. The checked-in
 [`live-http-upstream-17.5.json`](../examples/scenarios/live-http-upstream-17.5.json)
 scenario is a minimal example.
+
+To expose the same listener over HTTPS, add `live_data_plane.tls` with local
+certificate material. Paths are read by the local CLI/container process, so a
+container deployment should mount them explicitly:
+
+```json
+{
+  "live_data_plane": {
+    "protocol": "http",
+    "tls": {
+      "certfile": "/run/secrets/testcl/server.pem",
+      "keyfile": "/run/secrets/testcl/server.key"
+    }
+  }
+}
+```
+
+`client_auth` may be `none` (the default), `optional`, or `required`; the
+last two modes also require `cafile`. A mapped or direct HTTP upstream may
+set `tls.verify` (default `true`), `tls.cafile`, and an optional client
+`certfile`/`keyfile` pair. Set `verify` to `false` only for an intentionally
+insecure local fixture. The live listener reports `https://...` when TLS is
+enabled. Actual SSL certificate fields are not automatically injected into
+iRule `SSL::cert` state; use the packet-level TLS adapters or explicit
+scenario state for those semantics.
 
 For raw TCP clients, add an explicit `live_data_plane` object to the scenario:
 
