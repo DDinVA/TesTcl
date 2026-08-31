@@ -5293,6 +5293,52 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["status_counts"], {"ok": 29})
         self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
 
+    def test_ssl_candidate_sweep_uses_typed_fixtures(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 24, namespace="SSL", variants=1
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        self.assertEqual(
+            by_command["SSL::allow_nonssl"]["input"]["args"], [],
+        )
+        self.assertEqual(
+            by_command["SSL::alpn"]["input"]["args"], [],
+        )
+        self.assertEqual(
+            by_command["SSL::cert"]["input"]["args"], ["count"],
+        )
+        self.assertEqual(
+            by_command["SSL::c3d"]["input"]["args"], ["cert", "testcl"],
+        )
+        self.assertEqual(
+            by_command["SSL::cert_constraint"]["input"]["args"],
+            ["1.2.3.4", "testcl"],
+        )
+        self.assertEqual(
+            by_command["SSL::release"]["input"]["args"], [],
+        )
+        self.assertEqual(
+            by_command["SSL::maximum_record_size"]["input"]["args"], [],
+        )
+
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 0, 24, namespace="SSL", variants=8
+        )
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 24)
+        self.assertEqual(sweep["summary"]["variant_count"], 51)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 51})
+        self.assertEqual(
+            sweep["summary"]["execution_status_counts"],
+            {"ok": 51, "error": 0, "profile-gated": 0},
+        )
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(
