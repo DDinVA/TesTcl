@@ -20866,6 +20866,87 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             thread.join(timeout=5)
             server.server_close()
 
+    def test_live_observation_store_is_bounded_detached_and_json_safe(self) -> None:
+        store = self.adapter._LiveObservationStore(max_records=2, max_bytes=4096)
+        store.append(
+            session_id="live-session",
+            protocol="http",
+            phase="transaction",
+            direction="client_to_server",
+            result={"request": {"uri": "/one"}},
+        )
+        store.append(
+            session_id="live-session",
+            protocol="http",
+            phase="transaction",
+            direction="client_to_server",
+            result={"request": {"uri": "/two"}},
+        )
+        store.append(
+            session_id="live-session",
+            protocol="http",
+            phase="transaction",
+            direction="client_to_server",
+            result={"request": {"uri": "/three"}},
+        )
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["count"], 2)
+        self.assertEqual(
+            [item["result"]["request"]["uri"] for item in snapshot["observations"]],
+            ["/two", "/three"],
+        )
+        snapshot["observations"][0]["result"]["request"]["uri"] = "/mutated"
+        self.assertEqual(
+            store.snapshot()["observations"][0]["result"]["request"]["uri"],
+            "/two",
+        )
+        store.append(
+            session_id="live-session",
+            protocol="http",
+            phase="transaction",
+            direction="client_to_server",
+            result=object(),
+        )
+        self.assertEqual(store.snapshot()["count"], 2)
+        with self.assertRaisesRegex(ValueError, "between 1 and 2"):
+            store.snapshot(0)
+
+    def test_http_api_exposes_and_clears_live_observations(self) -> None:
+        store = self.adapter._LiveObservationStore()
+        store.append(
+            session_id="live-session",
+            protocol="websocket",
+            phase="frame",
+            direction="client_to_server",
+            result={"opcode": 1, "payload": "hello"},
+        )
+        server = self.adapter.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self.adapter._http_handler(Path(self.tcl_lsp_root), observations=store)
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/v1/live-observations?limit=1"
+            ) as response:
+                payload = json.loads(response.read())
+            self.assertEqual(payload["count"], 1)
+            self.assertEqual(payload["observations"][0]["protocol"], "websocket")
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/live-observations",
+                method="DELETE",
+            )
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(json.loads(response.read())["cleared"], True)
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/v1/live-observations"
+            ) as response:
+                self.assertEqual(json.loads(response.read())["count"], 0)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_live_http_data_plane_runs_persistent_real_client_requests(self) -> None:
         scenario = {
             "profiles": ["TCP", "HTTP"],
@@ -20886,8 +20967,9 @@ when HTTP_RESPONSE {
                 "body": "origin-body",
             },
         }
+        observations = self.adapter._LiveObservationStore()
         server, manager = self.adapter._data_plane_server(
-            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario, observations
         )
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
@@ -20916,6 +20998,12 @@ when HTTP_RESPONSE {
             blocked = connection.getresponse()
             self.assertEqual(blocked.status, 403)
             self.assertEqual(blocked.read(), b"denied")
+            observations_payload = observations.snapshot()
+            self.assertEqual(observations_payload["count"], 4)
+            self.assertEqual(
+                [item["result"]["request"]["uri"] for item in observations_payload["observations"]],
+                ["/one", "/two", "/two", "/blocked"],
+            )
         finally:
             connection.close()
             server.shutdown()

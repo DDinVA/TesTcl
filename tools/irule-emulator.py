@@ -67,6 +67,9 @@ LIVE_RAW_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 LIVE_RAW_READ_SIZE = 64 * 1024
 LIVE_RAW_READ_TIMEOUT_SECONDS = 1.0
 LIVE_HTTP2_MAX_STREAMS = 128
+LIVE_OBSERVATION_MAX_RECORDS = 128
+LIVE_OBSERVATION_MAX_BYTES = 8 * 1024 * 1024
+LIVE_OBSERVATION_MAX_RECORD_BYTES = 2 * 1024 * 1024
 ADAPT_FIXTURE_RESULTS = frozenset({"noop", "modified", "response", "error"})
 ADAPT_FIXTURE_RESULT_ALIASES = {
     "noop": "noop",
@@ -29406,6 +29409,120 @@ class SessionManager:
             session.close()
 
 
+class _LiveObservationStore:
+    """Keep a bounded, in-memory stream of real-client emulator results."""
+
+    def __init__(
+        self,
+        *,
+        max_records: int = LIVE_OBSERVATION_MAX_RECORDS,
+        max_bytes: int = LIVE_OBSERVATION_MAX_BYTES,
+    ) -> None:
+        if max_records < 1 or max_bytes < 1:
+            raise ValueError("live observation limits must be positive")
+        self._max_records = max_records
+        self._max_bytes = max_bytes
+        self._records: list[tuple[int, dict[str, Any], int]] = []
+        self._next_id = 1
+        self._total_bytes = 0
+        self._lock = threading.RLock()
+
+    def append(
+        self,
+        *,
+        session_id: str,
+        protocol: str,
+        phase: str,
+        direction: str,
+        result: Any,
+    ) -> None:
+        """Append one JSON-safe result, evicting oldest records when bounded."""
+        if not all(
+            isinstance(value, str) and value
+            for value in (session_id, protocol, phase, direction)
+        ):
+            raise ValueError("live observation metadata must be non-empty strings")
+        with self._lock:
+            record: dict[str, Any] = {
+                "observation_id": f"live_{self._next_id}",
+                "recorded_at": time.time(),
+                "session_id": session_id,
+                "protocol": protocol,
+                "phase": phase,
+                "direction": direction,
+                "result": result,
+            }
+            try:
+                encoded = json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            except (TypeError, ValueError):
+                # Observation capture is diagnostic only and must never change
+                # the outcome of a real-client data-plane connection.
+                return
+            if len(encoded) > LIVE_OBSERVATION_MAX_RECORD_BYTES:
+                record["result"] = {
+                    "status": "truncated",
+                    "serialized_bytes": len(encoded),
+                    "max_record_bytes": LIVE_OBSERVATION_MAX_RECORD_BYTES,
+                }
+                encoded = json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            if len(encoded) > self._max_bytes:
+                return
+            # Store the serialized representation, not a caller-owned nested
+            # mapping that a later data-plane step could mutate.
+            record = json.loads(encoded)
+            self._next_id += 1
+            encoded_size = len(encoded)
+            while self._records and (
+                len(self._records) >= self._max_records
+                or self._total_bytes + encoded_size > self._max_bytes
+            ):
+                _, _, old_size = self._records.pop(0)
+                self._total_bytes -= old_size
+            self._records.append((self._next_id - 1, record, encoded_size))
+            self._total_bytes += encoded_size
+
+    def snapshot(self, limit: int | None = None) -> dict[str, Any]:
+        """Return the newest bounded observations in chronological order."""
+        if limit is None:
+            limit = min(50, self._max_records)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= self._max_records:
+            raise ValueError(
+                f"live observation limit must be between 1 and {self._max_records}"
+            )
+        with self._lock:
+            # Records are JSON-safe by construction, but return detached
+            # values so callers cannot mutate the store through the snapshot.
+            records = [
+                json.loads(json.dumps(record, ensure_ascii=False))
+                for _, record, _ in self._records[-limit:]
+            ]
+            return {
+                "status": "ok",
+                "schema_version": 1,
+                "profile": "tmos-17.5",
+                "observations": records,
+                "count": len(records),
+                "capacity": self._max_records,
+                "bytes": self._total_bytes,
+            }
+
+    def clear(self) -> None:
+        """Clear all retained live observations."""
+        with self._lock:
+            self._records.clear()
+            self._total_bytes = 0
+
+
 class _LivePoolScheduler:
     """Coordinate bounded member rotation across real live-data-plane flows."""
 
@@ -32581,6 +32698,7 @@ def _live_http_handler(
     manager: "SessionManager",
     config: dict[str, Any] | None = None,
     scheduler: _LivePoolScheduler | None = None,
+    observations: "_LiveObservationStore | None" = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build a small real-client HTTP adapter over persistent iRule sessions."""
 
@@ -32870,6 +32988,14 @@ def _live_http_handler(
                         self._live_session_id,
                         lambda session: session.run_request(request),
                     )
+                if observations is not None and self._live_session_id is not None:
+                    observations.append(
+                        session_id=self._live_session_id,
+                        protocol="http",
+                        phase="transaction",
+                        direction="client_to_server",
+                        result=result,
+                    )
                 response = result.get("response", {})
                 status = response.get("status", 500)
                 if isinstance(status, bool) or not isinstance(status, int) or not 200 <= status <= 599:
@@ -32970,6 +33096,7 @@ def _live_websocket_handler(
     config: dict[str, Any],
     manager: "SessionManager",
     scheduler: _LivePoolScheduler | None = None,
+    observations: "_LiveObservationStore | None" = None,
 ) -> type[socketserver.BaseRequestHandler]:
     """Build a real-client WebSocket adapter over the packet iRule engine.
 
@@ -32981,6 +33108,22 @@ def _live_websocket_handler(
     """
 
     class LiveWebSocketHandler(socketserver.BaseRequestHandler):
+        def _record_observation(
+            self,
+            session_id: str,
+            phase: str,
+            direction: str,
+            result: Any,
+        ) -> None:
+            if observations is not None:
+                observations.append(
+                    session_id=session_id,
+                    protocol="websocket",
+                    phase=phase,
+                    direction=direction,
+                    result=result,
+                )
+
         def _read_upgrade(self) -> tuple[str, dict[str, str], bytes, int]:
             buffer = bytearray()
             marker = b"\r\n\r\n"
@@ -33118,6 +33261,9 @@ def _live_websocket_handler(
                 }
 
             state = manager.execute(session_id, process)
+            self._record_observation(
+                session_id, "upgrade", "client_to_server", state["result"]
+            )
             if not state["enabled"] or not state["upgraded"]:
                 self.request.sendall(
                     b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -33193,9 +33339,12 @@ def _live_websocket_handler(
             target, client_headers, client_leftover, client_bytes, request = (
                 self._client_upgrade_request()
             )
-            manager.execute(
+            request_result = manager.execute(
                 session_id,
                 lambda session: session.run_packet_trace([request]),
+            )
+            self._record_observation(
+                session_id, "upgrade_request", "client_to_server", request_result
             )
             request_runtime = manager.execute(
                 session_id,
@@ -33291,9 +33440,12 @@ def _live_websocket_handler(
                     response = self._packet(
                         "response", status=status, response_headers=response_headers
                     )
-                    manager.execute(
+                    response_result = manager.execute(
                         session_id,
                         lambda session: session.run_packet_trace([response]),
+                    )
+                    self._record_observation(
+                        session_id, "upgrade_response", "server_to_client", response_result
                     )
                     response_runtime = manager.execute(
                         session_id,
@@ -33330,6 +33482,9 @@ def _live_websocket_handler(
                         lambda session: session.fire_live_lb_failure_event(
                             failure_cause
                         ),
+                    )
+                    self._record_observation(
+                        session_id, "lb_failure", "client_to_server", failure
                     )
                     if failure.get("response_committed"):
                         raise EmulatorInputError(
@@ -33564,6 +33719,12 @@ def _live_websocket_handler(
                             source=source,
                             destination=destination,
                         )
+                        self._record_observation(
+                            session_id,
+                            "frame",
+                            "client_to_server" if from_client else "server_to_client",
+                            result,
+                        )
                         trace = result.get("trace", [])
                         entry = trace[-1] if trace and isinstance(trace[-1], dict) else {}
                         if entry.get("dropped"):
@@ -33687,6 +33848,9 @@ def _live_websocket_handler(
                         elif fragmented:
                             raise EmulatorInputError("WebSocket data frame starts before the prior message ended")
                         result, transformed = self._process_frame(session_id, frame)
+                        self._record_observation(
+                            session_id, "frame", "client_to_server", result
+                        )
                         trace = result.get("trace", [])
                         entry = trace[-1] if trace and isinstance(trace[-1], dict) else {}
                         if entry.get("dropped"):
@@ -33755,10 +33919,27 @@ def _live_tcp_handler(
     config: dict[str, Any],
     manager: "SessionManager",
     scheduler: _LivePoolScheduler | None = None,
+    observations: "_LiveObservationStore | None" = None,
 ) -> type[socketserver.BaseRequestHandler]:
     """Build a bounded raw TCP adapter over a persistent iRule session."""
 
     class LiveTCPHandler(socketserver.BaseRequestHandler):
+        def _record_observation(
+            self,
+            session_id: str,
+            phase: str,
+            direction: str,
+            result: Any,
+        ) -> None:
+            if observations is not None:
+                observations.append(
+                    session_id=session_id,
+                    protocol="tcp",
+                    phase=phase,
+                    direction=direction,
+                    result=result,
+                )
+
         def _packet(
             self,
             payload: bytes = b"",
@@ -33921,6 +34102,9 @@ def _live_tcp_handler(
                 session_id,
                 lambda session: session.open_packet_server_connection(packet),
             )
+            self._record_observation(
+                session_id, "upstream_open", "server_to_client", result
+            )
             if self._send_emissions(result, upstream):
                 return True
             return False
@@ -33954,6 +34138,9 @@ def _live_tcp_handler(
                     lambda session: session.run_packet_trace(
                         [self._packet(flags=["SYN"])]
                     ),
+                )
+                self._record_observation(
+                    session_id, "accept", "client_to_server", accepted
                 )
                 if self._send_emissions(accepted):
                     return
@@ -34050,6 +34237,12 @@ def _live_tcp_handler(
                                         [close_packet]
                                     ),
                                 )
+                                self._record_observation(
+                                    session_id,
+                                    "close",
+                                    "client_to_server" if is_client else "server_to_client",
+                                    closed,
+                                )
                                 self._send_emissions(closed, upstream)
                             except (
                                 EmulatorInputError,
@@ -34073,6 +34266,12 @@ def _live_tcp_handler(
                             lambda session, packet=packet: session.run_packet_trace(
                                 [packet]
                             ),
+                        )
+                        self._record_observation(
+                            session_id,
+                            "data",
+                            "client_to_server" if is_client else "server_to_client",
+                            result,
                         )
                         if self._send_emissions(result, upstream):
                             close_requested = True
@@ -34135,6 +34334,7 @@ def _live_http2_handler(
     origin_defaults: dict[str, Any],
     manager: "SessionManager",
     scheduler: _LivePoolScheduler | None = None,
+    observations: "_LiveObservationStore | None" = None,
 ) -> type[socketserver.BaseRequestHandler]:
     """Build a bounded TLS HTTP/2 real-client adapter over iRule sessions."""
 
@@ -34585,13 +34785,23 @@ def _live_http2_handler(
                 else:
                     staged["body"] = bytearray(body)
             if config.get("upstream") is not None:
-                return self._run_live_upstream(session_id, staged)
-            return manager.execute(
-                session_id,
-                lambda session: session.complete_staged_http_request(
-                    staged, origin_defaults
-                ),
-            )
+                result = self._run_live_upstream(session_id, staged)
+            else:
+                result = manager.execute(
+                    session_id,
+                    lambda session: session.complete_staged_http_request(
+                        staged, origin_defaults
+                    ),
+                )
+            if observations is not None:
+                observations.append(
+                    session_id=session_id,
+                    protocol="http2",
+                    phase="stream",
+                    direction="client_to_server",
+                    result=result,
+                )
+            return result
 
         def handle(self) -> None:  # noqa: D401 - socketserver API
             session_id: str | None = None
@@ -34760,6 +34970,7 @@ def _data_plane_server(
     host: str,
     port: int,
     raw_scenario: Any,
+    observations: "_LiveObservationStore | None" = None,
 ) -> tuple[socketserver.BaseServer, "SessionManager"]:
     if not 0 <= port <= 65535:
         raise EmulatorInputError("data-plane port must be between 0 and 65535")
@@ -34783,15 +34994,28 @@ def _data_plane_server(
                 else None
             )
             server_class = _LiveHTTPServer
-            handler = _live_websocket_handler(scenario, config, manager, scheduler)
+            handler = _live_websocket_handler(
+                scenario, config, manager, scheduler, observations
+            )
             if config["protocol"] in {"http", "http2"}:
                 handler = _live_http_handler(
-                    root, scenario, config["origin"], manager, config, scheduler
+                    root,
+                    scenario,
+                    config["origin"],
+                    manager,
+                    config,
+                    scheduler,
+                    observations,
                 )
             if config["protocol"] == "http2":
                 server_class = _LiveHTTPServer
                 handler = _live_http2_handler(
-                    scenario, config, config["origin"], manager, scheduler
+                    scenario,
+                    config,
+                    config["origin"],
+                    manager,
+                    scheduler,
+                    observations,
                 )
             server = server_class(
                 (host, port),
@@ -34803,7 +35027,8 @@ def _data_plane_server(
             )
         else:
             server = _LiveTCPServer(
-                (host, port), _live_tcp_handler(scenario, config, manager, scheduler)
+                (host, port),
+                _live_tcp_handler(scenario, config, manager, scheduler, observations),
             )
     except BaseException:
         manager.close_all()
@@ -34831,8 +35056,13 @@ def _data_plane_bound_port(server: socketserver.BaseServer) -> int:
     return bound_port
 
 
-def _http_handler(root: Path, manager: SessionManager | None = None) -> type[BaseHTTPRequestHandler]:
+def _http_handler(
+    root: Path,
+    manager: SessionManager | None = None,
+    observations: _LiveObservationStore | None = None,
+) -> type[BaseHTTPRequestHandler]:
     session_manager = manager if manager is not None else SessionManager(root)
+    live_observations = observations if observations is not None else _LiveObservationStore()
 
     class EmulatorHandler(BaseHTTPRequestHandler):
         server_version = "testcl-irule-emulator/1"
@@ -34873,6 +35103,16 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                 return
             if parsed.path == "/healthz":
                 _json_response(self, 200, {"status": "ok", "profile": "tmos-17.5"})
+                return
+            if parsed.path == "/v1/live-observations":
+                query = parse_qs(parsed.query, strict_parsing=False)
+                try:
+                    limit = int(query.get("limit", ["50"])[0])
+                    payload = live_observations.snapshot(limit)
+                except (TypeError, ValueError) as exc:
+                    _json_response(self, 400, {"status": "error", "error": str(exc)})
+                    return
+                _json_response(self, 200, payload)
                 return
             if parsed.path == "/v1/catalog":
                 query = parse_qs(parsed.query, strict_parsing=False)
@@ -35265,6 +35505,19 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
 
         def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             parsed = urlparse(self.path)
+            if parsed.path == "/v1/live-observations":
+                live_observations.clear()
+                _json_response(
+                    self,
+                    200,
+                    {
+                        "status": "ok",
+                        "schema_version": 1,
+                        "profile": "tmos-17.5",
+                        "cleared": True,
+                    },
+                )
+                return
             parts = [unquote(part) for part in parsed.path.split("/") if part]
             if len(parts) != 3 or parts[:2] != ["v1", "sessions"]:
                 _json_response(self, 404, {"status": "error", "error": "not found"})
@@ -35306,6 +35559,7 @@ def serve(
     data_plane_server: socketserver.BaseServer | None = None
     data_plane_manager: SessionManager | None = None
     data_plane_thread: threading.Thread | None = None
+    live_observations = _LiveObservationStore()
     try:
         if data_plane_scenario is not None:
             if data_plane_host == host and data_plane_port == port:
@@ -35317,6 +35571,7 @@ def serve(
                 data_plane_host,
                 data_plane_port,
                 data_plane_scenario,
+                live_observations,
             )
             data_plane_thread = threading.Thread(
                 target=data_plane_server.serve_forever,
@@ -35330,7 +35585,9 @@ def serve(
                 f"{scheme}://{data_plane_host}:{_data_plane_bound_port(data_plane_server)}",
                 file=sys.stderr,
             )
-        server = ThreadingHTTPServer((host, port), _http_handler(root, session_manager))
+        server = ThreadingHTTPServer(
+            (host, port), _http_handler(root, session_manager, live_observations)
+        )
         print(f"testcl emulator listening on http://{host}:{port}", file=sys.stderr)
         server.serve_forever()
     except KeyboardInterrupt:

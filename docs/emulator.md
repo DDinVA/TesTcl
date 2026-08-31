@@ -235,6 +235,15 @@ The API and data plane can run together by starting the normal API with
 the data plane defaults to `127.0.0.1:18080` and can be changed with
 `--data-plane-host` and `--data-plane-port`.
 
+In combined mode, the API also retains a bounded, in-memory observation stream
+from real-client data-plane traffic. `GET /v1/live-observations?limit=50`
+returns the most recent transaction, stream, frame, or TCP data results with
+their protocol, phase, direction, and emulator session ID. Use
+`DELETE /v1/live-observations` between test cases. The stream is intentionally
+not persisted and is diagnostic emulator output, not independent TMOS/vLab
+evidence. A ready-to-run smoke test is available at
+[`scripts/live-observation-smoke.sh`](../scripts/live-observation-smoke.sh).
+
 ## Command workbench
 
 Use the command workbench to exercise one target-valid F5 command from the
@@ -2385,7 +2394,8 @@ The service exposes `GET /healthz`, `GET /v1/capabilities`,
 `POST /v1/sessions`, `GET /v1/sessions/{session_id}`,
 `POST /v1/sessions/{session_id}/requests`,
 `POST /v1/sessions/{session_id}/packets`, and
-`DELETE /v1/sessions/{session_id}`. It binds to `127.0.0.1` by default, caps
+`DELETE /v1/sessions/{session_id}`. Combined API/data-plane mode additionally
+provides `GET` and `DELETE /v1/live-observations`. It binds to `127.0.0.1` by default, caps
 JSON request bodies at 2 MiB, and does not expose arbitrary Tcl evaluation.
 The HTTP API accepts inline `irule` text only; use the CLI's `irule_file` field
 when a rule must be loaded from a local file.

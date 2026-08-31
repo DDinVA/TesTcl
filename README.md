@@ -54,6 +54,9 @@ drops, ping/pong, close, fragmentation ordering, and optional TLS termination.
 An explicit direct or pool-mapped `live_data_plane.upstream` can bridge a real
 WebSocket backend, including bidirectional iRule frame mutation and scheduler
 member selection.
+In combined `--serve --data-plane-scenario` mode, query
+`/v1/live-observations` for a bounded in-memory stream of real-client emulator
+results; run `scripts/live-observation-smoke.sh` for a quick evaluation.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:
