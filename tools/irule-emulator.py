@@ -22256,6 +22256,95 @@ class EmulatorSession:
         }
         return result
 
+    def _live_lb_failure_result_on_worker(
+        self, session: Any, staged: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Build a response when LB_FAILED committed HTTP::respond output."""
+        initial = staged.get("initial_result", {})
+        request_state = session.get_state("http_request")
+        response_state = session.get_state("http_response")
+        lb_state = session.get_state("lb")
+        connection_state = session.get_state("connection")
+        semantic = _semantic_snapshot(session)
+        result = dict(initial)
+        result["pool"] = lb_state.get("pool", "")
+        result["node"] = lb_state.get("node_addr", "")
+        result["response_committed"] = True
+        result["connection_state"] = connection_state.get("state", "")
+        result["events_fired"] = list(staged.get("events", [])) + list(
+            staged.get("data_events", [])
+        )
+        result["decisions"] = list(staged.get("decisions", []))
+        result["logs"] = list(staged.get("logs", []))
+        result["semantic"] = semantic
+        result["request"] = {
+            "method": request_state.get("method", ""),
+            "uri": request_state.get("uri", ""),
+            "path": request_state.get("path", ""),
+            "query": request_state.get("query", ""),
+            "host": request_state.get("host", ""),
+            "headers": _header_dict(request_state.get("headers", "")),
+            "body": _decode_wire_text(bytes(staged.get("body", b""))),
+        }
+        response_status = int(response_state.get("status", "200"))
+        result["response"] = {
+            "status": response_status,
+            "reason": HTTP_REASON_PHRASES.get(
+                response_status, response_state.get("reason", "")
+            ),
+            "headers": _header_dict(response_state.get("headers", "")),
+            "body": session.eval_tcl("set ::state::http::response::payload"),
+        }
+        result["http_log"] = semantic["http_log"]["records"]
+        result["http2"] = _http2_snapshot(session)
+        if staged.get("live_lb_failure") is not None:
+            result["lb_failure"] = dict(staged["live_lb_failure"])
+        result["staged"] = {
+            "request_headers": True,
+            "request_data": bool(staged.get("data_events")),
+        }
+        return result
+
+    def _fire_live_lb_failure_on_worker(
+        self, session: Any, staged: dict[str, Any], cause: str
+    ) -> dict[str, Any]:
+        """Fire a bounded LB_FAILED event for a failed real upstream attempt."""
+        if cause not in LB_FAILURE_CAUSES:
+            causes = ", ".join(sorted(LB_FAILURE_CAUSES))
+            raise EmulatorInputError(f"live LB_FAILED cause must be one of: {causes}")
+        session.eval_tcl(
+            "::itest::semantic::prepare_lb_failure " + _tcl_quote(cause)
+        )
+        decisions_before = len(session.get_decisions())
+        logs_before = len(session.get_logs())
+        event_result = self._fire_event_on_worker(session, "LB_FAILED", {})
+        staged.setdefault("events", []).extend(
+            event_result.get("events_fired", [])
+        )
+        staged.setdefault("decisions", []).extend(
+            list(session.get_decisions()[decisions_before:])
+        )
+        staged.setdefault("logs", []).extend(session.get_logs()[logs_before:])
+        failure_snapshot = _lb_failure_snapshot(session)
+        staged["live_lb_failure"] = {
+            "cause": cause,
+            "fired": failure_snapshot.get("fired", "0") == "1",
+            "selected": failure_snapshot.get("selected", "0") == "1",
+        }
+        committed = session.eval_tcl("set ::state::http::response_committed") == "1"
+        return {
+            "event": event_result,
+            "response_committed": committed,
+            "selection": {
+                "pool": session.eval_tcl("set ::state::lb::pool"),
+                "member": session.eval_tcl("set ::state::lb::pool_member"),
+                "selected": session.eval_tcl("set ::state::lb::selected") == "1",
+            },
+            "result": self._live_lb_failure_result_on_worker(session, staged)
+            if committed
+            else None,
+        }
+
     def _deliver_staged_http_chunked_body_on_worker(
         self,
         session: Any,
@@ -28522,6 +28611,16 @@ class EmulatorSession:
             lambda session: self._start_staged_http_request_on_worker(session, request)
         )
 
+    def fire_live_lb_failure(self, staged: dict[str, Any], cause: str) -> dict[str, Any]:
+        """Fire LB_FAILED for a failed live upstream attempt."""
+        if not isinstance(staged, dict) or not isinstance(cause, str):
+            raise EmulatorInputError("live LB_FAILED input is invalid")
+        return self._call(
+            lambda session: self._fire_live_lb_failure_on_worker(
+                session, staged, cause
+            )
+        )
+
     def deliver_staged_http_body(
         self, staged: dict[str, Any], body: bytes
     ) -> list[dict[str, Any]]:
@@ -28913,6 +29012,15 @@ class _PersistentEmulatorSession:
             if self._closed:
                 raise EmulatorInputError("emulator session is closed")
             return self._state_session().start_staged_http_request(request)
+
+    def fire_live_lb_failure(
+        self, staged: dict[str, Any], cause: str
+    ) -> dict[str, Any]:
+        """Fire LB_FAILED for a failed live upstream attempt."""
+        with self._lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
+            return self._state_session().fire_live_lb_failure(staged, cause)
 
     def deliver_staged_http_body(
         self, staged: dict[str, Any], body: bytes
@@ -32484,13 +32592,24 @@ def _live_http_handler(
                     session_id,
                     lambda session: session.complete_staged_http_request(staged, {}),
                 )
-            candidates = _resolve_live_upstream_candidates(
+            pending_candidates = _resolve_live_upstream_candidates(
                 config, manager, session_id, scheduler
             )
+            attempted_candidates: set[tuple[str, str, str, int]] = set()
             method, uri, headers, body = self._backend_request(staged)
             upstream_config = config["upstream"]
             connect_error: OSError | ValueError | http.client.HTTPException | None = None
-            for selected_pool, member, endpoint in candidates:
+            while pending_candidates:
+                selected_pool, member, endpoint = pending_candidates.pop(0)
+                candidate_key = (
+                    selected_pool,
+                    member,
+                    endpoint["host"],
+                    endpoint["port"],
+                )
+                if candidate_key in attempted_candidates:
+                    continue
+                attempted_candidates.add(candidate_key)
                 if member:
                     manager.execute(
                         session_id,
@@ -32535,6 +32654,8 @@ def _live_http_handler(
                             },
                         ),
                     )
+                    if staged.get("live_lb_failure") is not None:
+                        result["lb_failure"] = dict(staged["live_lb_failure"])
                     if scheduler is not None and member:
                         scheduler.mark_success(selected_pool, member)
                     return result
@@ -32542,6 +32663,39 @@ def _live_http_handler(
                     connect_error = exc
                     if scheduler is not None and member:
                         scheduler.mark_failure(selected_pool, member)
+                    failure_cause = (
+                        "connection_timeout"
+                        if isinstance(exc, TimeoutError)
+                        else "unreachable"
+                    )
+                    failure = manager.execute(
+                        session_id,
+                        lambda session: session.fire_live_lb_failure(
+                            staged, failure_cause
+                        ),
+                    )
+                    if failure.get("response_committed"):
+                        return failure["result"]
+                    selection = failure.get("selection", {})
+                    try:
+                        refreshed_candidates = _resolve_live_upstream_candidates(
+                            config, manager, session_id, scheduler
+                        )
+                    except EmulatorInputError:
+                        refreshed_candidates = []
+                    if selection.get("pool") != selected_pool:
+                        pending_candidates = []
+                    pending_candidates.extend(
+                        candidate
+                        for candidate in refreshed_candidates
+                        if (
+                            candidate[0],
+                            candidate[1],
+                            candidate[2]["host"],
+                            candidate[2]["port"],
+                        )
+                        not in attempted_candidates
+                    )
                 finally:
                     if connection is not None:
                         connection.close()

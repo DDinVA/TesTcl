@@ -81,6 +81,14 @@ hop-by-hop headers are not forwarded through the adapter. The checked-in
 [`live-http-upstream-17.5.json`](../examples/scenarios/live-http-upstream-17.5.json)
 scenario is a minimal example.
 
+When a real HTTP upstream connection fails, the adapter fires `LB_FAILED` with
+`unreachable` or `connection_timeout` as the bounded `event info` cause. A
+rule can select another mapped pool/member with `pool` and `LB::reselect`, or
+commit a local response with `HTTP::respond`; failed mapped members are also
+placed in the live scheduler's temporary cooldown. Omit `upstream.pool` when
+an `LB_FAILED` handler is allowed to move between pools, because specifying it
+intentionally restricts resolution to that one pool.
+
 To expose the same listener over HTTPS, add `live_data_plane.tls` with local
 certificate material. Paths are read by the local CLI/container process, so a
 container deployment should mount them explicitly:

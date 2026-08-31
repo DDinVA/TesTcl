@@ -21085,6 +21085,132 @@ when HTTP_RESPONSE { HTTP::header insert X-Processed by-irule }
                 upstream_thread.join(timeout=5)
                 upstream_server.server_close()
 
+    def test_live_http_upstream_failure_fires_lb_failed_and_uses_fallback_pool(self) -> None:
+        class FallbackHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+                body = b"fallback-backend"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+        fallback_server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), FallbackHandler
+        )
+        fallback_server.daemon_threads = True
+        fallback_thread = threading.Thread(target=fallback_server.serve_forever)
+        fallback_thread.start()
+        unused = socket.socket()
+        unused.bind(("127.0.0.1", 0))
+        failed_port = unused.getsockname()[1]
+        unused.close()
+        scenario = {
+            "profiles": ["TCP", "HTTP"],
+            "pools": {
+                "primary_pool": ["primary:18090"],
+                "fallback_pool": ["fallback:18091"],
+            },
+            "irule": """
+when HTTP_REQUEST { pool primary_pool }
+when LB_FAILED {
+    log local0. "live-failure=[event info]"
+    pool fallback_pool
+    LB::reselect
+}
+""",
+            "live_data_plane": {
+                "protocol": "http",
+                "upstream": {
+                    "targets": {
+                        "primary:18090": {
+                            "host": "127.0.0.1",
+                            "port": failed_port,
+                        },
+                        "fallback:18091": {
+                            "host": "127.0.0.1",
+                            "port": fallback_server.server_port,
+                        },
+                    },
+                    "connect_timeout": 0.1,
+                    "failure_cooldown": 60.0,
+                },
+            },
+        }
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", server.server_port, timeout=2
+        )
+        try:
+            connection.request("GET", "/fallback", headers={"Host": "live.example"})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), b"fallback-backend")
+            self.assertEqual(
+                getattr(server, "_testcl_pool_scheduler").snapshot()["down"][0]["member"],
+                "primary:18090",
+            )
+        finally:
+            connection.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+            fallback_server.shutdown()
+            fallback_thread.join(timeout=5)
+            fallback_server.server_close()
+
+    def test_live_http_upstream_failure_can_commit_lb_failed_http_response(self) -> None:
+        unused = socket.socket()
+        unused.bind(("127.0.0.1", 0))
+        failed_port = unused.getsockname()[1]
+        unused.close()
+        scenario = {
+            "profiles": ["TCP", "HTTP"],
+            "pools": {"primary_pool": ["primary:18090"]},
+            "irule": """
+when HTTP_REQUEST { pool primary_pool }
+when LB_FAILED { HTTP::respond 503 content unavailable }
+""",
+            "live_data_plane": {
+                "protocol": "http",
+                "upstream": {
+                    "targets": {
+                        "primary:18090": {
+                            "host": "127.0.0.1",
+                            "port": failed_port,
+                        }
+                    },
+                    "connect_timeout": 0.1,
+                },
+            },
+        }
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", server.server_port, timeout=2
+        )
+        try:
+            connection.request("GET", "/unavailable", headers={"Host": "live.example"})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 503)
+            self.assertEqual(response.read(), b"unavailable")
+        finally:
+            connection.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+
     def test_live_http_data_plane_validates_origin_and_request_limits(self) -> None:
         with self.assertRaisesRegex(
             self.adapter.EmulatorInputError, "unsupported live_origin field"
