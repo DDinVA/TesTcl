@@ -111,6 +111,7 @@ jobs:
             fi
             sleep 1
           done
+          set +e
           python3 - <<'PY'
           import socket
 
@@ -127,8 +128,15 @@ jobs:
                       break
                   received.extend(chunk)
           if bytes(received) != expected:
+              print("raw TCP container log:")
               raise SystemExit(
                   f"raw TCP smoke response mismatch: {bytes(received)!r}"
               )
           print(bytes(received).decode("ascii"))
           PY
+          raw_status=$?
+          set -e
+          if [ "$raw_status" -ne 0 ]; then
+            docker logs "$raw_container_name"
+            exit "$raw_status"
+          fi
