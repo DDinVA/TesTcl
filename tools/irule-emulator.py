@@ -23,6 +23,8 @@ import os
 import queue
 import re
 import secrets
+import socket
+import socketserver
 import struct
 import sys
 import threading
@@ -53,6 +55,9 @@ except ModuleNotFoundError:  # test modules load this script by absolute path
 TMOS_VERSION = "17.5"
 MAX_IRULE_SOURCES = 64
 LIVE_HTTP_MAX_REQUEST_BYTES = 2 * 1024 * 1024
+LIVE_RAW_MAX_REQUEST_BYTES = 2 * 1024 * 1024
+LIVE_RAW_READ_SIZE = 64 * 1024
+LIVE_RAW_READ_TIMEOUT_SECONDS = 1.0
 ADAPT_FIXTURE_RESULTS = frozenset({"noop", "modified", "response", "error"})
 ADAPT_FIXTURE_RESULT_ALIASES = {
     "noop": "noop",
@@ -31590,6 +31595,68 @@ def _normalise_live_http_scenario(
     }
 
 
+def _normalise_live_data_plane_scenario(
+    raw: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Normalize the HTTP or raw-TCP real-client data-plane contract."""
+    if not isinstance(raw, dict):
+        raise EmulatorInputError("data-plane scenario must be a JSON object")
+    config = raw.get("live_data_plane")
+    if config is None:
+        scenario, origin = _normalise_live_http_scenario(raw)
+        return scenario, {"protocol": "http", "origin": origin}
+    if not isinstance(config, dict):
+        raise EmulatorInputError("live_data_plane must be an object")
+    unknown = sorted(set(config) - {"protocol", "read_timeout", "max_read_bytes"})
+    if unknown:
+        raise EmulatorInputError(
+            "unsupported live_data_plane field(s): " + ", ".join(unknown)
+        )
+    protocol = config.get("protocol", "http")
+    if not isinstance(protocol, str) or protocol.lower() not in {"http", "tcp"}:
+        raise EmulatorInputError("live_data_plane.protocol must be http or tcp")
+    protocol = protocol.lower()
+
+    scenario = dict(raw)
+    scenario.pop("live_data_plane", None)
+    if protocol == "http":
+        scenario, origin = _normalise_live_http_scenario(scenario)
+        return scenario, {"protocol": "http", "origin": origin}
+
+    if "live_origin" in scenario:
+        raise EmulatorInputError(
+            "live_origin is only valid for the HTTP data plane"
+        )
+    if any(field in scenario for field in ("request", "requests", "packets")):
+        raise EmulatorInputError(
+            "raw TCP data-plane scenario cannot contain request, requests, or packets"
+        )
+    timeout = config.get("read_timeout", LIVE_RAW_READ_TIMEOUT_SECONDS)
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(float(timeout))
+        or not 0.05 <= float(timeout) <= 60.0
+    ):
+        raise EmulatorInputError(
+            "live_data_plane.read_timeout must be between 0.05 and 60 seconds"
+        )
+    max_read_bytes = config.get("max_read_bytes", LIVE_RAW_MAX_REQUEST_BYTES)
+    if (
+        isinstance(max_read_bytes, bool)
+        or not isinstance(max_read_bytes, int)
+        or not 1 <= max_read_bytes <= LIVE_RAW_MAX_REQUEST_BYTES
+    ):
+        raise EmulatorInputError(
+            "live_data_plane.max_read_bytes must be between 1 and 2097152"
+        )
+    return scenario, {
+        "protocol": "tcp",
+        "read_timeout": float(timeout),
+        "max_read_bytes": max_read_bytes,
+    }
+
+
 def _live_http_handler(
     root: Path,
     scenario: dict[str, Any],
@@ -31766,26 +31833,179 @@ def _live_http_handler(
     return LiveEmulatorHandler
 
 
+def _live_tcp_handler(
+    scenario: dict[str, Any],
+    config: dict[str, Any],
+    manager: "SessionManager",
+) -> type[socketserver.BaseRequestHandler]:
+    """Build a bounded raw TCP adapter over a persistent iRule session."""
+
+    class LiveTCPHandler(socketserver.BaseRequestHandler):
+        def _packet(
+            self,
+            payload: bytes = b"",
+            *,
+            flags: list[str] | None = None,
+        ) -> dict[str, Any]:
+            server_address = self.server.server_address
+            return {
+                "protocol": "tcp",
+                "direction": "client_to_server",
+                "source": {
+                    "address": self.client_address[0],
+                    "port": self.client_address[1],
+                },
+                "destination": {
+                    "address": server_address[0],
+                    "port": server_address[1],
+                },
+                "flags": list(flags or []),
+                "payload": _decode_wire_text(payload) if payload else "",
+            }
+
+        def _send_emissions(self, result: dict[str, Any]) -> bool:
+            """Forward only server-directed TCP data and report close requests."""
+            should_close = False
+            emissions = result.get("emitted", [])
+            if not isinstance(emissions, list):
+                raise EmulatorInputError("emulator returned invalid TCP emissions")
+            for emission in emissions:
+                if not isinstance(emission, dict):
+                    raise EmulatorInputError("emulator returned an invalid TCP emission")
+                if emission.get("protocol") != "tcp":
+                    continue
+                if emission.get("direction") != "server_to_client":
+                    continue
+                if emission.get("kind") == "fin" or emission.get("control") == "FIN":
+                    should_close = True
+                    continue
+                payload = emission.get("payload")
+                if not isinstance(payload, str):
+                    raise EmulatorInputError("emulator returned a non-text TCP payload")
+                payload_bytes = payload.encode("utf-8")
+                response_bytes = getattr(self, "_response_bytes", 0)
+                if response_bytes + len(payload_bytes) > LIVE_RAW_MAX_REQUEST_BYTES:
+                    raise EmulatorResourceError("TCP response exceeds the 2 MiB limit")
+                if payload_bytes:
+                    self.request.sendall(payload_bytes)
+                    self._response_bytes = response_bytes + len(payload_bytes)
+            return should_close
+
+        def handle(self) -> None:  # noqa: D401 - socketserver API
+            session_id: str | None = None
+            total_read = 0
+            self._response_bytes = 0
+            try:
+                session_id = manager.create(scenario)
+                self.request.settimeout(config["read_timeout"])
+
+                accepted = manager.execute(
+                    session_id,
+                    lambda session: session.run_packet_trace(
+                        [self._packet(flags=["SYN"])]
+                    ),
+                )
+                if self._send_emissions(accepted):
+                    return
+
+                while total_read < config["max_read_bytes"]:
+                    try:
+                        payload = self.request.recv(
+                            min(LIVE_RAW_READ_SIZE, config["max_read_bytes"] - total_read)
+                        )
+                    except socket.timeout:
+                        break
+                    if not payload:
+                        break
+                    total_read += len(payload)
+                    result = manager.execute(
+                        session_id,
+                        lambda session, payload=payload: session.run_packet_trace(
+                            [self._packet(payload)]
+                        ),
+                    )
+                    if self._send_emissions(result):
+                        break
+
+                try:
+                    closed = manager.execute(
+                        session_id,
+                        lambda session: session.run_packet_trace(
+                            [self._packet(flags=["FIN"])]
+                        ),
+                    )
+                    self._send_emissions(closed)
+                except (EmulatorInputError, EmulatorNotFoundError, OSError):
+                    # The peer may have reset the socket while the close event
+                    # was being recorded; the primary request result is still
+                    # more useful than replacing it with teardown noise.
+                    pass
+            except (
+                EmulatorInputError,
+                EmulatorNotFoundError,
+                EmulatorResourceError,
+                UnicodeError,
+            ) as exc:
+                # A raw stream has no response envelope. Close the connection
+                # and leave a concise diagnosis on stderr for CLI/container use.
+                print(f"testcl raw TCP connection closed: {exc}", file=sys.stderr)
+                return
+            except OSError:
+                # Peer resets and broken pipes are normal during stream teardown.
+                return
+            finally:
+                if session_id is not None:
+                    try:
+                        manager.close(session_id)
+                    except EmulatorNotFoundError:
+                        pass
+
+    return LiveTCPHandler
+
+
+class _LiveTCPServer(socketserver.ThreadingTCPServer):
+    """TCP listener with safe rapid restart behavior for local test runs."""
+
+    allow_reuse_address = True
+
+
 def _data_plane_server(
     root: Path,
     host: str,
     port: int,
     raw_scenario: Any,
-) -> tuple[ThreadingHTTPServer, "SessionManager"]:
+) -> tuple[socketserver.BaseServer, "SessionManager"]:
     if not 0 <= port <= 65535:
         raise EmulatorInputError("data-plane port must be between 0 and 65535")
-    scenario, origin_defaults = _normalise_live_http_scenario(raw_scenario)
+    scenario, config = _normalise_live_data_plane_scenario(raw_scenario)
     manager = SessionManager(root, max_sessions=128)
     try:
-        server = ThreadingHTTPServer(
-            (host, port),
-            _live_http_handler(root, scenario, origin_defaults, manager),
-        )
+        if config["protocol"] == "http":
+            server = ThreadingHTTPServer(
+                (host, port),
+                _live_http_handler(root, scenario, config["origin"], manager),
+            )
+        else:
+            server = _LiveTCPServer(
+                (host, port), _live_tcp_handler(scenario, config, manager)
+            )
     except BaseException:
         manager.close_all()
         raise
+    setattr(server, "_testcl_protocol", config["protocol"])
     server.daemon_threads = True
     return server, manager
+
+
+def _data_plane_bound_port(server: socketserver.BaseServer) -> int:
+    """Return the actual bound port for HTTP and socketserver listeners."""
+    address = server.server_address
+    if not isinstance(address, tuple) or len(address) < 2:
+        raise EmulatorInputError("data-plane server returned an invalid bound address")
+    bound_port = address[1]
+    if isinstance(bound_port, bool) or not isinstance(bound_port, int):
+        raise EmulatorInputError("data-plane server returned an invalid bound port")
+    return bound_port
 
 
 def _http_handler(root: Path, manager: SessionManager | None = None) -> type[BaseHTTPRequestHandler]:
@@ -32260,7 +32480,7 @@ def serve(
         raise EmulatorInputError("port must be between 1 and 65535")
     session_manager = SessionManager(root)
     server: ThreadingHTTPServer | None = None
-    data_plane_server: ThreadingHTTPServer | None = None
+    data_plane_server: socketserver.BaseServer | None = None
     data_plane_manager: SessionManager | None = None
     data_plane_thread: threading.Thread | None = None
     try:
@@ -32277,13 +32497,14 @@ def serve(
             )
             data_plane_thread = threading.Thread(
                 target=data_plane_server.serve_forever,
-                name="testcl-http-data-plane",
+                name="testcl-data-plane",
                 daemon=True,
             )
             data_plane_thread.start()
+            scheme = getattr(data_plane_server, "_testcl_protocol", "http")
             print(
                 "testcl data plane listening on "
-                f"http://{data_plane_host}:{data_plane_server.server_port}",
+                f"{scheme}://{data_plane_host}:{_data_plane_bound_port(data_plane_server)}",
                 file=sys.stderr,
             )
         server = ThreadingHTTPServer((host, port), _http_handler(root, session_manager))
@@ -32305,10 +32526,11 @@ def serve(
 
 
 def serve_data_plane(root: Path, host: str, port: int, scenario: Any) -> None:
-    """Run only the optional real-client HTTP data plane."""
+    """Run only the optional real-client HTTP or raw TCP data plane."""
     server, manager = _data_plane_server(root, host, port, scenario)
+    scheme = getattr(server, "_testcl_protocol", "http")
     print(
-        f"testcl data plane listening on http://{host}:{server.server_port}",
+        f"testcl data plane listening on {scheme}://{host}:{_data_plane_bound_port(server)}",
         file=sys.stderr,
     )
     try:
@@ -32402,7 +32624,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--data-plane",
         action="store_true",
-        help="serve a real-client HTTP data plane using the scenario",
+        help="serve a real-client HTTP or raw TCP data plane using the scenario",
     )
     mode.add_argument(
         "--mcp",
@@ -32431,13 +32653,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--data-plane-host",
         default="127.0.0.1",
-        help="live HTTP data-plane bind address when combined with --serve",
+        help="live data-plane bind address when combined with --serve",
     )
     parser.add_argument(
         "--data-plane-port",
         type=int,
         default=18080,
-        help="live HTTP data-plane bind port when combined with --serve",
+        help="live data-plane bind port when combined with --serve",
     )
     parser.add_argument(
         "--backend",

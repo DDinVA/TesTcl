@@ -1,0 +1,9 @@
+{
+  "profiles": ["TCP"],
+  "irule": "when CLIENT_ACCEPTED { TCP::collect }\nwhen CLIENT_DATA {\n    TCP::respond [TCP::payload]\n    TCP::release\n    TCP::collect\n}",
+  "live_data_plane": {
+    "protocol": "tcp",
+    "read_timeout": 1.0,
+    "max_read_bytes": 2097152
+  }
+}

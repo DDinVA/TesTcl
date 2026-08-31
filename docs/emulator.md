@@ -67,6 +67,34 @@ are rejected explicitly, and response hop-by-hop headers are normalized by the
 listener. This is a deterministic HTTP data-plane adapter, not a TLS listener,
 kernel TCP stack, or live upstream proxy.
 
+For raw TCP clients, add an explicit `live_data_plane` object to the scenario:
+
+```json
+{
+  "profiles": ["TCP"],
+  "irule": "when CLIENT_ACCEPTED { TCP::collect } when CLIENT_DATA { TCP::respond [TCP::payload]; TCP::release; TCP::collect }",
+  "live_data_plane": {"protocol": "tcp", "read_timeout": 1.0}
+}
+```
+
+Run the included echo fixture with a normal TCP client:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --data-plane --host 127.0.0.1 --port 18081 \
+  --scenario examples/scenarios/live-tcp-17.5.json
+printf 'hello from tcp\n' | nc -N 127.0.0.1 18081
+```
+
+The raw listener creates one persistent emulator session per TCP connection,
+feeds each bounded read through the normal TCP packet adapter, and forwards only
+server-directed `TCP::respond` data. EOF, timeout, `TCP::close`, and the 2 MiB
+connection read limit terminate the stream. Incoming bytes cross the current
+Tcl boundary as UTF-8 text with replacement for invalid bytes or NULs; this
+live adapter is therefore for raw TCP/iRule behavior, not a kernel TCP stack,
+TLS endpoint, upstream proxy, or full database peer. Protocol-specific TDS,
+FTP, LDAP, and similar parsers are exercised through the packet/API drivers.
+
 The API and data plane can run together by starting the normal API with
 `--serve --data-plane-scenario PATH`; the API remains on `--host/--port`, while
 the data plane defaults to `127.0.0.1:18080` and can be changed with

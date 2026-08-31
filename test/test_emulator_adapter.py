@@ -11,6 +11,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import struct
 import subprocess
 import sys
@@ -20918,6 +20919,103 @@ when HTTP_RESPONSE {
                     },
                 },
             )
+
+    def test_live_tcp_data_plane_forwards_tcp_respond_and_preserves_session(self) -> None:
+        scenario = {
+            "profiles": ["TCP"],
+            "irule": """
+when CLIENT_ACCEPTED { TCP::collect }
+when CLIENT_DATA {
+    TCP::respond "echo:[TCP::payload]"
+    TCP::release
+    TCP::collect
+}
+""",
+            "live_data_plane": {
+                "protocol": "tcp",
+                "read_timeout": 0.2,
+            },
+        }
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        client = socket.create_connection(
+            ("127.0.0.1", self.adapter._data_plane_bound_port(server)), timeout=2
+        )
+        try:
+            client.sendall(b"one")
+            self.assertEqual(client.recv(64), b"echo:one")
+            client.sendall(b"two")
+            self.assertEqual(client.recv(64), b"echo:two")
+        finally:
+            client.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+
+    def test_live_tcp_data_plane_rejects_http_only_fixtures_and_limits(self) -> None:
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "only valid for the HTTP"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "irule": "when CLIENT_ACCEPTED {}",
+                    "live_data_plane": {"protocol": "tcp"},
+                    "live_origin": {"body": "not-for-tcp"},
+                },
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "read_timeout"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "irule": "when CLIENT_ACCEPTED {}",
+                    "live_data_plane": {
+                        "protocol": "tcp",
+                        "read_timeout": 0.001,
+                    },
+                },
+            )
+
+    def test_live_tcp_data_plane_forwards_tcp_close_and_closes_client_stream(self) -> None:
+        scenario = {
+            "profiles": ["TCP"],
+            "irule": """
+when CLIENT_ACCEPTED { TCP::collect }
+when CLIENT_DATA {
+    TCP::respond closing
+    TCP::close
+}
+""",
+            "live_data_plane": {"protocol": "tcp", "read_timeout": 0.2},
+        }
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        client = socket.create_connection(
+            ("127.0.0.1", self.adapter._data_plane_bound_port(server)), timeout=2
+        )
+        try:
+            client.sendall(b"one")
+            self.assertEqual(client.recv(64), b"closing")
+            self.assertEqual(client.recv(64), b"")
+        finally:
+            client.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
 
     def test_http_api_exposes_runtime_registration_probe(self) -> None:
         server = self.adapter.ThreadingHTTPServer(

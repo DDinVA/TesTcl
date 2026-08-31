@@ -59,7 +59,8 @@ jobs:
       - name: Smoke test the portable emulator image
         run: |
           container_name="testcl-irule-emulator-ci-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-$$"
-          trap 'docker rm --force "$container_name" >/dev/null 2>&1 || true' EXIT
+          raw_container_name="${container_name}-raw"
+          trap 'docker rm --force "$container_name" "$raw_container_name" >/dev/null 2>&1 || true' EXIT
           docker run --detach --name "$container_name" \
             --publish 18080:8080 --publish 18081:18080 \
             testcl-irule-emulator:ci \
@@ -93,3 +94,25 @@ jobs:
             sleep 1
           done
           grep -F 'hello from the modeled origin' /tmp/testcl-data-plane.txt
+
+          docker run --detach --name "$raw_container_name" \
+            --publish 18082:18082 \
+            testcl-irule-emulator:ci \
+            --data-plane --host 0.0.0.0 --port 18082 \
+            --scenario /opt/testcl/examples/scenarios/live-tcp-17.5.json
+          for attempt in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/18082) 2>/dev/null; then
+              exec 3>&- 3<&-
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs "$raw_container_name"
+              exit 1
+            fi
+            sleep 1
+          done
+          exec 3<>/dev/tcp/127.0.0.1/18082
+          printf 'container-tcp' >&3
+          IFS= read -r -N 13 raw_response <&3
+          test "$raw_response" = 'container-tcp'
+          exec 3>&- 3<&-
