@@ -4746,6 +4746,7 @@ when HTTP_RESPONSE_RELEASE {
             "antifraud-controls-17.5.json": 2,
             "category-17.5.json": 6,
             "tcp-controls-17.5.json": 2,
+            "tcp-introspection-17.5.json": 15,
             "dns-17.5.json": 7,
             "tcp-17.5.json": 6,
             "ssl-controls-17.5.json": 2,
@@ -4885,6 +4886,24 @@ when HTTP_RESPONSE_RELEASE {
         self.assertIn("add-behavior-vector", {command["next_action"] for command in report["commands"]})
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "duplicate pack name"):
             self.adapter._build_behavior_coverage(root, [packs[0], packs[0]])
+
+    def test_behavior_analysis_separates_adjacent_one_line_when_handlers(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        analysis = self.adapter._analyze_rule_capabilities(
+            root,
+            "when CLIENT_ACCEPTED { TCP::abc disable } when CLIENT_DATA { TCP::release }",
+            ["TCP"],
+        )
+
+        self.assertEqual(analysis["analysis"], "static-tcl-lsp")
+        self.assertEqual(
+            {command["name"] for command in analysis["commands"]},
+            {"TCP::abc", "TCP::release"},
+        )
+        self.assertEqual(
+            {event for command in analysis["commands"] for event in command["events"]},
+            {"CLIENT_ACCEPTED", "CLIENT_DATA"},
+        )
 
     def test_behavior_candidates_build_reference_free_plan_from_uncovered_queue(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)

@@ -6790,7 +6790,7 @@ def _prepare_irule_source(
     replacements: list[tuple[int, int, str]] = []
     controls: list[dict[str, Any]] = []
 
-    for texts, argv in commands:
+    for command_index, (texts, argv) in enumerate(commands):
         command_name = texts[0] if texts else ""
         if command_name == "priority":
             if len(texts) != 2:
@@ -6847,6 +6847,24 @@ def _prepare_irule_source(
                 f"when {event_name} priority {priority} timing {timing} ",
             )
         )
+        # Compact fixtures commonly place adjacent top-level ``when`` blocks
+        # on one line. The Tcl-LSP tokeniser can identify both commands, but a
+        # later command segmenter otherwise treats the second ``when`` as
+        # another word in the first command. Insert a separator only when the
+        # source has no existing Tcl command boundary between these two
+        # top-level handlers; never rewrite separators inside a braced body.
+        if command_index + 1 < len(commands):
+            next_texts, next_argv = commands[command_index + 1]
+            if next_texts and next_texts[0] == "when" and next_argv:
+                body_end = body_token.end.offset
+                next_start = next_argv[0].start.offset
+                gap = source[body_end:next_start]
+                if not any(character in gap for character in (";", "\n", "\r")):
+                    # Insert immediately before the next command token. The
+                    # token's end offset stops before a braced body's closing
+                    # delimiter in this parser, so inserting at ``body_end``
+                    # would put the separator inside the handler body.
+                    replacements.append((next_start, next_start, "\n"))
         controls.append(
             {
                 "ordinal": len(controls),
@@ -6937,7 +6955,11 @@ def _analyze_rule_capabilities(
                         for nested in scan_command_substitutions(token.text):
                             visit(nested.text, event_name)
 
-        for event_name, _priority, body, _body_token, _event_token in _find_when_bodies(source):
+        # Reuse the execution path's top-level normalization so compact
+        # adjacent ``when`` handlers and outer priority/timing directives are
+        # analyzed exactly as they will be executed.
+        analysis_source, _ = _prepare_irule_source(root, source)
+        for event_name, _priority, body, _body_token, _event_token in _find_when_bodies(analysis_source):
             event_names.add(event_name)
             visit(body, event_name)
 
