@@ -21,6 +21,16 @@ case, preserves plan order, adds a digest of the supplied records, and never
 executes the emulator to generate reference output. The assembled result can
 then be passed to `--golden-vectors` or `POST /v1/differential-vectors`.
 
+To generate a plan for a catalog chunk, use `--capture-plan-template`. It
+chooses a target-valid event/profile shell for each F5 iRule command; the
+collector still supplies command-specific arguments and fixture values:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --capture-plan-template --offset 0 --limit 100 \
+  --tmos-build 17.5.4 --capture-id run-001 > capture-plan-000.json
+```
+
 The `scenarios/multi-irule-17.5.json` fixture demonstrates multiple attached
 iRules with priority ordering and a shared pool fixture.
 

@@ -2760,6 +2760,212 @@ def _build_capture_campaign(
     }
 
 
+def _probe_event_inventory(root: Path) -> list[tuple[str, Any]]:
+    """Load the target-valid event properties used by collector templates."""
+    _load_session_class(root)
+    try:
+        from compiler.registry.namespace_data import get_event_props
+        from compiler.registry.namespace_models import EventProps
+        from compiler.registry.namespace_registry import NAMESPACE_REGISTRY
+    except ImportError as exc:  # pragma: no cover - depends on external checkout
+        raise EmulatorInputError(
+            f"could not load tcl-lsp event registry: {exc}"
+        ) from exc
+
+    inventory: list[tuple[str, Any]] = []
+    for name in _catalog_event_names(NAMESPACE_REGISTRY):
+        if name in TMOS_17_5_POST_TARGET_EVENTS or name in TMOS_17_5_UNAVAILABLE_EVENTS:
+            continue
+        props = get_event_props(name)
+        if props is None and name in TMOS_17_5_EVENT_OVERRIDES:
+            override = TMOS_17_5_EVENT_OVERRIDES[name]
+            props = EventProps(
+                client_side=override["client_side"],
+                server_side=override["server_side"],
+                transport=override["transport"],
+                implied_profiles=override["implied_profiles"],
+                flow=override["flow"],
+                deprecated=override["deprecated"],
+                common=override["common"],
+            )
+        if props is not None:
+            inventory.append((name, props))
+    return inventory
+
+
+def _command_probe_template(
+    root: Path,
+    command: str,
+    event_inventory: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    """Choose a valid event/profile shell without guessing command arguments."""
+    _load_session_class(root)
+    try:
+        from compiler.registry import REGISTRY
+        from compiler.registry.namespace_data import event_satisfies
+    except ImportError as exc:  # pragma: no cover - depends on external checkout
+        raise EmulatorInputError(
+            f"could not load tcl-lsp command registry: {exc}"
+        ) from exc
+
+    spec = REGISTRY.get_any(command)
+    if spec is None:  # pragma: no cover - registry contract guard
+        raise EmulatorInputError(f"catalog command has no specification: {command}")
+    requirements = spec.event_requires
+    by_name = dict(event_inventory)
+    preferred = [
+        "HTTP_REQUEST",
+        "CLIENT_ACCEPTED",
+        "RULE_INIT",
+        "SERVER_CONNECTED",
+        "LB_SELECTED",
+        "DNS_REQUEST",
+        "ACCESS_POLICY_AGENT_EVENT",
+        "AUTH_RESULT",
+        "CLIENT_DATA",
+        "SERVER_DATA",
+    ]
+    ordered_names: list[str] = []
+    if requirements is not None and requirements.also_in:
+        ordered_names.extend(sorted(requirements.also_in))
+    ordered_names.extend(name for name in preferred if name not in ordered_names)
+    ordered_names.extend(name for name, _ in event_inventory if name not in ordered_names)
+
+    selected_name: str | None = None
+    selected_props: Any | None = None
+    for name in ordered_names:
+        props = by_name.get(name)
+        if props is None:
+            continue
+        if requirements is None or event_satisfies(props, requirements, name):
+            selected_name = name
+            selected_props = props
+            break
+    if selected_name is None or selected_props is None:
+        raise EmulatorInputError(
+            f"catalog command has no target-valid event template: {command}"
+        )
+
+    profiles: list[str] = []
+
+    def add_profile(name: str) -> None:
+        if name and name not in profiles:
+            profiles.append(name)
+
+    transport = (
+        requirements.transport
+        if requirements is not None and requirements.transport is not None
+        else selected_props.transport
+    )
+    if transport == "tcp" or isinstance(transport, tuple) and "tcp" in transport:
+        add_profile("TCP")
+    elif transport == "udp" or isinstance(transport, tuple) and "udp" in transport:
+        add_profile("UDP")
+
+    required_profiles = set(requirements.profiles) if requirements is not None else set()
+    implied_profiles = set(selected_props.implied_profiles)
+    profile_candidates = required_profiles or implied_profiles
+    # HTTP and FASTHTTP are alternatives; a minimal collector fixture should
+    # choose one concrete profile rather than attach both to a virtual server.
+    if "HTTP" in profile_candidates:
+        add_profile("HTTP")
+    elif "FASTHTTP" in profile_candidates:
+        add_profile("FASTHTTP")
+    else:
+        for profile in sorted(profile_candidates):
+            add_profile(profile)
+    if not profiles and selected_name == "RULE_INIT":
+        profiles.extend(DEFAULT_PROFILES)
+
+    return {
+        "event": selected_name,
+        "profiles": profiles or list(DEFAULT_PROFILES),
+        "args": [],
+        "argument_policy": "collector-must-select-command-specific-arguments",
+        "argument_source": "catalog.documentation.synopsis",
+        "requires_fixture_state": selected_name != "RULE_INIT",
+    }
+
+
+def _build_capture_plan_template(
+    root: Path,
+    offset: int,
+    limit: int,
+    *,
+    namespace: str | None = None,
+    runtime_status: str | None = None,
+    target_status: str | None = "available-in-tmos-17.5",
+    name: str | None = None,
+    source: str = "external-bigip-or-vlab",
+    collector: str = "external-collector",
+    tmos_build: str = "17.5",
+    capture_id: str | None = None,
+) -> dict[str, Any]:
+    """Emit an assembly-ready plan template for one runnable catalog chunk."""
+    if not 1 <= limit <= CAPTURE_MAX_RECORDS:
+        raise EmulatorInputError(
+            "capture plan template limit must be between 1 and "
+            f"{CAPTURE_MAX_RECORDS}"
+        )
+    if target_status not in (None, "available-in-tmos-17.5"):
+        raise EmulatorInputError(
+            "capture plan templates only include commands available in TMOS 17.5"
+        )
+    campaign = _build_capture_campaign(
+        root,
+        offset,
+        limit,
+        namespace=namespace,
+        runtime_status=runtime_status,
+        target_status="available-in-tmos-17.5",
+    )
+    event_inventory = _probe_event_inventory(root)
+    campaign_data = campaign["campaign"]
+    if not campaign_data["cases"]:
+        raise EmulatorInputError(
+            "capture plan template offset is past the available TMOS 17.5 commands"
+        )
+    observations: list[dict[str, Any]] = []
+    for case in campaign_data["cases"]:
+        template = _command_probe_template(root, case["name"], event_inventory)
+        observations.append(
+            {
+                "id": case["id"],
+                "operation": "command_probe",
+                "input": {
+                    "command": case["name"],
+                    "args": template["args"],
+                    "event": template["event"],
+                    "profiles": template["profiles"],
+                },
+                "comparisons": [
+                    {
+                        "label": "command status",
+                        "actual_path": ["execution", "status"],
+                        "reference_path": ["status"],
+                    }
+                ],
+            }
+        )
+
+    plan = {
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "name": name or f"tmos-17.5-capture-plan-{offset:06d}-{limit:06d}",
+        "source": source,
+        "provenance": {
+            "collector": collector,
+            "tmos_build": tmos_build,
+            "capture_id": capture_id or f"campaign-{offset:06d}-{limit:06d}",
+            "generator": "tmos-17.5-capture-plan-template-v1",
+        },
+        "observations": observations,
+    }
+    # Validate before returning so a generated plan is safe to send directly
+    # to the assembly boundary. This also catches long command-derived IDs.
+    return _normalise_capture_plan(root, plan)
+
+
 def _build_runtime_probe(
     root: Path,
     offset: int,
@@ -25884,6 +26090,32 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_capture_plan_template",
+                "title": "Build a TMOS 17.5 capture plan",
+                "description": "Return an assembly-ready capture-plan template for one runnable catalog chunk, with deterministic event/profile shells and no fabricated reference output.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "offset": {"type": "integer", "minimum": 0, "default": 0},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100},
+                        "namespace": {"type": "string", "minLength": 1},
+                        "runtime_status": {
+                            "type": "string",
+                            "enum": sorted(RUNTIME_STATUS_VALUES),
+                        },
+                        "target_status": {
+                            "type": "string",
+                            "enum": sorted(TARGET_STATUS_VALUES),
+                            "default": "available-in-tmos-17.5",
+                        },
+                        "name": {"type": "string", "minLength": 1},
+                        "source": {"type": "string", "minLength": 1},
+                        "collector": {"type": "string", "minLength": 1},
+                        "tmos_build": {"type": "string", "pattern": "^17\\.5(?:\\..*)?$"},
+                        "capture_id": {"type": "string", "minLength": 1},
+                    }
+                ),
+            },
+            {
                 "name": "irule_probe",
                 "title": "Probe runtime registrations",
                 "description": "Verify a bounded catalog chunk against the live Tcl iRule dispatcher without executing catalog commands.",
@@ -26191,6 +26423,41 @@ class McpProtocolServer:
             }
             return self._tool_success(
                 _build_capture_campaign(self._root, offset, limit, **filters)
+            )
+
+        if name == "irule_capture_plan_template":
+            unknown = sorted(
+                set(args)
+                - {
+                    "offset", "limit", "namespace", "runtime_status",
+                    "target_status", "name", "source", "collector",
+                    "tmos_build", "capture_id",
+                }
+            )
+            if unknown:
+                raise McpProtocolError(
+                    -32602,
+                    "unsupported irule_capture_plan_template field(s): "
+                    + ", ".join(unknown),
+                )
+            offset = args.get("offset", 0)
+            limit = args.get("limit", 100)
+            if isinstance(offset, bool) or not isinstance(offset, int):
+                raise McpProtocolError(-32602, "capture plan offset must be an integer")
+            if isinstance(limit, bool) or not isinstance(limit, int):
+                raise McpProtocolError(-32602, "capture plan limit must be an integer")
+            options = {
+                field: args[field]
+                for field in (
+                    "namespace", "runtime_status", "target_status", "name",
+                    "source", "collector", "tmos_build", "capture_id",
+                )
+                if field in args
+            }
+            return self._tool_success(
+                _build_capture_plan_template(
+                    self._root, offset, limit, **options
+                )
             )
 
         if name == "irule_probe":
@@ -28555,6 +28822,27 @@ def _http_handler(root: Path, manager: SessionManager | None = None) -> type[Bas
                     return
                 _json_response(self, 200, payload)
                 return
+            if parsed.path == "/v1/capture-plan-template":
+                query = parse_qs(parsed.query, strict_parsing=False)
+                try:
+                    offset = int(query.get("offset", ["0"])[0])
+                    limit = int(query.get("limit", ["100"])[0])
+                    options = {
+                        field: query[field][0]
+                        for field in (
+                            "namespace", "runtime_status", "target_status", "name",
+                            "source", "collector", "tmos_build", "capture_id",
+                        )
+                        if field in query
+                    }
+                    payload = _build_capture_plan_template(
+                        root, offset, limit, **options
+                    )
+                except (TypeError, ValueError, EmulatorInputError, OSError) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
             if parsed.path == "/v1/capabilities":
                 query = parse_qs(parsed.query, strict_parsing=False)
                 try:
@@ -29020,6 +29308,11 @@ def main(argv: list[str] | None = None) -> int:
         help="emit a bounded catalog-derived TMOS 17.5 reference campaign chunk",
     )
     mode.add_argument(
+        "--capture-plan-template",
+        action="store_true",
+        help="emit an assembly-ready TMOS 17.5 capture-plan template for one catalog chunk",
+    )
+    mode.add_argument(
         "--conformance",
         action="store_true",
         help="report static catalog-to-runtime and packet-event adapter coverage",
@@ -29119,6 +29412,29 @@ def main(argv: list[str] | None = None) -> int:
         default="-",
         help="newline-delimited collector record path used with --assemble-observations, or - for stdin",
     )
+    parser.add_argument(
+        "--capture-plan-name",
+        help="name for --capture-plan-template output",
+    )
+    parser.add_argument(
+        "--capture-source",
+        default="external-bigip-or-vlab",
+        help="source label for --capture-plan-template output",
+    )
+    parser.add_argument(
+        "--capture-collector",
+        default="external-collector",
+        help="collector label for --capture-plan-template output",
+    )
+    parser.add_argument(
+        "--tmos-build",
+        default="17.5",
+        help="TMOS build recorded in --capture-plan-template provenance",
+    )
+    parser.add_argument(
+        "--capture-id",
+        help="capture identifier for --capture-plan-template provenance",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -29141,12 +29457,23 @@ def main(argv: list[str] | None = None) -> int:
             raise EmulatorInputError(
                 "--capture-records requires --assemble-observations"
             )
+        if (
+            args.capture_plan_name is not None
+            or args.capture_id is not None
+            or args.capture_source != "external-bigip-or-vlab"
+            or args.capture_collector != "external-collector"
+            or args.tmos_build != "17.5"
+        ) and not args.capture_plan_template:
+            raise EmulatorInputError(
+                "capture-plan template options require --capture-plan-template"
+            )
         if args.scenario != "-" and (
             direct_pack_path is not None
             or direct_golden_path is not None
-            or direct_observation_path is not None
-            or args.assemble_observations
-            or args.capture_campaign
+                or direct_observation_path is not None
+                or args.assemble_observations
+                or args.capture_campaign
+                or args.capture_plan_template
         ):
             raise EmulatorInputError(
                 "use either --scenario PATH or a direct pack path, not both"
@@ -29155,7 +29482,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.pcap and (
             args.serve or args.data_plane or args.mcp or args.capabilities or args.catalog or args.probe
             or args.capture_campaign or args.command_probe or args.behavior_pack or args.golden_vectors
-            or args.import_observations or args.assemble_observations or args.conformance
+            or args.capture_plan_template or args.import_observations
+            or args.assemble_observations or args.conformance
         ):
             raise EmulatorInputError(
                 "--pcap can only be used with one-shot scenario execution"
@@ -29211,6 +29539,23 @@ def main(argv: list[str] | None = None) -> int:
             }
             response = _build_capture_campaign(
                 root, args.offset, args.limit, **campaign_filters
+            )
+        elif args.capture_plan_template:
+            campaign_filters = {
+                field: getattr(args, field)
+                for field in ("namespace", "runtime_status", "target_status")
+                if getattr(args, field) is not None
+            }
+            response = _build_capture_plan_template(
+                root,
+                args.offset,
+                args.limit,
+                **campaign_filters,
+                name=args.capture_plan_name,
+                source=args.capture_source,
+                collector=args.capture_collector,
+                tmos_build=args.tmos_build,
+                capture_id=args.capture_id,
             )
         elif args.capabilities:
             response = _build_capabilities(

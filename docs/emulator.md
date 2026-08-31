@@ -2489,6 +2489,31 @@ pretend that a generated probe is valid for every command.
 The same view is available from `GET /v1/capture-campaign` and the
 `irule_capture_campaign` MCP tool.
 
+To turn one campaign chunk into an assembly-ready plan, use the capture-plan
+template mode:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --capture-plan-template --offset 0 --limit 100 \
+  --capture-source bigip-vlab-17.5.4 \
+  --capture-collector my-collector \
+  --tmos-build 17.5.4 \
+  --capture-id run-001 > capture-plan-000.json
+```
+
+The generated plan contains one `command_probe` observation per runnable
+catalog command, a target-valid event/profile shell, and a status comparison.
+Its empty `args` array is intentional: command arguments and fixture values
+are command-specific and must be selected by the collector or operator from
+the catalog synopsis. Replace the placeholder provenance when using the
+defaults. The plan contains no reference output and therefore is not evidence
+until a real BIG-IP or vLab collector produces matching records.
+
+The HTTP equivalent is `GET /v1/capture-plan-template`; it accepts the same
+pagination and filtering parameters as the campaign endpoint plus
+`source`, `collector`, `tmos_build`, `capture_id`, and `name`. The MCP
+equivalent is `irule_capture_plan_template`.
+
 ## Structured packet traces
 
 One-shot scenarios may use `packets` instead of `request`/`requests`. A trace

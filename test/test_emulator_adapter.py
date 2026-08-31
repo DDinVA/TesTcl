@@ -3756,6 +3756,65 @@ when HTTP_RESPONSE_RELEASE {
             for case in newer["campaign"]["cases"]
         ))
 
+    def test_capture_plan_template_is_assembly_ready_and_uses_valid_probe_shells(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        plan = self.adapter._build_capture_plan_template(
+            root,
+            0,
+            5,
+            source="bigip-vlab-17.5.4",
+            collector="tmsh-collector",
+            tmos_build="17.5.4",
+            capture_id="template-001",
+        )
+        self.assertEqual(plan["profile"], "tmos-17.5")
+        self.assertEqual(plan["provenance"]["collector"], "tmsh-collector")
+        self.assertEqual(plan["provenance"]["tmos_build"], "17.5.4")
+        self.assertEqual(plan["provenance"]["capture_id"], "template-001")
+        self.assertEqual(
+            [observation["id"] for observation in plan["observations"]],
+            [
+                "command_probe:AAA::acct_result",
+                "command_probe:AAA::acct_send",
+                "command_probe:AAA::auth_result",
+                "command_probe:AAA::auth_send",
+                "command_probe:ACCESS2::access2_proc",
+            ],
+        )
+        for observation in plan["observations"]:
+            self.assertEqual(observation["operation"], "command_probe")
+            self.assertEqual(observation["input"]["args"], [])
+            self.assertTrue(observation["input"]["event"])
+            self.assertTrue(observation["input"]["profiles"])
+            self.assertEqual(
+                observation["comparisons"][0]["actual_path"],
+                ["execution", "status"],
+            )
+
+        with self.assertRaises(self.adapter.EmulatorInputError):
+            self.adapter._build_capture_plan_template(
+                root, 0, 1, target_status="introduced-after-tmos-17.5"
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "limit must be between 1 and 256"
+        ):
+            self.adapter._build_capture_plan_template(root, 0, 257)
+
+        campaign_total = self.adapter._build_capture_campaign(root, 0, 1)[
+            "campaign"
+        ]["chunk"]["total"]
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "offset is past"
+        ):
+            self.adapter._build_capture_plan_template(root, campaign_total, 1)
+
+        event_inventory = self.adapter._probe_event_inventory(root)
+        dns_template = self.adapter._command_probe_template(
+            root, "DNS::return", event_inventory
+        )
+        self.assertEqual(dns_template["event"], "DNS_REQUEST")
+        self.assertEqual(dns_template["profiles"], ["UDP", "DNS"])
+
     def test_capability_filters_produce_bounded_implementation_slices(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         auth = self.adapter._build_capabilities(
@@ -20483,6 +20542,7 @@ when HTTP_RESPONSE {
         self.assertIn("irule_conformance", tool_names)
         self.assertIn("irule_pcap_replay", tool_names)
         self.assertIn("irule_session_trace", tool_names)
+        self.assertIn("irule_capture_plan_template", tool_names)
         self.assertIn("irule_catalog", tool_names)
         self.assertIn("irule_probe", tool_names)
         self.assertIn("irule_command_probe", tool_names)
@@ -20571,6 +20631,31 @@ when HTTP_RESPONSE {
                 case["target_status"] == "available-in-tmos-17.5"
                 for case in campaign_payload["campaign"]["cases"]
             ))
+
+            plan_template = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 18,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_capture_plan_template",
+                        "arguments": {
+                            "namespace": "AUTH",
+                            "limit": 2,
+                            "source": "bigip-vlab-17.5.4",
+                            "collector": "mcp-collector",
+                            "tmos_build": "17.5.4",
+                            "capture_id": "mcp-template-001",
+                        },
+                    },
+                }
+            )
+            plan_payload = plan_template["result"]["structuredContent"]
+            self.assertEqual(plan_payload["profile"], "tmos-17.5")
+            self.assertEqual(
+                plan_payload["provenance"]["capture_id"], "mcp-template-001"
+            )
+            self.assertEqual(len(plan_payload["observations"]), 2)
 
             probed = server.handle_message(
                 {
@@ -21188,6 +21273,23 @@ when HTTP_RESPONSE {
                 case["target_status"] == "available-in-tmos-17.5"
                 for case in campaign["campaign"]["cases"]
             ))
+
+            status, plan_template = request_json(
+                "/v1/capture-plan-template?limit=2&source=bigip-vlab-17.5.4"
+                "&collector=http-collector&tmos_build=17.5.4&capture_id=http-001"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(plan_template["profile"], "tmos-17.5")
+            self.assertEqual(
+                plan_template["provenance"]["capture_id"], "http-001"
+            )
+            self.assertEqual(len(plan_template["observations"]), 2)
+            self.assertEqual(
+                plan_template["observations"][0]["operation"], "command_probe"
+            )
+            self.assertTrue(
+                plan_template["observations"][0]["input"]["profiles"]
+            )
 
             status, created = request_json("/v1/sessions", "POST", config)
             session_id = created["session_id"]
