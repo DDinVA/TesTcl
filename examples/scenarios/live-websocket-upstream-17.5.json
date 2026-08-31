@@ -1,0 +1,23 @@
+{
+  "tmos_version": "17.5",
+  "profiles": ["TCP", "HTTP", "WS"],
+  "pools": {
+    "ws_pool": ["backend-a:18091"]
+  },
+  "irule": "when WS_REQUEST { pool ws_pool }\nwhen WS_CLIENT_FRAME { WS::collect frame }\nwhen WS_CLIENT_DATA { log local0. \"client-bytes=[WS::payload length]\" }\nwhen WS_SERVER_FRAME { WS::collect frame }\nwhen WS_SERVER_DATA { log local0. \"server-bytes=[WS::payload length]\" }",
+  "live_data_plane": {
+    "protocol": "websocket",
+    "read_timeout": 1.0,
+    "upstream": {
+      "pool": "ws_pool",
+      "targets": {
+        "backend-a:18091": {
+          "host": "127.0.0.1",
+          "port": 18091
+        }
+      },
+      "connect_timeout": 2.0,
+      "failure_cooldown": 1.0
+    }
+  }
+}

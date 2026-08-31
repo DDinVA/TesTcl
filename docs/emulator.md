@@ -154,7 +154,8 @@ and pool-mapped `targets` forms are supported; pool selection follows the
 live scheduler. Upstream TLS is optional for `ws://` fixtures and uses the
 same explicit verification settings as HTTP/1.1 when configured. TLS
 termination is available with the same `live_data_plane.tls` block described
-above.
+above. The checked-in [`live-websocket-upstream-17.5.json`](../examples/scenarios/live-websocket-upstream-17.5.json)
+shows the pool-mapped upstream shape.
 
 For raw TCP clients, add an explicit `live_data_plane` object to the scenario:
 

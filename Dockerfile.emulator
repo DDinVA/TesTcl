@@ -32,6 +32,7 @@ COPY examples/scenarios/live-http-upstream-17.5.json /opt/testcl/examples/scenar
 COPY examples/scenarios/live-tcp-17.5.json /opt/testcl/examples/scenarios/live-tcp-17.5.json
 COPY examples/scenarios/live-tcp-pool-17.5.json /opt/testcl/examples/scenarios/live-tcp-pool-17.5.json
 COPY examples/scenarios/live-websocket-17.5.json /opt/testcl/examples/scenarios/live-websocket-17.5.json
+COPY examples/scenarios/live-websocket-upstream-17.5.json /opt/testcl/examples/scenarios/live-websocket-upstream-17.5.json
 COPY requirements-emulator.txt /opt/testcl/requirements-emulator.txt
 COPY LICENSE /opt/testcl/LICENSE
 COPY THIRD_PARTY.md /opt/testcl/THIRD_PARTY.md
