@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "websocket-17.5",
+  "cases": [
+    {
+      "id": "request-key",
+      "probe": {
+        "command": "WS::request",
+        "args": ["key"],
+        "event": "WS_REQUEST",
+        "profiles": ["TCP", "HTTP", "WS"],
+        "state": {
+          "websocket": {
+            "method": "GET",
+            "uri": "/socket",
+            "host": "example.test",
+            "request_headers": "Upgrade websocket Connection Upgrade Sec-WebSocket-Key dGhlIHNhbXBsZSBub25jZQ=="
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "dGhlIHNhbXBsZSBub25jZQ=="}
+    },
+    {
+      "id": "response-accept-key",
+      "probe": {
+        "command": "WS::response",
+        "args": ["key"],
+        "event": "WS_RESPONSE",
+        "profiles": ["TCP", "HTTP", "WS"],
+        "state": {
+          "websocket": {
+            "status": 101,
+            "response_headers": "Upgrade websocket Connection Upgrade Sec-WebSocket-Accept xyz"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "xyz"}
+    },
+    {
+      "id": "frame-type",
+      "probe": {
+        "command": "WS::frame",
+        "args": ["type"],
+        "event": "WS_CLIENT_FRAME",
+        "profiles": ["TCP", "HTTP", "WS"],
+        "state": {
+          "websocket": {
+            "frame_type": "text",
+            "orig_masked": 1,
+            "mask": "01020304",
+            "payload": "hello"
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "text"}
+    },
+    {
+      "id": "payload-length",
+      "probe": {
+        "command": "WS::payload",
+        "args": ["length"],
+        "event": "WS_CLIENT_DATA",
+        "profiles": ["TCP", "HTTP", "WS"],
+        "state": {"websocket": {"payload": "Józ"}}
+      },
+      "expect": {"status": "ok", "value": "4", "value_bytes": 1}
+    }
+  ]
+}
