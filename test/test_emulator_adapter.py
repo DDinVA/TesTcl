@@ -4262,7 +4262,7 @@ when HTTP_RESPONSE_RELEASE {
             pack, tcl_lsp_root=self.tcl_lsp_root
         )
         self.assertEqual(result["status"], "passed")
-        self.assertEqual(result["summary"], {"case_count": 4, "passed": 4, "failed": 0})
+        self.assertEqual(result["summary"], {"case_count": 5, "passed": 5, "failed": 0})
         self.assertEqual(result["cases"][0]["actual"]["value"], "DESCRIBE")
         self.assertEqual(result["cases"][3]["actual"]["assertions"][2]["actual"], "PONG")
 
@@ -7249,6 +7249,133 @@ when SERVER_DATA { log local0. "mode=[FTP::ftps_mode]" }
                             "source": {"address": "192.0.2.10", "port": 40000},
                             "destination": {"address": "198.51.100.20", "port": 389},
                             "payload_hex": "ff020101",
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_raw_rtsp_control_messages_are_reassembled_and_decoded(self) -> None:
+        request = (
+            b"DESCRIBE rtsp://media.example/live RTSP/1.0\r\n"
+            b"CSeq: 1\r\n"
+            b"Content-Type: application/sdp\r\n"
+            b"Content-Length: 4\r\n\r\nping"
+        )
+        split_at = request.index(b"\r\n\r\n") + 2
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "RTSP"],
+                "irule": """
+when RTSP_REQUEST {
+    log local0. "request=[RTSP::method] [RTSP::uri] cseq=[RTSP::header value CSeq]"
+    RTSP::collect 4
+}
+when RTSP_REQUEST_DATA {
+    log local0. "body=[RTSP::payload] length=[RTSP::payload length]"
+    RTSP::release
+}
+when RTSP_RESPONSE {
+    log local0. "response=[RTSP::status] [RTSP::header value CSeq]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "source": {"address": "192.0.2.10", "port": 40000},
+                        "destination": {"address": "198.51.100.20", "port": 8554},
+                        "payload_hex": request[:split_at].hex(),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "source": {"address": "192.0.2.10", "port": 40000},
+                        "destination": {"address": "198.51.100.20", "port": 8554},
+                        "payload_hex": request[split_at:].hex(),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_events = [
+            event
+            for trace in result["trace"]
+            for event in trace["events"]
+            if event["event"] in {"RTSP_REQUEST", "RTSP_REQUEST_DATA"}
+        ]
+        self.assertEqual([event["event"] for event in request_events], [
+            "RTSP_REQUEST",
+            "RTSP_REQUEST_DATA",
+        ])
+        self.assertTrue(
+            any("request=DESCRIBE rtsp://media.example/live cseq=1" in log for log in request_events[0]["logs"])
+        )
+        self.assertTrue(any("body=ping length=4" in log for log in request_events[1]["logs"]))
+        self.assertTrue(result["trace"][0]["buffered"])
+        self.assertTrue(result["trace"][1]["released"])
+
+        response_one = b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 3\r\n\r\none"
+        response_two = b"RTSP/1.0 454 Session Not Found\r\nCSeq: 2\r\n\r\n"
+        coalesced = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "RTSP"],
+                "irule": "when RTSP_RESPONSE { log local0. \"response=[RTSP::status] cseq=[RTSP::header value CSeq]\" }",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": {"address": "198.51.100.20", "port": 554},
+                        "destination": {"address": "192.0.2.10", "port": 40000},
+                        "payload_hex": (response_one + response_two).hex(),
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        response_events = [
+            event
+            for trace in coalesced["trace"]
+            for event in trace["events"]
+            if event["event"] == "RTSP_RESPONSE"
+        ]
+        self.assertEqual(len(response_events), 2)
+        self.assertTrue(any("response=200 cseq=1" in log for log in response_events[0]["logs"]))
+        self.assertTrue(any("response=454 cseq=2" in log for log in response_events[1]["logs"]))
+        self.assertEqual(response_events[0]["state"]["rtsp"]["payload"], "one")
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "RTSP responses must be server_to_client",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "RTSP"],
+                    "irule": "when RTSP_REQUEST { log local0. request }",
+                    "packets": [
+                        {
+                            "protocol": "tcp",
+                            "source": {"address": "192.0.2.10", "port": 40000},
+                            "destination": {"address": "198.51.100.20", "port": 554},
+                            "payload": "RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n",
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "interleaved RTSP RTP/RTCP frames are not supported",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "RTSP"],
+                    "irule": "when RTSP_REQUEST { log local0. request }",
+                    "packets": [
+                        {
+                            "protocol": "tcp",
+                            "source": {"address": "192.0.2.10", "port": 40000},
+                            "destination": {"address": "198.51.100.20", "port": 554},
+                            "payload_hex": b"$\x00\x00\x00\x00".hex(),
                         }
                     ],
                 },

@@ -16751,6 +16751,25 @@ STARTTLS_RAW_PORTS = {
 LDAP_RAW_PORTS = frozenset({389})
 LDAP_MAX_MESSAGE_BYTES = 2 * 1024 * 1024
 LDAP_MAX_TAG_BYTES = 4
+RTSP_RAW_PORTS = frozenset({554, 8554})
+RTSP_MAX_MESSAGE_BYTES = 2 * 1024 * 1024
+RTSP_MAX_LINE_BYTES = 64 * 1024
+RTSP_MAX_HEADERS = 128
+RTSP_METHODS = frozenset(
+    {
+        "ANNOUNCE",
+        "DESCRIBE",
+        "GET_PARAMETER",
+        "OPTIONS",
+        "PAUSE",
+        "PLAY",
+        "RECORD",
+        "REDIRECT",
+        "SETUP",
+        "SET_PARAMETER",
+        "TEARDOWN",
+    }
+)
 LDAP_OPERATION_NAMES = {
     0xA0: "bindRequest",
     0xA1: "bindResponse",
@@ -17152,6 +17171,175 @@ def _decode_ldap_messages(
         if len(messages) > PACKET_MAX_COUNT:
             raise EmulatorInputError(
                 f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} LDAP messages"
+            )
+        position += consumed
+    return messages, payload[position:]
+
+
+def _looks_like_rtsp_prefix(payload: bytes) -> bool:
+    """Avoid treating arbitrary TCP bytes as RTSP when the port is unknown."""
+    if not payload:
+        return False
+    if payload.startswith(b"RTSP/"):
+        return True
+    return any(
+        method.startswith(payload) or payload.startswith(method + b" ")
+        for method in (name.encode("ascii") for name in RTSP_METHODS)
+    )
+
+
+def _rtsp_header_value(headers: dict[str, str], name: str) -> str:
+    for header_name, value in headers.items():
+        if header_name.lower() == name.lower():
+            return value
+    return ""
+
+
+def _decode_rtsp_message(
+    payload: bytes, direction: str
+) -> tuple[dict[str, Any], int] | None:
+    """Decode one bounded RTSP/1.0 control message from a TCP stream.
+
+    RTSP control messages use HTTP-like headers and an explicit Content-Length
+    when a body is present.  Interleaved RTP/RTCP ('$' frames) deliberately
+    remain outside this control-channel decoder.
+    """
+    if not payload:
+        return None
+    if len(payload) > RTSP_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"RTSP control stream exceeds the {RTSP_MAX_MESSAGE_BYTES} byte limit"
+        )
+    if payload.startswith(b"$"):
+        raise EmulatorInputError(
+            "interleaved RTSP RTP/RTCP frames are not supported"
+        )
+    header_end = payload.find(b"\r\n\r\n")
+    delimiter_width = 4
+    if header_end < 0:
+        header_end = payload.find(b"\n\n")
+        delimiter_width = 2
+    if header_end < 0:
+        if b"\r" in payload and not payload.endswith(b"\r") and b"\r\n" not in payload:
+            raise EmulatorInputError("RTSP headers contain a bare carriage return")
+        return None
+    header_bytes = payload[:header_end]
+    if b"\r" in header_bytes.replace(b"\r\n", b"\n"):
+        raise EmulatorInputError("RTSP headers contain a bare carriage return")
+    lines = header_bytes.replace(b"\r\n", b"\n").split(b"\n")
+    if not lines or not lines[0]:
+        raise EmulatorInputError("RTSP message has no start line")
+    if any(len(line) > RTSP_MAX_LINE_BYTES for line in lines):
+        raise EmulatorInputError(
+            f"RTSP header line exceeds the {RTSP_MAX_LINE_BYTES} byte limit"
+        )
+    try:
+        text_lines = [line.decode("iso-8859-1") for line in lines]
+    except UnicodeDecodeError as exc:  # pragma: no cover - ISO-8859-1 is total
+        raise EmulatorInputError("RTSP headers are not decodable") from exc
+    if any("\x00" in line for line in text_lines):
+        raise EmulatorInputError("RTSP headers cannot contain NUL bytes")
+
+    start_line = text_lines[0]
+    request_match = re.fullmatch(
+        r"([A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*)\s+(\S+)\s+(RTSP/\d+\.\d+)",
+        start_line,
+    )
+    response_match = re.fullmatch(
+        r"(RTSP/\d+\.\d+)\s+([1-9][0-9]{2})(?:\s+(.*))?", start_line
+    )
+    if request_match is None and response_match is None:
+        raise EmulatorInputError("RTSP message start line is invalid")
+    if request_match is not None and direction != "client_to_server":
+        raise EmulatorInputError("RTSP requests must be client_to_server")
+    if response_match is not None and direction != "server_to_client":
+        raise EmulatorInputError("RTSP responses must be server_to_client")
+
+    headers: dict[str, str] = {}
+    header_names: dict[str, str] = {}
+    for line in text_lines[1:]:
+        if ":" not in line:
+            raise EmulatorInputError("RTSP header is missing a colon")
+        name, value = line.split(":", 1)
+        name = name.strip()
+        if not name or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
+            raise EmulatorInputError("RTSP header name is invalid")
+        lower_name = name.lower()
+        if len(headers) >= RTSP_MAX_HEADERS and lower_name not in header_names:
+            raise EmulatorInputError("RTSP message contains too many headers")
+        value = value.strip()
+        # A map is the state shape exposed by the existing RTSP commands. Join
+        # repeated wire headers so captures do not silently lose values.
+        duplicate = header_names.get(lower_name)
+        if duplicate is None:
+            headers[name] = value
+            header_names[lower_name] = name
+        else:
+            headers[duplicate] = f"{headers[duplicate]}, {value}"
+
+    content_length = _rtsp_header_value(headers, "Content-Length")
+    if content_length:
+        if not content_length.isdigit():
+            raise EmulatorInputError("RTSP Content-Length must be a non-negative integer")
+        try:
+            body_length = int(content_length, 10)
+        except ValueError as exc:
+            raise EmulatorInputError("RTSP Content-Length is too large") from exc
+    else:
+        body_length = 0
+    body_start = header_end + delimiter_width
+    total_length = body_start + body_length
+    if total_length > RTSP_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"RTSP message exceeds the {RTSP_MAX_MESSAGE_BYTES} byte limit"
+        )
+    if total_length > len(payload):
+        return None
+    body = bytes(payload[body_start:total_length])
+    packet: dict[str, Any] = {
+        "protocol": "rtsp",
+        "direction": direction,
+        "type": "request" if request_match is not None else "response",
+        "version": (
+            request_match.group(3)
+            if request_match is not None
+            else response_match.group(1)
+        ),
+        "headers": headers,
+        "payload": _decode_wire_text(body),
+        "_rtsp_payload": body,
+        "_wire_payload": bytes(payload[:total_length]),
+        "message_length": total_length,
+    }
+    if request_match is not None:
+        packet.update({"method": request_match.group(1), "uri": request_match.group(2)})
+    else:
+        packet.update(
+            {
+                "status": int(response_match.group(2)),
+                "phrase": response_match.group(3) or "",
+                "response_headers": headers,
+            }
+        )
+    return packet, total_length
+
+
+def _decode_rtsp_messages(
+    payload: bytes, direction: str
+) -> tuple[list[dict[str, Any]], bytes]:
+    messages: list[dict[str, Any]] = []
+    position = 0
+    while position < len(payload):
+        decoded = _decode_rtsp_message(payload[position:], direction)
+        if decoded is None:
+            break
+        message, consumed = decoded
+        if consumed <= 0:
+            raise EmulatorInputError("RTSP decoder returned an invalid message length")
+        messages.append(message)
+        if len(messages) > PACKET_MAX_COUNT:
+            raise EmulatorInputError(
+                f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} RTSP messages"
             )
         position += consumed
     return messages, payload[position:]
@@ -20617,6 +20805,9 @@ class EmulatorSession:
         }
         self._ldap_raw_active = any(
             str(profile).upper() == "LDAP" for profile in self._profiles
+        )
+        self._rtsp_raw_active = any(
+            str(profile).upper() == "RTSP" for profile in self._profiles
         )
         self._sip_raw_active = any(
             str(profile).upper() in {"SIP", "SIPROUTER", "SIPSESSION"}
@@ -24461,6 +24652,39 @@ class EmulatorSession:
                 self._packet_streams.pop(key, None)
                 raise EmulatorInputError(
                     f"packet stream exceeds the {STREAM_MAX_BYTES // (1024 * 1024)} MiB limit"
+                )
+            return None, stream.buffered_bytes
+        rtsp_ports = {
+            packet.get("source", {}).get("port"),
+            packet.get("destination", {}).get("port"),
+        }
+        looks_like_rtsp = self._rtsp_raw_active and (
+            rtsp_ports.intersection(RTSP_RAW_PORTS)
+            or _looks_like_rtsp_prefix(combined)
+        )
+        if looks_like_rtsp:
+            decoded_messages, remaining = _decode_rtsp_messages(
+                combined, packet["direction"]
+            )
+            if decoded_messages:
+                stream.buffer = remaining
+                if not has_gap:
+                    stream.segments.clear()
+                for message in decoded_messages:
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            message[field] = packet[field]
+                first = decoded_messages[0]
+                if len(decoded_messages) > 1:
+                    first["_coalesced_packets"] = decoded_messages[1:]
+                return first, len(combined) - len(remaining)
+            stream.buffer = combined
+            if not has_gap:
+                stream.segments.clear()
+            if stream.buffered_bytes > RTSP_MAX_MESSAGE_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"RTSP control stream exceeds the {RTSP_MAX_MESSAGE_BYTES} byte limit"
                 )
             return None, stream.buffered_bytes
         ftp_ports = {

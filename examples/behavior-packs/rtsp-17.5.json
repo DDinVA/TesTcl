@@ -71,6 +71,28 @@
           {"path": ["trace", 0, "payload_after"], "equals": "PONG"}
         ]
       }
+    },
+    {
+      "id": "raw-control-channel",
+      "scenario": {
+        "profiles": ["TCP", "RTSP"],
+        "irule": "when RTSP_REQUEST { RTSP::respond 200 OK }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "source": {"address": "192.0.2.10", "port": 40000},
+            "destination": {"address": "198.51.100.20", "port": 8554},
+            "payload": "OPTIONS rtsp://media.example/live RTSP/1.0\r\nCSeq: 9\r\n\r\n"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "RTSP_REQUEST"},
+          {"path": ["trace", 0, "response", "status"], "equals": 200}
+        ]
+      }
     }
   ]
 }

@@ -1052,8 +1052,9 @@ F5 [`IP::hops`](https://clouddocs.f5.com/api/irules/IP__hops.html),
 RTSP packet traces use the RTSP profile and expose structured request/response
 events, case-insensitive header lookup and mutation, byte-oriented payload
 collection/replacement, release, metadata getters, and deterministic
-`RTSP::respond` emissions. The packet interface is structured rather than a
-full RTSP wire parser or media-session implementation.
+`RTSP::respond` emissions. Raw control messages support bounded RTSP/1.0
+headers and Content-Length bodies, including TCP split/coalescing;
+interleaved RTP/RTCP and media-session negotiation are not emulated.
 The load-balancing layer also models the high-value `LB::` connection controls:
 mode and bias overrides, SNAT inspection, context and source/destination tags,
 connection-limit records, queue queries, decision-log enablement, and bounded
@@ -2259,7 +2260,8 @@ Description, Enhanced Packet, and Simple Packet Blocks with bounded interface
 and timestamp-resolution metadata. `direction` defaults to
 `client_to_server`; `auto` requires both endpoint addresses and skips packets
 that do not match either direction. The capture is bounded to 16 MiB, 1,000
-records, and 2 MiB per packet. IPv4 fragments are not supported yet. TCP sequence numbers are honored for
+records, and 2 MiB per packet. IPv4 and IPv6 fragments are reassembled within
+bounded fragment sets before transport decoding. TCP sequence numbers are honored for
 bounded out-of-order reassembly and retransmission de-duplication. HTTP
 request and response payloads honor `Content-Length` and chunked transfer
 framing, including partial bodies split across TCP packets and response
@@ -3232,12 +3234,17 @@ multiplex live streams, contact an origin, or emit pushed frames.
 ```
 
 For raw captures, use `protocol: "wire"`, `network: "ipv4"` or `"ipv6"`, and
-the corresponding IP packet in `raw_hex`. The decoder rejects fragmented IPv4
-and IPv6 packets, skips bounded IPv6 extension headers, and performs bounded
-sequence-aware TCP application reassembly across records and persistent
+the corresponding IP packet in `raw_hex`. The decoder reassembles complete
+IPv4 and IPv6 fragment sets within bounded limits, rejects incomplete or
+malformed fragment sets, skips bounded IPv6 extension headers, and performs
+bounded sequence-aware TCP application reassembly across records and persistent
 session calls, including out-of-order segments and duplicate retransmissions.
 Classic PCAP and pcapng file/HTTP/MCP ingestion supports Ethernet or raw IPv4
-and IPv6 frames; fragment reassembly remains outside this slice.
+and IPv6 frames, including bounded IPv4/IPv6 fragment reassembly. RTSP control
+messages on the RTSP profile are decoded from raw TCP streams, including
+split/coalesced RTSP/1.0 headers and bounded Content-Length bodies. Interleaved
+RTP/RTCP media frames and full media-session negotiation remain outside this
+slice.
 
 ```json
 {

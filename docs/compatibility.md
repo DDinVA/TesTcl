@@ -507,11 +507,12 @@ scenario-seeded maps; no licensed external database, DNS lookup, or live
 blacklist enforcement is performed. Structured packet byte counts use UTF-8
 payload length, while raw IPv4 adapters use the IPv4 total length.
 RTSP packet traces expose the four RTSP request/response events and the
-catalogued `RTSP::` surface for structured header lookup/mutation, payload
-collection and replacement, release, metadata getters, and deterministic
-response emission. RTSP currently requires structured packets and the RTSP
-profile; it does not parse raw RTSP wire messages or implement media transport,
-session negotiation, or interleaved RTP.
+catalogued `RTSP::` surface for structured or raw-TCP header lookup/mutation,
+payload collection and replacement, release, metadata getters, and
+deterministic response emission. Raw RTSP/1.0 control messages support bounded
+TCP split/coalescing and Content-Length bodies when the RTSP profile is
+attached. The emulator does not implement media transport, session
+negotiation, or interleaved RTP/RTCP.
 The LB control layer models `LB::bias`, `LB::class`, `LB::command`,
 `LB::connect`, `LB::connlimit`, `LB::context_id`, `LB::dst_tag`,
 `LB::enable_decisionlog`, `LB::mode`, `LB::prime`, `LB::queue`, `LB::snat`,
