@@ -355,6 +355,35 @@ accessors, and three SIPALG controls across command probes and request/response
 packet lifecycles. A catalog chunk plus its behavior pack is a portable
 implementation checkpoint for adding higher-fidelity semantic mocks.
 
+To measure how much of the F5 catalog those contracts actually exercise, use
+the behavior-coverage report:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-coverage
+```
+
+The CLI reads the deterministic JSON files in `examples/behavior-packs` (or a
+directory supplied with `--behavior-pack-dir`). The report includes both
+direct `probe` commands and commands discovered inside `scenario` iRules,
+along with pack/case/event provenance and an `add-behavior-vector` queue for
+available TMOS 17.5 F5 commands that are not covered. The denominator excludes
+Tcl support entries and post-17.5 commands. With the checked-in packs, the
+current report covers 98 of 989 target F5 commands (9.91%). This is test-input
+coverage, not a semantic-fidelity score.
+
+For service clients, submit the packs as one bounded JSON request to
+`POST /v1/behavior-coverage`:
+
+```json
+{"packs":[{"name":"http-core-17.5","cases":["..."]}]}
+```
+
+The same operation is exposed as the `irule_behavior_coverage` MCP tool. It is
+read-only: it analyzes pack inputs and catalog metadata without running the
+cases; use `irule_behavior_pack` or `irule_differential_vectors` to execute
+them.
+
 ### TMOS 17.5 differential vectors
 
 Behavior packs assert values authored inside the emulator project. Differential
@@ -2595,6 +2624,8 @@ clients can discover these tools with `tools/list`:
   without executing catalog commands.
 - `irule_catalog_smoke` executes safe zero-argument probes for a bounded
   target catalog chunk and classifies behavior without claiming TMOS parity.
+- `irule_behavior_coverage` maps supplied behavior packs to the available F5
+  catalog and returns the uncovered implementation queue.
 - `irule_conformance` reports static catalog/runtime and packet-adapter coverage.
 - `irule_session_create`, `irule_session_inspect`, `irule_session_request`,
   `irule_session_trace`, `irule_session_event`, and `irule_session_close` manage

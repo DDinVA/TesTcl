@@ -4829,6 +4829,34 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(missing_path["status"], "failed")
         self.assertIn("path not found", missing_path["cases"][0]["mismatches"][0]["error"])
 
+    def test_behavior_coverage_maps_probe_and_scenario_usage_to_f5_catalog(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        packs = [
+            json.loads(
+                (ROOT / "examples" / "behavior-packs" / filename).read_text(
+                    encoding="utf-8"
+                )
+            )
+            for filename in ("http-core-17.5.json", "fix-17.5.json")
+        ]
+        report = self.adapter._build_behavior_coverage(root, packs)
+
+        self.assertEqual(report["summary"]["behavior_pack_count"], 2)
+        self.assertEqual(report["summary"]["case_count"], 10)
+        self.assertEqual(report["summary"]["target_f5_command_count"], 989)
+        self.assertGreater(report["summary"]["covered_command_count"], 0)
+        host = next(command for command in report["commands"] if command["name"] == "HTTP::host")
+        self.assertTrue(host["covered"])
+        self.assertEqual(host["packs"], ["http-core-17.5"])
+        self.assertIn("probe", host["source_kinds"])
+        fix_tag = next(command for command in report["commands"] if command["name"] == "FIX::tag")
+        self.assertTrue(fix_tag["covered"])
+        self.assertIn("scenario", fix_tag["source_kinds"])
+        self.assertEqual(report["packs"][1]["name"], "http-core-17.5")
+        self.assertIn("add-behavior-vector", {command["next_action"] for command in report["commands"]})
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "duplicate pack name"):
+            self.adapter._build_behavior_coverage(root, [packs[0], packs[0]])
+
     def test_behavior_pack_validation_is_bounded_and_atomic(self) -> None:
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "schema_version"):
             self.adapter.run_behavior_pack(
@@ -23630,6 +23658,24 @@ when CLIENT_DATA {
             self.assertEqual(payload["status"], "passed")
             self.assertEqual(payload["summary"]["passed"], 9)
 
+            coverage_request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/behavior-coverage",
+                data=json.dumps({"packs": [pack]}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(coverage_request) as response:
+                coverage_payload = json.loads(response.read())
+            self.assertEqual(coverage_payload["status"], "ok")
+            self.assertEqual(coverage_payload["summary"]["behavior_pack_count"], 1)
+            self.assertTrue(
+                next(
+                    command
+                    for command in coverage_payload["commands"]
+                    if command["name"] == "HTTP::host"
+                )["covered"]
+            )
+
             stateful = json.loads(
                 (ROOT / "examples" / "behavior-packs" / "stateful-17.5.json")
                 .read_text(encoding="utf-8")
@@ -24128,6 +24174,7 @@ when CLIENT_DATA {
         self.assertIn("irule_command_probe", tool_names)
         self.assertIn("irule_catalog_smoke", tool_names)
         self.assertIn("irule_behavior_pack", tool_names)
+        self.assertIn("irule_behavior_coverage", tool_names)
         self.assertIn("irule_differential_vectors", tool_names)
         self.assertIn("irule_import_observations", tool_names)
         self.assertIn("irule_assemble_observations", tool_names)
@@ -24267,6 +24314,28 @@ when CLIENT_DATA {
             smoked_payload = smoked["result"]["structuredContent"]
             self.assertEqual(smoked_payload["summary"]["smoke_count"], 1)
             self.assertEqual(smoked_payload["summary"]["registered_count"], 1)
+
+            coverage = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 20,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_behavior_coverage",
+                        "arguments": {
+                            "packs": [
+                                json.loads(
+                                    (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+                                    .read_text(encoding="utf-8")
+                                )
+                            ]
+                        },
+                    },
+                }
+            )
+            coverage_payload = coverage["result"]["structuredContent"]
+            self.assertEqual(coverage_payload["status"], "ok")
+            self.assertEqual(coverage_payload["summary"]["behavior_pack_count"], 1)
 
             command_probe = server.handle_message(
                 {

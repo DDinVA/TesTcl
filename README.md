@@ -63,6 +63,8 @@ real TCP byte-to-replay-plan check.
 For catalog-wide progress, run `./scripts/emulate-irule.sh --catalog-smoke
 --namespace HTTP --limit 16`; this executes safe zero-argument probes and
 reports which commands work, need arguments, or fail in the current emulator.
+To see semantic test-input coverage across all checked-in packs, run
+`./scripts/emulate-irule.sh --behavior-coverage`.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:

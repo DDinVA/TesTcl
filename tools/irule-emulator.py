@@ -325,6 +325,8 @@ IRULE_ANALYSIS_MAX_PROFILES = 64
 BEHAVIOR_PACK_MAX_CASES = 256
 BEHAVIOR_PACK_MAX_NAME_BYTES = 256
 BEHAVIOR_PACK_MAX_BYTES = 2 * 1024 * 1024
+BEHAVIOR_COVERAGE_MAX_PACKS = 64
+BEHAVIOR_COVERAGE_MAX_BYTES = 2 * 1024 * 1024
 GOLDEN_VECTOR_MAX_CASES = 256
 GOLDEN_VECTOR_MAX_NAME_BYTES = 256
 GOLDEN_VECTOR_MAX_BYTES = 2 * 1024 * 1024
@@ -4997,6 +4999,260 @@ def _build_conformance(root: Path) -> dict[str, Any]:
             "This is static catalog-to-runtime coverage. It is not a claim that "
             "generated stubs reproduce BIG-IP TMM semantics."
         ),
+    }
+
+
+def _build_behavior_coverage(root: Path, packs: Any) -> dict[str, Any]:
+    """Map behavior-pack usage onto the available TMOS 17.5 F5 catalog."""
+    if not isinstance(packs, list) or not packs:
+        raise EmulatorInputError("behavior coverage packs must be a non-empty array")
+    if len(packs) > BEHAVIOR_COVERAGE_MAX_PACKS:
+        raise EmulatorInputError(
+            f"behavior coverage accepts at most {BEHAVIOR_COVERAGE_MAX_PACKS} packs"
+        )
+    try:
+        encoded = json.dumps(
+            packs, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise EmulatorInputError(
+            "behavior coverage packs must contain only JSON-compatible values"
+        ) from exc
+    if len(encoded) > BEHAVIOR_COVERAGE_MAX_BYTES:
+        raise EmulatorInputError(
+            f"behavior coverage packs exceed the {BEHAVIOR_COVERAGE_MAX_BYTES // (1024 * 1024)} MiB limit"
+        )
+
+    registry, status_map = _runtime_status_map(root)
+    target_names = sorted(
+        name
+        for name in status_map
+        if _catalog_kind(name, registry.get_any(name)) == "f5-irule"
+        if _target_status(
+            name,
+            TMOS_17_5_POST_TARGET_COMMANDS,
+            TMOS_17_5_UNAVAILABLE_COMMANDS,
+        )
+        == "available-in-tmos-17.5"
+    )
+    target_name_set = set(target_names)
+    tcl_dir = root / "tooling" / "irule_test" / "tcl"
+    handwritten = _proc_names(tcl_dir / "command_mocks.tcl")
+    generated = _proc_names(tcl_dir / "_mock_stubs.tcl")
+    usage: dict[str, dict[str, Any]] = {}
+    pack_rows: list[dict[str, Any]] = []
+    seen_pack_names: set[str] = set()
+
+    def record_usage(
+        name: str,
+        pack_name: str,
+        case_id: str,
+        source_kind: str,
+        occurrences: int = 1,
+        events: Any = None,
+    ) -> None:
+        if not isinstance(name, str) or not name:
+            return
+        entry = usage.setdefault(
+            name,
+            {
+                "occurrences": 0,
+                "packs": set(),
+                "cases": set(),
+                "events": set(),
+                "source_kinds": set(),
+            },
+        )
+        occurrence_count = (
+            occurrences
+            if isinstance(occurrences, int) and not isinstance(occurrences, bool)
+            else 1
+        )
+        entry["occurrences"] += max(1, occurrence_count)
+        entry["packs"].add(pack_name)
+        entry["cases"].add(case_id)
+        entry["source_kinds"].add(source_kind)
+        if isinstance(events, list):
+            entry["events"].update(event for event in events if isinstance(event, str))
+
+    for pack in packs:
+        prepared = _normalise_behavior_pack(root, pack)
+        pack_name = prepared["name"]
+        if pack_name in seen_pack_names:
+            raise EmulatorInputError(
+                f"behavior coverage contains duplicate pack name {pack_name!r}"
+            )
+        seen_pack_names.add(pack_name)
+        pack_commands: set[str] = set()
+        probe_case_count = 0
+        scenario_case_count = 0
+        analysis_unavailable_count = 0
+        analysis_warnings: list[str] = []
+        for case in prepared["cases"]:
+            case_id = case["id"]
+            if case["kind"] == "probe":
+                probe_case_count += 1
+                command = case["probe"].get("command")
+                if isinstance(command, str) and command:
+                    record_usage(
+                        command, pack_name, case_id, "probe", events=[case["probe"].get("event", "")]
+                    )
+                    pack_commands.add(command)
+                continue
+
+            scenario_case_count += 1
+            scenario = case["scenario"]
+            profiles = scenario.get("profiles", DEFAULT_PROFILES)
+            analysis = _analyze_rule_capabilities(
+                root, scenario.get("irule", ""), profiles
+            )
+            if analysis.get("analysis") == "unavailable":
+                analysis_unavailable_count += 1
+            for warning in analysis.get("warnings", []):
+                if isinstance(warning, dict) and isinstance(warning.get("message"), str):
+                    analysis_warnings.append(warning["message"])
+            for command_row in analysis.get("commands", []):
+                if not isinstance(command_row, dict):
+                    continue
+                command = command_row.get("name")
+                if not isinstance(command, str) or not command:
+                    continue
+                record_usage(
+                    command,
+                    pack_name,
+                    case_id,
+                    "scenario",
+                    occurrences=command_row.get("occurrences", 1),
+                    events=command_row.get("events"),
+                )
+                pack_commands.add(command)
+        pack_rows.append(
+            {
+                "name": pack_name,
+                "case_count": len(prepared["cases"]),
+                "probe_case_count": probe_case_count,
+                "scenario_case_count": scenario_case_count,
+                "command_count": len(pack_commands),
+                "commands": sorted(pack_commands),
+                "analysis_unavailable_count": analysis_unavailable_count,
+                "analysis_warnings": sorted(set(analysis_warnings)),
+            }
+        )
+
+    def usage_row(name: str) -> dict[str, Any]:
+        entry = usage.get(name)
+        if entry is None:
+            return {
+                "covered": False,
+                "occurrences": 0,
+                "pack_count": 0,
+                "packs": [],
+                "case_count": 0,
+                "cases": [],
+                "events": [],
+                "source_kinds": [],
+            }
+        return {
+            "covered": True,
+            "occurrences": entry["occurrences"],
+            "pack_count": len(entry["packs"]),
+            "packs": sorted(entry["packs"]),
+            "case_count": len(entry["cases"]),
+            "cases": sorted(entry["cases"]),
+            "events": sorted(entry["events"]),
+            "source_kinds": sorted(entry["source_kinds"]),
+        }
+
+    commands: list[dict[str, Any]] = []
+    runtime_status_counts = {status: 0 for status in sorted(RUNTIME_STATUS_VALUES)}
+    covered_runtime_status_counts = {status: 0 for status in sorted(RUNTIME_STATUS_VALUES)}
+    uncovered_by_namespace: dict[str, int] = {}
+    covered_count = 0
+    for name in target_names:
+        runtime_status = status_map[name]
+        runtime_status_counts[runtime_status] += 1
+        row = usage_row(name)
+        if row["covered"]:
+            covered_count += 1
+            covered_runtime_status_counts[runtime_status] += 1
+            next_action = (
+                "deepen-semantic-vector"
+                if runtime_status == "semantic-mock"
+                else "extend-behavior-vector"
+            )
+        else:
+            namespace = name.split("::", 1)[0] if "::" in name else ""
+            uncovered_by_namespace[namespace] = uncovered_by_namespace.get(namespace, 0) + 1
+            next_action = "add-behavior-vector"
+        commands.append(
+            {
+                "name": name,
+                "namespace": name.split("::", 1)[0] if "::" in name else "",
+                "runtime_status": runtime_status,
+                "target_status": "available-in-tmos-17.5",
+                "next_action": next_action,
+                **row,
+            }
+        )
+
+    out_of_scope_usage: list[dict[str, Any]] = []
+    for name in sorted(set(usage) - target_name_set):
+        entry = usage[name]
+        spec = registry.get_any(name)
+        out_of_scope_usage.append(
+            {
+                "name": name,
+                "catalog_kind": _catalog_kind(name, spec) if spec is not None else "unknown",
+                "runtime_status": (
+                    _capability_status(
+                        _mock_proc_name(name),
+                        handwritten,
+                        generated,
+                    )
+                    if spec is not None
+                    else "unknown-command"
+                ),
+                "occurrences": entry["occurrences"],
+                "packs": sorted(entry["packs"]),
+                "cases": sorted(entry["cases"]),
+                "events": sorted(entry["events"]),
+            }
+        )
+
+    total_cases = sum(pack["case_count"] for pack in pack_rows)
+    probe_cases = sum(pack["probe_case_count"] for pack in pack_rows)
+    scenario_cases = sum(pack["scenario_case_count"] for pack in pack_rows)
+    uncovered_count = len(target_names) - covered_count
+    return {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "tmos_version": TMOS_VERSION,
+        "source": "behavior-packs",
+        "summary": {
+            "behavior_pack_count": len(pack_rows),
+            "case_count": total_cases,
+            "probe_case_count": probe_cases,
+            "scenario_case_count": scenario_cases,
+            "target_f5_command_count": len(target_names),
+            "covered_command_count": covered_count,
+            "uncovered_command_count": uncovered_count,
+            "coverage_percent": round(covered_count * 100 / len(target_names), 2)
+            if target_names
+            else 0.0,
+            "runtime_status_counts": runtime_status_counts,
+            "covered_runtime_status_counts": covered_runtime_status_counts,
+            "uncovered_by_namespace": dict(sorted(uncovered_by_namespace.items())),
+            "out_of_scope_usage_count": len(out_of_scope_usage),
+        },
+        "interpretation": (
+            "This is test-input coverage, not a fidelity score. A covered command "
+            "has at least one checked-in behavior-pack case; it may still need "
+            "deeper semantic and TMOS 17.5 differential vectors."
+        ),
+        "packs": sorted(pack_rows, key=lambda pack: pack["name"]),
+        "commands": commands,
+        "out_of_scope_usage": out_of_scope_usage,
     }
 
 
@@ -30410,6 +30666,22 @@ class McpProtocolServer:
                 ),
             },
             {
+                "name": "irule_behavior_coverage",
+                "title": "Measure behavior-pack coverage",
+                "description": "Map supplied TMOS 17.5 behavior packs onto the F5 iRule catalog and return covered commands plus an implementation queue.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "packs": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": BEHAVIOR_COVERAGE_MAX_PACKS,
+                            "items": {"type": "object"},
+                        }
+                    },
+                    ["packs"],
+                ),
+            },
+            {
                 "name": "irule_differential_vectors",
                 "title": "Compare TMOS 17.5 golden vectors",
                 "description": "Run bounded emulator inputs and compare selected observations with independently captured TMOS 17.5 reference output.",
@@ -30767,6 +31039,15 @@ class McpProtocolServer:
                 run_behavior_pack(args["pack"], tcl_lsp_root=str(self._root))
             )
 
+        if name == "irule_behavior_coverage":
+            if set(args) != {"packs"} or not isinstance(args["packs"], list):
+                raise McpProtocolError(
+                    -32602, "irule_behavior_coverage requires a packs array"
+                )
+            return self._tool_success(
+                _build_behavior_coverage(self._root, args["packs"])
+            )
+
         if name == "irule_differential_vectors":
             if set(args) != {"pack"} or not isinstance(args["pack"], dict):
                 raise McpProtocolError(
@@ -31034,6 +31315,41 @@ def _read_capture_records(stream: Any) -> list[Any]:
                 f"capture record line {line_number} contains an invalid JSON value"
             ) from exc
     return records
+
+
+def _read_behavior_coverage_directory(path: Path) -> list[Any]:
+    """Load a bounded, deterministic set of behavior packs from a directory."""
+    if not path.is_dir():
+        raise EmulatorInputError(f"behavior pack directory does not exist: {path}")
+    pack_paths = sorted(path.glob("*.json"))
+    if not pack_paths:
+        raise EmulatorInputError(f"behavior pack directory contains no JSON packs: {path}")
+    if len(pack_paths) > BEHAVIOR_COVERAGE_MAX_PACKS:
+        raise EmulatorInputError(
+            f"behavior pack directory contains more than {BEHAVIOR_COVERAGE_MAX_PACKS} packs"
+        )
+    packs: list[Any] = []
+    total_bytes = 0
+    for pack_path in pack_paths:
+        try:
+            size = pack_path.stat().st_size
+        except OSError as exc:
+            raise EmulatorInputError(f"could not stat behavior pack {pack_path}") from exc
+        total_bytes += size
+        if total_bytes > BEHAVIOR_COVERAGE_MAX_BYTES:
+            raise EmulatorInputError(
+                f"behavior pack directory exceeds the {BEHAVIOR_COVERAGE_MAX_BYTES // (1024 * 1024)} MiB limit"
+            )
+        try:
+            packs.append(
+                json.loads(
+                    pack_path.read_text(encoding="utf-8"),
+                    parse_constant=_reject_json_constant,
+                )
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise EmulatorInputError(f"could not read behavior pack {pack_path}") from exc
+    return packs
 
 
 def serve_mcp(root: Path, input_stream: Any = None, output_stream: Any = None) -> None:
@@ -35910,6 +36226,28 @@ def _http_handler(
                     return
                 _json_response(self, 200, payload)
                 return
+            if parsed.path == "/v1/behavior-coverage":
+                try:
+                    request = self._read_json()
+                    if (
+                        not isinstance(request, dict)
+                        or set(request) != {"packs"}
+                        or not isinstance(request["packs"], list)
+                    ):
+                        raise EmulatorInputError(
+                            "behavior coverage request requires a packs array"
+                        )
+                    payload = _build_behavior_coverage(root, request["packs"])
+                except (
+                    json.JSONDecodeError,
+                    EmulatorInputError,
+                    EmulatorResourceError,
+                    OSError,
+                ) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
             if parsed.path == "/v1/differential-vectors":
                 try:
                     pack = self._read_json()
@@ -36365,6 +36703,11 @@ def main(argv: list[str] | None = None) -> int:
         help="execute a bounded catalog behavior pack from PATH, or stdin when omitted",
     )
     mode.add_argument(
+        "--behavior-coverage",
+        action="store_true",
+        help="measure checked-in behavior-pack coverage of the TMOS 17.5 F5 catalog",
+    )
+    mode.add_argument(
         "--golden-vectors",
         nargs="?",
         const="-",
@@ -36398,6 +36741,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--offset", type=int, default=0, help="capability chunk start")
     parser.add_argument("--limit", type=int, help="capability or catalog chunk size")
+    parser.add_argument(
+        "--behavior-pack-dir",
+        help="directory of JSON behavior packs for --behavior-coverage",
+    )
     parser.add_argument("--namespace", help="limit capabilities to one exact command namespace")
     parser.add_argument(
         "--runtime-status",
@@ -36486,6 +36833,10 @@ def main(argv: list[str] | None = None) -> int:
             raise EmulatorInputError(
                 "--capture-records requires --assemble-observations"
             )
+        if args.behavior_pack_dir is not None and not args.behavior_coverage:
+            raise EmulatorInputError(
+                "--behavior-pack-dir requires --behavior-coverage"
+            )
         if (
             args.capture_plan_name is not None
             or args.capture_id is not None
@@ -36504,6 +36855,7 @@ def main(argv: list[str] | None = None) -> int:
             or args.capture_campaign
             or args.capture_plan_template
             or args.catalog_smoke
+            or args.behavior_coverage
         ):
             raise EmulatorInputError(
                 "use either --scenario PATH or a direct operation input, not both"
@@ -36511,7 +36863,7 @@ def main(argv: list[str] | None = None) -> int:
         root = _find_tcl_lsp_root(args.tcl_lsp_root)
         if args.pcap and (
             args.serve or args.data_plane or args.mcp or args.capabilities or args.catalog or args.probe
-            or args.catalog_smoke or args.capture_campaign or args.command_probe or args.behavior_pack or args.golden_vectors
+            or args.catalog_smoke or args.behavior_coverage or args.capture_campaign or args.command_probe or args.behavior_pack or args.golden_vectors
             or args.capture_plan_template or args.import_observations
             or args.assemble_observations or args.conformance
         ):
@@ -36613,6 +36965,14 @@ def main(argv: list[str] | None = None) -> int:
             }
             response = _build_catalog_smoke(
                 root, args.offset, 16 if args.limit is None else args.limit, **smoke_filters
+            )
+        elif args.behavior_coverage:
+            if args.behavior_pack_dir is None:
+                pack_dir = Path(__file__).resolve().parent.parent / "examples" / "behavior-packs"
+            else:
+                pack_dir = Path(args.behavior_pack_dir)
+            response = _build_behavior_coverage(
+                root, _read_behavior_coverage_directory(pack_dir)
             )
         elif args.conformance:
             response = _build_conformance(root)

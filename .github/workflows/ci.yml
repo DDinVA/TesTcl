@@ -95,6 +95,10 @@ jobs:
           done
           grep -F 'hello from the modeled origin' /tmp/testcl-data-plane.txt
 
+          docker run --rm testcl-irule-emulator:ci --behavior-coverage >/tmp/testcl-behavior-coverage.json
+          grep -F '"target_f5_command_count":989' /tmp/testcl-behavior-coverage.json
+          grep -F '"covered_command_count":98' /tmp/testcl-behavior-coverage.json
+
           docker run --detach --name "$raw_container_name" \
             --publish 18082:18082 \
             testcl-irule-emulator:ci \
