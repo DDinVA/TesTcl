@@ -3230,6 +3230,27 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("example.com. A IN 30 192.0.2.10",),
         ("example.com. A IN 30 192.0.2.10", "AAAA"),
     ),
+    "DNSMSG::header": (
+        ("dnsmsg1", "rcode"),
+        ("dnsmsg1", "opcode"),
+        ("dnsmsg1", "id"),
+        ("dnsmsg1", "qr"),
+        ("dnsmsg1", "aa"),
+    ),
+    "DNSMSG::record": (
+        ("rr1", "owner"),
+        ("rr1", "name"),
+        ("rr1", "type"),
+        ("rr1", "ttl"),
+        ("rr1", "class"),
+        ("rr1", "rdata"),
+    ),
+    "DNSMSG::section": (
+        ("dnsmsg1", "question"),
+        ("dnsmsg1", "answer"),
+        ("dnsmsg1", "authority"),
+        ("dnsmsg1", "additional"),
+    ),
 }
 _CANDIDATE_EVENT_HINTS = {
     "TCP::recvwnd": "CLIENT_ACCEPTED",
@@ -3270,6 +3291,9 @@ _CANDIDATE_EVENT_HINTS = {
     "MR::store": "MR_INGRESS",
     "MR::stream": "MR_INGRESS",
     "MR::transport": "MR_INGRESS",
+    "DNSMSG::header": "CLIENT_ACCEPTED",
+    "DNSMSG::record": "CLIENT_ACCEPTED",
+    "DNSMSG::section": "CLIENT_ACCEPTED",
 }
 _CANDIDATE_PROFILE_HINTS = {
     # MQTT::enable has an event-only catalog requirement, but its implementation
@@ -3510,6 +3534,20 @@ def _command_argument_candidates(
 
 def _candidate_fixture_scenario(command: str) -> dict[str, Any] | None:
     """Supply only generic, non-secret state useful to local probe execution."""
+    if command.startswith("DNSMSG::"):
+        return {
+            "resolvers": {
+                "testcl": [
+                    {
+                        "name": "example.com.",
+                        "type": "A",
+                        "class": "IN",
+                        "ttl": 30,
+                        "rdata": "192.0.2.10",
+                    }
+                ]
+            }
+        }
     if command.startswith("LB::") or command in {"active_members", "persist"}:
         return {
             "pools": {"api_pool": ["192.0.2.10:80"]},
@@ -4485,8 +4523,17 @@ def _normalise_command_probe_args(value: Any) -> list[str]:
 def _command_probe_irule(event: str, command: str, args: list[str]) -> str:
     """Build the fixed event wrapper used by the safe command workbench."""
     command_words = " ".join([_tcl_quote(command), *(_tcl_quote(arg) for arg in args)])
+    fixture_setup = ""
+    if command.startswith("DNSMSG::"):
+        # DNSMSG commands consume opaque handles returned by
+        # RESOLVER::name_lookup. Create deterministic handles in the same
+        # event before probing the candidate invocation.
+        fixture_setup = (
+            "set ::orch::_testcl_dnsmsg_fixture "
+            "[RESOLVER::name_lookup testcl example.com. A]\n    "
+        )
     return f"""when {event} {{
-    set ::orch::_testcl_command_probe_rc [catch {{
+    {fixture_setup}set ::orch::_testcl_command_probe_rc [catch {{
         set ::orch::_testcl_command_probe_value [{command_words}]
     }} ::orch::_testcl_command_probe_error ::orch::_testcl_command_probe_options]
 }}
