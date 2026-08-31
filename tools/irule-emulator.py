@@ -23,6 +23,7 @@ import os
 import queue
 import re
 import secrets
+import select
 import socket
 import socketserver
 import struct
@@ -24517,6 +24518,14 @@ class EmulatorSession:
             raise EmulatorInputError("invalid TCP payload state") from exc
 
     @staticmethod
+    def _tcp_released_payload_from_tcl(session: Any) -> bytes:
+        encoded = session.eval_tcl("::itest::semantic::tcp_released_payload_hex")
+        try:
+            return bytes.fromhex(str(encoded))
+        except ValueError as exc:  # pragma: no cover - Tcl binary contract guard
+            raise EmulatorInputError("invalid TCP released payload state") from exc
+
+    @staticmethod
     def _sctp_payload_from_tcl(session: Any) -> bytes:
         encoded = session.eval_tcl("binary encode hex $::state::sctp::payload")
         try:
@@ -28308,6 +28317,11 @@ class EmulatorSession:
                     )
                     if len(collection) != 6:
                         entry["ignored"] = "tcp payload not collected"
+                        # Without TCP::collect, TMM forwards the payload
+                        # through the normal stream path even though no
+                        # CLIENT_DATA or SERVER_DATA event is dispatched.
+                        entry["forwarded_payload_hex"] = wire_payload.hex()
+                        entry["forwarded_byte_length"] = len(wire_payload)
                     else:
                         try:
                             collection_values = {
@@ -28358,9 +28372,19 @@ class EmulatorSession:
                                 "::itest::semantic::tcp_event_released"
                             ) == "1"
                             retained = b""
+                            forwarded = b""
                             if released:
+                                forwarded = self._tcp_released_payload_from_tcl(session)
                                 retained = self._tcp_payload_from_tcl(session, side)
                             self._tcp_buffers[side] = retained + remainder
+                            entry["released"] = released
+                            entry["payload_after"] = _decode_wire_text(
+                                self._tcp_buffers[side]
+                            )
+                            entry["payload_after_hex"] = self._tcp_buffers[side].hex()
+                            if forwarded:
+                                entry["forwarded_payload_hex"] = forwarded.hex()
+                                entry["forwarded_byte_length"] = len(forwarded)
                 if flags.intersection({"FIN", "RST"}):
                     finish_http(at_index=index)
                     if self._mqtt_raw_active and direction == "client_to_server":
@@ -28419,6 +28443,32 @@ class EmulatorSession:
     def run_packet_trace(self, packets: Any) -> dict[str, Any]:
         normalised = _normalise_packets(packets)
         return self._run_normalised_packet_trace(normalised)
+
+    def open_packet_server_connection(self, packet: Any) -> dict[str, Any]:
+        """Open the modeled serverside lifecycle for a live TCP peer."""
+        normalised = _normalise_packets([packet])
+        if len(normalised) != 1 or normalised[0]["protocol"] != "tcp":
+            raise EmulatorInputError(
+                "live upstream server connection requires one TCP packet"
+            )
+        if normalised[0]["direction"] != "server_to_client":
+            raise EmulatorInputError(
+                "live upstream server connection packet must be server_to_client"
+            )
+
+        def dispatch(session: Any) -> dict[str, Any]:
+            events: list[dict[str, Any]] = []
+            if not self._connection_open:
+                self._activate_packet_connection(session, normalised[0], events)
+            self._activate_packet_server_connection(
+                session, normalised[0], events, emit_init=True
+            )
+            emitted: list[dict[str, Any]] = []
+            for event in events:
+                emitted.extend(event.get("emissions", []))
+            return {"status": "ok", "events": events, "emitted": emitted}
+
+        return self._call(dispatch)
 
     def metadata(self, session_id: str) -> dict[str, Any]:
         def read_metadata(session: Any) -> dict[str, Any]:
@@ -28756,6 +28806,16 @@ class _PersistentEmulatorSession:
                     del self._flow_sessions[flow_key]
                     session.close()
                 raise
+
+    def open_packet_server_connection(self, packet: Any) -> dict[str, Any]:
+        """Open a modeled serverside connection in the selected flow."""
+        with self._lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
+            session, _, _ = self._select_flow_session(
+                None, field="server connection"
+            )
+            return session.open_packet_server_connection(packet)
 
     def metadata(self, session_id: str, flow_id: Any = None) -> dict[str, Any]:
         with self._lock:
@@ -31659,7 +31719,9 @@ def _normalise_live_data_plane_scenario(
         return scenario, {"protocol": "http", "origin": origin}
     if not isinstance(config, dict):
         raise EmulatorInputError("live_data_plane must be an object")
-    unknown = sorted(set(config) - {"protocol", "read_timeout", "max_read_bytes"})
+    unknown = sorted(
+        set(config) - {"protocol", "read_timeout", "max_read_bytes", "upstream"}
+    )
     if unknown:
         raise EmulatorInputError(
             "unsupported live_data_plane field(s): " + ", ".join(unknown)
@@ -31672,6 +31734,10 @@ def _normalise_live_data_plane_scenario(
     scenario = dict(raw)
     scenario.pop("live_data_plane", None)
     if protocol == "http":
+        if "upstream" in config:
+            raise EmulatorInputError(
+                "live_data_plane.upstream is only valid for the raw TCP data plane"
+            )
         scenario, origin = _normalise_live_http_scenario(scenario)
         return scenario, {"protocol": "http", "origin": origin}
 
@@ -31702,10 +31768,70 @@ def _normalise_live_data_plane_scenario(
         raise EmulatorInputError(
             "live_data_plane.max_read_bytes must be between 1 and 2097152"
         )
+    upstream_config = config.get("upstream")
+    if upstream_config is not None:
+        if not isinstance(upstream_config, dict):
+            raise EmulatorInputError("live_data_plane.upstream must be an object")
+        unknown_upstream = sorted(
+            set(upstream_config) - {"host", "port", "connect_timeout"}
+        )
+        if unknown_upstream:
+            raise EmulatorInputError(
+                "unsupported live_data_plane.upstream field(s): "
+                + ", ".join(unknown_upstream)
+            )
+        upstream_host = upstream_config.get("host")
+        if (
+            not isinstance(upstream_host, str)
+            or not upstream_host
+            or "\x00" in upstream_host
+            or "\r" in upstream_host
+            or "\n" in upstream_host
+        ):
+            raise EmulatorInputError(
+                "live_data_plane.upstream.host must be a non-empty hostname or address"
+            )
+        try:
+            upstream_host_bytes = upstream_host.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise EmulatorInputError(
+                "live_data_plane.upstream.host must be valid UTF-8"
+            ) from exc
+        if len(upstream_host_bytes) > 4096:
+            raise EmulatorInputError(
+                "live_data_plane.upstream.host cannot exceed 4096 UTF-8 bytes"
+            )
+        upstream_port = upstream_config.get("port")
+        if (
+            isinstance(upstream_port, bool)
+            or not isinstance(upstream_port, int)
+            or not 1 <= upstream_port <= 65535
+        ):
+            raise EmulatorInputError(
+                "live_data_plane.upstream.port must be between 1 and 65535"
+            )
+        connect_timeout = upstream_config.get("connect_timeout", timeout)
+        if (
+            isinstance(connect_timeout, bool)
+            or not isinstance(connect_timeout, (int, float))
+            or not math.isfinite(float(connect_timeout))
+            or not 0.05 <= float(connect_timeout) <= 60.0
+        ):
+            raise EmulatorInputError(
+                "live_data_plane.upstream.connect_timeout must be between 0.05 and 60 seconds"
+            )
+        upstream = {
+            "host": upstream_host,
+            "port": upstream_port,
+            "connect_timeout": float(connect_timeout),
+        }
+    else:
+        upstream = None
     return scenario, {
         "protocol": "tcp",
         "read_timeout": float(timeout),
         "max_read_bytes": max_read_bytes,
+        "upstream": upstream,
     }
 
 
@@ -31917,8 +32043,10 @@ def _live_tcp_handler(
                 packet["payload_hex"] = payload.hex()
             return packet
 
-        def _send_emissions(self, result: dict[str, Any]) -> bool:
-            """Forward only server-directed TCP data and report close requests."""
+        def _send_emissions(
+            self, result: dict[str, Any], upstream: socket.socket | None = None
+        ) -> bool:
+            """Forward TCP::respond data to the modeled peer and report closes."""
             should_close = False
             emissions = result.get("emitted", [])
             if not isinstance(emissions, list):
@@ -31928,11 +32056,21 @@ def _live_tcp_handler(
                     raise EmulatorInputError("emulator returned an invalid TCP emission")
                 if emission.get("protocol") != "tcp":
                     continue
-                if emission.get("direction") != "server_to_client":
-                    continue
                 if emission.get("kind") == "fin" or emission.get("control") == "FIN":
                     should_close = True
                     continue
+                direction = emission.get("direction")
+                if direction == "server_to_client":
+                    target = self.request
+                elif direction == "client_to_server":
+                    target = upstream
+                    if target is None:
+                        # A client-only listener has no serverside socket, so
+                        # retain the historical behavior of ignoring a
+                        # serverside response emission.
+                        continue
+                else:
+                    raise EmulatorInputError("emulator returned an invalid TCP emission direction")
                 payload_hex = emission.get("payload_hex")
                 if payload_hex is not None:
                     if not isinstance(payload_hex, str) or len(payload_hex) % 2:
@@ -31952,18 +32090,109 @@ def _live_tcp_handler(
                             "emulator returned a non-text TCP payload"
                         )
                     payload_bytes = payload.encode("utf-8")
-                response_bytes = getattr(self, "_response_bytes", 0)
-                if response_bytes + len(payload_bytes) > LIVE_RAW_MAX_REQUEST_BYTES:
-                    raise EmulatorResourceError("TCP response exceeds the 2 MiB limit")
+                counter_name = (
+                    "_response_bytes"
+                    if direction == "server_to_client"
+                    else "_upstream_write_bytes"
+                )
+                response_bytes = getattr(self, counter_name, 0)
+                if response_bytes + len(payload_bytes) > self._max_wire_bytes:
+                    raise EmulatorResourceError("TCP emitted data exceeds the configured byte limit")
                 if payload_bytes:
-                    self.request.sendall(payload_bytes)
-                    self._response_bytes = response_bytes + len(payload_bytes)
+                    target.sendall(payload_bytes)
+                    setattr(self, counter_name, response_bytes + len(payload_bytes))
             return should_close
+
+        def _send_forwarded_payload(
+            self,
+            result: dict[str, Any],
+            direction: str,
+            upstream: socket.socket | None,
+        ) -> None:
+            """Forward released/default-pass TCP bytes across the live bridge."""
+            target = self.request if direction == "server_to_client" else upstream
+            if target is None:
+                return
+            trace = result.get("trace", [])
+            if not isinstance(trace, list):
+                raise EmulatorInputError("emulator returned invalid TCP trace")
+            for entry in trace:
+                if not isinstance(entry, dict):
+                    raise EmulatorInputError("emulator returned invalid TCP trace entry")
+                payload_hex = entry.get("forwarded_payload_hex")
+                if payload_hex is None:
+                    continue
+                if not isinstance(payload_hex, str) or len(payload_hex) % 2:
+                    raise EmulatorInputError("emulator returned invalid forwarded TCP payload")
+                try:
+                    payload = bytes.fromhex(payload_hex)
+                except ValueError as exc:
+                    raise EmulatorInputError(
+                        "emulator returned invalid forwarded TCP payload"
+                    ) from exc
+                counter_name = (
+                    "_client_write_bytes"
+                    if direction == "server_to_client"
+                    else "_upstream_write_bytes"
+                )
+                current = getattr(self, counter_name, 0)
+                if current + len(payload) > self._max_wire_bytes:
+                    raise EmulatorResourceError(
+                        "TCP forwarded data exceeds the configured byte limit"
+                    )
+                if payload:
+                    target.sendall(payload)
+                    setattr(self, counter_name, current + len(payload))
+
+        @staticmethod
+        def _socket_endpoint(value: Any, fallback: tuple[str, int]) -> dict[str, Any]:
+            if not isinstance(value, tuple) or len(value) < 2:
+                return {"address": fallback[0], "port": fallback[1]}
+            return {"address": str(value[0]), "port": int(value[1])}
+
+        def _upstream_packet(
+            self,
+            upstream: socket.socket,
+            payload: bytes = b"",
+            *,
+            flags: list[str] | None = None,
+        ) -> dict[str, Any]:
+            listener = self.server.server_address
+            packet: dict[str, Any] = {
+                "protocol": "tcp",
+                "direction": "server_to_client",
+                "source": self._socket_endpoint(
+                    upstream.getpeername(), ("127.0.0.1", 0)
+                ),
+                "destination": self._socket_endpoint(
+                    listener, ("127.0.0.1", listener[1])
+                ),
+                "flags": list(flags or []),
+            }
+            if payload:
+                packet["payload_hex"] = payload.hex()
+            return packet
+
+        def _open_upstream(
+            self, session_id: str, upstream: socket.socket
+        ) -> bool:
+            packet = self._upstream_packet(upstream, flags=["SYN"])
+            result = manager.execute(
+                session_id,
+                lambda session: session.open_packet_server_connection(packet),
+            )
+            if self._send_emissions(result, upstream):
+                return True
+            return False
 
         def handle(self) -> None:  # noqa: D401 - socketserver API
             session_id: str | None = None
-            total_read = 0
+            upstream: socket.socket | None = None
+            total_read = {"client": 0, "server": 0}
             self._response_bytes = 0
+            self._client_write_bytes = 0
+            self._upstream_write_bytes = 0
+            self._max_wire_bytes = config["max_read_bytes"]
             try:
                 print(
                     "testcl raw TCP connection accepted from "
@@ -31982,42 +32211,103 @@ def _live_tcp_handler(
                 if self._send_emissions(accepted):
                     return
 
-                while total_read < config["max_read_bytes"]:
+                upstream_config = config.get("upstream")
+                if upstream_config is not None:
                     try:
-                        payload = self.request.recv(
-                            min(LIVE_RAW_READ_SIZE, config["max_read_bytes"] - total_read)
+                        upstream = socket.create_connection(
+                            (upstream_config["host"], upstream_config["port"]),
+                            timeout=upstream_config["connect_timeout"],
                         )
-                    except socket.timeout:
-                        break
-                    if not payload:
-                        break
-                    total_read += len(payload)
-                    print(
-                        f"testcl raw TCP received {len(payload)} bytes",
-                        file=sys.stderr,
-                    )
-                    result = manager.execute(
-                        session_id,
-                        lambda session, payload=payload: session.run_packet_trace(
-                            [self._packet(payload)]
-                        ),
-                    )
-                    if self._send_emissions(result):
-                        break
+                        upstream.settimeout(config["read_timeout"])
+                        if self._open_upstream(session_id, upstream):
+                            return
+                    except (OSError, ValueError) as exc:
+                        print(
+                            "testcl raw TCP upstream connection failed: "
+                            f"{exc}",
+                            file=sys.stderr,
+                        )
+                        return
 
-                try:
-                    closed = manager.execute(
-                        session_id,
-                        lambda session: session.run_packet_trace(
-                            [self._packet(flags=["FIN"])]
-                        ),
-                    )
-                    self._send_emissions(closed)
-                except (EmulatorInputError, EmulatorNotFoundError, OSError):
-                    # The peer may have reset the socket while the close event
-                    # was being recorded; the primary request result is still
-                    # more useful than replacing it with teardown noise.
-                    pass
+                sockets: list[socket.socket] = [self.request]
+                if upstream is not None:
+                    sockets.append(upstream)
+                while sockets:
+                    try:
+                        readable, _, _ = select.select(
+                            sockets, [], [], config["read_timeout"]
+                        )
+                    except (OSError, ValueError):
+                        break
+                    if not readable:
+                        break
+                    close_requested = False
+                    for readable_socket in readable:
+                        is_client = readable_socket is self.request
+                        side = "client" if is_client else "server"
+                        remaining = config["max_read_bytes"] - total_read[side]
+                        if remaining <= 0:
+                            close_requested = True
+                            break
+                        try:
+                            payload = readable_socket.recv(
+                                min(LIVE_RAW_READ_SIZE, remaining)
+                            )
+                        except (socket.timeout, BlockingIOError):
+                            continue
+                        if not payload:
+                            close_requested = True
+                            close_packet = (
+                                self._packet(flags=["FIN"])
+                                if is_client
+                                else self._upstream_packet(
+                                    upstream, flags=["FIN"]
+                                )
+                            )
+                            try:
+                                closed = manager.execute(
+                                    session_id,
+                                    lambda session, close_packet=close_packet: session.run_packet_trace(
+                                        [close_packet]
+                                    ),
+                                )
+                                self._send_emissions(closed, upstream)
+                            except (
+                                EmulatorInputError,
+                                EmulatorNotFoundError,
+                                OSError,
+                            ):
+                                pass
+                            break
+                        total_read[side] += len(payload)
+                        print(
+                            f"testcl raw TCP received {len(payload)} {side} bytes",
+                            file=sys.stderr,
+                        )
+                        packet = (
+                            self._packet(payload)
+                            if is_client
+                            else self._upstream_packet(upstream, payload)
+                        )
+                        result = manager.execute(
+                            session_id,
+                            lambda session, packet=packet: session.run_packet_trace(
+                                [packet]
+                            ),
+                        )
+                        if self._send_emissions(result, upstream):
+                            close_requested = True
+                            break
+                        self._send_forwarded_payload(
+                            result,
+                            "client_to_server" if is_client else "server_to_client",
+                            upstream,
+                        )
+                        if total_read[side] >= config["max_read_bytes"]:
+                            close_requested = True
+                            break
+                    if close_requested:
+                        break
             except (
                 EmulatorInputError,
                 EmulatorNotFoundError,
@@ -32032,6 +32322,11 @@ def _live_tcp_handler(
                 # Peer resets and broken pipes are normal during stream teardown.
                 return
             finally:
+                if upstream is not None:
+                    try:
+                        upstream.close()
+                    except OSError:
+                        pass
                 if session_id is not None:
                     try:
                         manager.close(session_id)

@@ -12,6 +12,7 @@ import json
 import os
 import re
 import socket
+import socketserver
 import struct
 import subprocess
 import sys
@@ -20991,6 +20992,52 @@ when CLIENT_DATA {
         self.assertEqual(emission["byte_length"], len(payload))
         self.assertEqual(emission["payload_hex"], payload.hex())
 
+    def test_packet_trace_reports_default_and_release_tcp_forwarding(self) -> None:
+        passthrough = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": "when CLIENT_ACCEPTED {}",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "payload_hex": "00ff8041",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(passthrough["trace"][0]["forwarded_payload_hex"], "00ff8041")
+        self.assertEqual(passthrough["trace"][0]["forwarded_byte_length"], 4)
+
+        released = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED { TCP::collect 4 }
+when CLIENT_DATA { TCP::release 2 }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "flags": ["SYN"],
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                    {
+                        "protocol": "tcp",
+                        "payload_hex": "00ff8041",
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(released["trace"][1]["forwarded_payload_hex"], "00ff")
+        self.assertEqual(released["trace"][1]["payload_after_hex"], "8041")
+
     def test_tcp_text_emission_remains_utf8_encoded(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -21044,6 +21091,68 @@ when CLIENT_DATA {
             server.server_close()
             manager.close_all()
 
+    def test_live_tcp_data_plane_bridges_a_real_upstream_peer(self) -> None:
+        received: list[bytes] = []
+
+        class UpstreamHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:  # noqa: D401 - socketserver API
+                payload = self.request.recv(64)
+                received.append(payload)
+                self.request.sendall(b"backend:" + payload)
+
+        upstream_server = socketserver.ThreadingTCPServer(
+            ("127.0.0.1", 0), UpstreamHandler
+        )
+        upstream_server.daemon_threads = True
+        upstream_thread = threading.Thread(target=upstream_server.serve_forever)
+        upstream_thread.start()
+        scenario = {
+            "profiles": ["TCP"],
+            "irule": """
+when CLIENT_ACCEPTED { TCP::collect }
+when CLIENT_DATA {
+    TCP::release
+    TCP::collect
+}
+when SERVER_CONNECTED { log local0. connected; }
+when SERVER_DATA {
+    TCP::respond [TCP::payload]
+    TCP::release
+    TCP::collect
+}
+""",
+            "live_data_plane": {
+                "protocol": "tcp",
+                "read_timeout": 0.5,
+                "upstream": {
+                    "host": "127.0.0.1",
+                    "port": upstream_server.server_address[1],
+                },
+            },
+        }
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        client = socket.create_connection(
+            ("127.0.0.1", self.adapter._data_plane_bound_port(server)), timeout=2
+        )
+        client.settimeout(2)
+        try:
+            client.sendall(b"ping")
+            self.assertEqual(client.recv(64), b"backend:ping")
+            self.assertEqual(received, [b"ping"])
+        finally:
+            client.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+            upstream_server.shutdown()
+            upstream_thread.join(timeout=5)
+            upstream_server.server_close()
+
     def test_live_tcp_data_plane_rejects_http_only_fixtures_and_limits(self) -> None:
         with self.assertRaisesRegex(
             self.adapter.EmulatorInputError, "only valid for the HTTP"
@@ -21070,6 +21179,36 @@ when CLIENT_DATA {
                     "live_data_plane": {
                         "protocol": "tcp",
                         "read_timeout": 0.001,
+                    },
+                },
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "only valid for the raw TCP"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "irule": "",
+                    "live_data_plane": {
+                        "protocol": "http",
+                        "upstream": {"host": "127.0.0.1", "port": 19000},
+                    },
+                },
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "upstream.port"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "irule": "",
+                    "live_data_plane": {
+                        "protocol": "tcp",
+                        "upstream": {"host": "127.0.0.1", "port": 0},
                     },
                 },
             )

@@ -87,16 +87,40 @@ printf 'hello from tcp\n' | nc -N 127.0.0.1 18081
 ```
 
 The raw listener creates one persistent emulator session per TCP connection,
-feeds each bounded read through the normal TCP packet adapter, and forwards only
+feeds each bounded read through the normal TCP packet adapter, and forwards
 server-directed `TCP::respond` data. Wire reads enter the packet adapter as
 `payload_hex`, so `TCP::payload`, byte lengths, offsets, replacements, and
 binary Tcl operations see the original bytes. JSON results retain readable
 payload text and add `payload_hex` when a value is not losslessly representable
 as UTF-8. EOF, timeout, `TCP::close`, and the 2 MiB connection read limit
-terminate the stream. This live adapter is for raw TCP/iRule behavior, not a
-kernel TCP stack, TLS endpoint, upstream proxy, or full database peer.
-Protocol-specific TDS, FTP, LDAP, and similar parsers are exercised through the
-packet/API drivers.
+terminate the stream. With an explicit upstream target, ordinary TCP bytes and
+`TCP::release` output cross a bounded client-to-backend-to-client bridge;
+`SERVER_INIT` and `SERVER_CONNECTED` are fired when the backend socket opens,
+and server-side `TCP::respond` output is sent to that backend. The upstream
+target is opt-in and supports only a hostname/address, port, and connect
+timeout. This live adapter is still not a kernel TCP stack, TLS endpoint, pool
+scheduler, or full database peer. Protocol-specific TDS, FTP, LDAP, and similar
+parsers are exercised through the packet/API drivers.
+
+For example, a raw TCP scenario can bridge to a local test service with:
+
+```json
+{
+  "profiles": ["TCP"],
+  "irule": "when CLIENT_ACCEPTED { TCP::collect } when CLIENT_DATA { TCP::release; TCP::collect } when SERVER_DATA { TCP::release; TCP::collect }",
+  "live_data_plane": {
+    "protocol": "tcp",
+    "read_timeout": 1.0,
+    "upstream": {"host": "127.0.0.1", "port": 19000, "connect_timeout": 2.0}
+  }
+}
+```
+
+The bridge is deliberately bounded to `max_read_bytes` per direction (2 MiB
+by default), does not interpret the backend protocol, and closes the stream on
+backend connect failure or idle timeout. That makes it useful for exercising
+iRule control flow against a disposable service without claiming to reproduce
+TMM scheduling or BIG-IP networking internals.
 
 The API and data plane can run together by starting the normal API with
 `--serve --data-plane-scenario PATH`; the API remains on `--host/--port`, while

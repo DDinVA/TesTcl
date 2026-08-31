@@ -17707,6 +17707,7 @@ namespace eval ::itest::semantic {
 
     proc tcp_clear_event_state {} {
         unset -nocomplain ::state::vars::connection_vars(__testcl_tcp_released)
+        unset -nocomplain ::state::vars::connection_vars(__testcl_tcp_released_payload_hex)
         unset -nocomplain ::state::vars::connection_vars(__testcl_tcp_emissions)
     }
 
@@ -17764,6 +17765,13 @@ namespace eval ::itest::semantic {
             return 1
         }
         return 0
+    }
+
+    proc tcp_released_payload_hex {} {
+        if {[info exists ::state::vars::connection_vars(__testcl_tcp_released_payload_hex)]} {
+            return $::state::vars::connection_vars(__testcl_tcp_released_payload_hex)
+        }
+        return ""
     }
 
     proc _tcp_wire_bytes {value} {
@@ -17855,6 +17863,9 @@ namespace eval ::itest::semantic {
             error "TCP::release length must be a non-negative integer"
         }
         if {$length > $available} { set length $available }
+        set released_payload [::itest::cmd::_payload_first [set $payload_var] $length]
+        set ::state::vars::connection_vars(__testcl_tcp_released_payload_hex) \
+            [binary encode hex $released_payload]
         if {$length > 0} {
             set $payload_var [::itest::cmd::_payload_splice [set $payload_var] 0 $length ""]
         }

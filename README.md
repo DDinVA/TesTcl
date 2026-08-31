@@ -28,10 +28,11 @@ combine `--serve --data-plane-scenario PATH`; the container exposes the API on
 8080 and the optional data plane on 18080.
 The same listener can expose a bounded raw TCP data plane for iRule TCP
 fixtures by adding `"live_data_plane": {"protocol": "tcp"}` to the scenario.
-`TCP::respond` emissions are written back to the client; no upstream socket or
-database peer is created. Protocol-specific TDS, FTP, LDAP, and similar wire
-parsers remain available through the packet/API drivers while their live socket
-adapters are built out.
+`TCP::respond` emissions are written back to the client. An explicit
+`live_data_plane.upstream` target can opt into a bounded, bidirectional TCP
+bridge for testing a real backend peer; it is not a kernel TCP stack, TLS
+terminator, pool scheduler, or database emulator. Protocol-specific TDS, FTP,
+LDAP, and similar wire parsers remain available through the packet/API drivers.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:
