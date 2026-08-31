@@ -3348,6 +3348,30 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("getsid", "userkey-testcl-hash"),
     ),
     "ACCESS::uuid": (("getsid", "sid-1"),),
+    "IP::addr": (
+        ("192.0.2.10", "equals", "192.0.2.10"),
+        ("192.0.2.10", "mask", "192.0.2.0/24"),
+    ),
+    "IP::client_addr": ((),),
+    "IP::hops": ((),),
+    "IP::idle_timeout": ((), ("900",)),
+    "IP::ingress_drop_rate": (("192.0.2.10", "10", "60"),),
+    "IP::ingress_rate_limit": (("10", "100"),),
+    "IP::intelligence": (("192.0.2.10",),),
+    "IP::local_addr": (("clientside",), ("serverside",)),
+    "IP::protocol": ((),),
+    "IP::remote_addr": (("clientside",), ("serverside",)),
+    "IP::reputation": (("192.0.2.10",), ("192.0.2.10", "198.51.100.10")),
+    "IP::server_addr": ((),),
+    "IP::stats": (
+        (),
+        ("age",),
+        ("pkts", "in"),
+        ("bytes", "out"),
+    ),
+    "IP::tos": (("clientside",), ("clientside", "16")),
+    "IP::ttl": ((),),
+    "IP::version": ((),),
 }
 _CANDIDATE_EVENT_HINTS = {
     "TCP::recvwnd": "CLIENT_ACCEPTED",
@@ -3724,6 +3748,14 @@ def _command_argument_candidates(
 
 def _candidate_fixture_scenario(command: str) -> dict[str, Any] | None:
     """Supply only generic, non-secret state useful to local probe execution."""
+    if command.startswith("IP::"):
+        return {
+            "ip": {
+                "hops": 12,
+                "intelligence": {"192.0.2.10": ["scanner", "proxy"]},
+                "reputation": {"192.0.2.10": ["low-risk"]},
+            }
+        }
     if command.startswith("ACCESS::"):
         return {
             "access": {
