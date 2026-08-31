@@ -46,6 +46,7 @@ MAX_ID_BYTES = 256
 MAX_LOG_LINES = 5000
 MAX_PROFILES = 64
 MAX_PROFILE_BYTES = 256
+MAX_HOST_BYTES = 256
 SUPPORTED_EVENTS = frozenset({"HTTP_REQUEST", "RULE_INIT"})
 DANGEROUS_TCL_COMMANDS = frozenset(
     {
@@ -490,6 +491,28 @@ class PlanCollector:
         ):
             raise CollectorError("plan HTTP request headers must be scalar values")
         encoded_headers = {key: str(value) for key, value in headers.items()}
+        host = request_data.get("host")
+        if host is not None:
+            if (
+                not isinstance(host, str)
+                or not host
+                or any(character in host for character in "\r\n\x00")
+            ):
+                raise CollectorError(
+                    "plan HTTP request host must be a non-empty, bounded single-line string"
+                )
+            try:
+                host_bytes = host.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise CollectorError(
+                    "plan HTTP request host must be valid UTF-8"
+                ) from exc
+            if len(host_bytes) > MAX_HOST_BYTES:
+                raise CollectorError(
+                    "plan HTTP request host must be a non-empty, bounded single-line string"
+                )
+            if not any(name.lower() == "host" for name in encoded_headers):
+                encoded_headers["Host"] = host
         body = request_data.get("body", "")
         if isinstance(body, str):
             payload = body.encode("utf-8")

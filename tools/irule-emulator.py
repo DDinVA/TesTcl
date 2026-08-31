@@ -2899,6 +2899,12 @@ def _command_probe_template(
 
 def _protocol_request_template(event: str) -> dict[str, Any] | None:
     """Return a bounded starter fixture for the reusable protocol driver."""
+    if event in {"HTTP_REQUEST", "HTTP_RESPONSE"}:
+        return {
+            "method": "GET",
+            "uri": "/testcl/command",
+            "host": "example.test",
+        }
     if event.startswith("DNS_"):
         return {
             "qname": "example.com",

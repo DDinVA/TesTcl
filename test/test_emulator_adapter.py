@@ -3819,6 +3819,10 @@ when HTTP_RESPONSE_RELEASE {
             {"qname": "example.com", "qtype": "A", "recursion_desired": True},
         )
         self.assertEqual(
+            self.adapter._protocol_request_template("HTTP_REQUEST"),
+            {"method": "GET", "uri": "/testcl/command", "host": "example.test"},
+        )
+        self.assertEqual(
             self.adapter._protocol_request_template("MQTT_CLIENT_DATA"),
             {
                 "client_id": "testcl-1705",

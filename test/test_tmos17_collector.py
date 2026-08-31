@@ -147,6 +147,40 @@ def test_collect_case_restores_virtual_and_returns_only_observed_record() -> Non
     assert "~Tenant~testcl_capture_" in fake.calls[4][1]
 
 
+def test_send_http_preserves_declared_host_header() -> None:
+    runner = collector.PlanCollector(
+        _FakeRest(),
+        "/Common/test-vs",
+        "https://traffic.example.test/",
+        settle_seconds=0,
+    )
+    response = SimpleNamespace(read=lambda _limit: b"")
+    with patch.object(collector, "urlopen") as urlopen:
+        urlopen.return_value.__enter__.return_value = response
+        runner._send_http(
+            {
+                "method": "GET",
+                "uri": "/testcl/command",
+                "host": "example.test",
+            }
+        )
+    sent_request = urlopen.call_args.args[0]
+    assert sent_request.get_header("Host") == "example.test"
+
+
+def test_send_http_rejects_unsafe_declared_host() -> None:
+    runner = collector.PlanCollector(
+        _FakeRest(),
+        "/Common/test-vs",
+        "https://traffic.example.test/",
+        settle_seconds=0,
+    )
+    with pytest.raises(collector.CollectorError, match="host"):
+        runner._send_http({"uri": "/testcl/command", "host": "bad\r\nHost: injected"})
+    with pytest.raises(collector.CollectorError, match="valid UTF-8"):
+        runner._send_http({"uri": "/testcl/command", "host": "bad\ud800"})
+
+
 def test_collect_refuses_unsupported_event_before_device_mutation() -> None:
     fake = _FakeRest()
     runner = collector.PlanCollector(
