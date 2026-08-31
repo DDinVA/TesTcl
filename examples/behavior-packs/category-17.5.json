@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "category-17.5",
+  "cases": [
+    {
+      "id": "analytics-enable",
+      "probe": {
+        "command": "CATEGORY::analytics",
+        "args": ["enable"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP", "CATEGORY"]
+      },
+      "expect": {"status": "ok", "event_fired": true}
+    },
+    {
+      "id": "lookup-custom-category",
+      "probe": {
+        "command": "CATEGORY::lookup",
+        "args": ["https://example.test/", "-display", "custom", "-ip", "192.0.2.10", "-custom_cat_match", "testcl"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "state": {"category": {"categories": "custom", "safesearch": "yes", "matchtype": "custom"}}
+      },
+      "expect": {"status": "ok", "value": "custom", "event_fired": true}
+    },
+    {
+      "id": "matchtype-from-match-event",
+      "probe": {
+        "command": "CATEGORY::matchtype",
+        "args": ["TYPE"],
+        "event": "CATEGORY_MATCHED",
+        "profiles": ["TCP", "HTTP", "CATEGORY"],
+        "state": {"category": {"matchtype": "custom"}}
+      },
+      "expect": {"status": "ok", "value": "custom", "event_fired": true}
+    },
+    {
+      "id": "result-from-match-event",
+      "probe": {
+        "command": "CATEGORY::result",
+        "args": ["category", "-display", "custom"],
+        "event": "CATEGORY_MATCHED",
+        "profiles": ["TCP", "HTTP", "CATEGORY"],
+        "state": {"category": {"categories": "custom", "safesearch": "yes", "matchtype": "custom"}}
+      },
+      "expect": {"status": "ok", "value": "custom", "event_fired": true}
+    },
+    {
+      "id": "filetype-output-variables",
+      "probe": {
+        "command": "CATEGORY::filetype",
+        "args": ["testcl", "-mimetype", "MIME", "-mimesubtype", "SUBTYPE"],
+        "event": "HTTP_RESPONSE_DATA",
+        "profiles": ["TCP", "HTTP"],
+        "state": {"category": {"filetype_mimetype": "text/plain", "filetype_mimesubtype": "plain"}}
+      },
+      "expect": {"status": "ok", "event_fired": true}
+    },
+    {
+      "id": "safesearch-result",
+      "probe": {
+        "command": "CATEGORY::safesearch",
+        "args": ["https://example.test/"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP", "CATEGORY"],
+        "state": {"category": {"safesearch": "yes"}}
+      },
+      "expect": {"status": "ok", "value": "yes", "event_fired": true}
+    }
+  ]
+}
