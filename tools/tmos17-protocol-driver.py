@@ -42,6 +42,36 @@ DNS_TYPES = {
 }
 PCP_OPCODES = {"announce": 0, "map": 1, "peer": 2}
 PCP_PROTOCOLS = {"tcp": 6, "udp": 17}
+RADIUS_CODES = {
+    "access-request": 1,
+    "access-accept": 2,
+    "access-reject": 3,
+    "accounting-request": 4,
+    "accounting-response": 5,
+}
+RADIUS_ATTRIBUTE_CODES = {
+    "user-name": 1,
+    "user-password": 2,
+    "nas-ip-address": 4,
+    "nas-port": 5,
+    "service-type": 6,
+    "framed-ip-address": 8,
+    "reply-message": 18,
+    "state": 24,
+    "class": 25,
+    "vendor-specific": 26,
+    "session-timeout": 27,
+    "called-station-id": 30,
+    "calling-station-id": 31,
+    "nas-identifier": 32,
+    "acct-status-type": 40,
+    "acct-input-octets": 42,
+    "acct-output-octets": 43,
+    "acct-session-id": 44,
+    "event-timestamp": 55,
+    "nas-port-type": 61,
+    "connect-info": 77,
+}
 
 
 class DriverError(RuntimeError):
@@ -388,6 +418,137 @@ def build_pcp_request(request: dict[str, Any]) -> bytes:
     return bytes(message)
 
 
+def _radius_uint(value: Any, field: str, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise DriverError(f"RADIUS {field} must be an integer from 0 to {maximum}")
+    if isinstance(value, str) and value.isdigit() and len(value) <= 32:
+        value = int(value, 10)
+    if not isinstance(value, int) or not 0 <= value <= maximum:
+        raise DriverError(f"RADIUS {field} must be an integer from 0 to {maximum}")
+    return value
+
+
+def _radius_hex(value: Any, field: str, length: int | None = None) -> bytes:
+    if not isinstance(value, str) or len(value) % 2:
+        raise DriverError(f"RADIUS {field} must be an even-length hexadecimal string")
+    try:
+        data = bytes.fromhex(value)
+    except ValueError as exc:
+        raise DriverError(f"RADIUS {field} must be hexadecimal") from exc
+    if length is not None and len(data) != length:
+        raise DriverError(f"RADIUS {field} must contain exactly {length} bytes")
+    return data
+
+
+def _radius_attr_code(value: Any, field: str) -> int:
+    if isinstance(value, str):
+        code = RADIUS_ATTRIBUTE_CODES.get(value.lower())
+        if code is None and value.isdigit():
+            code = int(value, 10)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        code = value
+    else:
+        code = None
+    if code is None or not 1 <= code <= 255:
+        raise DriverError(f"RADIUS {field} must be a known attribute name or a value from 1 to 255")
+    return code
+
+
+def _radius_attr_data(item: dict[str, Any], index: int) -> bytes:
+    sources = [key for key in ("data", "data_hex", "data_base64") if key in item]
+    if len(sources) != 1:
+        raise DriverError(f"RADIUS attribute {index} must specify exactly one data source")
+    source = sources[0]
+    if source == "data_hex":
+        return _radius_hex(item[source], f"attribute {index} data_hex")
+    if source == "data_base64":
+        encoded = item[source]
+        if not isinstance(encoded, str):
+            raise DriverError(f"RADIUS attribute {index} data_base64 must be a string")
+        try:
+            return base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise DriverError(f"RADIUS attribute {index} data_base64 is not valid base64") from exc
+    value = item[source]
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
+        raise DriverError(f"RADIUS attribute {index} data must be a string or integer")
+    data_type = str(item.get("type", "string")).lower()
+    if data_type == "ip4":
+        try:
+            address = ipaddress.ip_address(str(value))
+        except ValueError as exc:
+            raise DriverError(f"RADIUS attribute {index} data must be an IPv4 address") from exc
+        if address.version != 4:
+            raise DriverError(f"RADIUS attribute {index} data must be an IPv4 address")
+        return address.packed
+    if data_type in {"integer", "integer32"}:
+        return _radius_uint(value, f"attribute {index} data", 0xFFFFFFFF).to_bytes(4, "big")
+    if data_type == "integer64":
+        return _radius_uint(value, f"attribute {index} data", 0xFFFFFFFFFFFFFFFF).to_bytes(8, "big")
+    try:
+        return str(value).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise DriverError(f"RADIUS attribute {index} data must be valid UTF-8") from exc
+
+
+def build_radius_request(request: dict[str, Any], event: str) -> bytes:
+    """Build one bounded RADIUS request for an authentication or accounting event."""
+    radius = request.get("radius", {})
+    if not isinstance(radius, dict):
+        raise DriverError("RADIUS request radius must be an object")
+    allowed = {"code", "id", "authenticator_hex", "avps"}
+    if any(not isinstance(key, str) for key in radius):
+        raise DriverError("RADIUS request field names must be strings")
+    unknown = sorted(set(radius) - allowed)
+    if unknown:
+        raise DriverError("RADIUS request unsupported field(s): " + ", ".join(unknown))
+    default_code = 4 if event.endswith("ACCT_REQUEST") else 1
+    code_value = radius.get("code", default_code)
+    if isinstance(code_value, str):
+        code = RADIUS_CODES.get(code_value.lower())
+        if code is None and code_value.isdigit():
+            code = _radius_uint(code_value, "code", 255)
+    else:
+        code = _radius_uint(code_value, "code", 255)
+    if code not in {1, 4}:
+        raise DriverError("RADIUS request code must be Access-Request (1) or Accounting-Request (4)")
+    if code != default_code:
+        expected_name = "Accounting-Request (4)" if default_code == 4 else "Access-Request (1)"
+        raise DriverError(f"RADIUS {event} requires {expected_name}")
+    identifier = _radius_uint(radius.get("id", 0), "id", 255)
+    authenticator = _radius_hex(
+        radius.get("authenticator_hex", "00" * 16), "authenticator_hex", 16
+    )
+    avps = radius.get("avps", [])
+    if not isinstance(avps, list) or len(avps) > 128:
+        raise DriverError("RADIUS avps must be an array of at most 128 items")
+    encoded_avps = bytearray()
+    for index, item in enumerate(avps):
+        if not isinstance(item, dict):
+            raise DriverError(f"RADIUS attribute {index} must be an object")
+        if any(not isinstance(key, str) for key in item):
+            raise DriverError(f"RADIUS attribute {index} field names must be strings")
+        code_number = _radius_attr_code(item.get("code"), f"attribute {index} code")
+        data = _radius_attr_data(item, index)
+        vendor_id = _radius_uint(item.get("vendor_id", 0), f"attribute {index} vendor_id", 0xFFFFFFFF)
+        vendor_type = _radius_uint(item.get("vendor_type", 0), f"attribute {index} vendor_type", 255)
+        if code_number == 26:
+            if not vendor_id or not vendor_type:
+                raise DriverError(f"RADIUS attribute {index} Vendor-Specific fields are required")
+            if len(data) + 8 > 255:
+                raise DriverError(f"RADIUS attribute {index} exceeds the 255-byte limit")
+            data = vendor_id.to_bytes(4, "big") + bytes([vendor_type, len(data) + 2]) + data
+        elif vendor_id or vendor_type:
+            raise DriverError(f"RADIUS attribute {index} vendor fields require code 26")
+        if len(data) + 2 > 255:
+            raise DriverError(f"RADIUS attribute {index} exceeds the 255-byte limit")
+        encoded_avps.extend(bytes([code_number, len(data) + 2]) + data)
+    length = 20 + len(encoded_avps)
+    if length > 4096:
+        raise DriverError("RADIUS request exceeds the 4096-byte limit")
+    return bytes([code, identifier]) + struct.pack(">H", length) + authenticator + encoded_avps
+
+
 def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
     event = _text(trigger.get("event"), "event", required=True)
     assert event is not None
@@ -417,6 +578,17 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
         return (
             endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="udp", default_port=5351),
             build_pcp_request(request),
+            timeout,
+        )
+    if event in {"RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST"}:
+        return (
+            endpoint_from_request(
+                request,
+                trigger.get("traffic_url"),
+                default_scheme="udp",
+                default_port=1813 if event.endswith("ACCT_REQUEST") else 1812,
+            ),
+            build_radius_request(request, event),
             timeout,
         )
     payload = _payload_bytes(request)

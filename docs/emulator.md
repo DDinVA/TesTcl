@@ -2505,7 +2505,7 @@ The generated plan contains one `command_probe` observation per runnable
 catalog command, a target-valid event/profile shell, and a status comparison.
 Its empty `args` array is intentional: command arguments and fixture values
 are command-specific and must be selected by the collector or operator from
-the catalog synopsis. DNS, MQTT, SIP, and PCP event templates also include a small
+the catalog synopsis. DNS, MQTT, SIP, PCP, and RADIUS event templates also include a small
 starter `request` fixture for the bundled protocol driver; replace its
 destination and values for the target environment. Replace the placeholder
 provenance when using the defaults. The plan contains no reference output and
@@ -2619,7 +2619,7 @@ In a local checkout, use `--trigger-command ./scripts/tmos17-protocol-driver.sh`
 in the emulator image, use
 `--trigger-command /opt/testcl/tools/tmos17-protocol-driver.py`.
 
-The same bounded HTTP, DNS, MQTT, SIP, and PCP request fixtures can be replayed through
+The same bounded HTTP, DNS, MQTT, SIP, PCP, and RADIUS request fixtures can be replayed through
 the local differential path with `--golden-vectors` or the command-workbench
 API. The adapter converts those request objects into deterministic protocol
 packets before firing the catalogued event, so command results can be compared
@@ -3337,6 +3337,19 @@ about and which events currently have packet adapters:
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh --conformance
 curl http://127.0.0.1:8080/v1/conformance
 ```
+
+For a single local smoke report, run the checked-in behavior packs, golden
+vectors, catalog conformance checks, and representative HTTP, DNS, MQTT, SIP,
+PCP, and RADIUS probes:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/evaluate-local.sh
+```
+
+The script requires the repository's uv-managed `.venv` with Python 3.13 or
+newer. Its `evidence` value is `local-emulator-contracts`: passing means the
+current local contracts agree, not that behavior has been independently
+observed on TMOS 17.5 or in a vLab.
 
 ## Container
 

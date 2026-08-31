@@ -94,6 +94,53 @@ def test_pcp_driver_rejects_invalid_nested_fields() -> None:
         driver.build_pcp_request({"pcp": {"third_party": 0}})
 
 
+def test_radius_driver_builds_auth_request_with_typed_attributes() -> None:
+    payload = driver.build_radius_request(
+        {
+            "radius": {
+                "code": "Access-Request",
+                "id": 3,
+                "authenticator_hex": "11" * 16,
+                "avps": [
+                    {"code": "User-Name", "data": "alice"},
+                    {"code": "NAS-IP-Address", "type": "ip4", "data": "192.0.2.20"},
+                ],
+            }
+        },
+        "RADIUS_AAA_AUTH_REQUEST",
+    )
+    assert payload[:4] == b"\x01\x03\x00\x21"
+    assert payload[4:20] == b"\x11" * 16
+    assert payload[20:] == b"\x01\x07alice\x04\x06\xc0\x00\x02\x14"
+
+
+def test_radius_driver_rejects_event_code_mismatch_and_bad_attributes() -> None:
+    with pytest.raises(driver.DriverError, match="requires Access-Request"):
+        driver.build_radius_request(
+            {"radius": {"code": 4}}, "RADIUS_AAA_AUTH_REQUEST"
+        )
+    with pytest.raises(driver.DriverError, match="exactly one data source"):
+        driver.build_radius_request(
+            {"radius": {"avps": [{"code": 1}]}}, "RADIUS_AAA_AUTH_REQUEST"
+        )
+    with pytest.raises(driver.DriverError, match="255-byte limit"):
+        driver.build_radius_request(
+            {
+                "radius": {
+                    "avps": [
+                        {
+                            "code": 26,
+                            "vendor_id": 10415,
+                            "vendor_type": 1,
+                            "data": "x" * 248,
+                        }
+                    ]
+                }
+            },
+            "RADIUS_AAA_AUTH_REQUEST",
+        )
+
+
 def test_dns_driver_requires_boolean_recursion_flag() -> None:
     with pytest.raises(driver.DriverError, match="recursion_desired"):
         driver.build_dns_query({"qname": "example.com", "recursion_desired": "yes"})

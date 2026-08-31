@@ -3847,6 +3847,17 @@ when HTTP_RESPONSE_RELEASE {
                 }
             },
         )
+        self.assertEqual(
+            self.adapter._protocol_request_template("RADIUS_AAA_AUTH_REQUEST"),
+            {
+                "radius": {
+                    "code": 1,
+                    "id": 23,
+                    "authenticator_hex": "00" * 16,
+                    "avps": [{"code": "User-Name", "data": "testcl"}],
+                }
+            },
+        )
         self.assertIsNone(self.adapter._protocol_request_template("CLIENT_DATA"))
 
         protocol_plan = self.adapter._build_capture_plan_template(
@@ -3947,6 +3958,27 @@ when HTTP_RESPONSE_RELEASE {
         )
         self.assertEqual(pcp_probe["execution"]["status"], "ok")
         self.assertEqual(pcp_probe["execution"]["value"], "map")
+        radius_request = self.adapter._protocol_request_template(
+            "RADIUS_AAA_AUTH_REQUEST"
+        )
+        assert radius_request is not None
+        radius_packet = self.adapter._protocol_request_packet(
+            "RADIUS_AAA_AUTH_REQUEST", radius_request
+        )
+        self.assertEqual(radius_packet["protocol"], "radius")
+        self.assertEqual(radius_packet["code"], 1)
+        radius_probe = self.adapter.run_command_probe(
+            {
+                "command": "RADIUS::code",
+                "event": "RADIUS_AAA_AUTH_REQUEST",
+                "profiles": ["UDP", "RADIUS"],
+                "request": radius_request,
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+            allow_external_protocol_request=True,
+        )
+        self.assertEqual(radius_probe["execution"]["status"], "ok")
+        self.assertEqual(radius_probe["execution"]["value"], "1")
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "not both"):
             self.adapter._normalise_protocol_request(
                 "MQTT_CLIENT_DATA",
@@ -3962,6 +3994,14 @@ when HTTP_RESPONSE_RELEASE {
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "do not accept payload"):
             self.adapter._normalise_protocol_request(
                 "PCP_REQUEST", {"pcp": {}, "payload": "ignored"}
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "unsupported field"):
+            self.adapter._normalise_protocol_request(
+                "RADIUS_AAA_AUTH_REQUEST", {"radius": {"unknown": 1}}
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "does not match"):
+            self.adapter._normalise_protocol_request(
+                "RADIUS_AAA_AUTH_REQUEST", {"radius": {"code": 4}}
             )
         sip_message_packet = self.adapter._protocol_request_packet(
             "SIP_REQUEST",

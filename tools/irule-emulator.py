@@ -296,6 +296,7 @@ PROTOCOL_REQUEST_FIELDS = frozenset(
         "destination", "timeout", "payload", "payload_base64", "qname", "qtype",
         "qclass", "transaction_id", "recursion_desired", "client_id", "topic",
         "keepalive", "message", "method", "uri", "status", "headers", "body", "pcp",
+        "radius",
     }
 )
 IRULE_ANALYSIS_MAX_SOURCE_BYTES = 512 * 1024
@@ -2933,6 +2934,17 @@ def _protocol_request_template(event: str) -> dict[str, Any] | None:
                 "suggested_ext_addr": "0.0.0.0",
             }
         }
+    if event in {"RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST"}:
+        return {
+            "radius": {
+                "code": 4 if event.endswith("ACCT_REQUEST") else 1,
+                "id": 23,
+                "authenticator_hex": "00" * 16,
+                "avps": [
+                    {"code": "User-Name", "data": "testcl"},
+                ],
+            }
+        }
     return None
 
 
@@ -3330,12 +3342,75 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
             raise EmulatorInputError(
                 f"protocol driver request pcp is invalid: {exc}"
             ) from exc
+    if "radius" in request:
+        if not isinstance(request["radius"], dict):
+            raise EmulatorInputError("protocol driver request radius must be an object")
+        if event not in {"RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST"}:
+            raise EmulatorInputError(
+                "protocol driver request radius is supported only for RADIUS request events"
+            )
+        radius_request = request["radius"]
+        if any(not isinstance(key, str) for key in radius_request):
+            raise EmulatorInputError("protocol driver request radius field names must be strings")
+        unknown_radius_fields = sorted(
+            set(radius_request) - {"code", "id", "authenticator_hex", "avps"}
+        )
+        if unknown_radius_fields:
+            raise EmulatorInputError(
+                "protocol driver request radius unsupported field(s): "
+                + ", ".join(unknown_radius_fields)
+            )
+        expected_code = (
+            RADIUS_ACCOUNTING_REQUEST
+            if event.endswith("ACCT_REQUEST")
+            else RADIUS_AUTH_REQUEST
+        )
+        radius_code = radius_request.get("code", expected_code)
+        if isinstance(radius_code, str):
+            radius_code = RADIUS_REQUEST_CODE_NAMES.get(
+                radius_code.lower(), radius_code
+            )
+        if radius_code != expected_code:
+            raise EmulatorInputError(
+                f"protocol driver request radius code does not match {event}"
+            )
+        try:
+            _normalise_packets(
+                [
+                    {
+                        "protocol": "radius",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.10", "port": 53000},
+                        "destination": {
+                            "address": "192.0.2.53",
+                            "port": 1813 if event.endswith("ACCT_REQUEST") else 1812,
+                        },
+                        "code": radius_code,
+                        "id": radius_request.get("id", 0),
+                        "authenticator_hex": radius_request.get(
+                            "authenticator_hex", "00" * RADIUS_AUTHENTICATOR_BYTES
+                        ),
+                        "avps": radius_request.get("avps", []),
+                    }
+                ]
+            )
+        except (EmulatorInputError, AttributeError) as exc:
+            raise EmulatorInputError(
+                f"protocol driver request radius is invalid: {exc}"
+            ) from exc
     if event == "PCP_REQUEST":
         if "pcp" not in request:
             raise EmulatorInputError("PCP protocol driver requests require pcp")
         if {"payload", "payload_base64"} & set(request):
             raise EmulatorInputError(
                 "PCP protocol driver requests do not accept payload or payload_base64"
+            )
+    if event in {"RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST"}:
+        if "radius" not in request:
+            raise EmulatorInputError("RADIUS protocol driver requests require radius")
+        if {"payload", "payload_base64"} & set(request):
+            raise EmulatorInputError(
+                "RADIUS protocol driver requests do not accept payload or payload_base64"
             )
 
     headers = request.get("headers")
@@ -3413,9 +3488,14 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
         raise EmulatorInputError("DNS protocol driver requests require qname")
     if event.startswith("MQTT_") and "topic" not in request:
         raise EmulatorInputError("MQTT protocol driver requests require topic")
-    if not event.startswith(("DNS_", "MQTT_", "SIP_")) and event != "PCP_REQUEST" and not {
+    if (
+        not event.startswith(("DNS_", "MQTT_", "SIP_"))
+        and event not in {"PCP_REQUEST", "RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST"}
+        and not {
         "payload", "payload_base64"
-    } & set(request):
+        }
+        & set(request)
+    ):
         raise EmulatorInputError(
             "raw protocol driver requests require payload or payload_base64"
         )
@@ -3502,9 +3582,41 @@ def _protocol_request_packet(event: str, request: dict[str, Any]) -> dict[str, A
             "destination": {"address": "192.0.2.53", "port": PCP_PORT},
             "pcp": pcp_request,
         }
+    elif event in {"RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST"}:
+        radius_request = request.get("radius")
+        if not isinstance(radius_request, dict):
+            raise EmulatorInputError("RADIUS protocol driver requests require radius")
+        expected_code = (
+            RADIUS_ACCOUNTING_REQUEST
+            if event.endswith("ACCT_REQUEST")
+            else RADIUS_AUTH_REQUEST
+        )
+        radius_code = radius_request.get("code", expected_code)
+        if isinstance(radius_code, str):
+            radius_code = RADIUS_REQUEST_CODE_NAMES.get(
+                radius_code.lower(), radius_code
+            )
+        if radius_code != expected_code:
+            raise EmulatorInputError(
+                f"protocol driver request radius code does not match {event}"
+            )
+        packet = {
+            **common,
+            "protocol": "radius",
+            "destination": {
+                "address": "192.0.2.53",
+                "port": 1813 if event.endswith("ACCT_REQUEST") else 1812,
+            },
+            "code": radius_code,
+            "id": radius_request.get("id", 0),
+            "authenticator_hex": radius_request.get(
+                "authenticator_hex", "00" * RADIUS_AUTHENTICATOR_BYTES
+            ),
+            "avps": radius_request.get("avps", []),
+        }
     else:
         raise EmulatorInputError(
-            "local protocol replay currently supports HTTP, DNS, MQTT, SIP, and PCP requests"
+            "local protocol replay currently supports HTTP, DNS, MQTT, SIP, PCP, and RADIUS requests"
         )
     try:
         return _normalise_packets([packet])[0]
@@ -11393,6 +11505,13 @@ RADIUS_ATTRIBUTE_HEADER_LENGTH = 2
 RADIUS_VENDOR_SPECIFIC = 26
 RADIUS_AUTH_REQUEST = 1
 RADIUS_ACCOUNTING_REQUEST = 4
+RADIUS_REQUEST_CODE_NAMES = {
+    "access-request": RADIUS_AUTH_REQUEST,
+    "access-accept": 2,
+    "access-reject": 3,
+    "accounting-request": RADIUS_ACCOUNTING_REQUEST,
+    "accounting-response": 5,
+}
 RADIUS_ACCOUNTING_RESPONSE = 5
 RADIUS_AUTH_RESPONSE_CODES = frozenset({2, 3, 11})
 RADIUS_AUTH_ATTRIBUTE_CODES = {
