@@ -5089,6 +5089,46 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["status_counts"], {"ok": 37})
         self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
 
+    def test_antifraud_candidate_sweep_uses_profile_and_event_fixtures(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 39, namespace="ANTIFRAUD", variants=1
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        for command in (
+            "ANTIFRAUD::disable_app_layer_encryption",
+            "ANTIFRAUD::disable_auto_transactions",
+            "ANTIFRAUD::disable_injection",
+            "ANTIFRAUD::disable_malware",
+            "ANTIFRAUD::disable_phishing",
+        ):
+            self.assertEqual(by_command[command]["event"], "HTTP_REQUEST")
+            self.assertEqual(by_command[command]["profiles"], ["TCP", "FASTHTTP", "HTTP"])
+        self.assertEqual(by_command["ANTIFRAUD::fingerprint"]["event"], "ANTIFRAUD_LOGIN")
+        self.assertEqual(by_command["ANTIFRAUD::guid"]["event"], "ANTIFRAUD_LOGIN")
+        self.assertEqual(by_command["ANTIFRAUD::username"]["event"], "ANTIFRAUD_LOGIN")
+        self.assertEqual(
+            [variant["args"] for variant in by_command["ANTIFRAUD::enable_log"]["argument_candidates"]],
+            [[], ["Error"], ["Warning"], ["Notice"], ["Informational"], ["Debug"]],
+        )
+
+        first = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 0, 32, namespace="ANTIFRAUD", variants=8
+        )
+        second = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 32, 32, namespace="ANTIFRAUD", variants=8
+        )
+        self.assertEqual(first["summary"]["status_counts"], {"ok": 32})
+        self.assertEqual(second["summary"]["status_counts"], {"ok": 12})
+        self.assertEqual(first["summary"]["execution_status_counts"]["error"], 0)
+        self.assertEqual(second["summary"]["execution_status_counts"]["error"], 0)
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(

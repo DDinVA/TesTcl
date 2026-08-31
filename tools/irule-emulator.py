@@ -2934,9 +2934,17 @@ def _command_probe_template(
     required_profiles = set(requirements.profiles) if requirements is not None else set()
     implied_profiles = set(selected_props.implied_profiles)
     profile_candidates = required_profiles | implied_profiles
-    # HTTP and FASTHTTP are alternatives; a minimal collector fixture should
-    # choose one concrete profile rather than attach both to a virtual server.
-    if "HTTP" in profile_candidates:
+    # HTTP and FASTHTTP are alternatives when they are merely implied by the
+    # selected event. An explicit command requirement wins. If a command
+    # explicitly requires FASTHTTP but the selected event is driven by HTTP,
+    # retain both profiles so the reusable HTTP lifecycle can actually fire.
+    if "HTTP" in required_profiles:
+        add_profile("HTTP")
+    if "FASTHTTP" in required_profiles:
+        add_profile("FASTHTTP")
+        if "HTTP" in implied_profiles:
+            add_profile("HTTP")
+    elif "HTTP" in profile_candidates:
         add_profile("HTTP")
     elif "FASTHTTP" in profile_candidates:
         add_profile("FASTHTTP")
@@ -2989,6 +2997,14 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
     "TCP::recvwnd": (("auto",), ("65535",)),
     "TCP::release": ((), ("1",)),
     "TCP::sendbuf": (("auto",), ("65535",)),
+    "ANTIFRAUD::enable_log": (
+        (),
+        ("Error",),
+        ("Warning",),
+        ("Notice",),
+        ("Informational",),
+        ("Debug",),
+    ),
     "HTTP::retry": (
         ("GET /testcl/command HTTP/1.1\r\nHost: example.test\r\n\r\n",),
         ("-reset", "GET /testcl/command HTTP/1.1\r\nHost: example.test\r\n\r\n"),
@@ -3001,6 +3017,9 @@ _CANDIDATE_EVENT_HINTS = {
     "TCP::notify": "CLIENT_DATA",
     "HTTP::release": "HTTP_REQUEST_DATA",
     "HTTP::retry": "HTTP_RESPONSE",
+    "ANTIFRAUD::fingerprint": "ANTIFRAUD_LOGIN",
+    "ANTIFRAUD::guid": "ANTIFRAUD_LOGIN",
+    "ANTIFRAUD::username": "ANTIFRAUD_LOGIN",
 }
 
 

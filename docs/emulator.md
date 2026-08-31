@@ -425,7 +425,10 @@ fixture or protocol driver before collection. A small set of modeled lifecycle
 commands also carries explicit safe event hints (for example,
 `HTTP::release` in `HTTP_REQUEST_DATA` and `HTTP::retry` in `HTTP_RESPONSE`)
 so generated sweeps do not confuse an invalid event fixture with a semantic
-failure. Use
+failure. When a command explicitly requires `FASTHTTP` but its selected event
+is driven by the reusable HTTP lifecycle, the local fixture may include both
+profiles; this is an execution fixture, not a claim that a production virtual
+server should attach incompatible profiles. Use
 `GET /v1/behavior-candidates` for the checked-in packs or `POST
 /v1/behavior-candidates` with `{"packs":[...]}` for custom packs. The same
 operation is exposed as `irule_behavior_candidates` in MCP.
