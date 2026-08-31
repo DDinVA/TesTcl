@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "auth-controls-17.5",
+  "cases": [
+    {
+      "id": "successful-authentication-and-session-data",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "AUTH"],
+        "auth": {
+          "type": "pam",
+          "service": "default_radius",
+          "ldap_status": "success",
+          "ldap_username": "alice",
+          "response_data": {"user": "alice", "role": "admin"}
+        },
+        "irule": "when CLIENT_ACCEPTED {\n  set ::auth_id [AUTH::start pam default_radius]\n  AUTH::subscribe $::auth_id\n  AUTH::username_credential $::auth_id alice\n}\nwhen HTTP_REQUEST {\n  AUTH::password_credential $::auth_id secret\n  AUTH::authenticate $::auth_id\n}\nwhen AUTH_RESULT {\n  log local0. \"result=[AUTH::status $::auth_id] data=[AUTH::response_data $::auth_id] id=[AUTH::last_event_session_id] ldap_status=[AUTH::ssl_cc_ldap_status $::auth_id]\"\n}\nwhen AUTH_SUCCESS {\n  log local0. \"success=[AUTH::status] ldap=[AUTH::ssl_cc_ldap_username $::auth_id]\"\n  AUTH::unsubscribe $::auth_id\n}",
+        "request": {"uri": "/login"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired"], "equals": ["CLIENT_ACCEPTED", "HTTP_REQUEST", "AUTH_RESULT", "AUTH_SUCCESS"]},
+          {"path": ["results", 0, "semantic", "auth", "enabled"], "equals": true},
+          {"path": ["results", 0, "semantic", "auth", "last_event"], "equals": "AUTH_SUCCESS"},
+          {"path": ["results", 0, "semantic", "auth", "last_event_session_id"], "equals": "auth-1"},
+          {"path": ["results", 0, "semantic", "auth", "session_count"], "equals": 1},
+          {"path": ["results", 0, "semantic", "auth", "sessions", 0, "status"], "equals": 0},
+          {"path": ["results", 0, "semantic", "auth", "sessions", 0, "subscribed"], "equals": false},
+          {"path": ["results", 0, "semantic", "auth", "sessions", 0, "last_event"], "equals": "AUTH_SUCCESS"}
+        ]
+      }
+    },
+    {
+      "id": "credential-challenge-and-continuation",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "AUTH"],
+        "auth": {
+          "result": "wantcredential",
+          "credential_type": "otp",
+          "prompt": "Token:",
+          "prompt_style": "echo_on"
+        },
+        "irule": "when CLIENT_ACCEPTED {\n  set ::auth_id [AUTH::start pam radius]\n  AUTH::subscribe $::auth_id\n}\nwhen HTTP_REQUEST { AUTH::authenticate $::auth_id }\nwhen AUTH_WANTCREDENTIAL {\n  log local0. \"want=[AUTH::wantcredential_type $::auth_id] prompt=[AUTH::wantcredential_prompt $::auth_id] style=[AUTH::wantcredential_prompt_style $::auth_id]\"\n  AUTH::authenticate_continue $::auth_id 123456\n}\nwhen AUTH_RESULT { log local0. \"status=[AUTH::status]\" }\nwhen AUTH_SUCCESS { log local0. continued }",
+        "request": {"uri": "/login"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired"], "equals": ["CLIENT_ACCEPTED", "HTTP_REQUEST", "AUTH_WANTCREDENTIAL", "AUTH_RESULT", "AUTH_SUCCESS"]},
+          {"path": ["results", 0, "semantic", "auth", "sessions", 0, "status"], "equals": 0},
+          {"path": ["results", 0, "semantic", "auth", "sessions", 0, "in_progress"], "equals": false},
+          {"path": ["results", 0, "semantic", "auth", "sessions", 0, "subscribed"], "equals": true},
+          {"path": ["results", 0, "semantic", "auth", "sessions", 0, "last_event"], "equals": "AUTH_SUCCESS"}
+        ]
+      }
+    },
+    {
+      "id": "certificate-credential-registration",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "AUTH"],
+        "auth": {"result": "success"},
+        "irule": "when CLIENT_ACCEPTED {\n  set ::auth_id [AUTH::start pam certificate_service]\n  AUTH::cert_credential $::auth_id client-cert\n  AUTH::cert_issuer_credential $::auth_id issuer-cert\n  AUTH::subscribe $::auth_id\n}\nwhen HTTP_REQUEST { AUTH::authenticate $::auth_id }\nwhen AUTH_RESULT { log local0. \"certificate-status=[AUTH::status]\" }",
+        "request": {"uri": "/certificate-login"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired"], "equals": ["CLIENT_ACCEPTED", "HTTP_REQUEST", "AUTH_RESULT", "AUTH_SUCCESS"]},
+          {"path": ["results", 0, "semantic", "auth", "sessions", 0, "status"], "equals": 0},
+          {"path": ["results", 0, "semantic", "auth", "sessions", 0, "in_progress"], "equals": false}
+        ]
+      }
+    },
+    {
+      "id": "challenge-abort",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "AUTH"],
+        "auth": {"result": "wantcredential"},
+        "irule": "when CLIENT_ACCEPTED { set ::auth_id [AUTH::start pam radius] }\nwhen HTTP_REQUEST { AUTH::authenticate $::auth_id }\nwhen AUTH_WANTCREDENTIAL { AUTH::abort $::auth_id }\nwhen AUTH_FAILURE { log local0. \"aborted=[AUTH::status]\" }",
+        "request": {"uri": "/abort"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired"], "equals": ["CLIENT_ACCEPTED", "HTTP_REQUEST", "AUTH_WANTCREDENTIAL", "AUTH_FAILURE"]},
+          {"path": ["results", 0, "semantic", "auth", "sessions", 0, "valid"], "equals": false},
+          {"path": ["results", 0, "semantic", "auth", "sessions", 0, "status"], "equals": 1},
+          {"path": ["results", 0, "semantic", "auth", "sessions", 0, "last_event"], "equals": "AUTH_FAILURE"}
+        ]
+      }
+    }
+  ]
+}
