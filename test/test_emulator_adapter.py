@@ -4746,6 +4746,7 @@ when HTTP_RESPONSE_RELEASE {
             "access-controls-17.5.json": 3,
             "adapt-controls-17.5.json": 2,
             "auth-controls-17.5.json": 4,
+            "gtp-controls-17.5.json": 2,
             "antifraud-controls-17.5.json": 2,
             "asm-controls-17.5.json": 2,
             "botdefense-controls-17.5.json": 2,

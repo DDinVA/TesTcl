@@ -99,7 +99,7 @@ jobs:
 
           docker run --rm testcl-irule-emulator:ci --behavior-coverage >/tmp/testcl-behavior-coverage.json
           grep -F '"target_f5_command_count":989' /tmp/testcl-behavior-coverage.json
-          grep -F '"covered_command_count":617' /tmp/testcl-behavior-coverage.json
+          grep -F '"covered_command_count":629' /tmp/testcl-behavior-coverage.json
           docker run --rm testcl-irule-emulator:ci \
             --behavior-pack /opt/testcl/examples/behavior-packs/aaa-17.5.json \
             >/tmp/testcl-aaa-pack.json
@@ -115,6 +115,11 @@ jobs:
             >/tmp/testcl-adapt-controls-pack.json
           grep -F '"status":"passed"' /tmp/testcl-adapt-controls-pack.json
           grep -F '"case_count":2' /tmp/testcl-adapt-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/gtp-controls-17.5.json \
+            >/tmp/testcl-gtp-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-gtp-controls-pack.json
+          grep -F '"case_count":2' /tmp/testcl-gtp-controls-pack.json
           docker run --rm testcl-irule-emulator:ci \
             --behavior-pack /opt/testcl/examples/behavior-packs/sctp-controls-17.5.json \
             >/tmp/testcl-sctp-controls-pack.json

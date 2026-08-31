@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "gtp-controls-17.5",
+  "cases": [
+    {
+      "id": "v2-signalling-message-and-ie-controls",
+      "scenario": {
+        "profiles": ["GTP"],
+        "irule": "when GTP_SIGNALLING_INGRESS { set ::version [GTP::header version]; set ::type [GTP::header type]; set ::teid [GTP::header teid]; set ::sequence [GTP::header sequence]; set ::npdu [GTP::header npdu]; set ::length [GTP::length]; set ::message [GTP::message]; set ::payload [GTP::payload]; set ::cause [GTP::ie get value cause:0]; set ::count [GTP::ie count -type cause]; set ::list [GTP::ie get list -type cause]; set ::exists [GTP::ie exists cause:0]; set ::clone [GTP::clone]; GTP::parse $::message; GTP::new 2 32; GTP::header sequence set 12; GTP::header npdu set 9; GTP::forward $::message; GTP::respond $::message; log local0. \"v=$::version type=$::type teid=$::teid seq=[GTP::header sequence] npdu=[GTP::header npdu] len=$::length cause=$::cause count=$::count list=$::list exists=$::exists payload=$::payload\" }",
+        "packets": [
+          {
+            "protocol": "gtp",
+            "version": 2,
+            "type": 32,
+            "teid": 305419896,
+            "sequence": 7,
+            "ies": [{"type": 2, "instance": 0, "data_hex": "01"}]
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "GTP_SIGNALLING_INGRESS"},
+          {"path": ["trace", 0, "events", 2, "state", "gtp", "version"], "equals": "2"},
+          {"path": ["trace", 0, "events", 2, "state", "gtp", "type"], "equals": "32"},
+          {"path": ["trace", 0, "events", 2, "state", "gtp", "teid"], "equals": "305419896"},
+          {"path": ["trace", 0, "events", 2, "state", "gtp", "sequence"], "equals": "12"},
+          {"path": ["trace", 0, "events", 2, "state", "gtp", "npdu"], "equals": "9"},
+          {"path": ["trace", 0, "events", 2, "state", "gtp", "length"], "equals": "13"},
+          {"path": ["trace", 0, "events", 2, "state", "gtp", "ies"], "equals": "{\"2\" \"0\" \"01\"}"},
+          {"path": ["trace", 0, "events", 2, "state", "gtp", "message_hex"], "equals": "4820000d1234567800000c000200010001"},
+          {"path": ["trace", 0, "events", 2, "state", "gtp", "responded"], "equals": "true"}
+        ]
+      }
+    },
+    {
+      "id": "g-pdu-tunnel-payload-and-discard",
+      "scenario": {
+        "profiles": ["GTP"],
+        "irule": "when GTP_GPDU_INGRESS { set ::prefix [GTP::payload 4]; set ::tunnel [list [GTP::tunnel is_ip] [GTP::tunnel ip_version] [GTP::tunnel ip_proto] [GTP::tunnel ip_src] [GTP::tunnel ip_dst] [GTP::tunnel tcp_src_port] [GTP::tunnel tcp_dst_port]]; set ::replacement [expr {$::tunnel eq \"1 4 6 192.0.2.1 198.51.100.2 1234 5678\" ? \"TEST\" : \"FAIL\"}]; GTP::payload replace 0 4 $::replacement; GTP::discard; log local0. \"prefix=$::prefix tunnel=$::tunnel payload=[GTP::payload]\" }",
+        "packets": [
+          {
+            "protocol": "gtp",
+            "version": 2,
+            "type": 255,
+            "teid": 1,
+            "sequence": 1,
+            "payload_hex": "450000280000000028060000c0000201c633640204d2162e00000000000000000000000000000000"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "GTP_GPDU_INGRESS"},
+          {"path": ["trace", 0, "events", 2, "state", "gtp", "payload_hex"], "equals": "544553540000000028060000c0000201c633640204d2162e00000000000000000000000000000000"},
+          {"path": ["trace", 0, "events", 2, "state", "gtp", "payload_length"], "equals": "40"},
+          {"path": ["trace", 0, "events", 2, "state", "gtp", "discarded"], "equals": "true"},
+          {"path": ["trace", 0, "discarded"], "equals": true},
+          {"path": ["trace", 0, "drop_reason"], "equals": "message"}
+        ]
+      }
+    }
+  ]
+}
