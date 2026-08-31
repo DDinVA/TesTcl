@@ -4761,6 +4761,7 @@ when HTTP_RESPONSE_RELEASE {
             "tmm-17.5.json": 5,
             "flowtable-17.5.json": 7,
             "classification-17.5.json": 10,
+            "ip-controls-17.5.json": 2,
             "profile-17.5.json": 25,
             "mr-17.5.json": 23,
             "http-edge-17.5.json": 23,
