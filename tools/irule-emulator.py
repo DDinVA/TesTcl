@@ -296,7 +296,7 @@ PROTOCOL_REQUEST_FIELDS = frozenset(
         "destination", "timeout", "payload", "payload_base64", "qname", "qtype",
         "qclass", "transaction_id", "recursion_desired", "client_id", "topic",
         "keepalive", "message", "method", "uri", "status", "headers", "body", "pcp",
-        "radius",
+        "radius", "websocket",
     }
 )
 IRULE_ANALYSIS_MAX_SOURCE_BYTES = 512 * 1024
@@ -2923,6 +2923,15 @@ def _protocol_request_template(event: str) -> dict[str, Any] | None:
             "method": "OPTIONS",
             "uri": "sip:test@example.invalid",
         }
+    if event == "WS_REQUEST":
+        return {
+            "websocket": {
+                "method": "GET",
+                "uri": "/socket",
+                "host": "example.test",
+                "sec_websocket_key": "dGhlIHNhbXBsZSBub25jZQ==",
+            }
+        }
     if event == "PCP_REQUEST":
         return {
             "pcp": {
@@ -3398,6 +3407,100 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
             raise EmulatorInputError(
                 f"protocol driver request radius is invalid: {exc}"
             ) from exc
+    if "websocket" in request:
+        if event != "WS_REQUEST":
+            raise EmulatorInputError(
+                "protocol driver request websocket is supported only for WS_REQUEST"
+            )
+        websocket_request = request["websocket"]
+        if not isinstance(websocket_request, dict):
+            raise EmulatorInputError(
+                "protocol driver request websocket must be an object"
+            )
+        allowed_websocket_fields = {
+            "method", "uri", "host", "headers", "sec_websocket_key"
+        }
+        unknown_websocket_fields = sorted(
+            set(websocket_request) - allowed_websocket_fields
+        )
+        if unknown_websocket_fields:
+            raise EmulatorInputError(
+                "protocol driver request websocket unsupported field(s): "
+                + ", ".join(unknown_websocket_fields)
+            )
+        for field, default in (
+            ("method", "GET"),
+            ("uri", "/socket"),
+            ("host", "example.test"),
+            ("sec_websocket_key", "dGhlIHNhbXBsZSBub25jZQ=="),
+        ):
+            value = websocket_request.get(field, default)
+            if not isinstance(value, str) or not value:
+                raise EmulatorInputError(
+                    f"protocol driver request websocket {field} must be a non-empty string"
+                )
+            if "\x00" in value or "\r" in value or "\n" in value:
+                raise EmulatorInputError(
+                    f"protocol driver request websocket {field} must not contain NUL or line breaks"
+                )
+            try:
+                value_bytes = value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise EmulatorInputError(
+                    f"protocol driver request websocket {field} must be valid UTF-8"
+                ) from exc
+            if len(value_bytes) > PROTOCOL_REQUEST_MAX_TEXT_BYTES:
+                raise EmulatorInputError(
+                    f"protocol driver request websocket {field} is too long"
+                )
+        if websocket_request.get("method", "GET") != "GET":
+            raise EmulatorInputError(
+                "protocol driver request websocket method must be GET"
+            )
+        if not websocket_request.get("uri", "/socket").startswith("/"):
+            raise EmulatorInputError(
+                "protocol driver request websocket uri must be an absolute path"
+            )
+        try:
+            websocket_key = base64.b64decode(
+                websocket_request.get(
+                    "sec_websocket_key", "dGhlIHNhbXBsZSBub25jZQ=="
+                ),
+                validate=True,
+            )
+        except (binascii.Error, ValueError) as exc:
+            raise EmulatorInputError(
+                "protocol driver request websocket sec_websocket_key must be valid base64"
+            ) from exc
+        if len(websocket_key) != 16:
+            raise EmulatorInputError(
+                "protocol driver request websocket sec_websocket_key must decode to 16 bytes"
+            )
+        websocket_headers = websocket_request.get("headers", {})
+        if not isinstance(websocket_headers, dict):
+            raise EmulatorInputError(
+                "protocol driver request websocket headers must be an object"
+            )
+        for header_name, header_value in websocket_headers.items():
+            if (
+                not isinstance(header_name, str)
+                or not header_name
+                or not isinstance(header_value, str)
+                or not header_value
+                or "\x00" in header_name
+                or "\x00" in header_value
+                or "\r" in header_name
+                or "\n" in header_name
+                or "\r" in header_value
+                or "\n" in header_value
+            ):
+                raise EmulatorInputError(
+                    "protocol driver request websocket headers must be non-empty strings without line breaks"
+                )
+        if {"payload", "payload_base64"} & set(request):
+            raise EmulatorInputError(
+                "WS_REQUEST protocol driver requests do not accept payload fields"
+            )
     if event == "PCP_REQUEST":
         if "pcp" not in request:
             raise EmulatorInputError("PCP protocol driver requests require pcp")
@@ -3412,6 +3515,8 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
             raise EmulatorInputError(
                 "RADIUS protocol driver requests do not accept payload or payload_base64"
             )
+    if event == "WS_REQUEST" and "websocket" not in request:
+        raise EmulatorInputError("WS_REQUEST protocol driver requests require websocket")
 
     headers = request.get("headers")
     if headers is not None:
@@ -3490,7 +3595,10 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
         raise EmulatorInputError("MQTT protocol driver requests require topic")
     if (
         not event.startswith(("DNS_", "MQTT_", "SIP_"))
-        and event not in {"PCP_REQUEST", "RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST"}
+        and event not in {
+            "PCP_REQUEST", "RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST",
+            "WS_REQUEST",
+        }
         and not {
         "payload", "payload_base64"
         }
@@ -3614,9 +3722,39 @@ def _protocol_request_packet(event: str, request: dict[str, Any]) -> dict[str, A
             ),
             "avps": radius_request.get("avps", []),
         }
+    elif event == "WS_REQUEST":
+        websocket_request = request.get("websocket")
+        if not isinstance(websocket_request, dict):
+            raise EmulatorInputError(
+                "WS_REQUEST protocol driver requests require websocket"
+            )
+        headers = dict(websocket_request.get("headers", {}))
+        defaults = {
+            "Host": websocket_request.get("host", "example.test"),
+            "Upgrade": "websocket",
+            "Connection": "Upgrade",
+            "Sec-WebSocket-Key": websocket_request.get(
+                "sec_websocket_key", "dGhlIHNhbXBsZSBub25jZQ=="
+            ),
+            "Sec-WebSocket-Version": "13",
+        }
+        existing = {str(key).lower() for key in headers}
+        for key, value in defaults.items():
+            if key.lower() not in existing:
+                headers[key] = value
+        packet = {
+            **common,
+            "protocol": "websocket",
+            "destination": {"address": "192.0.2.53", "port": 80},
+            "type": "request",
+            "method": websocket_request.get("method", "GET"),
+            "uri": websocket_request.get("uri", "/socket"),
+            "host": websocket_request.get("host", "example.test"),
+            "headers": headers,
+        }
     else:
         raise EmulatorInputError(
-            "local protocol replay currently supports HTTP, DNS, MQTT, SIP, PCP, and RADIUS requests"
+            "local protocol replay currently supports HTTP, DNS, MQTT, SIP, PCP, RADIUS, and WebSocket requests"
         )
     try:
         return _normalise_packets([packet])[0]

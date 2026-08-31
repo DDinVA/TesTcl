@@ -28,6 +28,7 @@ MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
 MAX_TEXT_BYTES = 256 * 1024
 MAX_HTTP_HEADERS = 128
 MAX_HTTP_LINE_BYTES = 8 * 1024
+MAX_WEBSOCKET_FRAME_BYTES = MAX_PAYLOAD_BYTES
 DEFAULT_TIMEOUT = 10.0
 MAX_TIMEOUT = 60.0
 DNS_TYPES = {
@@ -281,8 +282,8 @@ def build_mqtt_connect_publish(request: dict[str, Any]) -> bytes:
     return connect + publish
 
 
-def _http_header_value(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value:
+def _http_header_value(value: Any, field: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
         raise DriverError(f"HTTP {field} must be a non-empty string")
     if "\r" in value or "\n" in value or "\x00" in value:
         raise DriverError(f"HTTP {field} cannot contain line breaks or NUL")
@@ -330,7 +331,7 @@ def build_http_request(request: dict[str, Any]) -> bytes:
                 "HTTP header names must be non-empty and cannot contain separators"
             )
         _http_header_value(key, "header name")
-        normalised_value = _http_header_value(value, "header value")
+        normalised_value = _http_header_value(value, "header value", allow_empty=True)
         lowered = key.lower()
         if lowered in header_names:
             raise DriverError(f"HTTP header {key!r} is repeated")
@@ -373,6 +374,156 @@ def build_http_request(request: dict[str, Any]) -> bytes:
     if len(encoded) > MAX_PAYLOAD_BYTES:
         raise DriverError("HTTP request exceeds the 2 MiB limit")
     return encoded
+
+
+WEBSOCKET_OPCODES = {
+    "continuation": 0x0,
+    "text": 0x1,
+    "binary": 0x2,
+    "close": 0x8,
+    "ping": 0x9,
+    "pong": 0xA,
+}
+DEFAULT_WEBSOCKET_KEY = "dGhlIHNhbXBsZSBub25jZQ=="
+
+
+def _websocket_key(value: Any) -> str:
+    value = _http_ascii_value(value, "sec_websocket_key")
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise DriverError("HTTP sec_websocket_key must be valid base64") from exc
+    if len(decoded) != 16:
+        raise DriverError("HTTP sec_websocket_key must decode to 16 bytes")
+    return value
+
+
+def _websocket_frame(request: dict[str, Any]) -> bytes:
+    frame_type = request.get("frame_type", "text")
+    if not isinstance(frame_type, str) or frame_type.lower() not in WEBSOCKET_OPCODES:
+        raise DriverError(
+            "WebSocket frame_type must be continuation, text, binary, close, ping, or pong"
+        )
+    frame_type = frame_type.lower()
+    fin = request.get("fin", True)
+    if not isinstance(fin, bool):
+        raise DriverError("WebSocket fin must be a boolean")
+    if "payload_base64" in request:
+        if "payload" in request:
+            raise DriverError("WebSocket frame must use payload or payload_base64, not both")
+        payload = _payload_bytes(request)
+    else:
+        payload_value = request.get("payload", "")
+        if not isinstance(payload_value, str):
+            raise DriverError("WebSocket payload must be a string when payload_base64 is not used")
+        try:
+            payload = payload_value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise DriverError("WebSocket payload must be valid UTF-8") from exc
+    if len(payload) > MAX_WEBSOCKET_FRAME_BYTES:
+        raise DriverError("WebSocket frame exceeds the 2 MiB limit")
+    if frame_type in {"close", "ping", "pong"}:
+        if not fin:
+            raise DriverError("WebSocket control frames must set fin=true")
+        if len(payload) > 125:
+            raise DriverError("WebSocket control frames cannot exceed 125 bytes")
+    mask_hex = request.get("mask_hex", "01020304")
+    if not isinstance(mask_hex, str) or len(mask_hex) != 8:
+        raise DriverError("WebSocket mask_hex must contain exactly 4 bytes")
+    try:
+        mask = bytes.fromhex(mask_hex)
+    except ValueError as exc:
+        raise DriverError("WebSocket mask_hex must be hexadecimal") from exc
+    length = len(payload)
+    if length < 126:
+        length_bytes = bytes([0x80 | length])
+    elif length <= 0xFFFF:
+        length_bytes = bytes([0x80 | 126]) + struct.pack(">H", length)
+    else:
+        length_bytes = bytes([0x80 | 127]) + struct.pack(">Q", length)
+    masked_payload = bytes(
+        value ^ mask[index % 4] for index, value in enumerate(payload)
+    )
+    return (
+        bytes([(0x80 if fin else 0) | WEBSOCKET_OPCODES[frame_type]])
+        + length_bytes
+        + mask
+        + masked_payload
+    )
+
+
+def build_websocket_request(request: dict[str, Any], event: str) -> bytes:
+    """Build a WebSocket upgrade and optional masked client frame."""
+    websocket = request.get("websocket", {})
+    if not isinstance(websocket, dict):
+        raise DriverError("WebSocket request websocket must be an object")
+    allowed = {
+        "method", "uri", "host", "headers", "sec_websocket_key", "frame_type",
+        "fin", "mask_hex", "payload", "payload_base64",
+    }
+    unknown = sorted(set(websocket) - allowed)
+    if unknown:
+        raise DriverError("WebSocket request unsupported field(s): " + ", ".join(unknown))
+    method = websocket.get("method", "GET")
+    if not isinstance(method, str) or method != "GET":
+        raise DriverError("WebSocket upgrade method must be GET")
+    uri = _http_ascii_value(websocket.get("uri", "/socket"), "uri")
+    if not uri.startswith("/"):
+        raise DriverError("WebSocket uri must be an absolute path")
+    host = _http_header_value(websocket.get("host", "example.test"), "host")
+    key = _websocket_key(websocket.get("sec_websocket_key", DEFAULT_WEBSOCKET_KEY))
+    headers = websocket.get("headers", {})
+    if not isinstance(headers, dict) or len(headers) > MAX_HTTP_HEADERS:
+        raise DriverError(
+            f"WebSocket headers must be an object with at most {MAX_HTTP_HEADERS} items"
+        )
+    normalised_headers: list[tuple[str, str]] = []
+    header_names: set[str] = set()
+    for name, value in headers.items():
+        if not isinstance(name, str) or not name or not name.isascii() or any(
+            character not in "!#$%&'*+-.^_`|~" and not character.isalnum()
+            for character in name
+        ):
+            raise DriverError("WebSocket header names must be valid HTTP names")
+        normalised_value = _http_header_value(value, "header value", allow_empty=True)
+        lowered = name.lower()
+        if lowered in header_names:
+            raise DriverError(f"WebSocket header {name!r} is repeated")
+        header_names.add(lowered)
+        normalised_headers.append((name, normalised_value))
+    required_headers = [
+        ("Host", host),
+        ("Upgrade", "websocket"),
+        ("Connection", "Upgrade"),
+        ("Sec-WebSocket-Key", key),
+        ("Sec-WebSocket-Version", "13"),
+    ]
+    for name, value in required_headers:
+        lowered = name.lower()
+        if lowered not in header_names:
+            normalised_headers.append((name, value))
+            header_names.add(lowered)
+    if len(normalised_headers) > MAX_HTTP_HEADERS:
+        raise DriverError(
+            f"WebSocket headers must contain at most {MAX_HTTP_HEADERS} items"
+        )
+    handshake = (
+        "\r\n".join(
+            [f"{method} {uri} HTTP/1.1"]
+            + [f"{name}: {value}" for name, value in normalised_headers]
+        )
+        + "\r\n\r\n"
+    ).encode("latin-1")
+    if event == "WS_REQUEST":
+        return handshake
+    if event in {"WS_CLIENT_FRAME", "WS_CLIENT_DATA"}:
+        frame = _websocket_frame(websocket)
+        if len(handshake) + len(frame) > MAX_PAYLOAD_BYTES:
+            raise DriverError("WebSocket upgrade and frame exceed the 2 MiB limit")
+        return handshake + frame
+    raise DriverError(
+        "WebSocket protocol driver supports WS_REQUEST, WS_CLIENT_FRAME, and WS_CLIENT_DATA"
+    )
 
 
 def build_sip_message(request: dict[str, Any], event: str) -> bytes:
@@ -664,6 +815,17 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
                 default_port=80,
             ),
             build_http_request(request),
+            timeout,
+        )
+    if event.startswith("WS_") and "websocket" in request:
+        return (
+            endpoint_from_request(
+                request,
+                trigger.get("traffic_url"),
+                default_scheme="tcp",
+                default_port=80,
+            ),
+            build_websocket_request(request, event),
             timeout,
         )
     if event.startswith("DNS_"):

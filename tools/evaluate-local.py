@@ -106,6 +106,16 @@ def _probe_requests(emulator: Any) -> list[dict[str, Any]]:
                 "request": templates("RADIUS_AAA_AUTH_REQUEST"),
             },
         },
+        {
+            "name": "WS::request",
+            "request": {
+                "command": "WS::request",
+                "args": ["key"],
+                "event": "WS_REQUEST",
+                "profiles": ["TCP", "HTTP", "WS"],
+                "request": templates("WS_REQUEST"),
+            },
+        },
     ]
 
 

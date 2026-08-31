@@ -91,6 +91,60 @@ def test_http_driver_rejects_header_injection_and_conflicting_body_sources() -> 
         )
 
 
+def test_websocket_driver_builds_upgrade_and_masked_client_frame() -> None:
+    payload = driver.build_websocket_request(
+        {
+            "websocket": {
+                "uri": "/socket",
+                "host": "example.test",
+                "sec_websocket_key": "dGhlIHNhbXBsZSBub25jZQ==",
+                "frame_type": "text",
+                "payload": "hello",
+                "mask_hex": "01020304",
+            }
+        },
+        "WS_CLIENT_FRAME",
+    )
+    assert payload.startswith(
+        b"GET /socket HTTP/1.1\r\n"
+        b"Host: example.test\r\n"
+        b"Upgrade: websocket\r\n"
+        b"Connection: Upgrade\r\n"
+        b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        b"Sec-WebSocket-Version: 13\r\n\r\n"
+    )
+    assert payload.endswith(b"\x81\x85\x01\x02\x03\x04igohn")
+    endpoint, handshake, timeout = driver.build_payload(
+        {
+            "event": "WS_REQUEST",
+            "traffic_url": "tcp://192.0.2.20:8080",
+            "request": {"websocket": {"uri": "/socket"}},
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 8080)
+    assert handshake.endswith(b"Sec-WebSocket-Version: 13\r\n\r\n")
+    assert timeout == 10.0
+
+
+def test_websocket_driver_rejects_invalid_mask_and_control_frame() -> None:
+    with pytest.raises(driver.DriverError, match="mask_hex"):
+        driver.build_websocket_request(
+            {"websocket": {"mask_hex": "bad", "payload": "x"}},
+            "WS_CLIENT_FRAME",
+        )
+    with pytest.raises(driver.DriverError, match="control frames"):
+        driver.build_websocket_request(
+            {
+                "websocket": {
+                    "frame_type": "ping",
+                    "fin": False,
+                    "payload": "x",
+                }
+            },
+            "WS_CLIENT_FRAME",
+        )
+
+
 def test_sip_driver_rejects_header_injection_and_adds_content_length() -> None:
     payload = driver.build_sip_message(
         {"method": "OPTIONS", "uri": "sip:test@example.com", "body": "hello"},

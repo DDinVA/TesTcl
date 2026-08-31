@@ -3979,6 +3979,44 @@ when HTTP_RESPONSE_RELEASE {
         )
         self.assertEqual(radius_probe["execution"]["status"], "ok")
         self.assertEqual(radius_probe["execution"]["value"], "1")
+        websocket_request = self.adapter._protocol_request_template("WS_REQUEST")
+        assert websocket_request is not None
+        self.assertEqual(
+            websocket_request,
+            {
+                "websocket": {
+                    "method": "GET",
+                    "uri": "/socket",
+                    "host": "example.test",
+                    "sec_websocket_key": "dGhlIHNhbXBsZSBub25jZQ==",
+                }
+            },
+        )
+        websocket_packet = self.adapter._protocol_request_packet(
+            "WS_REQUEST", websocket_request
+        )
+        self.assertEqual(websocket_packet["protocol"], "websocket")
+        self.assertEqual(websocket_packet["type"], "request")
+        self.assertEqual(
+            websocket_packet["headers"]["Sec-WebSocket-Key"],
+            "dGhlIHNhbXBsZSBub25jZQ==",
+        )
+        websocket_probe = self.adapter.run_command_probe(
+            {
+                "command": "WS::request",
+                "args": ["key"],
+                "event": "WS_REQUEST",
+                "profiles": ["TCP", "HTTP", "WS"],
+                "request": websocket_request,
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+            allow_external_protocol_request=True,
+        )
+        self.assertEqual(websocket_probe["execution"]["status"], "ok")
+        self.assertEqual(
+            websocket_probe["execution"]["value"],
+            "dGhlIHNhbXBsZSBub25jZQ==",
+        )
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "not both"):
             self.adapter._normalise_protocol_request(
                 "MQTT_CLIENT_DATA",

@@ -2505,7 +2505,8 @@ The generated plan contains one `command_probe` observation per runnable
 catalog command, a target-valid event/profile shell, and a status comparison.
 Its empty `args` array is intentional: command arguments and fixture values
 are command-specific and must be selected by the collector or operator from
-the catalog synopsis. HTTP/1.1, DNS, MQTT, SIP, PCP, and RADIUS event templates also include a small
+the catalog synopsis. HTTP/1.1, WebSocket-over-HTTP/1.1, DNS, MQTT, SIP, PCP,
+and RADIUS event templates also include a small
 starter `request` fixture for the bundled protocol driver; replace its
 destination and values for the target environment. Replace the placeholder
 provenance when using the defaults. The plan contains no reference output and
