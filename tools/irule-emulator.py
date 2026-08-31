@@ -3393,6 +3393,16 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
     "CACHE::uri": (("/testcl/asset",),),
     "CACHE::useragent": (("testcl-agent",),),
     "CACHE::userkey": (("tenant-testcl",),),
+    "LB::connlimit": (
+        ("node", "limit", "10", "key", "tenant-testcl"),
+        ("poolmember", "limit", "10", "key", "tenant-testcl"),
+        ("virtual", "limit", "10", "key", "tenant-testcl"),
+    ),
+    "LB::context_id": (("context-testcl",),),
+    "LB::dst_tag": (("destination-testcl",),),
+    "LB::mode": (("roundrobin",),),
+    "LB::reselect": (("pool", "api_pool"),),
+    "LB::src_tag": (("source-testcl",),),
 }
 _CANDIDATE_EVENT_HINTS = {
     "TCP::recvwnd": "CLIENT_ACCEPTED",

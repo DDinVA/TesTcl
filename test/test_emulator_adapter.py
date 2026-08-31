@@ -5632,6 +5632,43 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["status_counts"], {"ok": 20})
         self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
 
+    def test_lb_candidate_sweep_uses_pool_and_typed_control_fixtures(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        packs = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted((ROOT / "examples" / "behavior-packs").glob("*.json"))
+        ]
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, packs, 0, 20, namespace="LB", variants=1
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        self.assertEqual(
+            by_command["LB::connlimit"]["input"]["args"],
+            ["node", "limit", "10", "key", "tenant-testcl"],
+        )
+        self.assertEqual(
+            by_command["LB::mode"]["input"]["args"],
+            ["roundrobin"],
+        )
+        self.assertEqual(
+            by_command["LB::reselect"]["input"]["args"],
+            ["pool", "api_pool"],
+        )
+        self.assertEqual(
+            by_command["LB::reselect"]["input"]["scenario"]["pools"]["api_pool"],
+            ["192.0.2.10:80"],
+        )
+
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, packs, 0, 20, namespace="LB", variants=8
+        )
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 20)
+        self.assertEqual(sweep["summary"]["variant_count"], 32)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 32})
+        self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(
