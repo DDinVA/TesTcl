@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "tmm-17.5",
+  "cases": [
+    {
+      "id": "cmp-count",
+      "probe": {
+        "command": "TMM::cmp_count",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "state": {"tmm": {"cmp_count": 4, "cmp_group": 2, "cmp_groups": [0, 1, 2, 3], "cmp_primary_group": 0, "cmp_unit": 2}}
+      },
+      "expect": {"status": "ok", "value": "4"}
+    },
+    {
+      "id": "cmp-group",
+      "probe": {
+        "command": "TMM::cmp_group",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "state": {"tmm": {"cmp_count": 4, "cmp_group": 2, "cmp_groups": [0, 1, 2, 3], "cmp_primary_group": 0, "cmp_unit": 2}}
+      },
+      "expect": {"status": "ok", "value": "2"}
+    },
+    {
+      "id": "cmp-groups",
+      "probe": {
+        "command": "TMM::cmp_groups",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "state": {"tmm": {"cmp_count": 4, "cmp_group": 2, "cmp_groups": [0, 1, 2, 3], "cmp_primary_group": 0, "cmp_unit": 2}}
+      },
+      "expect": {"status": "ok", "value": "0 1 2 3"}
+    },
+    {
+      "id": "cmp-primary-group",
+      "probe": {
+        "command": "TMM::cmp_primary_group",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "state": {"tmm": {"cmp_count": 4, "cmp_group": 2, "cmp_groups": [0, 1, 2, 3], "cmp_primary_group": 0, "cmp_unit": 2}}
+      },
+      "expect": {"status": "ok", "value": "0"}
+    },
+    {
+      "id": "cmp-unit",
+      "probe": {
+        "command": "TMM::cmp_unit",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "state": {"tmm": {"cmp_count": 4, "cmp_group": 2, "cmp_groups": [0, 1, 2, 3], "cmp_primary_group": 0, "cmp_unit": 2}}
+      },
+      "expect": {"status": "ok", "value": "2"}
+    }
+  ]
+}

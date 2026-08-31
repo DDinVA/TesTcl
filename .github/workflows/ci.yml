@@ -97,7 +97,7 @@ jobs:
 
           docker run --rm testcl-irule-emulator:ci --behavior-coverage >/tmp/testcl-behavior-coverage.json
           grep -F '"target_f5_command_count":989' /tmp/testcl-behavior-coverage.json
-          grep -F '"covered_command_count":128' /tmp/testcl-behavior-coverage.json
+          grep -F '"covered_command_count":133' /tmp/testcl-behavior-coverage.json
           docker run --rm testcl-irule-emulator:ci \
             --behavior-pack /opt/testcl/examples/behavior-packs/http2-17.5.json \
             >/tmp/testcl-http2-pack.json
@@ -108,6 +108,11 @@ jobs:
             >/tmp/testcl-route-pack.json
           grep -F '"status":"passed"' /tmp/testcl-route-pack.json
           grep -F '"case_count":10' /tmp/testcl-route-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/tmm-17.5.json \
+            >/tmp/testcl-tmm-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-tmm-pack.json
+          grep -F '"case_count":5' /tmp/testcl-tmm-pack.json
           docker run --rm testcl-irule-emulator:ci \
             --behavior-candidates --namespace HTTP --limit 1 \
             >/tmp/testcl-behavior-candidates.json
