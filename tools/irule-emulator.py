@@ -3251,6 +3251,38 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("dnsmsg1", "authority"),
         ("dnsmsg1", "additional"),
     ),
+    "X509::cert_fields": (
+        ("cert1", "0", "hash"),
+        ("cert1", "0", "issuer"),
+        ("cert1", "0", "serial"),
+        ("cert1", "0", "sigalg"),
+        ("cert1", "0", "subject"),
+        ("cert1", "0", "subpubkey"),
+        ("cert1", "0", "validity"),
+        ("cert1", "0", "versionnum"),
+    ),
+    "X509::extensions": (("cert1",),),
+    "X509::hash": (("cert1",),),
+    "X509::issuer": (("cert1",),),
+    "X509::not_valid_after": (("cert1",),),
+    "X509::not_valid_before": (("cert1",),),
+    "X509::pem2der": (
+        ("-----BEGIN CERTIFICATE-----\nVEVTVA==\n-----END CERTIFICATE-----",),
+    ),
+    "X509::serial_number": (("cert1",),),
+    "X509::signature_algorithm": (("cert1",),),
+    "X509::subject": (("cert1",), ("cert1", "commonName")),
+    "X509::subject_public_key": (
+        ("cert1",),
+        ("type", "cert1"),
+        ("bits", "cert1"),
+        ("curve_name", "cert1"),
+    ),
+    "X509::subject_public_key_RSA_bits": (("cert1",),),
+    "X509::subject_public_key_type": (("cert1",),),
+    "X509::verify_cert_error_string": (("0",), ("2",), ("50",)),
+    "X509::version": (("cert1",),),
+    "X509::whole": (("cert1",),),
 }
 _CANDIDATE_EVENT_HINTS = {
     "TCP::recvwnd": "CLIENT_ACCEPTED",
@@ -3294,6 +3326,22 @@ _CANDIDATE_EVENT_HINTS = {
     "DNSMSG::header": "CLIENT_ACCEPTED",
     "DNSMSG::record": "CLIENT_ACCEPTED",
     "DNSMSG::section": "CLIENT_ACCEPTED",
+    "X509::cert_fields": "CLIENTSSL_CLIENTCERT",
+    "X509::extensions": "CLIENTSSL_CLIENTCERT",
+    "X509::hash": "CLIENTSSL_CLIENTCERT",
+    "X509::issuer": "CLIENTSSL_CLIENTCERT",
+    "X509::not_valid_after": "CLIENTSSL_CLIENTCERT",
+    "X509::not_valid_before": "CLIENTSSL_CLIENTCERT",
+    "X509::pem2der": "CLIENTSSL_CLIENTCERT",
+    "X509::serial_number": "CLIENTSSL_CLIENTCERT",
+    "X509::signature_algorithm": "CLIENTSSL_CLIENTCERT",
+    "X509::subject": "CLIENTSSL_CLIENTCERT",
+    "X509::subject_public_key": "CLIENTSSL_CLIENTCERT",
+    "X509::subject_public_key_RSA_bits": "CLIENTSSL_CLIENTCERT",
+    "X509::subject_public_key_type": "CLIENTSSL_CLIENTCERT",
+    "X509::verify_cert_error_string": "CLIENTSSL_CLIENTCERT",
+    "X509::version": "CLIENTSSL_CLIENTCERT",
+    "X509::whole": "CLIENTSSL_CLIENTCERT",
 }
 _CANDIDATE_PROFILE_HINTS = {
     # MQTT::enable has an event-only catalog requirement, but its implementation
@@ -3339,6 +3387,44 @@ for _dns_command in {
     "DNS::type",
 }:
     _CANDIDATE_STATE_HINTS[_dns_command] = _DNS_RR_CANDIDATE_STATE
+_X509_CANDIDATE_STATE = {
+    "tls_client": {
+        "cert_subject": "CN=example.test,O=TestCL",
+        "cert_issuer": "CN=testcl-ca",
+        "cert_serial": "01",
+        "cert_hash": "deadbeef",
+        "cert_extensions": "subjectAltName=DNS:example.test",
+        "cert_not_valid_after": "2030-01-01T00:00:00Z",
+        "cert_not_valid_before": "2020-01-01T00:00:00Z",
+        "cert_signature_algorithm": "sha256WithRSAEncryption",
+        "cert_public_key": "public-key-testcl",
+        "cert_public_key_type": "RSA",
+        "cert_public_key_bits": "2048",
+        "cert_public_key_curve": "",
+        "cert_version": "3",
+        "cert_pem": "-----BEGIN CERTIFICATE-----\nVEVTVA==\n-----END CERTIFICATE-----",
+        "cert_der": "DER-testcl",
+        "cert_count": "1",
+    }
+}
+for _x509_command in {
+    "X509::cert_fields",
+    "X509::extensions",
+    "X509::hash",
+    "X509::issuer",
+    "X509::not_valid_after",
+    "X509::not_valid_before",
+    "X509::pem2der",
+    "X509::serial_number",
+    "X509::signature_algorithm",
+    "X509::subject",
+    "X509::subject_public_key",
+    "X509::subject_public_key_RSA_bits",
+    "X509::subject_public_key_type",
+    "X509::version",
+    "X509::whole",
+}:
+    _CANDIDATE_STATE_HINTS[_x509_command] = _X509_CANDIDATE_STATE
 
 
 def _candidate_synopsis_words(synopsis: str, command: str) -> list[tuple[str, bool]]:
@@ -4524,7 +4610,11 @@ def _command_probe_irule(event: str, command: str, args: list[str]) -> str:
     """Build the fixed event wrapper used by the safe command workbench."""
     command_words = " ".join([_tcl_quote(command), *(_tcl_quote(arg) for arg in args)])
     fixture_setup = ""
-    if command.startswith("DNSMSG::"):
+    if command.startswith("X509::") and command != "X509::verify_cert_error_string":
+        # X509 utilities consume the opaque handle returned by SSL::cert. The
+        # candidate state fixture supplies one peer certificate at index zero.
+        fixture_setup = "set ::orch::_testcl_x509_fixture [SSL::cert 0]\n    "
+    elif command.startswith("DNSMSG::"):
         # DNSMSG commands consume opaque handles returned by
         # RESOLVER::name_lookup. Create deterministic handles in the same
         # event before probing the candidate invocation.

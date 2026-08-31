@@ -5452,6 +5452,42 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["status_counts"], {"ok": 15})
         self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
 
+    def test_x509_candidate_sweep_seeds_certificate_handles(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 16, namespace="X509", variants=1
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        self.assertEqual(
+            {candidate["event"] for candidate in candidates["candidates"]},
+            {"CLIENTSSL_CLIENTCERT"},
+        )
+        self.assertEqual(
+            by_command["X509::subject"]["input"]["args"], ["cert1"],
+        )
+        self.assertEqual(
+            by_command["X509::cert_fields"]["input"]["args"],
+            ["cert1", "0", "hash"],
+        )
+        self.assertEqual(
+            by_command["X509::verify_cert_error_string"]["input"]["args"], ["0"],
+        )
+        self.assertNotIn("state", by_command["X509::verify_cert_error_string"]["input"])
+
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 0, 16, namespace="X509", variants=8
+        )
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 16)
+        self.assertEqual(sweep["summary"]["variant_count"], 29)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 29})
+        self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(
