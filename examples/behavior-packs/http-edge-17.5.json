@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "http-edge-17.5",
+  "cases": [
+    {"id": "class-select", "probe": {"command": "HTTP::class", "args": ["select", "testcl"], "event": "HTTP_CLASS_FAILED", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "close", "probe": {"command": "HTTP::close", "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "collect", "probe": {"command": "HTTP::collect", "args": ["1"], "event": "AUTH_ERROR", "profiles": ["TCP", "HTTP", "FASTHTTP", "AUTH"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "disable-discard", "probe": {"command": "HTTP::disable", "args": ["discard"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "enable", "probe": {"command": "HTTP::enable", "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "fallback", "probe": {"command": "HTTP::fallback", "args": ["example.test"], "event": "LB_FAILED", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "has-responded", "probe": {"command": "HTTP::has_responded", "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "value": "0", "event_fired": true}},
+    {"id": "hsts-enable-subdomains", "probe": {"command": "HTTP::hsts", "args": ["include-subdomains", "enable"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "is-redirect", "probe": {"command": "HTTP::is_redirect", "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "value": "0", "event_fired": true}},
+    {"id": "passthrough-reason-number", "probe": {"command": "HTTP::passthrough_reason", "args": ["as_num"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "value": "0", "event_fired": true}},
+    {"id": "basic-auth-password", "probe": {"command": "HTTP::password", "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "value": "", "event_fired": true}},
+    {"id": "normalized-path", "probe": {"command": "HTTP::path", "args": ["-normalized"], "event": "MR_INGRESS", "profiles": ["TCP", "HTTP", "FASTHTTP", "MR"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "proxy-address", "probe": {"command": "HTTP::proxy", "args": ["addr"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "redirect", "probe": {"command": "HTTP::redirect", "args": ["testcl"], "event": "LB_FAILED", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "reject-reason-number", "probe": {"command": "HTTP::reject_reason", "args": ["as_num"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "value": "0", "event_fired": true}},
+    {"id": "release", "probe": {"command": "HTTP::release", "event": "HTTP_REQUEST_DATA", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "raw-request", "probe": {"command": "HTTP::request", "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP", "FASTHTTP"], "request": {"method": "GET", "uri": "/testcl/command", "host": "example.test"}}, "expect": {"status": "ok", "value": "GET /testcl/command HTTP/1.1\r\nHost: example.test\r\n\r\n", "event_fired": true}},
+    {"id": "request-number", "probe": {"command": "HTTP::request_num", "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP", "FASTHTTP"], "request": {"method": "GET", "uri": "/testcl/command", "host": "example.test"}}, "expect": {"status": "ok", "value": "1", "event_fired": true}},
+    {"id": "raw-response", "probe": {"command": "HTTP::response", "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "value": "HTTP/1.1 200 OK\r\n\r\n", "event_fired": true}},
+    {"id": "retry", "probe": {"command": "HTTP::retry", "args": ["GET /testcl/command HTTP/1.1\r\nHost: example.test\r\n\r\n"], "event": "HTTP_RESPONSE", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "status", "probe": {"command": "HTTP::status", "event": "MR_INGRESS", "profiles": ["TCP", "HTTP", "FASTHTTP", "MR"]}, "expect": {"status": "ok", "value": "200", "event_fired": true}},
+    {"id": "basic-auth-username", "probe": {"command": "HTTP::username", "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP", "FASTHTTP"]}, "expect": {"status": "ok", "value": "", "event_fired": true}},
+    {"id": "version-string", "probe": {"command": "HTTP::version", "args": ["0", "9", "HTTP::version", "-string", "value"], "event": "MR_EGRESS", "profiles": ["TCP", "HTTP", "FASTHTTP", "MR"]}, "expect": {"status": "ok", "value": "1.1", "event_fired": true}}
+  ]
+}
