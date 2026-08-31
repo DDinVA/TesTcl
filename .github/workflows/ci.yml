@@ -111,8 +111,24 @@ jobs:
             fi
             sleep 1
           done
-          exec 3<>/dev/tcp/127.0.0.1/18082
-          printf 'container-tcp' >&3
-          IFS= read -r -N 13 raw_response <&3
-          test "$raw_response" = 'container-tcp'
-          exec 3>&- 3<&-
+          python3 - <<'PY'
+          import socket
+
+          expected = b"container-tcp"
+          received = bytearray()
+          with socket.create_connection(("127.0.0.1", 18082), timeout=5) as client:
+              client.sendall(expected)
+              while len(received) < len(expected):
+                  try:
+                      chunk = client.recv(len(expected) - len(received))
+                  except ConnectionResetError:
+                      break
+                  if not chunk:
+                      break
+                  received.extend(chunk)
+          if bytes(received) != expected:
+              raise SystemExit(
+                  f"raw TCP smoke response mismatch: {bytes(received)!r}"
+              )
+          print(bytes(received).decode("ascii"))
+          PY
