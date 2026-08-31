@@ -72,12 +72,14 @@ certificate verification settings. HTTP/1.1 uses TLS 1.2 or newer when enabled.
 For a real TLS client using HTTP/2, set `live_data_plane.protocol` to `http2`.
 The listener advertises ALPN `h2`, decodes the client preface plus bounded
 HEADERS/DATA frames with HPACK, and runs the same staged `HTTP_REQUEST`,
-optional body collection, origin, and `HTTP_RESPONSE` lifecycle. HTTP/2 is
-currently limited to the deterministic `live_origin` fixture: cleartext
-prior-knowledge mode and HTTP/2 upstream bridging are rejected explicitly.
-The listener caps each connection at 2 MiB and 128 concurrent request streams;
-TLS session resumption and BIG-IP SSL profile semantics remain outside this
-adapter. The checked-in
+optional body collection, origin, and `HTTP_RESPONSE` lifecycle. It can use
+either the deterministic `live_origin` fixture or a configured TLS h2 upstream;
+cleartext prior-knowledge mode is rejected. The h2 upstream path sends the
+iRule-mutated request over a fresh bounded TLS connection, requires ALPN `h2`,
+decodes HPACK response headers and DATA, and feeds connection failures through
+`LB_FAILED` and the mapped-member fallback scheduler. The listener caps each
+connection at 2 MiB and 128 concurrent request streams; TLS session resumption
+and BIG-IP SSL profile semantics remain outside this adapter. The checked-in
 [`live-http2-17.5.json`](../examples/scenarios/live-http2-17.5.json) scenario
 shows the certificate paths expected when running the container with mounted
 secrets.
@@ -87,8 +89,10 @@ To exercise a real HTTP backend, replace `live_origin` with
 iRule-mutated request to one backend. The pool form uses the same mapped target
 and bounded scheduler model as raw TCP; `HTTP_REQUEST` runs before the backend
 request is sent, and `HTTP_RESPONSE` plus response-body collection run after the
-backend reply is received. Backend response bodies are capped at 2 MiB and
-hop-by-hop headers are not forwarded through the adapter. The checked-in
+backend reply is received. For `protocol: "http2"`, the upstream must include
+TLS settings and negotiate ALPN `h2`; for HTTP/1.1, an upstream TLS block is
+optional and negotiates `http/1.1`. Backend response bodies are capped at 2 MiB
+and hop-by-hop headers are not forwarded through the adapter. The checked-in
 [`live-http-upstream-17.5.json`](../examples/scenarios/live-http-upstream-17.5.json)
 scenario is a minimal example.
 

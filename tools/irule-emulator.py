@@ -32150,10 +32150,6 @@ def _normalise_live_data_plane_scenario(
             raise EmulatorInputError(
                 "live_data_plane.protocol http2 requires live_data_plane.tls"
             )
-        if protocol == "http2" and "upstream" in config:
-            raise EmulatorInputError(
-                "live_data_plane.upstream is not supported for live HTTP/2"
-            )
     elif "live_origin" in scenario:
         raise EmulatorInputError("live_origin is only valid for the HTTP data plane")
     elif "tls" in config and config["tls"] is not None:
@@ -32343,11 +32339,15 @@ def _normalise_live_data_plane_scenario(
             )
         upstream_tls = None
         if "tls" in upstream_config and upstream_config["tls"] is not None:
-            if protocol != "http":
+            if protocol == "tcp":
                 raise EmulatorInputError(
                     "live_data_plane.upstream.tls is only valid for HTTP"
                 )
             upstream_tls = _normalise_live_upstream_tls(upstream_config["tls"])
+        if protocol == "http2" and upstream_config is not None and upstream_tls is None:
+            raise EmulatorInputError(
+                "live HTTP/2 upstream requires live_data_plane.upstream.tls"
+            )
         upstream = {
             "endpoint": endpoint,
             "pool": pool_name,
@@ -32390,8 +32390,10 @@ def _build_live_server_tls_context(
     return context
 
 
-def _build_live_upstream_tls_context(settings: dict[str, Any]) -> ssl.SSLContext:
-    """Build a TLS client context with explicit verification behavior."""
+def _build_live_upstream_tls_context(
+    settings: dict[str, Any], *, alpn_protocols: list[str]
+) -> ssl.SSLContext:
+    """Build a TLS client context with explicit verification and ALPN behavior."""
     if settings["verify"]:
         context = ssl.create_default_context()
         if settings["cafile"] is not None:
@@ -32403,7 +32405,7 @@ def _build_live_upstream_tls_context(settings: dict[str, Any]) -> ssl.SSLContext
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     if settings["certfile"] is not None:
         context.load_cert_chain(settings["certfile"], settings["keyfile"])
-    context.set_alpn_protocols(["http/1.1"])
+    context.set_alpn_protocols(alpn_protocols)
     return context
 
 
@@ -32660,7 +32662,9 @@ def _live_http_handler(
                             endpoint["host"],
                             endpoint["port"],
                             timeout=upstream_config["connect_timeout"],
-                            context=_build_live_upstream_tls_context(upstream_tls),
+                            context=_build_live_upstream_tls_context(
+                                upstream_tls, alpn_protocols=["http/1.1"]
+                            ),
                         )
                     connection.request(method, uri, body=body or None, headers=headers)
                     response = connection.getresponse()
@@ -33236,10 +33240,338 @@ def _live_http2_handler(
     config: dict[str, Any],
     origin_defaults: dict[str, Any],
     manager: "SessionManager",
+    scheduler: _LivePoolScheduler | None = None,
 ) -> type[socketserver.BaseRequestHandler]:
     """Build a bounded TLS HTTP/2 real-client adapter over iRule sessions."""
 
     class LiveHTTP2Handler(socketserver.BaseRequestHandler):
+        @staticmethod
+        def _backend_request(
+            staged: dict[str, Any], endpoint: dict[str, Any]
+        ) -> tuple[str, str, str, list[tuple[str, str]], bytes]:
+            """Build a sanitized HTTP/2 request from the post-iRule state."""
+            initial_request = staged.get("initial_result", {}).get("request", {})
+            if not isinstance(initial_request, dict):
+                raise EmulatorInputError(
+                    "emulator returned an invalid staged HTTP/2 request"
+                )
+            method = initial_request.get("method", "GET")
+            uri = initial_request.get("uri", "/")
+            host = initial_request.get("host", "")
+            headers = initial_request.get("headers", {})
+            if (
+                not isinstance(method, str)
+                or not method
+                or not isinstance(uri, str)
+                or not uri
+                or any(character in method + uri for character in "\r\n\x00")
+            ):
+                raise EmulatorInputError("emulator returned an invalid HTTP/2 target")
+            if not isinstance(host, str) or any(
+                character in host for character in "\r\n\x00"
+            ):
+                raise EmulatorInputError("emulator returned an invalid HTTP/2 authority")
+            if not isinstance(headers, dict):
+                raise EmulatorInputError("emulator returned invalid HTTP/2 headers")
+            header_pairs: list[tuple[str, str]] = []
+            for name, value in headers.items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or name.startswith(":")
+                    or not isinstance(value, str)
+                    or any(character in name + value for character in "\r\n\x00")
+                ):
+                    raise EmulatorInputError("emulator returned unsafe HTTP/2 headers")
+                lower_name = name.lower()
+                if lower_name in {
+                    "connection",
+                    "content-length",
+                    "expect",
+                    "host",
+                    "keep-alive",
+                    "proxy-connection",
+                    "transfer-encoding",
+                    "upgrade",
+                }:
+                    continue
+                header_pairs.append((lower_name, value))
+            authority = host or endpoint["host"]
+            if not isinstance(authority, str) or not authority:
+                raise EmulatorInputError("emulator returned an empty HTTP/2 authority")
+            body = bytes(staged.get("body", b""))
+            if body:
+                header_pairs.append(("content-length", str(len(body))))
+            return method, uri, authority, header_pairs, body
+
+        @staticmethod
+        def _window_update(stream_id: int, increment: int) -> bytes:
+            if not 1 <= increment <= 0x7FFF_FFFF:
+                raise EmulatorResourceError("invalid live HTTP/2 flow-control increment")
+            return _live_http2_frame(
+                0x8, 0, stream_id, increment.to_bytes(4, "big")
+            )
+
+        def _upstream_roundtrip(
+            self,
+            endpoint: dict[str, Any],
+            staged: dict[str, Any],
+            upstream_config: dict[str, Any],
+        ) -> dict[str, Any]:
+            """Perform one bounded TLS+h2 upstream request/response exchange."""
+            if HpackEncoder is None:
+                raise EmulatorInputError("live HTTP/2 requires hpack")
+            method, uri, authority, request_headers, body = self._backend_request(
+                staged, endpoint
+            )
+            raw_socket: socket.socket | None = None
+            connection: socket.socket | None = None
+            try:
+                raw_socket = socket.create_connection(
+                    (endpoint["host"], endpoint["port"]),
+                    timeout=upstream_config["connect_timeout"],
+                )
+                upstream_tls = upstream_config.get("tls")
+                if not isinstance(upstream_tls, dict):
+                    raise EmulatorInputError(
+                        "live HTTP/2 upstream requires TLS settings"
+                    )
+                context = _build_live_upstream_tls_context(
+                    upstream_tls, alpn_protocols=["h2"]
+                )
+                connection = context.wrap_socket(
+                    raw_socket, server_hostname=endpoint["host"]
+                )
+                raw_socket = None
+                if connection.selected_alpn_protocol() != "h2":
+                    raise OSError("live HTTP/2 upstream did not negotiate h2")
+                connection.settimeout(config["read_timeout"])
+                encoder = HpackEncoder()
+                request_header_block = encoder.encode(
+                    [
+                        (":method", method),
+                        (":scheme", "https"),
+                        (":authority", authority),
+                        (":path", uri),
+                        *request_headers,
+                    ]
+                )
+                connection.sendall(HTTP2_CLIENT_PREFACE)
+                connection.sendall(_live_http2_frame(0x4, 0, 0))
+                # Raise both windows enough for the bounded request. This is
+                # safe because the configured request limit is far below the
+                # HTTP/2 31-bit flow-control maximum.
+                if body:
+                    connection.sendall(
+                        self._window_update(0, len(body))
+                        + self._window_update(1, len(body))
+                    )
+                connection.sendall(
+                    _live_http2_frame(
+                        0x1,
+                        0x4 | (0x1 if not body else 0),
+                        1,
+                        request_header_block,
+                    )
+                )
+                if body:
+                    offset = 0
+                    while offset < len(body):
+                        end = min(offset + 16 * 1024, len(body))
+                        flags = 0x1 if end == len(body) else 0
+                        connection.sendall(
+                            _live_http2_frame(0x0, flags, 1, body[offset:end])
+                        )
+                        offset = end
+
+                decoder = Http2ConnectionDecoder()
+                response_event: dict[str, Any] | None = None
+                response_body = bytearray()
+                total_bytes = 0
+                stream_complete = False
+                while not stream_complete:
+                    remaining = config["max_read_bytes"] - total_bytes
+                    if remaining <= 0:
+                        raise EmulatorResourceError(
+                            "live HTTP/2 upstream exceeds the configured byte limit"
+                        )
+                    payload = connection.recv(min(LIVE_RAW_READ_SIZE, remaining))
+                    if not payload:
+                        raise OSError(
+                            "live HTTP/2 upstream closed before the response completed"
+                        )
+                    total_bytes += len(payload)
+                    events = decoder.feed(payload, "server_to_client")
+                    for event in events:
+                        if event.get("kind") == "control":
+                            frame_type = event.get("frame_type")
+                            if frame_type == "SETTINGS":
+                                connection.sendall(_live_http2_frame(0x4, 0x1, 0))
+                            elif frame_type == "PING" and not event.get("ack"):
+                                opaque = bytes.fromhex(event["opaque_data_hex"])
+                                connection.sendall(
+                                    _live_http2_frame(0x6, 0x1, 0, opaque)
+                                )
+                            continue
+                        if event.get("stream_id") != 1:
+                            raise Http2DecodeError(
+                                "live HTTP/2 upstream used an unexpected stream"
+                            )
+                        if event.get("kind") == "headers":
+                            status_text = event.get("pseudo_headers", {}).get(":status")
+                            try:
+                                status = int(status_text)
+                            except (TypeError, ValueError):
+                                raise Http2DecodeError(
+                                    "live HTTP/2 upstream response is missing :status"
+                                ) from None
+                            if 100 <= status < 200:
+                                if event.get("end_stream"):
+                                    raise Http2DecodeError(
+                                        "live HTTP/2 upstream ended after an informational response"
+                                    )
+                                continue
+                            if response_event is not None:
+                                raise Http2DecodeError(
+                                    "live HTTP/2 upstream sent duplicate final headers"
+                                )
+                            if not 200 <= status <= 599:
+                                raise Http2DecodeError(
+                                    "live HTTP/2 upstream returned an invalid status"
+                                )
+                            response_event = event
+                            stream_complete = bool(event.get("end_stream"))
+                        elif event.get("kind") == "data":
+                            if response_event is None:
+                                raise Http2DecodeError(
+                                    "live HTTP/2 upstream sent DATA before headers"
+                                )
+                            response_body.extend(event.get("data", b""))
+                            if len(response_body) > LIVE_HTTP_MAX_REQUEST_BYTES:
+                                raise EmulatorResourceError(
+                                    "live HTTP/2 upstream response body exceeds the 2 MiB limit"
+                                )
+                            if response_body and not event.get("end_stream"):
+                                increment = len(event.get("data", b""))
+                                if increment:
+                                    connection.sendall(
+                                        self._window_update(0, increment)
+                                        + self._window_update(1, increment)
+                                    )
+                            stream_complete = bool(event.get("end_stream"))
+                if response_event is None:
+                    raise Http2DecodeError(
+                        "live HTTP/2 upstream returned no final response headers"
+                    )
+                return {
+                    "response_status": int(
+                        response_event["pseudo_headers"][":status"]
+                    ),
+                    "response_headers": dict(response_event.get("headers", {})),
+                    "response_body": response_body.decode("utf-8", errors="replace"),
+                }
+            finally:
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except OSError:
+                        pass
+                if raw_socket is not None:
+                    try:
+                        raw_socket.close()
+                    except OSError:
+                        pass
+
+        def _run_live_upstream(
+            self, session_id: str, staged: dict[str, Any]
+        ) -> dict[str, Any]:
+            upstream_config = config.get("upstream")
+            if not isinstance(upstream_config, dict):
+                raise EmulatorInputError("live HTTP/2 upstream configuration is missing")
+            if staged.get("initial_result", {}).get("response_committed"):
+                return manager.execute(
+                    session_id,
+                    lambda session: session.complete_staged_http_request(staged, {}),
+                )
+            pending_candidates = _resolve_live_upstream_candidates(
+                config, manager, session_id, scheduler
+            )
+            attempted: set[tuple[str, str, str, int]] = set()
+            last_error: BaseException | None = None
+            while pending_candidates:
+                selected_pool, member, endpoint = pending_candidates.pop(0)
+                candidate_key = (
+                    selected_pool,
+                    member,
+                    endpoint["host"],
+                    endpoint["port"],
+                )
+                if candidate_key in attempted:
+                    continue
+                attempted.add(candidate_key)
+                if member:
+                    manager.execute(
+                        session_id,
+                        lambda session, selected_pool=selected_pool, selected_member=member: session.force_pool_member(
+                            selected_pool, selected_member
+                        ),
+                    )
+                try:
+                    response = self._upstream_roundtrip(
+                        endpoint, staged, upstream_config
+                    )
+                    result = manager.execute(
+                        session_id,
+                        lambda session: session.complete_staged_http_request(
+                            staged, response
+                        ),
+                    )
+                    if staged.get("live_lb_failure") is not None:
+                        result["lb_failure"] = dict(staged["live_lb_failure"])
+                    if scheduler is not None and member:
+                        scheduler.mark_success(selected_pool, member)
+                    return result
+                except (OSError, Http2DecodeError) as exc:
+                    last_error = exc
+                    if scheduler is not None and member:
+                        scheduler.mark_failure(selected_pool, member)
+                    failure_cause = (
+                        "connection_timeout"
+                        if isinstance(exc, TimeoutError)
+                        else "unreachable"
+                    )
+                    failure = manager.execute(
+                        session_id,
+                        lambda session: session.fire_live_lb_failure(
+                            staged, failure_cause
+                        ),
+                    )
+                    if failure.get("response_committed"):
+                        return failure["result"]
+                    selection = failure.get("selection", {})
+                    try:
+                        refreshed = _resolve_live_upstream_candidates(
+                            config, manager, session_id, scheduler
+                        )
+                    except EmulatorInputError:
+                        refreshed = []
+                    if selection.get("pool") != selected_pool:
+                        pending_candidates = []
+                    pending_candidates.extend(
+                        candidate
+                        for candidate in refreshed
+                        if (
+                            candidate[0],
+                            candidate[1],
+                            candidate[2]["host"],
+                            candidate[2]["port"],
+                        ) not in attempted
+                    )
+            raise EmulatorInputError(
+                "live HTTP/2 upstream connection failed: "
+                f"{last_error or 'no candidate accepted the request'}"
+            )
+
         def _respond(
             self, encoder: Any, stream_id: int, result: dict[str, Any]
         ) -> None:
@@ -33358,6 +33690,8 @@ def _live_http2_handler(
                     )
                 else:
                     staged["body"] = bytearray(body)
+            if config.get("upstream") is not None:
+                return self._run_live_upstream(session_id, staged)
             return manager.execute(
                 session_id,
                 lambda session: session.complete_staged_http_request(
@@ -33561,7 +33895,7 @@ def _data_plane_server(
             if config["protocol"] == "http2":
                 server_class = _LiveHTTPServer
                 handler = _live_http2_handler(
-                    scenario, config, config["origin"], manager
+                    scenario, config, config["origin"], manager, scheduler
                 )
             server = server_class(
                 (host, port),
