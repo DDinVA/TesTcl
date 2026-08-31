@@ -42,6 +42,17 @@ Live execution is deliberately explicit and requires `BIGIP_USERNAME`,
 [`docs/emulator.md`](../docs/emulator.md) for the virtual-server and traffic
 requirements.
 
+For DNS, SIP, MQTT, and other protocol-specific cases, add
+`--trigger-command /path/to/driver`. The collector invokes that executable
+once per case with a JSON request on stdin containing the TMOS profile, case
+ID, event, command, arguments, profiles, traffic URL, and selected virtual.
+The driver must return zero and generate traffic to the virtual; it is invoked
+without a shell. The collector discards both driver output streams and keeps
+ownership of temporary iRule cleanup and structured observation output. Without
+a driver, unsupported events are rejected before device mutation unless
+`--allow-partial` is supplied. Partial output must be paired with a matching
+subset plan before assembly.
+
 The `scenarios/multi-irule-17.5.json` fixture demonstrates multiple attached
 iRules with priority ordering and a shared pool fixture.
 

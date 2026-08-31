@@ -23,6 +23,7 @@ import math
 import os
 import re
 import shlex
+import subprocess
 import ssl
 import sys
 import time
@@ -43,25 +44,50 @@ MAX_ARG_BYTES = 16 * 1024
 MAX_TOTAL_ARG_BYTES = 64 * 1024
 MAX_ID_BYTES = 256
 MAX_LOG_LINES = 5000
+MAX_PROFILES = 64
+MAX_PROFILE_BYTES = 256
 SUPPORTED_EVENTS = frozenset({"HTTP_REQUEST", "RULE_INIT"})
 DANGEROUS_TCL_COMMANDS = frozenset(
     {
+        "after",
         "apply",
+        "array",
+        "break",
+        "catch",
+        "close",
+        "error",
         "eval",
         "exec",
+        "exit",
+        "expr",
+        "for",
+        "foreach",
         "file",
+        "global",
+        "if",
+        "info",
+        "namespace",
         "interp",
         "load",
         "open",
         "package",
+        "proc",
+        "puts",
         "rename",
+        "read",
+        "return",
         "socket",
         "source",
         "subst",
+        "switch",
         "tailcall",
+        "set",
+        "unset",
         "unknown",
         "uplevel",
         "upvar",
+        "variable",
+        "while",
     }
 )
 CAPTURE_PREFIX = "TESTCL_CAPTURE_V1"
@@ -205,11 +231,17 @@ def validate_plan(plan: Any) -> dict[str, Any]:
                 raise CollectorError(f"observation {case_id!r} arguments exceed 64 KiB")
             normalised_args.append(arg)
         profiles = request.get("profiles", [])
-        if not isinstance(profiles, list) or not profiles or any(
+        if not isinstance(profiles, list) or not profiles or len(profiles) > MAX_PROFILES or any(
             not isinstance(profile, str) or not profile or "\x00" in profile
             for profile in profiles
         ):
-            raise CollectorError(f"observation {case_id!r} profiles must be non-empty strings")
+            raise CollectorError(
+                f"observation {case_id!r} profiles must contain 1 to {MAX_PROFILES} non-empty strings"
+            )
+        if any(len(profile.encode("utf-8")) > MAX_PROFILE_BYTES for profile in profiles):
+            raise CollectorError(
+                f"observation {case_id!r} contains an oversized profile name"
+            )
         if "request" in request and not isinstance(request["request"], dict):
             raise CollectorError(f"observation {case_id!r} request must be an object")
         comparisons = observation["comparisons"]
@@ -406,6 +438,8 @@ class PlanCollector:
         virtual: str,
         traffic_url: str,
         *,
+        trigger_command: str | None = None,
+        trigger_timeout: float = 60.0,
         log_lines: int = 500,
         log_timeout: float = 5.0,
         settle_seconds: float = 0.2,
@@ -416,6 +450,10 @@ class PlanCollector:
             raise CollectorError("log-timeout must be between 0 and 60 seconds")
         if not 0 <= settle_seconds <= 10:
             raise CollectorError("settle-seconds must be between 0 and 10 seconds")
+        if not 0 < trigger_timeout <= 300:
+            raise CollectorError("trigger-timeout must be greater than 0 and at most 300 seconds")
+        if trigger_command is not None and not trigger_command.strip():
+            raise CollectorError("trigger-command must be a non-empty executable path")
         self.client = client
         self.run_id = uuid.uuid4().hex[:12]
         self.virtual_path, self.rule_ref_prefix = _virtual_path(virtual)
@@ -424,6 +462,8 @@ class PlanCollector:
         self.log_lines = log_lines
         self.log_timeout = log_timeout
         self.settle_seconds = settle_seconds
+        self.trigger_command = trigger_command
+        self.trigger_timeout = trigger_timeout
 
     def _bash(self, command: str) -> str:
         result = self.client.post(
@@ -467,6 +507,54 @@ class PlanCollector:
         except (URLError, OSError) as exc:
             raise CollectorError(f"traffic request failed: {exc}") from exc
 
+    def _run_trigger(self, case: dict[str, Any]) -> None:
+        if self.trigger_command is None:
+            raise CollectorError(
+                f"event {case['input']['event']} requires --trigger-command"
+            )
+        trigger_input = {
+            "profile": TMOS_PROFILE,
+            "case": case["id"],
+            "event": case["input"]["event"],
+            "command": case["input"]["command"],
+            "args": case["input"]["args"],
+            "profiles": case["input"]["profiles"],
+            "traffic_url": self.traffic_url,
+            "virtual": self.rule_ref_prefix,
+        }
+        if "request" in case["input"]:
+            trigger_input["request"] = case["input"]["request"]
+        trigger_env = os.environ.copy()
+        trigger_env.pop("BIGIP_USERNAME", None)
+        trigger_env.pop("BIGIP_PASSWORD", None)
+        try:
+            completed = subprocess.run(
+                [self.trigger_command],
+                input=json.dumps(
+                    trigger_input, ensure_ascii=False, allow_nan=False
+                ).encode("utf-8"),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=self.trigger_timeout,
+                check=False,
+                shell=False,
+                env=trigger_env,
+            )
+        except FileNotFoundError as exc:
+            raise CollectorError(
+                f"trigger executable was not found: {self.trigger_command!r}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise CollectorError(
+                f"trigger command timed out after {self.trigger_timeout:g} seconds"
+            ) from exc
+        except OSError as exc:
+            raise CollectorError(f"trigger command could not start: {exc}") from exc
+        if completed.returncode != 0:
+            raise CollectorError(
+                f"trigger command failed with exit code {completed.returncode}"
+            )
+
     def _find_log_result(self, case_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + self.log_timeout
         while True:
@@ -480,7 +568,7 @@ class PlanCollector:
         raise CollectorError(f"no structured BIG-IP log result found for {case_id!r}")
 
     def collect_case(self, case: dict[str, Any]) -> dict[str, Any]:
-        if not case["event_supported"]:
+        if not case["event_supported"] and self.trigger_command is None:
             raise CollectorError(
                 f"event {case['input']['event']} is not triggerable by this collector"
             )
@@ -514,6 +602,8 @@ class PlanCollector:
                 if not isinstance(request_data, dict):
                     raise CollectorError("HTTP command probe request must be an object")
                 self._send_http(request_data)
+            elif case["input"]["event"] != "RULE_INIT":
+                self._run_trigger(case)
             if self.settle_seconds:
                 time.sleep(self.settle_seconds)
             output = self._find_log_result(log_id)
@@ -543,7 +633,7 @@ class PlanCollector:
             for case in validated["observations"]
             if not case["event_supported"]
         ]
-        if unsupported and not allow_partial:
+        if unsupported and self.trigger_command is None and not allow_partial:
             events = ", ".join(f"{row['id']}={row['event']}" for row in unsupported[:8])
             raise CollectorError(
                 "plan contains events this collector cannot drive; use --allow-partial "
@@ -551,7 +641,11 @@ class PlanCollector:
             )
         records: list[dict[str, Any]] = []
         skipped: list[dict[str, str]] = []
-        unsupported_ids = {row["id"] for row in unsupported}
+        unsupported_ids = (
+            {row["id"] for row in unsupported}
+            if self.trigger_command is None
+            else set()
+        )
         for case in validated["observations"]:
             if case["id"] in unsupported_ids:
                 skipped.append(
@@ -580,12 +674,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bigip-url", help="BIG-IP management URL, e.g. https://bigip.example")
     parser.add_argument("--virtual", help="existing virtual server as /partition/name or ~partition~name")
     parser.add_argument("--traffic-url", help="HTTP URL that reaches the selected virtual server")
+    parser.add_argument(
+        "--trigger-command",
+        help="executable protocol driver for non-HTTP/RULE_INIT events; receives one JSON request on stdin",
+    )
+    parser.add_argument(
+        "--trigger-timeout",
+        type=float,
+        default=60.0,
+        help="maximum seconds allowed for one protocol-driver invocation",
+    )
     parser.add_argument("--insecure", action="store_true", help="disable BIG-IP TLS certificate verification")
     parser.add_argument("--log-lines", type=int, default=500, help="number of /var/log/ltm lines to inspect")
     parser.add_argument("--log-timeout", type=float, default=5.0, help="seconds to wait for a structured log result")
     parser.add_argument("--settle-seconds", type=float, default=0.2, help="seconds to wait after traffic before log polling")
     args = parser.parse_args(argv)
     try:
+        if args.trigger_command is not None and not args.trigger_command.strip():
+            raise CollectorError("trigger-command must be a non-empty executable path")
+        if not 0 < args.trigger_timeout <= 300:
+            raise CollectorError(
+                "trigger-timeout must be greater than 0 and at most 300 seconds"
+            )
         plan = validate_plan(_read_json_file(args.plan))
         if not args.execute:
             unsupported = [
@@ -599,7 +709,12 @@ def main(argv: list[str] | None = None) -> int:
                         "status": "dry-run",
                         "profile": TMOS_PROFILE,
                         "case_count": len(plan["observations"]),
-                        "executable_count": len(plan["observations"]) - len(unsupported),
+                        "executable_count": (
+                            len(plan["observations"])
+                            if args.trigger_command
+                            else len(plan["observations"]) - len(unsupported)
+                        ),
+                        "protocol_driver": bool(args.trigger_command),
                         "unsupported": unsupported,
                         "device_mutation": False,
                     },
@@ -626,6 +741,8 @@ def main(argv: list[str] | None = None) -> int:
             client,
             args.virtual,
             args.traffic_url,
+            trigger_command=args.trigger_command,
+            trigger_timeout=args.trigger_timeout,
             log_lines=args.log_lines,
             log_timeout=args.log_timeout,
             settle_seconds=args.settle_seconds,

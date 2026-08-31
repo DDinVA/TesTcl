@@ -2543,10 +2543,40 @@ the selected virtual, drives `HTTP_REQUEST` cases (and observes `RULE_INIT`),
 reads a structured `/var/log/ltm` record through iControl REST, and restores
 the virtual before deleting the temporary rule. Both `--execute` and
 `--allow-device-write` are required. TLS verification is enabled by default;
-`--insecure` is an explicit opt-out. Plans containing events outside this
-collector's triggerable subset are rejected before any device mutation unless
-`--allow-partial` is supplied. Partial output must be paired with a matching
-subset plan before assembly.
+`--insecure` is an explicit opt-out.
+
+For events that require a protocol-specific stimulus, pass an executable
+protocol driver:
+
+```sh
+BIGIP_USERNAME=admin BIGIP_PASSWORD='…' \
+  ./scripts/collect-tmos17.sh \
+  --plan mqtt-capture-plan.json \
+  --execute --allow-device-write \
+  --bigip-url https://bigip.example \
+  --virtual /Common/irule-test-vs \
+  --traffic-url http://198.18.0.1:18080 \
+  --trigger-command /opt/drivers/mqtt-driver \
+  > records.ndjson
+```
+
+The collector invokes the driver once per non-`HTTP_REQUEST`/non-`RULE_INIT`
+case with no shell. It writes one UTF-8 JSON object to the driver's stdin and
+requires exit status zero; stdout and stderr are discarded. The object contains
+`profile`, `case`, `event`, `command`, `args`, `profiles`, `traffic_url`, and
+the selected `virtual`; it also includes the plan's optional `request` object
+when one is present. The driver is
+responsible for producing the protocol traffic that reaches that virtual;
+the collector remains responsible for iRule isolation, log correlation,
+observation polling, and cleanup. Driver execution is bounded by
+`--trigger-timeout` (1–300 seconds, default 60). A driver may be a compiled
+binary, shell-free wrapper, or another executable; if it needs arguments,
+provide a purpose-built wrapper executable rather than a shell command line.
+
+Without a driver, plans containing events outside the built-in HTTP/RULE_INIT
+subset are rejected before any device mutation. `--allow-partial` may instead
+skip those cases. Partial output must be paired with a matching subset plan
+before assembly.
 
 ## Structured packet traces
 
