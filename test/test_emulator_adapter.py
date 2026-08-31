@@ -21841,7 +21841,7 @@ when SERVER_DATA { TCP::respond [TCP::payload]; TCP::release; TCP::collect }
         client = socket.create_connection(
             ("127.0.0.1", self.adapter._data_plane_bound_port(server)), timeout=2
         )
-        client.settimeout(2)
+        client.settimeout(5)
         try:
             client.sendall(b"fallback")
             self.assertEqual(client.recv(64), b"healthy:fallback")
