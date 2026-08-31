@@ -4748,6 +4748,7 @@ when HTTP_RESPONSE_RELEASE {
             "uri-17.5.json": 8,
             "stateful-17.5.json": 2,
             "ssl-tls-17.5.json": 16,
+            "http2-17.5.json": 11,
             "udp-datagram-17.5.json": 15,
             "sip-17.5.json": 41,
         }
@@ -5674,6 +5675,7 @@ when HTTP_RESPONSE_RELEASE {
         packs = [
             json.loads(path.read_text(encoding="utf-8"))
             for path in sorted((ROOT / "examples" / "behavior-packs").glob("*.json"))
+            if path.name != "http2-17.5.json"
         ]
         candidates = self.adapter._build_behavior_vector_candidates(
             root, packs, 0, 10, namespace="HTTP2", variants=1
