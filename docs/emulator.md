@@ -244,6 +244,8 @@ their protocol, phase, direction, and emulator session ID. Use
 not persisted and is diagnostic emulator output, not independent TMOS/vLab
 evidence. A ready-to-run smoke test is available at
 [`scripts/live-observation-smoke.sh`](../scripts/live-observation-smoke.sh).
+For a raw TCP byte-to-replay-plan check, use
+[`scripts/live-packet-observation-smoke.sh`](../scripts/live-packet-observation-smoke.sh).
 To turn captured live inputs into an external-reference plan, POST a scenario
 and optional observation IDs to `/v1/live-observations/capture-plan`; the
 response is a plan without outputs. HTTP transactions become one request
