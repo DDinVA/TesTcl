@@ -26,6 +26,8 @@ from urllib.parse import urlparse
 MAX_INPUT_BYTES = 512 * 1024
 MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
 MAX_TEXT_BYTES = 256 * 1024
+MAX_HTTP_HEADERS = 128
+MAX_HTTP_LINE_BYTES = 8 * 1024
 DEFAULT_TIMEOUT = 10.0
 MAX_TIMEOUT = 60.0
 DNS_TYPES = {
@@ -277,6 +279,100 @@ def build_mqtt_connect_publish(request: dict[str, Any]) -> bytes:
     publish_body = _mqtt_utf8(topic, "topic") + payload
     publish = b"0" + _mqtt_remaining_length(len(publish_body)) + publish_body
     return connect + publish
+
+
+def _http_header_value(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise DriverError(f"HTTP {field} must be a non-empty string")
+    if "\r" in value or "\n" in value or "\x00" in value:
+        raise DriverError(f"HTTP {field} cannot contain line breaks or NUL")
+    try:
+        encoded = value.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        raise DriverError(f"HTTP {field} must contain Latin-1 header bytes") from exc
+    if len(encoded) > MAX_HTTP_LINE_BYTES:
+        raise DriverError(f"HTTP {field} is too long")
+    return value
+
+
+def _http_ascii_value(value: Any, field: str) -> str:
+    value = _http_header_value(value, field)
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise DriverError(f"HTTP {field} must contain ASCII characters") from exc
+    return value
+
+
+def build_http_request(request: dict[str, Any]) -> bytes:
+    """Build one bounded HTTP/1.1 request from a structured plan fixture."""
+    method = request.get("method", "GET")
+    if not isinstance(method, str) or not method or not method.isascii() or not method.isalpha():
+        raise DriverError("HTTP method must contain ASCII letters")
+    uri = request.get("uri", "/")
+    if not isinstance(uri, str) or not uri.startswith("/"):
+        raise DriverError("HTTP uri must be an absolute path")
+    _http_ascii_value(uri, "uri")
+    host = _http_header_value(request.get("host", "example.test"), "host")
+    headers = request.get("headers", {})
+    if not isinstance(headers, dict) or len(headers) > MAX_HTTP_HEADERS:
+        raise DriverError(
+            f"HTTP headers must be an object with at most {MAX_HTTP_HEADERS} items"
+        )
+    normalised_headers: list[tuple[str, str]] = []
+    header_names: set[str] = set()
+    for key, value in headers.items():
+        if not isinstance(key, str) or not key or not key.isascii() or any(
+            character not in "!#$%&'*+-.^_`|~" and not character.isalnum()
+            for character in key
+        ):
+            raise DriverError(
+                "HTTP header names must be non-empty and cannot contain separators"
+            )
+        _http_header_value(key, "header name")
+        normalised_value = _http_header_value(value, "header value")
+        lowered = key.lower()
+        if lowered in header_names:
+            raise DriverError(f"HTTP header {key!r} is repeated")
+        header_names.add(lowered)
+        normalised_headers.append((key, normalised_value))
+    if "host" not in header_names:
+        normalised_headers.insert(0, ("Host", host))
+    if len(normalised_headers) > MAX_HTTP_HEADERS:
+        raise DriverError(
+            f"HTTP headers must contain at most {MAX_HTTP_HEADERS} items"
+        )
+
+    body_sources = [
+        field for field in ("body", "payload", "payload_base64") if field in request
+    ]
+    if len(body_sources) > 1:
+        raise DriverError(
+            "HTTP request must use exactly one of body, payload, or payload_base64"
+        )
+    if body_sources and body_sources[0] in {"payload", "payload_base64"}:
+        body = _payload_bytes(request)
+    else:
+        body_value = request.get("body", "")
+        if not isinstance(body_value, str):
+            raise DriverError("HTTP body must be a string when payload_base64 is not used")
+        try:
+            body = body_value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise DriverError("HTTP body must be valid UTF-8") from exc
+        if len(body) > MAX_PAYLOAD_BYTES:
+            raise DriverError("HTTP body exceeds the 2 MiB limit")
+    if body and "content-length" not in header_names and "transfer-encoding" not in header_names:
+        normalised_headers.append(("Content-Length", str(len(body))))
+    if "connection" not in header_names:
+        normalised_headers.append(("Connection", "close"))
+
+    lines = [f"{method} {uri} HTTP/1.1"]
+    lines.extend(f"{key}: {value}" for key, value in normalised_headers)
+    encoded = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body
+    if len(encoded) > MAX_PAYLOAD_BYTES:
+        raise DriverError("HTTP request exceeds the 2 MiB limit")
+    return encoded
 
 
 def build_sip_message(request: dict[str, Any], event: str) -> bytes:
@@ -556,6 +652,20 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
     if not isinstance(request, dict):
         raise DriverError("request must be an object")
     timeout = _timeout(request)
+    if event.startswith("HTTP_") and any(
+        field in request
+        for field in ("method", "uri", "host", "headers", "body", "payload_base64")
+    ):
+        return (
+            endpoint_from_request(
+                request,
+                trigger.get("traffic_url"),
+                default_scheme="tcp",
+                default_port=80,
+            ),
+            build_http_request(request),
+            timeout,
+        )
     if event.startswith("DNS_"):
         return (
             endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="udp", default_port=53),

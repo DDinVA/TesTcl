@@ -53,8 +53,8 @@ a driver, unsupported events are rejected before device mutation unless
 `--allow-partial` is supplied. Partial output must be paired with a matching
 subset plan before assembly.
 
-The bundled stdlib-only protocol driver can provide initial DNS, SIP, MQTT,
-PCP, RADIUS, and raw UDP/TCP stimuli. Put the destination and protocol fixture in each
+The bundled stdlib-only protocol driver can provide initial HTTP/1.1, DNS, SIP,
+MQTT, PCP, RADIUS, and raw UDP/TCP stimuli. Put the destination and protocol fixture in each
 plan case's `input.request`; use
 `--trigger-command ./scripts/tmos17-protocol-driver.sh` locally. The wrapper
 requires the repo's uv-managed Python 3.13 environment. The container can use

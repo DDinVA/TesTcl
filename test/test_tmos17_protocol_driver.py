@@ -43,6 +43,54 @@ def test_mqtt_driver_builds_connect_then_publish() -> None:
     assert encoded.endswith(b"\x00\x07f5/test\x00mqtt")
 
 
+def test_http_driver_builds_structured_request_and_body() -> None:
+    payload = driver.build_http_request(
+        {
+            "method": "POST",
+            "uri": "/api/test?mode=1",
+            "host": "example.test",
+            "headers": {"X-Request-ID": "abc"},
+            "body": "hello",
+        }
+    )
+    assert payload == (
+        b"POST /api/test?mode=1 HTTP/1.1\r\n"
+        b"Host: example.test\r\n"
+        b"X-Request-ID: abc\r\n"
+        b"Content-Length: 5\r\n"
+        b"Connection: close\r\n\r\nhello"
+    )
+    endpoint, payload, timeout = driver.build_payload(
+        {
+            "event": "HTTP_REQUEST",
+            "traffic_url": "tcp://192.0.2.20:8080",
+            "request": {"method": "GET", "uri": "/health", "host": "vip.test"},
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 8080)
+    assert payload.startswith(b"GET /health HTTP/1.1\r\nHost: vip.test\r\n")
+    assert timeout == 10.0
+
+
+def test_http_driver_rejects_header_injection_and_conflicting_body_sources() -> None:
+    with pytest.raises(driver.DriverError, match="line breaks"):
+        driver.build_http_request({"headers": {"X-Test": "ok\r\nInjected: yes"}})
+    with pytest.raises(driver.DriverError, match="repeated"):
+        driver.build_http_request({"headers": {"Host": "one", "host": "two"}})
+    with pytest.raises(driver.DriverError, match="body, payload, or payload_base64"):
+        driver.build_http_request(
+            {"body": "hello", "payload_base64": base64.b64encode(b"world").decode("ascii")}
+        )
+    with pytest.raises(driver.DriverError, match="ASCII"):
+        driver.build_http_request({"uri": "/café"})
+    with pytest.raises(driver.DriverError, match="header names"):
+        driver.build_http_request({"headers": {"X Bad": "value"}})
+    with pytest.raises(driver.DriverError, match="at most 128"):
+        driver.build_http_request(
+            {"headers": {f"X-{index}": "value" for index in range(128)}}
+        )
+
+
 def test_sip_driver_rejects_header_injection_and_adds_content_length() -> None:
     payload = driver.build_sip_message(
         {"method": "OPTIONS", "uri": "sip:test@example.com", "body": "hello"},
