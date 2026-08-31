@@ -4745,6 +4745,7 @@ when HTTP_RESPONSE_RELEASE {
             "aaa-17.5.json": 3,
             "antifraud-controls-17.5.json": 2,
             "asm-controls-17.5.json": 2,
+            "botdefense-controls-17.5.json": 2,
             "category-17.5.json": 6,
             "tcp-controls-17.5.json": 2,
             "tcp-introspection-17.5.json": 15,

@@ -374,7 +374,7 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 417 of 989 target F5 commands (42.16%). This is test-input
+current report covers 442 of 989 target F5 commands (44.69%). This is test-input
 coverage, not a semantic-fidelity score.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
@@ -492,6 +492,15 @@ violation/signature state, payload rewriting, and connection-reset semantics:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/asm-controls-17.5.json
+```
+
+Run the Bot Defense controls behavior pack to verify deterministic bot
+classification fields, action overrides, policy controls, and connection-reset
+semantics:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/botdefense-controls-17.5.json
 ```
 
 Run the TCP introspection behavior pack to verify connection ports, transport

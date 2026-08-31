@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "botdefense-controls-17.5",
+  "cases": [
+    {
+      "id": "request-and-action-policy-surface",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "BOTDEFENSE"],
+        "botdefense": {
+          "action": "allow",
+          "bot_anomalies": ["OAT", "automation"],
+          "bot_categories": ["scraping"],
+          "bot_name": "curl",
+          "bot_signature": "Headless Browser",
+          "bot_signature_category": "Automation",
+          "captcha_age": 42,
+          "captcha_status": "correct",
+          "client_class": "malicious_bot",
+          "client_type": "bot",
+          "cookie_age": 12,
+          "cookie_status": "valid",
+          "cs_allowed": true,
+          "cs_attribute_device_id": true,
+          "cs_possible": true,
+          "device_id": 123,
+          "intent": "credential_stuffing",
+          "micro_service": {"name": "login", "type": "authentication"},
+          "previous_action": "browser_challenge",
+          "previous_request_age": 7,
+          "previous_support_id": "prev-1",
+          "reason": "anomaly",
+          "support_id": "cur-1"
+        },
+        "irule": "when HTTP_REQUEST {\n  log local0. \"action=[BOTDEFENSE::action] anomalies=[BOTDEFENSE::bot_anomalies] categories=[BOTDEFENSE::bot_categories]\"\n  log local0. \"bot=[BOTDEFENSE::bot_name] sig=[BOTDEFENSE::bot_signature] sigcat=[BOTDEFENSE::bot_signature_category]\"\n  log local0. \"captcha=[BOTDEFENSE::captcha_status] age=[BOTDEFENSE::captcha_age] cookie=[BOTDEFENSE::cookie_status] cage=[BOTDEFENSE::cookie_age]\"\n  log local0. \"class=[BOTDEFENSE::client_class] type=[BOTDEFENSE::client_type] device=[BOTDEFENSE::device_id] intent=[BOTDEFENSE::intent]\"\n  log local0. \"micro=[BOTDEFENSE::micro_service name]/[BOTDEFENSE::micro_service type] previous=[BOTDEFENSE::previous_action]/[BOTDEFENSE::previous_request_age]/[BOTDEFENSE::previous_support_id]\"\n  log local0. \"reason=[BOTDEFENSE::reason] support=[BOTDEFENSE::support_id] possible=[BOTDEFENSE::cs_possible] allowed=[BOTDEFENSE::cs_allowed] attr=[BOTDEFENSE::cs_attribute device_id]\"\n  set override [BOTDEFENSE::action block]\n  BOTDEFENSE::cs_allowed false\n  BOTDEFENSE::cs_attribute device_id false\n  BOTDEFENSE::disable\n  BOTDEFENSE::enable\n  log local0. \"override=$override action=[BOTDEFENSE::action] allowed=[BOTDEFENSE::cs_allowed] attr=[BOTDEFENSE::cs_attribute device_id]\"\n}\nwhen BOTDEFENSE_REQUEST { log local0. botdefense-request }\nwhen BOTDEFENSE_ACTION { log local0. botdefense-action }",
+        "request": {"uri": "/"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired"], "equals": ["HTTP_REQUEST", "BOTDEFENSE_REQUEST", "BOTDEFENSE_ACTION"]},
+          {"path": ["results", 0, "semantic", "botdefense", "enabled"], "equals": true},
+          {"path": ["results", 0, "semantic", "botdefense", "action"], "equals": "block"},
+          {"path": ["results", 0, "semantic", "botdefense", "action_overridden"], "equals": true},
+          {"path": ["results", 0, "semantic", "botdefense", "cs_allowed"], "equals": false},
+          {"path": ["results", 0, "semantic", "botdefense", "cs_attribute_device_id"], "equals": false},
+          {"path": ["results", 0, "semantic", "botdefense", "bot_anomalies"], "equals": ["OAT", "automation"]},
+          {"path": ["results", 0, "semantic", "botdefense", "bot_categories"], "equals": ["scraping"]},
+          {"path": ["results", 0, "semantic", "botdefense", "device_id"], "equals": 123},
+          {"path": ["results", 0, "semantic", "botdefense", "micro_service"], "equals": {"name": "login", "type": "authentication"}}
+        ]
+      }
+    },
+    {
+      "id": "request-controls-and-connection-reset",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "BOTDEFENSE"],
+        "botdefense": {"action": "allow"},
+        "irule": "when HTTP_REQUEST {\n  if {[HTTP::uri] eq \"/disable\"} { BOTDEFENSE::disable }\n  if {[HTTP::uri] eq \"/enable\"} { BOTDEFENSE::enable }\n  if {[HTTP::uri] eq \"/override\"} { BOTDEFENSE::action block }\n  log local0. \"uri=[HTTP::uri] action=[BOTDEFENSE::action]\"\n}",
+        "requests": [
+          {"uri": "/disable"},
+          {"uri": "/enable"},
+          {"uri": "/override"},
+          {"uri": "/fresh", "new_connection": true}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "botdefense", "enabled"], "equals": false},
+          {"path": ["results", 1, "semantic", "botdefense", "enabled"], "equals": true},
+          {"path": ["results", 2, "semantic", "botdefense", "action"], "equals": "block"},
+          {"path": ["results", 2, "semantic", "botdefense", "action_overridden"], "equals": true},
+          {"path": ["results", 3, "semantic", "botdefense", "action"], "equals": "allow"},
+          {"path": ["results", 3, "semantic", "botdefense", "enabled"], "equals": true}
+        ]
+      }
+    }
+  ]
+}
