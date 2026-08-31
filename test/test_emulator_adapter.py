@@ -4938,6 +4938,27 @@ when HTTP_RESPONSE_RELEASE {
         )
         self.assertTrue(all("execution" in row for row in sweep["candidates"]))
 
+    def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 7, 1, namespace="HTTP", variants=4
+        )
+
+        self.assertEqual(sweep["candidates"][0]["command"], "HTTP::hsts")
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 1)
+        self.assertEqual(sweep["summary"]["variant_count"], 4)
+        self.assertEqual(sweep["summary"]["executed_count"], 4)
+        self.assertEqual(sweep["summary"]["execution_status_counts"]["ok"], 4)
+        self.assertEqual(len(sweep["candidates"][0]["variants"]), 4)
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "between 1 and 8"):
+            self.adapter._build_behavior_vector_sweep(
+                root, [pack], 0, 1, namespace="HTTP", variants=9
+            )
+
     def test_behavior_pack_validation_is_bounded_and_atomic(self) -> None:
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "schema_version"):
             self.adapter.run_behavior_pack(
@@ -23782,7 +23803,9 @@ when CLIENT_DATA {
                 data=json.dumps({
                     "packs": [pack],
                     "namespace": "HTTP",
+                    "offset": 7,
                     "limit": 1,
+                    "variants": 4,
                 }).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
@@ -23790,8 +23813,10 @@ when CLIENT_DATA {
             with urllib.request.urlopen(sweep_request) as response:
                 sweep_payload = json.loads(response.read())
             self.assertEqual(sweep_payload["status"], "ok")
-            self.assertEqual(sweep_payload["summary"]["executed_count"], 1)
-            self.assertEqual(sweep_payload["summary"]["status_counts"], {"ok": 1})
+            self.assertEqual(sweep_payload["summary"]["executed_count"], 4)
+            self.assertEqual(sweep_payload["summary"]["variant_count"], 4)
+            self.assertEqual(sweep_payload["summary"]["status_counts"], {"ok": 4})
+            self.assertEqual(sweep_payload["candidates"][0]["command"], "HTTP::hsts")
 
             stateful = json.loads(
                 (ROOT / "examples" / "behavior-packs" / "stateful-17.5.json")
@@ -24496,15 +24521,18 @@ when CLIENT_DATA {
                                 )
                             ],
                             "namespace": "HTTP",
+                            "offset": 7,
                             "limit": 1,
+                            "variants": 4,
                         },
                     },
                 }
             )
             sweep_payload = sweep["result"]["structuredContent"]
             self.assertEqual(sweep_payload["status"], "ok")
-            self.assertEqual(sweep_payload["summary"]["executed_count"], 1)
-            self.assertEqual(sweep_payload["summary"]["status_counts"], {"ok": 1})
+            self.assertEqual(sweep_payload["summary"]["executed_count"], 4)
+            self.assertEqual(sweep_payload["summary"]["variant_count"], 4)
+            self.assertEqual(sweep_payload["summary"]["status_counts"], {"ok": 4})
 
             command_probe = server.handle_message(
                 {

@@ -69,6 +69,7 @@ To generate the next executable reference-capture chunk, run
 `./scripts/emulate-irule.sh --behavior-candidates --limit 16`.
 To execute that generated chunk locally and inspect dispatch/semantic outcomes,
 run `./scripts/emulate-irule.sh --behavior-sweep --namespace HTTP --limit 16`.
+Add `--variants 8` to exercise every bounded argument hypothesis per command.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:

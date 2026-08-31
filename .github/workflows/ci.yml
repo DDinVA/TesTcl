@@ -104,10 +104,11 @@ jobs:
           grep -F '"candidate_command_count":1' /tmp/testcl-behavior-candidates.json
           grep -F '"plan_observation_count":1' /tmp/testcl-behavior-candidates.json
           docker run --rm testcl-irule-emulator:ci \
-            --behavior-sweep --namespace HTTP --limit 1 \
+            --behavior-sweep --namespace HTTP --offset 7 --limit 1 --variants 4 \
             >/tmp/testcl-behavior-sweep.json
-          grep -F '"executed_count":1' /tmp/testcl-behavior-sweep.json
-          grep -F '"ok":1' /tmp/testcl-behavior-sweep.json
+          grep -F '"variant_count":4' /tmp/testcl-behavior-sweep.json
+          grep -F '"executed_count":4' /tmp/testcl-behavior-sweep.json
+          grep -F '"ok":4' /tmp/testcl-behavior-sweep.json
 
           docker run --detach --name "$raw_container_name" \
             --publish 18082:18082 \

@@ -407,15 +407,17 @@ operation is exposed as `irule_behavior_candidates` in MCP.
 
 To evaluate those hypotheses against the local emulator, run a bounded sweep:
 
-`_`sh
+```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
-  --behavior-sweep --namespace HTTP --offset 0 --limit 16
-`_`
+  --behavior-sweep --namespace HTTP --offset 0 --limit 16 --variants 8
+```
 
 The sweep executes each generated input and returns compact per-command
 execution evidence, including `ok`, `argument-required`, `runtime-error`, or
 `profile-gated` results. It is a local diagnostic and does not claim TMOS
-parity. Use `GET /v1/behavior-sweep` for checked-in packs or `POST
+parity. By default it runs the primary argument hypothesis; `--variants 8`
+runs every bounded registry-derived argument form and reports each result. Use
+`GET /v1/behavior-sweep` for checked-in packs or `POST
 /v1/behavior-sweep` with `{"packs":[...]}` for custom packs; MCP exposes the
 same operation as `irule_behavior_sweep`.
 

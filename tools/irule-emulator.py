@@ -3334,6 +3334,7 @@ def _build_behavior_vector_sweep(
     *,
     namespace: str | None = None,
     runtime_status: str | None = None,
+    variants: int = 1,
 ) -> dict[str, Any]:
     """Execute one bounded candidate chunk locally and return compact evidence."""
     if isinstance(limit, bool) or not isinstance(limit, int):
@@ -3342,6 +3343,13 @@ def _build_behavior_vector_sweep(
         raise EmulatorInputError(
             "behavior sweep limit must be between 1 and "
             f"{BEHAVIOR_SWEEP_MAX_COMMANDS}"
+        )
+    if isinstance(variants, bool) or not isinstance(variants, int):
+        raise EmulatorInputError("behavior sweep variants must be an integer")
+    if not 1 <= variants <= BEHAVIOR_CANDIDATE_MAX_VARIANTS:
+        raise EmulatorInputError(
+            "behavior sweep variants must be between 1 and "
+            f"{BEHAVIOR_CANDIDATE_MAX_VARIANTS}"
         )
     candidates = _build_behavior_vector_candidates(
         root,
@@ -3367,6 +3375,7 @@ def _build_behavior_vector_sweep(
             ),
             "candidate_status": candidate["candidate_status"],
             "sweep_status": "candidate-unavailable",
+            "variants": [],
         }
         probe_input = candidate.get("input")
         if not isinstance(probe_input, dict):
@@ -3377,32 +3386,54 @@ def _build_behavior_vector_sweep(
                 status_counts.get("candidate-unavailable", 0) + 1
             )
             continue
-        try:
-            result = run_command_probe(
-                probe_input,
-                tcl_lsp_root=str(root),
-                allow_external_protocol_request=True,
-            )
-            execution = result.get("execution")
-            if not isinstance(execution, dict):
-                raise EmulatorInputError(
-                    "command probe returned no execution object"
+        argument_candidates = candidate.get("argument_candidates", [])
+        if not isinstance(argument_candidates, list) or not argument_candidates:
+            argument_candidates = [{"args": [], "source": "candidate-fallback"}]
+        for argument_candidate in argument_candidates[:variants]:
+            args = argument_candidate.get("args")
+            if not isinstance(args, list):
+                args = []
+            variant = {
+                "args": list(args),
+                "source": argument_candidate.get("source", "candidate"),
+                "sweep_status": "input-error",
+            }
+            variant_input = dict(probe_input)
+            variant_input["args"] = list(args)
+            try:
+                result = run_command_probe(
+                    variant_input,
+                    tcl_lsp_root=str(root),
+                    allow_external_protocol_request=True,
                 )
-            sweep_status = _catalog_smoke_status(execution)
-            row.update(
-                {
-                    "sweep_status": sweep_status,
-                    "execution": _catalog_smoke_execution_snapshot(execution),
-                }
-            )
-            execution_status = execution.get("status")
-            if execution_status in execution_status_counts:
-                execution_status_counts[execution_status] += 1
-        except (EmulatorInputError, OSError) as exc:
-            row.update({"sweep_status": "input-error", "error": str(exc)[:2048]})
+                execution = result.get("execution")
+                if not isinstance(execution, dict):
+                    raise EmulatorInputError(
+                        "command probe returned no execution object"
+                    )
+                sweep_status = _catalog_smoke_status(execution)
+                variant.update(
+                    {
+                        "sweep_status": sweep_status,
+                        "execution": _catalog_smoke_execution_snapshot(execution),
+                    }
+                )
+                execution_status = execution.get("status")
+                if execution_status in execution_status_counts:
+                    execution_status_counts[execution_status] += 1
+            except (EmulatorInputError, OSError) as exc:
+                variant["error"] = str(exc)[:2048]
+            row["variants"].append(variant)
+            status = variant["sweep_status"]
+            status_counts[status] = status_counts.get(status, 0) + 1
+        if row["variants"]:
+            primary_variant = row["variants"][0]
+            row["sweep_status"] = primary_variant["sweep_status"]
+            if "execution" in primary_variant:
+                row["execution"] = primary_variant["execution"]
+            if "error" in primary_variant:
+                row["error"] = primary_variant["error"]
         rows.append(row)
-        status = row["sweep_status"]
-        status_counts[status] = status_counts.get(status, 0) + 1
 
     candidate_summary = candidates["summary"]
     return {
@@ -3419,6 +3450,7 @@ def _build_behavior_vector_sweep(
         "summary": {
             "uncovered_command_count": candidate_summary["uncovered_command_count"],
             "candidate_command_count": len(rows),
+            "variant_count": sum(len(row["variants"]) for row in rows),
             "executed_count": sum(
                 count
                 for status, count in status_counts.items()
@@ -31236,6 +31268,12 @@ class McpProtocolServer:
                             "maximum": BEHAVIOR_SWEEP_MAX_COMMANDS,
                             "default": 16,
                         },
+                        "variants": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": BEHAVIOR_CANDIDATE_MAX_VARIANTS,
+                            "default": 1,
+                        },
                         "namespace": {"type": "string", "minLength": 1},
                         "runtime_status": {
                             "type": "string",
@@ -31633,7 +31671,9 @@ class McpProtocolServer:
             )
 
         if name == "irule_behavior_sweep":
-            allowed = {"packs", "offset", "limit", "namespace", "runtime_status"}
+            allowed = {
+                "packs", "offset", "limit", "variants", "namespace", "runtime_status"
+            }
             unknown = sorted(set(args) - allowed)
             if unknown or not isinstance(args.get("packs"), list):
                 details = f": {', '.join(unknown)}" if unknown else ""
@@ -31649,6 +31689,7 @@ class McpProtocolServer:
                     args.get("limit", 16),
                     namespace=args.get("namespace"),
                     runtime_status=args.get("runtime_status"),
+                    variants=args.get("variants", 1),
                 )
             )
 
@@ -36799,6 +36840,7 @@ def _http_handler(
                 try:
                     offset = int(query.get("offset", ["0"])[0])
                     limit = int(query.get("limit", ["16"])[0])
+                    variants = int(query.get("variants", ["1"])[0])
                     filters = {
                         field: query[field][0]
                         for field in ("namespace", "runtime_status")
@@ -36814,6 +36856,7 @@ def _http_handler(
                         _read_behavior_coverage_directory(pack_dir),
                         offset,
                         limit,
+                        variants=variants,
                         **filters,
                     )
                 except (TypeError, ValueError, EmulatorInputError, OSError) as exc:
@@ -36948,7 +36991,7 @@ def _http_handler(
                             "behavior sweep request must be a JSON object"
                         )
                     allowed = {
-                        "packs", "offset", "limit", "namespace", "runtime_status"
+                        "packs", "offset", "limit", "variants", "namespace", "runtime_status"
                     }
                     unknown = sorted(set(request) - allowed)
                     if unknown or not isinstance(request.get("packs"), list):
@@ -36963,6 +37006,7 @@ def _http_handler(
                         request.get("limit", 16),
                         namespace=request.get("namespace"),
                         runtime_status=request.get("runtime_status"),
+                        variants=request.get("variants", 1),
                     )
                 except (
                     json.JSONDecodeError,
@@ -37478,6 +37522,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--offset", type=int, default=0, help="capability chunk start")
     parser.add_argument("--limit", type=int, help="capability or catalog chunk size")
     parser.add_argument(
+        "--variants",
+        type=int,
+        default=1,
+        help="number of argument hypotheses to execute per behavior-sweep command (1-8)",
+    )
+    parser.add_argument(
         "--behavior-pack-dir",
         help="directory of JSON behavior packs for --behavior-coverage, --behavior-candidates, or --behavior-sweep",
     )
@@ -37573,7 +37623,8 @@ def main(argv: list[str] | None = None) -> int:
             args.behavior_coverage or args.behavior_candidates or args.behavior_sweep
         ):
             raise EmulatorInputError(
-                "--behavior-pack-dir requires --behavior-coverage or --behavior-candidates"
+                "--behavior-pack-dir requires --behavior-coverage, "
+                "--behavior-candidates, or --behavior-sweep"
             )
         if (args.behavior_candidates or args.behavior_sweep) and args.target_status not in (
             None, "available-in-tmos-17.5"
@@ -37752,6 +37803,7 @@ def main(argv: list[str] | None = None) -> int:
                 16 if args.limit is None else args.limit,
                 namespace=args.namespace,
                 runtime_status=args.runtime_status,
+                variants=args.variants,
             )
         elif args.conformance:
             response = _build_conformance(root)
