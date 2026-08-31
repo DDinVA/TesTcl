@@ -125,6 +125,14 @@ def _probe_requests(emulator: Any) -> list[dict[str, Any]]:
                 "request": templates("RTSP_REQUEST"),
             },
         },
+        {
+            "name": "FTP::ftps_mode",
+            "request": {
+                "command": "FTP::ftps_mode",
+                "event": "CLIENT_ACCEPTED",
+                "profiles": ["TCP", "FTP"],
+            },
+        },
     ]
 
 

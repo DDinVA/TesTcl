@@ -636,8 +636,12 @@ enable/disable, FTPS mode, TLS session-reuse enforcement, and passive-port
 range selection. Packet inputs may provide a control message type, command,
 response code, TLS flags, and text or hexadecimal payload; the adapter keeps
 the controls connection-scoped and records disabled processing in the trace.
-It does not parse FTP commands, open a data-channel socket, negotiate TLS, or
-allocate real passive ports.
+When the `FTP` profile is attached, raw TCP streams on port 21 (or streams
+whose prefix is a recognized FTP command/response) are reassembled into
+bounded command lines and single- or multi-line server responses before the
+FTP events fire. Partial lines and response terminators may span packets.
+The adapter does not open a data-channel socket, negotiate TLS, or allocate
+real passive ports.
 Structured IMAP, POP3, and LDAP packet traces use the ordinary TCP lifecycle
 (`CLIENT_ACCEPTED`, `CLIENT_DATA`, `SERVER_CONNECTED`, and `SERVER_DATA`) and
 expose their TMOS 17.5 STARTTLS controls. `IMAP::activation_mode`,
@@ -2586,7 +2590,8 @@ The repository includes a dependency-light starter driver at
 `tools/tmos17-protocol-driver.py`, with the local `uv`-enforcing wrapper
 `scripts/tmos17-protocol-driver.sh`. It supports DNS queries, MQTT 3.1.1
 CONNECT plus PUBLISH traffic, generated or raw SIP messages, structured RTSP
-requests, and generic raw UDP/TCP payloads. Protocol fixtures belong in the
+requests, FTP control-channel commands/responses, and generic raw UDP/TCP
+payloads. Protocol fixtures belong in the
 plan's optional `request` object. For example, a DNS case can use:
 
 For `RTSP_REQUEST_DATA`, the collector adds a short `RTSP_REQUEST` primer that
@@ -2621,6 +2626,11 @@ For generic protocol events, provide `request.destination` as `udp://` or
 `tcp://` and either `payload_base64` or a UTF-8 `payload`. The driver does not
 wait for or synthesize a response; it only produces the stimulus needed to
 reach the virtual and returns non-zero when validation or transmission fails.
+For FTP control traffic, use `event: "CLIENT_DATA"` with
+`request.ftp.command`, or `event: "SERVER_DATA"` with
+`request.ftp.response_code` and `request.ftp.text`/`lines`; the default
+destination port is 21. The driver adds CRLF framing and can emit bounded
+multiline replies.
 In a local checkout, use `--trigger-command ./scripts/tmos17-protocol-driver.sh`;
 in the emulator image, use
 `--trigger-command /opt/testcl/tools/tmos17-protocol-driver.py`.

@@ -28,6 +28,7 @@ MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
 MAX_TEXT_BYTES = 256 * 1024
 MAX_HTTP_HEADERS = 128
 MAX_HTTP_LINE_BYTES = 8 * 1024
+MAX_FTP_LINE_BYTES = 64 * 1024
 MAX_WEBSOCKET_FRAME_BYTES = MAX_PAYLOAD_BYTES
 DEFAULT_TIMEOUT = 10.0
 MAX_TIMEOUT = 60.0
@@ -496,6 +497,133 @@ def build_rtsp_message(request: dict[str, Any], event: str) -> bytes:
     return encoded
 
 
+def _ftp_encode(value: str, field: str) -> bytes:
+    try:
+        return value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise DriverError(f"FTP {field} must be valid UTF-8") from exc
+
+
+def _ftp_line_encode(value: str, field: str) -> bytes:
+    encoded = _ftp_encode(value, field)
+    if len(encoded) > MAX_FTP_LINE_BYTES:
+        raise DriverError(
+            f"FTP {field} exceeds the {MAX_FTP_LINE_BYTES} byte line limit"
+        )
+    return encoded
+
+
+def build_ftp_message(request: dict[str, Any], event: str) -> bytes:
+    """Build one bounded FTP control-channel message for CLIENT/SERVER_DATA."""
+    if event not in {"CLIENT_DATA", "SERVER_DATA"}:
+        raise DriverError(
+            "FTP protocol driver supports CLIENT_DATA and SERVER_DATA"
+        )
+    ftp = request.get("ftp", {})
+    if not isinstance(ftp, dict):
+        raise DriverError("FTP request ftp must be an object")
+    allowed = {
+        "type",
+        "command",
+        "response_code",
+        "text",
+        "lines",
+        "message",
+    }
+    unknown = sorted(set(ftp) - allowed)
+    if unknown:
+        raise DriverError("FTP request unsupported field(s): " + ", ".join(unknown))
+
+    message = ftp.get("message")
+    if message is not None:
+        if set(ftp) - {"message"}:
+            raise DriverError("FTP message cannot be combined with structured fields")
+        raw = _text(message, "FTP message", required=True)
+        assert raw is not None
+        encoded = raw.replace("\r\n", "\n").replace("\r", "\n").replace(
+            "\n", "\r\n"
+        ).encode("utf-8")
+        if not encoded.endswith(b"\r\n"):
+            encoded += b"\r\n"
+        if any(
+            len(line) > MAX_FTP_LINE_BYTES
+            for line in encoded.split(b"\r\n")[:-1]
+        ):
+            raise DriverError(
+                f"FTP message contains a line exceeding the {MAX_FTP_LINE_BYTES} byte limit"
+            )
+        if len(encoded) > MAX_PAYLOAD_BYTES:
+            raise DriverError("FTP message exceeds the 2 MiB limit")
+        return encoded
+
+    expected_type = "command" if event == "CLIENT_DATA" else "response"
+    packet_type = ftp.get("type")
+    if packet_type is None:
+        if "command" in ftp:
+            packet_type = "command"
+        elif any(field in ftp for field in ("response_code", "text", "lines")):
+            packet_type = "response"
+        else:
+            packet_type = expected_type
+    if not isinstance(packet_type, str) or packet_type not in {"command", "response"}:
+        raise DriverError("FTP type must be command or response")
+    if packet_type != expected_type:
+        raise DriverError(f"FTP {event} requires a {expected_type} message")
+    if packet_type == "command":
+        conflicting = sorted(set(ftp) & {"response_code", "text", "lines"})
+        if conflicting:
+            raise DriverError(
+                "FTP command cannot include response field(s): " + ", ".join(conflicting)
+            )
+        command = _text(ftp.get("command"), "FTP command", required=True)
+        assert command is not None
+        command = _single_line(command, "FTP command")
+        command_parts = command.split(None, 1)
+        if not command_parts:
+            raise DriverError("FTP command must not be blank")
+        token = command_parts[0]
+        if not token.isascii() or not token[0].isalpha() or not token.replace("-", "").isalnum():
+            raise DriverError("FTP command must begin with an ASCII command token")
+        encoded = _ftp_line_encode(command + "\r\n", "command")
+    else:
+        if "command" in ftp:
+            raise DriverError("FTP response cannot include command")
+        code = ftp.get("response_code")
+        if isinstance(code, bool) or not isinstance(code, int) or not 100 <= code <= 599:
+            raise DriverError("FTP response_code must be an integer from 100 to 599")
+        lines = ftp.get("lines")
+        if lines is not None:
+            if not isinstance(lines, list) or not lines or len(lines) > 1024:
+                raise DriverError("FTP lines must contain 1 to 1024 strings")
+            if not all(isinstance(line, str) for line in lines):
+                raise DriverError("FTP lines must contain only strings")
+            text_lines = [_single_line(line, "FTP response line") for line in lines]
+            if len(text_lines) == 1:
+                encoded = _ftp_line_encode(
+                    f"{code:03d} {text_lines[0]}\r\n", "response line"
+                )
+            else:
+                encoded_lines = [f"{code:03d}-{text_lines[0]}"]
+                encoded_lines.extend(text_lines[1:-1])
+                encoded_lines.append(f"{code:03d} {text_lines[-1]}")
+                for line in encoded_lines:
+                    _ftp_line_encode(line + "\r\n", "response line")
+                encoded = _ftp_encode(
+                    "\r\n".join(encoded_lines) + "\r\n", "response line"
+                )
+        else:
+            text_value = ftp.get("text", "")
+            if not isinstance(text_value, str):
+                raise DriverError("FTP response text must be a string")
+            text_value = _single_line(text_value, "FTP response text")
+            encoded = _ftp_line_encode(
+                f"{code:03d} {text_value}\r\n", "response text"
+            )
+    if len(encoded) > MAX_PAYLOAD_BYTES:
+        raise DriverError("FTP message exceeds the 2 MiB limit")
+    return encoded
+
+
 WEBSOCKET_OPCODES = {
     "continuation": 0x0,
     "text": 0x1,
@@ -958,6 +1086,17 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
         return (
             endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="tcp", default_port=1883),
             build_mqtt_connect_publish(request),
+            timeout,
+        )
+    if event in {"CLIENT_DATA", "SERVER_DATA"} and "ftp" in request:
+        return (
+            endpoint_from_request(
+                request,
+                trigger.get("traffic_url"),
+                default_scheme="tcp",
+                default_port=21,
+            ),
+            build_ftp_message(request, event),
             timeout,
         )
     if event.startswith("SIP_"):

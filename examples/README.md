@@ -54,8 +54,8 @@ a driver, unsupported events are rejected before device mutation unless
 subset plan before assembly.
 
 The bundled stdlib-only protocol driver can provide initial HTTP/1.1,
-WebSocket-over-HTTP/1.1, DNS, SIP, RTSP, MQTT, PCP, RADIUS, and raw UDP/TCP
-stimuli.
+WebSocket-over-HTTP/1.1, DNS, SIP, RTSP, FTP control-channel, MQTT, PCP,
+RADIUS, and raw UDP/TCP stimuli.
 Put the destination and protocol fixture in each
 plan case's `input.request`; use
 `--trigger-command ./scripts/tmos17-protocol-driver.sh` locally. The wrapper

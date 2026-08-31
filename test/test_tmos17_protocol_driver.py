@@ -203,6 +203,61 @@ def test_rtsp_driver_normalises_raw_message_line_endings() -> None:
     assert payload == b"OPTIONS rtsp://media.example/live RTSP/1.0\r\nCSeq: 3\r\n\r\n"
 
 
+def test_ftp_driver_builds_command_response_and_multiline_reply() -> None:
+    command = driver.build_ftp_message(
+        {"ftp": {"command": "USER alice"}}, "CLIENT_DATA"
+    )
+    assert command == b"USER alice\r\n"
+    response = driver.build_ftp_message(
+        {"ftp": {"response_code": 220, "lines": ["welcome", "ready"]}},
+        "SERVER_DATA",
+    )
+    assert response == b"220-welcome\r\n220 ready\r\n"
+    assert driver.build_ftp_message(
+        {"ftp": {"response_code": 220, "lines": ["welcome"]}},
+        "SERVER_DATA",
+    ) == b"220 welcome\r\n"
+    endpoint, payload, timeout = driver.build_payload(
+        {
+            "event": "CLIENT_DATA",
+            "traffic_url": "tcp://192.0.2.20:2121",
+            "request": {"ftp": {"command": "NOOP"}},
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 2121)
+    assert payload == b"NOOP\r\n"
+    assert timeout == 10.0
+
+
+def test_ftp_driver_rejects_wrong_direction_and_line_injection() -> None:
+    with pytest.raises(driver.DriverError, match="SERVER_DATA requires"):
+        driver.build_ftp_message(
+            {"ftp": {"command": "USER alice"}}, "SERVER_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="line breaks"):
+        driver.build_ftp_message(
+            {"ftp": {"command": "USER alice\r\nNOOP"}}, "CLIENT_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="response_code"):
+        driver.build_ftp_message(
+            {"ftp": {"response_code": 99, "text": "bad"}}, "SERVER_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="must not be blank"):
+        driver.build_ftp_message({"ftp": {"command": " "}}, "CLIENT_DATA")
+    with pytest.raises(driver.DriverError, match="cannot include response"):
+        driver.build_ftp_message(
+            {"ftp": {"command": "NOOP", "text": "ignored"}}, "CLIENT_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="valid UTF-8"):
+        driver.build_ftp_message(
+            {"ftp": {"response_code": 550, "text": "bad\ud800"}}, "SERVER_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="line exceeding"):
+        driver.build_ftp_message(
+            {"ftp": {"message": "X" * 65537}}, "CLIENT_DATA"
+        )
+
+
 def test_sip_driver_rejects_header_injection_and_adds_content_length() -> None:
     payload = driver.build_sip_message(
         {"method": "OPTIONS", "uri": "sip:test@example.com", "body": "hello"},

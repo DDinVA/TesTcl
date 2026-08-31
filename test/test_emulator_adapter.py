@@ -7002,6 +7002,104 @@ when SERVER_DATA {
                 tcl_lsp_root=self.tcl_lsp_root,
             )
 
+    def test_raw_tcp_ftp_control_messages_are_reassembled(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "FTP"],
+                "irule": """
+when CLIENT_DATA { log local0. "mode=[FTP::ftps_mode]" }
+when SERVER_DATA { log local0. "mode=[FTP::ftps_mode]" }
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "source": {"address": "192.0.2.10", "port": 40000},
+                        "destination": {"address": "198.51.100.20", "port": 21},
+                        "payload": "USER al",
+                    },
+                    {
+                        "protocol": "tcp",
+                        "source": {"address": "192.0.2.10", "port": 40000},
+                        "destination": {"address": "198.51.100.20", "port": 21},
+                        "payload": "ice\r\n",
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": {"address": "198.51.100.20", "port": 21},
+                        "destination": {"address": "192.0.2.10", "port": 40000},
+                        "payload": "220-welcome\r\n220",
+                    },
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": {"address": "198.51.100.20", "port": 21},
+                        "destination": {"address": "192.0.2.10", "port": 40000},
+                        "payload": " ready\r\n",
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        client_data = next(
+            event
+            for trace in result["trace"]
+            for event in trace["events"]
+            if event["event"] == "CLIENT_DATA"
+        )
+        server_data = next(
+            event
+            for trace in result["trace"]
+            for event in trace["events"]
+            if event["event"] == "SERVER_DATA"
+        )
+        self.assertEqual(client_data["state"]["ftp"]["type"], "command")
+        self.assertEqual(client_data["state"]["ftp"]["command"], "USER")
+        self.assertTrue(any("mode=allow" in line for line in client_data["logs"]))
+        self.assertEqual(server_data["state"]["ftp"]["type"], "response")
+        self.assertEqual(server_data["state"]["ftp"]["response_code"], "220")
+        self.assertTrue(any("mode=allow" in line for line in server_data["logs"]))
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "FTP response must start with a three-digit code",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "FTP"],
+                    "irule": "when CLIENT_DATA { log local0. ok }",
+                    "packets": [
+                        {
+                            "protocol": "tcp",
+                            "direction": "server_to_client",
+                            "source": {"address": "198.51.100.20", "port": 21},
+                            "destination": {"address": "192.0.2.10", "port": 40000},
+                            "payload": "not ftp\r\n",
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "FTP command cannot be empty",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "FTP"],
+                    "irule": "when CLIENT_DATA { log local0. ok }",
+                    "packets": [
+                        {
+                            "protocol": "tcp",
+                            "source": {"address": "192.0.2.10", "port": 40000},
+                            "destination": {"address": "198.51.100.20", "port": 21},
+                            "payload": " \r\n",
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_icap_request_response_events_and_headers(self) -> None:
         result = self.adapter.run_scenario(
             {

@@ -11753,6 +11753,9 @@ TLS_CERT_MAX_BYTES = 2 * 1024 * 1024
 WEBSOCKET_MAX_FRAME_BYTES = STREAM_MAX_BYTES
 MQTT_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
 SIP_MAX_MESSAGE_BYTES = STREAM_MAX_BYTES
+FTP_MAX_MESSAGE_BYTES = 256 * 1024
+FTP_MAX_LINE_BYTES = 64 * 1024
+FTP_MAX_MULTILINE_LINES = 1024
 SDP_MAX_STATE_BYTES = 64 * 1024
 SDP_MAX_LINE_BYTES = 4096
 SDP_MAX_MEDIA = 128
@@ -16374,6 +16377,213 @@ def _encode_sip_message(packet: dict[str, Any]) -> bytes:
     return ("\r\n".join(lines) + "\r\n\r\n").encode("utf-8") + payload_bytes
 
 
+FTP_COMMAND_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,31}")
+FTP_COMMAND_PREFIXES = frozenset(
+    {
+        "ABOR",
+        "ACCT",
+        "ADAT",
+        "ALLO",
+        "APPE",
+        "AUTH",
+        "CCC",
+        "CDUP",
+        "CONF",
+        "CWD",
+        "DELE",
+        "ENC",
+        "EPRT",
+        "EPSV",
+        "FEAT",
+        "HELP",
+        "HOST",
+        "LANG",
+        "LIST",
+        "MDTM",
+        "MFCT",
+        "MFMT",
+        "MIC",
+        "MKD",
+        "MLSD",
+        "MLST",
+        "MODE",
+        "NLST",
+        "NOOP",
+        "OPTS",
+        "PASS",
+        "PASV",
+        "PBSZ",
+        "PORT",
+        "PROT",
+        "PWD",
+        "QUIT",
+        "REIN",
+        "REST",
+        "RETR",
+        "RMD",
+        "RNFR",
+        "RNTO",
+        "SITE",
+        "SIZE",
+        "SMNT",
+        "SPSV",
+        "STAT",
+        "STOR",
+        "STOU",
+        "STRU",
+        "SYST",
+        "TYPE",
+        "USER",
+    }
+)
+
+
+def _looks_like_ftp_payload(payload: bytes) -> bool:
+    if not payload:
+        return False
+    if len(payload) >= 4 and payload[:3].isdigit() and payload[3:4] in {b" ", b"-"}:
+        return True
+    tokens = payload.split(None, 1)
+    if not tokens:
+        return False
+    token = tokens[0].split(b"\r", 1)[0].split(b"\n", 1)[0]
+    try:
+        command = token.decode("ascii").upper()
+    except UnicodeDecodeError:
+        return False
+    return command in FTP_COMMAND_PREFIXES
+
+
+def _ftp_line(payload: bytes) -> tuple[bytes, int] | None:
+    """Return one FTP control line, retaining incomplete TCP input."""
+    if len(payload) > FTP_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"FTP control stream exceeds the {FTP_MAX_MESSAGE_BYTES} byte limit"
+        )
+    newline = payload.find(b"\n")
+    if newline < 0:
+        if b"\r" in payload and not payload.endswith(b"\r"):
+            raise EmulatorInputError("FTP control line contains a bare carriage return")
+        return None
+    line = payload[:newline]
+    if line.endswith(b"\r"):
+        line = line[:-1]
+    elif b"\r" in line:
+        raise EmulatorInputError("FTP control line contains a bare carriage return")
+    if len(line) > FTP_MAX_LINE_BYTES:
+        raise EmulatorInputError(
+            f"FTP control line exceeds the {FTP_MAX_LINE_BYTES} byte limit"
+        )
+    return line, newline + 1
+
+
+def _ftp_text(value: bytes, field: str) -> str:
+    if b"\x00" in value:
+        raise EmulatorInputError(f"FTP {field} contains a NUL byte")
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EmulatorInputError(f"FTP {field} must be valid UTF-8") from exc
+
+
+def _decode_ftp_message(
+    payload: bytes, direction: str
+) -> tuple[dict[str, Any], int] | None:
+    """Decode one bounded FTP control command or response from a TCP stream."""
+    first = _ftp_line(payload)
+    if first is None:
+        return None
+    line, consumed = first
+    if not line:
+        raise EmulatorInputError("FTP control message cannot be empty")
+
+    if direction == "client_to_server":
+        line_text = _ftp_text(line, "command")
+        parts = line_text.split(None, 1)
+        if not parts:
+            raise EmulatorInputError("FTP command cannot be empty")
+        command = parts[0].upper()
+        if not FTP_COMMAND_TOKEN.fullmatch(command):
+            raise EmulatorInputError("FTP command token is invalid")
+        return {
+            "protocol": "ftp",
+            "direction": direction,
+            "type": "command",
+            "command": command,
+            "response_code": 0,
+            "payload": _decode_wire_text(payload[:consumed]),
+            "message": _decode_wire_text(payload[:consumed]),
+            "message_length": consumed,
+            "_wire_payload": bytes(payload[:consumed]),
+        }, consumed
+
+    line_text = _ftp_text(line, "response")
+    match = re.match(r"^(\d{3})([ -])(.*)$", line_text)
+    if match is None:
+        raise EmulatorInputError(
+            "FTP response must start with a three-digit code and a space or hyphen"
+        )
+    response_code = int(match.group(1))
+    if not 100 <= response_code <= 599:
+        raise EmulatorInputError("FTP response code must be between 100 and 599")
+    if match.group(2) == "-":
+        lines = 1
+        position = consumed
+        terminator = f"{response_code:03d} "
+        while True:
+            next_line = _ftp_line(payload[position:])
+            if next_line is None:
+                return None
+            continuation, width = next_line
+            continuation_text = _ftp_text(continuation, "response")
+            position += width
+            lines += 1
+            if lines > FTP_MAX_MULTILINE_LINES:
+                raise EmulatorInputError(
+                    f"FTP multiline response exceeds {FTP_MAX_MULTILINE_LINES} lines"
+                )
+            if continuation_text.startswith(terminator):
+                consumed = position
+                break
+        if consumed > FTP_MAX_MESSAGE_BYTES:
+            raise EmulatorInputError(
+                f"FTP response exceeds the {FTP_MAX_MESSAGE_BYTES} byte limit"
+            )
+
+    return {
+        "protocol": "ftp",
+        "direction": direction,
+        "type": "response",
+        "command": "",
+        "response_code": response_code,
+        "payload": _decode_wire_text(payload[:consumed]),
+        "message": _decode_wire_text(payload[:consumed]),
+        "message_length": consumed,
+        "_wire_payload": bytes(payload[:consumed]),
+    }, consumed
+
+
+def _decode_ftp_messages(
+    payload: bytes, direction: str
+) -> tuple[list[dict[str, Any]], bytes]:
+    messages: list[dict[str, Any]] = []
+    position = 0
+    while position < len(payload):
+        decoded = _decode_ftp_message(payload[position:], direction)
+        if decoded is None:
+            break
+        message, consumed = decoded
+        if consumed <= 0:
+            raise EmulatorInputError("FTP decoder returned an invalid message length")
+        messages.append(message)
+        if len(messages) > PACKET_MAX_COUNT:
+            raise EmulatorInputError(
+                f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} FTP messages"
+            )
+        position += consumed
+    return messages, payload[position:]
+
+
 def _decode_sip_message(
     payload: bytes, direction: str
 ) -> tuple[dict[str, Any], int] | None:
@@ -18487,6 +18697,31 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             normalised.setdefault("response_code", 0)
             normalised.setdefault("tls_active", "0")
             normalised.setdefault("tls_session_reused", "0")
+            raw_ftp = normalised.get("_wire_payload")
+            if raw_ftp is None and "payload" in normalised:
+                try:
+                    raw_ftp = normalised["payload"].encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise EmulatorInputError(
+                        f"packet {index} FTP payload must be valid UTF-8"
+                    ) from exc
+            has_wire_input = "payload_hex" in packet or (
+                "payload" in packet and isinstance(raw_ftp, (bytes, bytearray))
+                and b"\n" in raw_ftp
+            )
+            if has_wire_input and raw_ftp:
+                decoded = _decode_ftp_message(bytes(raw_ftp), direction)
+                if decoded is None or decoded[1] != len(raw_ftp):
+                    raise EmulatorInputError(
+                        f"packet {index} FTP payload must contain exactly one complete control message"
+                    )
+                parsed, _ = decoded
+                for field in ("type", "command", "response_code"):
+                    if field in packet and str(normalised[field]) != str(parsed[field]):
+                        raise EmulatorInputError(
+                            f"packet {index} FTP {field} conflicts with payload"
+                        )
+                normalised.update(parsed)
         if protocol == "tds":
             normalised.setdefault("type", 0)
             normalised.setdefault("length", 0)
@@ -19693,6 +19928,9 @@ class EmulatorSession:
         self._ip_virtual_age_ms = 0
         self._mqtt_raw_active = any(
             str(profile).upper() == "MQTT" for profile in self._profiles
+        )
+        self._ftp_raw_active = any(
+            str(profile).upper() in {"FTP", "FTPS"} for profile in self._profiles
         )
         self._sip_raw_active = any(
             str(profile).upper() in {"SIP", "SIPROUTER", "SIPSESSION"}
@@ -23209,6 +23447,11 @@ class EmulatorSession:
         )
 
     @staticmethod
+    def _looks_like_ftp_prefix(payload: bytes) -> bool:
+        """Avoid treating arbitrary TCP bytes as FTP when FTP is attached."""
+        return _looks_like_ftp_payload(payload)
+
+    @staticmethod
     def _looks_like_diameter_prefix(payload: bytes) -> bool:
         return bool(payload) and payload[0] == 1
 
@@ -23532,6 +23775,39 @@ class EmulatorSession:
                 self._packet_streams.pop(key, None)
                 raise EmulatorInputError(
                     f"packet stream exceeds the {STREAM_MAX_BYTES // (1024 * 1024)} MiB limit"
+                )
+            return None, stream.buffered_bytes
+        ftp_ports = {
+            packet.get("source", {}).get("port"),
+            packet.get("destination", {}).get("port"),
+        }
+        looks_like_ftp = self._ftp_raw_active and (
+            21 in ftp_ports or self._looks_like_ftp_prefix(combined)
+        )
+        if looks_like_ftp:
+            decoded_messages, remaining = _decode_ftp_messages(
+                combined, packet["direction"]
+            )
+            if decoded_messages:
+                stream.buffer = remaining
+                if not has_gap:
+                    stream.segments.clear()
+                for message in decoded_messages:
+                    message["transport"] = "tcp"
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            message[field] = packet[field]
+                first = decoded_messages[0]
+                if len(decoded_messages) > 1:
+                    first["_coalesced_packets"] = decoded_messages[1:]
+                return first, len(combined) - len(remaining)
+            stream.buffer = combined
+            if not has_gap:
+                stream.segments.clear()
+            if stream.buffered_bytes > FTP_MAX_MESSAGE_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"FTP control stream exceeds the {FTP_MAX_MESSAGE_BYTES} byte limit"
                 )
             return None, stream.buffered_bytes
         looks_like_mqtt = self._mqtt_raw_active and self._looks_like_mqtt_prefix(combined)
