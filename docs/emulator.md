@@ -88,12 +88,15 @@ printf 'hello from tcp\n' | nc -N 127.0.0.1 18081
 
 The raw listener creates one persistent emulator session per TCP connection,
 feeds each bounded read through the normal TCP packet adapter, and forwards only
-server-directed `TCP::respond` data. EOF, timeout, `TCP::close`, and the 2 MiB
-connection read limit terminate the stream. Incoming bytes cross the current
-Tcl boundary as UTF-8 text with replacement for invalid bytes or NULs; this
-live adapter is therefore for raw TCP/iRule behavior, not a kernel TCP stack,
-TLS endpoint, upstream proxy, or full database peer. Protocol-specific TDS,
-FTP, LDAP, and similar parsers are exercised through the packet/API drivers.
+server-directed `TCP::respond` data. Wire reads enter the packet adapter as
+`payload_hex`, so `TCP::payload`, byte lengths, offsets, replacements, and
+binary Tcl operations see the original bytes. JSON results retain readable
+payload text and add `payload_hex` when a value is not losslessly representable
+as UTF-8. EOF, timeout, `TCP::close`, and the 2 MiB connection read limit
+terminate the stream. This live adapter is for raw TCP/iRule behavior, not a
+kernel TCP stack, TLS endpoint, upstream proxy, or full database peer.
+Protocol-specific TDS, FTP, LDAP, and similar parsers are exercised through the
+packet/API drivers.
 
 The API and data plane can run together by starting the normal API with
 `--serve --data-plane-scenario PATH`; the API remains on `--host/--port`, while

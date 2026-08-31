@@ -17766,11 +17766,40 @@ namespace eval ::itest::semantic {
         return 0
     }
 
-    proc tcp_emission_snapshot {} {
-        if {[info exists ::state::vars::connection_vars(__testcl_tcp_emissions)]} {
-            return $::state::vars::connection_vars(__testcl_tcp_emissions)
+    proc _tcp_wire_bytes {value} {
+        # Preserve bytearrays such as [TCP::payload], while ordinary Tcl text
+        # is encoded as UTF-8 when it crosses the emulated wire boundary.
+        foreach side {client server} {
+            set variable ::state::connection::${side}_payload
+            if {[info exists $variable] && [string equal $value [set $variable]]} {
+                return [binary format a* [set $variable]]
+            }
         }
-        return ""
+        if {![catch {tcl::unsupported::representation $value} representation] &&
+            [string first "bytearray" $representation] >= 0} {
+            return [binary format a* $value]
+        }
+        return [encoding convertto utf-8 $value]
+    }
+
+    proc _tcp_wire_hex {value} {
+        return [binary encode hex [_tcp_wire_bytes $value]]
+    }
+
+    proc tcp_emission_snapshot {} {
+        if {![info exists ::state::vars::connection_vars(__testcl_tcp_emissions)]} {
+            return ""
+        }
+        set snapshot {}
+        foreach emission $::state::vars::connection_vars(__testcl_tcp_emissions) {
+            set values [dict create {*}$emission]
+            if {[dict get $values kind] eq "data" && [dict exists $values payload]} {
+                dict set values payload_hex [_tcp_wire_hex [dict get $values payload]]
+                dict unset values payload
+            }
+            lappend snapshot $values
+        }
+        return $snapshot
     }
 
     proc tcp_payload_command {args} {
@@ -17838,8 +17867,9 @@ namespace eval ::itest::semantic {
     proc tcp_respond_command {args} {
         if {[llength $args] != 1} { error "TCP::respond requires a payload" }
         set response [lindex $args 0]
+        set payload_hex [_tcp_wire_hex $response]
         lappend ::state::vars::connection_vars(__testcl_tcp_emissions) \
-            [list kind data side [_tcp_side] payload $response byte_length [::itest::byte_length $response]]
+            [list kind data side [_tcp_side] payload_hex $payload_hex byte_length [expr {[string length $payload_hex] / 2}]]
         ::itest::log_decision tcp respond [list [_tcp_side] $response]
         return ""
     }

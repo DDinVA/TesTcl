@@ -20956,6 +20956,94 @@ when CLIENT_DATA {
             server.server_close()
             manager.close_all()
 
+    def test_packet_trace_preserves_binary_tcp_payload_and_emission_hex(self) -> None:
+        payload = b"\x00\xff\x80A"
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": """
+when CLIENT_ACCEPTED { TCP::collect 4 }
+when CLIENT_DATA {
+    TCP::respond [TCP::payload]
+    TCP::release
+    TCP::collect 4
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "flags": ["SYN"],
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                    {
+                        "protocol": "tcp",
+                        "payload_hex": payload.hex(),
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        emission = result["emitted"][0]
+        self.assertEqual(emission["byte_length"], len(payload))
+        self.assertEqual(emission["payload_hex"], payload.hex())
+
+    def test_tcp_text_emission_remains_utf8_encoded(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP"],
+                "irule": "when CLIENT_ACCEPTED { TCP::respond é }",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "flags": ["SYN"],
+                        "source": {"address": "10.0.0.5", "port": 51000},
+                        "destination": {"address": "192.0.2.10", "port": 443},
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+
+        self.assertEqual(result["emitted"][0]["payload"], "é")
+        self.assertEqual(result["emitted"][0]["byte_length"], 2)
+        self.assertNotIn("payload_hex", result["emitted"][0])
+
+    def test_live_tcp_data_plane_round_trips_binary_payload(self) -> None:
+        scenario = {
+            "profiles": ["TCP"],
+            "irule": """
+when CLIENT_ACCEPTED { TCP::collect 4 }
+when CLIENT_DATA {
+    TCP::respond [TCP::payload]
+    TCP::release
+    TCP::collect 4
+}
+""",
+            "live_data_plane": {"protocol": "tcp", "read_timeout": 0.2},
+        }
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        client = socket.create_connection(
+            ("127.0.0.1", self.adapter._data_plane_bound_port(server)), timeout=2
+        )
+        payload = b"\x00\xff\x80A"
+        try:
+            client.sendall(payload)
+            self.assertEqual(client.recv(64), payload)
+        finally:
+            client.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+
     def test_live_tcp_data_plane_rejects_http_only_fixtures_and_limits(self) -> None:
         with self.assertRaisesRegex(
             self.adapter.EmulatorInputError, "only valid for the HTTP"

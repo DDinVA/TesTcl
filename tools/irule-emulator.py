@@ -13067,9 +13067,21 @@ def _packet_direction(value: Any) -> str:
 
 
 def _decode_wire_text(payload: bytes) -> str:
-    # Tcl strings cannot contain embedded NUL bytes. Preserve human-readable
-    # captures while replacing binary NULs at the wire-to-Tcl boundary.
+    # JSON-facing diagnostics need a readable string even when the wire value
+    # is not valid UTF-8. Binary-capable event paths keep the original bytes in
+    # `_wire_payload` and use this only for text snapshots/log context.
     return payload.decode("utf-8", errors="replace").replace("\x00", "\ufffd")
+
+
+def _packet_payload_bytes(packet: dict[str, Any]) -> bytes:
+    """Return the exact packet payload when a wire representation is present."""
+    payload = packet.get("_wire_payload")
+    if isinstance(payload, (bytes, bytearray)):
+        return bytes(payload)
+    text = packet.get("payload", "")
+    if not isinstance(text, str):  # pragma: no cover - normalizer guard
+        raise EmulatorInputError("packet payload must be text or binary")
+    return text.encode("utf-8")
 
 
 def _socks_host_from_bytes(value: bytes) -> str:
@@ -21689,7 +21701,7 @@ class EmulatorSession:
         self._deferred_packet_http_tails: dict[
             tuple[Any, ...], dict[str, Any]
         ] = {}
-        self._tcp_buffers = {"client": "", "server": ""}
+        self._tcp_buffers = {"client": b"", "server": b""}
         self._stream_buffers = {"client": b"", "server": b""}
         self._sctp_buffers = {"client": b"", "server": b""}
         self._ssl_buffers = {"client": b"", "server": b""}
@@ -23479,13 +23491,19 @@ class EmulatorSession:
             namespace = EVENT_STATE_NAMESPACES[layer]
             for field, value in values.items():
                 binary_fields = (
-                    field in {"payload", "message", "authenticator"}
-                    and layer in {
-                        "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp",
-                        "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "l7check",
-                        *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification",
-                        "category", "rtsp", "cache", "datagram", "tls_client", "tls_server",
-                    }
+                    (
+                        field in {"payload", "message", "authenticator"}
+                        and layer in {
+                            "websocket", "mqtt", "sip", "diameter", "radius", "mr", "gtp",
+                            "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "l7check",
+                            *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification",
+                            "category", "rtsp", "cache", "datagram", "tls_client", "tls_server",
+                        }
+                    )
+                    or (
+                        layer == "connection"
+                        and field in {"client_payload", "server_payload"}
+                    )
                 )
                 if binary_fields:
                     # Structured packet payloads are JSON text at the API
@@ -23749,14 +23767,12 @@ class EmulatorSession:
                 {"protocol": "6" if transport == "tcp" else "17", "transport": transport}
             )
         # A raw TLS record is already decoded into the TLS layer. Do not copy
-        # its opaque record bytes into the generic connection string state;
-        # the Tcl bridge transports that layer as text and cannot safely carry
-        # arbitrary certificate-handshake bytes there.
-        if "payload" in packet and not (
+        # its opaque record bytes into the generic connection string state.
+        if ("payload" in packet or "_wire_payload" in packet) and not (
             protocol == "tls" and "_wire_length" in packet
         ):
             payload_key = "client_payload" if direction == "client_to_server" else "server_payload"
-            connection[payload_key] = packet["payload"]
+            connection[payload_key] = _packet_payload_bytes(packet)
         for field in ("ttl", "tos"):
             if field in packet:
                 connection[field] = str(packet[field])
@@ -24488,6 +24504,19 @@ class EmulatorSession:
             raise EmulatorInputError("invalid SSL payload state") from exc
 
     @staticmethod
+    def _tcp_payload_from_tcl(session: Any, side: str) -> bytes:
+        if side not in {"client", "server"}:
+            raise EmulatorInputError("TCP payload side must be client or server")
+        variable = f"::state::connection::{side}_payload"
+        if session.eval_tcl(f"info exists {variable}") != "1":
+            return b""
+        encoded = session.eval_tcl(f"binary encode hex ${variable}")
+        try:
+            return bytes.fromhex(str(encoded))
+        except ValueError as exc:  # pragma: no cover - Tcl binary contract guard
+            raise EmulatorInputError("invalid TCP payload state") from exc
+
+    @staticmethod
     def _sctp_payload_from_tcl(session: Any) -> bytes:
         encoded = session.eval_tcl("binary encode hex $::state::sctp::payload")
         try:
@@ -24503,7 +24532,7 @@ class EmulatorSession:
         )
         for raw_emission in raw_emissions:
             parts = _split_tcl_list(raw_emission)
-            if len(parts) not in {4, 8}:
+            if len(parts) not in {4, 6, 8}:
                 raise EmulatorInputError("invalid TCP emission state")
             values = {
                 parts[index]: parts[index + 1]
@@ -24529,13 +24558,32 @@ class EmulatorSession:
                 byte_length = int(values["byte_length"])
             except (KeyError, TypeError, ValueError):
                 raise EmulatorInputError("invalid TCP response byte length") from None
-            emissions.append({
+            payload_hex = values.get("payload_hex")
+            if payload_hex is not None:
+                if len(payload_hex) % 2:
+                    raise EmulatorInputError("invalid TCP response payload hex")
+                try:
+                    payload_bytes = bytes.fromhex(payload_hex)
+                except ValueError:
+                    raise EmulatorInputError("invalid TCP response payload hex") from None
+                payload = _decode_wire_text(payload_bytes)
+            else:
+                payload = values.get("payload", "")
+                if not isinstance(payload, str):
+                    raise EmulatorInputError("invalid TCP response payload")
+                payload_bytes = payload.encode("utf-8")
+            if byte_length != len(payload_bytes):
+                raise EmulatorInputError("TCP response byte length does not match payload")
+            emission = {
                 "protocol": "tcp",
                 "side": side,
                 "direction": direction,
-                "payload": values.get("payload", ""),
+                "payload": payload,
                 "byte_length": byte_length,
-            })
+            }
+            if payload_hex is not None and payload_bytes != payload.encode("utf-8"):
+                emission["payload_hex"] = payload_hex.lower()
+            emissions.append(emission)
         return emissions
 
     @staticmethod
@@ -25018,7 +25066,7 @@ class EmulatorSession:
         self._http2_decoder = None
         self._http2_streams.clear()
         self._http2_tcp_active = False
-        self._tcp_buffers = {"client": "", "server": ""}
+        self._tcp_buffers = {"client": b"", "server": b""}
         self._sctp_buffers = {"client": b"", "server": b""}
         self._ssl_buffers = {"client": b"", "server": b""}
         self._websocket_raw_active = False
@@ -28252,7 +28300,8 @@ class EmulatorSession:
                     entry["payload_after"] = _decode_wire_text(after_event)
             else:  # TCP
                 flags = set(packet.get("flags", []))
-                if packet.get("payload"):
+                wire_payload = _packet_payload_bytes(packet)
+                if wire_payload:
                     side = "client" if direction == "client_to_server" else "server"
                     collection = _split_tcl_list(
                         session.eval_tcl(f"::itest::semantic::tcp_collection_request {side}")
@@ -28267,7 +28316,12 @@ class EmulatorSession:
                             }
                         except (TypeError, ValueError):
                             raise EmulatorInputError("invalid TCP collection state") from None
-                        self._tcp_buffers[side] += packet["payload"]
+                        buffered = self._tcp_buffers[side] + wire_payload
+                        if len(buffered) > STREAM_MAX_BYTES:
+                            raise EmulatorInputError(
+                                f"TCP collection exceeds {STREAM_MAX_BYTES // (1024 * 1024)} MiB"
+                            )
+                        self._tcp_buffers[side] = buffered
                         skip = collection_values.get("skip", 0)
                         length = collection_values.get("length", 0)
                         every_packet = collection_values.get("every_packet", 0) == 1
@@ -28284,7 +28338,8 @@ class EmulatorSession:
                             event_payload = self._tcp_buffers[side][event_start:event_end]
                             remainder = self._tcp_buffers[side][event_end:]
                             event_packet = dict(packet)
-                            event_packet["payload"] = event_payload
+                            event_packet["payload"] = _decode_wire_text(event_payload)
+                            event_packet["_wire_payload"] = event_payload
                             event_name = (
                                 "CLIENT_DATA" if direction == "client_to_server" else "SERVER_DATA"
                             )
@@ -28299,15 +28354,12 @@ class EmulatorSession:
                                 session, event_name, self._packet_event_state(event_packet)
                             )
                             entry["events"].append(event_result)
-                            connection_state = event_result.get("state", {}).get("connection", {})
                             released = session.eval_tcl(
                                 "::itest::semantic::tcp_event_released"
                             ) == "1"
-                            retained = (
-                                connection_state.get(f"{side}_payload", "")
-                                if released
-                                else ""
-                            )
+                            retained = b""
+                            if released:
+                                retained = self._tcp_payload_from_tcl(session, side)
                             self._tcp_buffers[side] = retained + remainder
                 if flags.intersection({"FIN", "RST"}):
                     finish_http(at_index=index)
@@ -31848,7 +31900,7 @@ def _live_tcp_handler(
             flags: list[str] | None = None,
         ) -> dict[str, Any]:
             server_address = self.server.server_address
-            return {
+            packet = {
                 "protocol": "tcp",
                 "direction": "client_to_server",
                 "source": {
@@ -31860,8 +31912,10 @@ def _live_tcp_handler(
                     "port": server_address[1],
                 },
                 "flags": list(flags or []),
-                "payload": _decode_wire_text(payload) if payload else "",
             }
+            if payload:
+                packet["payload_hex"] = payload.hex()
+            return packet
 
         def _send_emissions(self, result: dict[str, Any]) -> bool:
             """Forward only server-directed TCP data and report close requests."""
@@ -31879,10 +31933,25 @@ def _live_tcp_handler(
                 if emission.get("kind") == "fin" or emission.get("control") == "FIN":
                     should_close = True
                     continue
-                payload = emission.get("payload")
-                if not isinstance(payload, str):
-                    raise EmulatorInputError("emulator returned a non-text TCP payload")
-                payload_bytes = payload.encode("utf-8")
+                payload_hex = emission.get("payload_hex")
+                if payload_hex is not None:
+                    if not isinstance(payload_hex, str) or len(payload_hex) % 2:
+                        raise EmulatorInputError(
+                            "emulator returned invalid TCP payload hex"
+                        )
+                    try:
+                        payload_bytes = bytes.fromhex(payload_hex)
+                    except ValueError as exc:
+                        raise EmulatorInputError(
+                            "emulator returned invalid TCP payload hex"
+                        ) from exc
+                else:
+                    payload = emission.get("payload")
+                    if not isinstance(payload, str):
+                        raise EmulatorInputError(
+                            "emulator returned a non-text TCP payload"
+                        )
+                    payload_bytes = payload.encode("utf-8")
                 response_bytes = getattr(self, "_response_bytes", 0)
                 if response_bytes + len(payload_bytes) > LIVE_RAW_MAX_REQUEST_BYTES:
                     raise EmulatorResourceError("TCP response exceeds the 2 MiB limit")
