@@ -2619,6 +2619,14 @@ In a local checkout, use `--trigger-command ./scripts/tmos17-protocol-driver.sh`
 in the emulator image, use
 `--trigger-command /opt/testcl/tools/tmos17-protocol-driver.py`.
 
+The same bounded DNS, MQTT, and SIP request fixtures can be replayed through
+the local differential path with `--golden-vectors` or the command-workbench
+API. The adapter converts those request objects into deterministic protocol
+packets before firing the catalogued event, so command results can be compared
+with an assembled observation pack. Generic raw UDP/TCP request fixtures remain
+collector-only for now; local replay rejects them explicitly instead of
+silently treating arbitrary bytes as a protocol event.
+
 ## Structured packet traces
 
 One-shot scenarios may use `packets` instead of `request`/`requests`. A trace

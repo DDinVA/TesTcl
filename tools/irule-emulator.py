@@ -3278,6 +3278,18 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
                 f"{PROTOCOL_REQUEST_MAX_TEXT_BYTES // 1024} KiB limit"
             )
 
+    if "payload" in request and "payload_base64" in request:
+        raise EmulatorInputError(
+            "protocol driver request must use payload or payload_base64, not both"
+        )
+    if "payload_base64" in request:
+        try:
+            base64.b64decode(request["payload_base64"], validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise EmulatorInputError(
+                "protocol driver request payload_base64 is not valid base64"
+            ) from exc
+
     headers = request.get("headers")
     if headers is not None:
         if not isinstance(headers, dict):
@@ -3362,8 +3374,92 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
     return dict(request)
 
 
+def _protocol_request_packet(event: str, request: dict[str, Any]) -> dict[str, Any]:
+    """Convert a protocol-driver fixture into one normalized emulator packet."""
+    common = {
+        "direction": "client_to_server",
+        "source": {"address": "192.0.2.10", "port": 53000},
+        "destination": {"address": "192.0.2.53", "port": 53},
+    }
+    if event.startswith("DNS_"):
+        packet = {
+            **common,
+            "protocol": "dns",
+            "qname": request["qname"],
+            "qtype": str(request.get("qtype", "A")),
+            "qclass": str(request.get("qclass", "IN")),
+            "rd": request.get("recursion_desired", True),
+            "id": request.get("transaction_id", 0x1705),
+        }
+    elif event.startswith("MQTT_"):
+        packet = {
+            **common,
+            "protocol": "mqtt",
+            "destination": {"address": "192.0.2.53", "port": 1883},
+            "type": "PUBLISH",
+            "client_id": request.get("client_id", "testcl-1705"),
+            "topic": request["topic"],
+            "keep_alive": request.get("keepalive", 30),
+        }
+        if "payload_base64" in request:
+            try:
+                packet["payload_hex"] = base64.b64decode(
+                    request["payload_base64"], validate=True
+                ).hex()
+            except (binascii.Error, ValueError) as exc:
+                raise EmulatorInputError(
+                    "protocol driver request payload_base64 is not valid base64"
+                ) from exc
+        else:
+            packet["payload"] = request.get("payload", "testcl")
+    elif event.startswith("SIP_"):
+        packet = {
+            **common,
+            "protocol": "sip",
+            "destination": {"address": "192.0.2.53", "port": 5060},
+            "transport": "udp",
+            "type": "response" if event.endswith("RESPONSE") else "request",
+        }
+        if "message" in request:
+            packet["message"] = (
+                request["message"].replace("\r\n", "\n").replace("\r", "\n")
+                .replace("\n", "\r\n")
+            )
+        else:
+            packet.update(
+                {
+                    "method": request.get("method", "OPTIONS"),
+                    "uri": request.get("uri", "sip:test@example.invalid"),
+                    "headers": request.get("headers", {}),
+                    "body": request.get("body", ""),
+                }
+            )
+            if packet["type"] == "response":
+                status = str(request.get("status", "200 OK"))
+                status_parts = status.split(None, 1)
+                try:
+                    packet["status"] = int(status_parts[0])
+                except (TypeError, ValueError) as exc:
+                    raise EmulatorInputError(
+                        "protocol driver request SIP status must begin with an integer"
+                    ) from exc
+                packet["phrase"] = status_parts[1] if len(status_parts) == 2 else ""
+    else:
+        raise EmulatorInputError(
+            "local protocol replay currently supports DNS, MQTT, and SIP requests"
+        )
+    try:
+        return _normalise_packets([packet])[0]
+    except (KeyError, TypeError, ValueError) as exc:  # pragma: no cover - boundary guard
+        raise EmulatorInputError(f"could not build local {event} protocol packet: {exc}") from exc
+
+
 def _normalise_command_probe_request(
-    root: Path, request: Any, *, allow_external_protocol_request: bool = False
+    root: Path,
+    request: Any,
+    *,
+    allow_external_protocol_request: bool = False,
+    prepare_external_protocol_request: bool = False,
 ) -> dict[str, Any]:
     """Validate a command probe and construct its fixture-only scenario."""
     if not isinstance(request, dict):
@@ -3463,6 +3559,7 @@ def _normalise_command_probe_request(
 
     state = request.get("state")
     http_request = request.get("request")
+    protocol_packet: dict[str, Any] | None = None
     if "state" in request and state is None:
         raise EmulatorInputError("command probe state must be an object when provided")
     if "request" in request and http_request is None:
@@ -3476,6 +3573,9 @@ def _normalise_command_probe_request(
                     "command probe request input is supported only for HTTP_REQUEST or HTTP_RESPONSE"
                 )
             http_request = _normalise_protocol_request(event_name, http_request)
+            if prepare_external_protocol_request:
+                protocol_packet = _protocol_request_packet(event_name, http_request)
+            http_request = None
         else:
             if not isinstance(http_request, dict):
                 raise EmulatorInputError("command probe request must be a JSON object")
@@ -3490,6 +3590,7 @@ def _normalise_command_probe_request(
         "profiles": list(profiles),
         "state": state,
         "request": http_request,
+        "packet": protocol_packet,
         "scenario": scenario,
         "catalog": catalog,
     }
@@ -11675,6 +11776,7 @@ PACKET_PROTOCOL_FIELDS = {
         "mask",
     },
     "mqtt": {
+        "payload_hex",
         "type",
         "protocol_name",
         "protocol_version",
@@ -15639,7 +15741,7 @@ def _encode_mqtt_message(packet: dict[str, Any]) -> bytes:
             if packet_id == 0:
                 raise EmulatorInputError("MQTT PUBLISH packet id must be nonzero")
             body += packet_id.to_bytes(2, "big")
-        payload = packet.get("payload", "")
+        payload = packet.get("_mqtt_payload", packet.get("payload", ""))
         body += payload if isinstance(payload, (bytes, bytearray)) else str(payload).encode("utf-8")
     elif packet_type in {"PUBACK", "PUBREC", "PUBREL", "PUBCOMP", "UNSUBACK"}:
         packet_id = _mqtt_int(packet, "packet_id")
@@ -17142,7 +17244,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             raise EmulatorInputError(
                 f"unsupported packet {index} field(s): {', '.join(unknown)}"
             )
-        if protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", "socks", "l7check", "fix", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and "payload" in packet and "payload_hex" in packet:
+        if protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", "socks", "l7check", "fix", "mqtt", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and "payload" in packet and "payload_hex" in packet:
             raise EmulatorInputError(
                 f"packet {index} {protocol.upper()} packets must use payload or payload_hex, not both"
             )
@@ -17380,7 +17482,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     else:
                         options[canonical_id] = _packet_scalar(option_value, "options")
                 normalised[field] = options
-            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ike", "ftp", "icap", "tds", "socks", "l7check", "fix", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
+            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ike", "ftp", "icap", "tds", "socks", "l7check", "fix", "mqtt", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
                 value = _require_string(packet[field], f"packet {index} payload_hex")
                 if len(value) % 2:
                     raise EmulatorInputError(
@@ -18239,11 +18341,15 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     )
             if packet_type in {"CONNECT", "PUBLISH"} and "payload" not in normalised:
                 normalised.setdefault("payload", "")
-            payload = normalised.get("payload", "")
-            try:
-                normalised["_mqtt_payload"] = payload.encode("utf-8")
-            except UnicodeEncodeError as exc:
-                raise EmulatorInputError(f"packet {index} MQTT payload must be valid UTF-8") from exc
+            payload = normalised.get("_wire_payload")
+            if not isinstance(payload, (bytes, bytearray)):
+                try:
+                    payload = normalised.get("payload", "").encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise EmulatorInputError(
+                        f"packet {index} MQTT payload must be valid UTF-8"
+                    ) from exc
+            normalised["_mqtt_payload"] = bytes(payload)
             normalised["_wire_payload"] = _encode_mqtt_message(normalised)
         if protocol == "sip":
             packet_type = normalised.get("type")
@@ -19250,6 +19356,7 @@ class EmulatorSession:
         event_name: str,
         state: dict[str, dict[str, str]],
         request: dict[str, Any] | None = None,
+        packet: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Execute the generated single-command event and capture its Tcl result."""
         for variable in (
@@ -19263,7 +19370,7 @@ class EmulatorSession:
                 f"{_tcl_quote('-1' if variable == 'rc' else '')}"
             )
         if request is None:
-            event_result = self._fire_event_on_worker(session, event_name, state)
+            event_result = self._fire_event_on_worker(session, event_name, state, packet)
         else:
             request_result = self._run_request_on_worker(session, request)
             event_result = {
@@ -19318,9 +19425,14 @@ class EmulatorSession:
         event: Any,
         state: Any = None,
         request: dict[str, Any] | None = None,
+        packet: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run the generated catalog-command event against this session."""
-        event_name, normalised_state = _normalise_event(event, state)
+        if packet is None:
+            event_name, normalised_state = _normalise_event(event, state)
+        else:
+            event_name, _ = _normalise_event(event, None)
+            normalised_state = self._packet_event_state(packet)
         if event_name not in self._event_profiles:
             raise EmulatorInputError(f"unknown iRule event: {event_name}")
         if request is not None and event_name not in {"HTTP_REQUEST", "HTTP_RESPONSE"}:
@@ -19329,7 +19441,7 @@ class EmulatorSession:
             )
         return self._call(
             lambda session: self._run_command_probe_on_worker(
-                session, event_name, normalised_state, request
+                session, event_name, normalised_state, request, packet
             )
         )
 
@@ -27132,6 +27244,7 @@ def run_command_probe(
     *,
     tcl_lsp_root: str | None = None,
     backend: str = "inprocess",
+    allow_external_protocol_request: bool = False,
 ) -> dict[str, Any]:
     """Execute one target-valid F5 command through a generated event wrapper."""
     if backend != "inprocess":
@@ -27140,7 +27253,12 @@ def run_command_probe(
             "use the repo uv environment with Tcl/Tk support"
         )
     root = _find_tcl_lsp_root(tcl_lsp_root)
-    prepared = _normalise_command_probe_request(root, request)
+    prepared = _normalise_command_probe_request(
+        root,
+        request,
+        allow_external_protocol_request=allow_external_protocol_request,
+        prepare_external_protocol_request=allow_external_protocol_request,
+    )
     session: EmulatorSession | None = None
     try:
         session = EmulatorSession(
@@ -27152,7 +27270,10 @@ def run_command_probe(
             backend=backend,
         )
         execution = session.run_command_probe(
-            prepared["event"], prepared["state"], prepared["request"]
+            prepared["event"],
+            prepared["state"],
+            prepared["request"],
+            prepared["packet"],
         )
         return {
             "status": "ok",
@@ -28455,7 +28576,9 @@ def run_golden_vectors(
             "environment with Tcl/Tk support"
         )
     root = _find_tcl_lsp_root(tcl_lsp_root)
-    prepared = _normalise_golden_vectors(root, pack)
+    prepared = _normalise_golden_vectors(
+        root, pack, allow_external_protocol_request=True
+    )
     rows: list[dict[str, Any]] = []
     passed = 0
     comparison_count = 0
@@ -28495,7 +28618,10 @@ def run_golden_vectors(
                 )
             elif vector["operation"] == "command_probe":
                 actual_output = run_command_probe(
-                    vector["input"], tcl_lsp_root=str(root), backend=backend
+                    vector["input"],
+                    tcl_lsp_root=str(root),
+                    backend=backend,
+                    allow_external_protocol_request=True,
                 )
             else:
                 pcap_input = vector["input"]

@@ -3851,6 +3851,92 @@ when HTTP_RESPONSE_RELEASE {
             assembled_protocol["pack"]["vectors"][0]["input"]["request"],
             protocol_input["request"],
         )
+        replayed_protocol = self.adapter.run_golden_vectors(
+            assembled_protocol["pack"], tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(replayed_protocol["status"], "passed")
+        self.assertEqual(replayed_protocol["analysis"]["execution_error_count"], 0)
+        for command, event, profiles, request, expected in (
+            (
+                "DNS::len",
+                "DNS_REQUEST",
+                ["UDP", "DNS"],
+                protocol_input["request"],
+                "29",
+            ),
+            (
+                "MQTT::topic",
+                "MQTT_CLIENT_DATA",
+                ["TCP", "MQTT"],
+                self.adapter._protocol_request_template("MQTT_CLIENT_DATA"),
+                "testcl/command",
+            ),
+            (
+                "SIP::method",
+                "SIP_REQUEST",
+                ["SIP"],
+                self.adapter._protocol_request_template("SIP_REQUEST"),
+                "OPTIONS",
+            ),
+        ):
+            probe = self.adapter.run_command_probe(
+                {
+                    "command": command,
+                    "event": event,
+                    "profiles": profiles,
+                    "request": request,
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+                allow_external_protocol_request=True,
+            )
+            self.assertEqual(probe["execution"]["status"], "ok")
+            self.assertEqual(probe["execution"]["value"], expected)
+        binary_mqtt_request = {
+            "topic": "testcl/binary",
+            "payload_base64": base64.b64encode(b"\x00\xff").decode("ascii"),
+        }
+        binary_mqtt_packet = self.adapter._protocol_request_packet(
+            "MQTT_CLIENT_DATA", binary_mqtt_request
+        )
+        self.assertEqual(binary_mqtt_packet["_mqtt_payload"], b"\x00\xff")
+        binary_mqtt_probe = self.adapter.run_command_probe(
+            {
+                "command": "MQTT::payload",
+                "args": ["length"],
+                "event": "MQTT_CLIENT_DATA",
+                "profiles": ["TCP", "MQTT"],
+                "request": binary_mqtt_request,
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+            allow_external_protocol_request=True,
+        )
+        self.assertEqual(binary_mqtt_probe["execution"]["status"], "ok")
+        self.assertEqual(binary_mqtt_probe["execution"]["value"], "2")
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "not both"):
+            self.adapter._normalise_protocol_request(
+                "MQTT_CLIENT_DATA",
+                {"topic": "testcl/binary", "payload": "text", "payload_base64": "AP8="},
+            )
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "not valid base64"):
+            self.adapter._normalise_protocol_request(
+                "MQTT_CLIENT_DATA",
+                {"topic": "testcl/binary", "payload_base64": "not-base64"},
+            )
+        sip_message_packet = self.adapter._protocol_request_packet(
+            "SIP_REQUEST",
+            {
+                "message": (
+                    "OPTIONS sip:test@example.invalid SIP/2.0\r\n"
+                    "Call-ID: testcl-1705\r\n\r\n"
+                )
+            },
+        )
+        self.assertEqual(sip_message_packet["method"], "OPTIONS")
+        sip_response_packet = self.adapter._protocol_request_packet(
+            "SIP_RESPONSE", {"status": "200 OK"}
+        )
+        self.assertEqual(sip_response_packet["status"], 200)
+        self.assertEqual(sip_response_packet["phrase"], "OK")
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "finite number"):
             self.adapter._normalise_protocol_request(
                 "DNS_REQUEST", {"qname": "example.com", "timeout": 10**1000}
