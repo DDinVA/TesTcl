@@ -4253,6 +4253,19 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(mismatch["field"], "value")
         self.assertEqual(mismatch["actual"], "api.example.com")
 
+    def test_behavior_pack_replays_structured_rtsp_probe_requests(self) -> None:
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "rtsp-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        result = self.adapter.run_behavior_pack(
+            pack, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["summary"], {"case_count": 4, "passed": 4, "failed": 0})
+        self.assertEqual(result["cases"][0]["actual"]["value"], "DESCRIBE")
+        self.assertEqual(result["cases"][3]["actual"]["assertions"][2]["actual"], "PONG")
+
     def test_golden_vectors_compare_independent_reference_observations(self) -> None:
         pack = json.loads(
             (ROOT / "examples" / "golden-vectors" / "http-17.5.json")

@@ -145,6 +145,64 @@ def test_websocket_driver_rejects_invalid_mask_and_control_frame() -> None:
         )
 
 
+def test_rtsp_driver_builds_structured_request_and_payload() -> None:
+    payload = driver.build_rtsp_message(
+        {
+            "method": "DESCRIBE",
+            "uri": "rtsp://media.example/live",
+            "headers": {"CSeq": "7", "Accept": "application/sdp"},
+            "body": "ping",
+        },
+        "RTSP_REQUEST",
+    )
+    assert payload == (
+        b"DESCRIBE rtsp://media.example/live RTSP/1.0\r\n"
+        b"CSeq: 7\r\n"
+        b"Accept: application/sdp\r\n"
+        b"Content-Length: 4\r\n\r\nping"
+    )
+    endpoint, payload, timeout = driver.build_payload(
+        {
+            "event": "RTSP_REQUEST",
+            "traffic_url": "tcp://192.0.2.20:8554",
+            "request": {
+                "method": "OPTIONS",
+                "uri": "rtsp://media.example/live",
+                "headers": {"CSeq": "2"},
+            },
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 8554)
+    assert payload.startswith(b"OPTIONS rtsp://media.example/live RTSP/1.0\r\n")
+    assert timeout == 10.0
+
+
+def test_rtsp_driver_rejects_injection_and_ambiguous_sources() -> None:
+    with pytest.raises(driver.DriverError, match="line breaks"):
+        driver.build_rtsp_message(
+            {"headers": {"CSeq": "1\r\nInjected: yes"}}, "RTSP_REQUEST"
+        )
+    with pytest.raises(driver.DriverError, match="exactly one"):
+        driver.build_rtsp_message(
+            {"body": "body", "payload_base64": base64.b64encode(b"payload").decode()},
+            "RTSP_REQUEST",
+        )
+    with pytest.raises(driver.DriverError, match="ASCII bytes"):
+        driver.build_rtsp_message(
+            {"headers": {"X-Test": "café"}}, "RTSP_REQUEST"
+        )
+    with pytest.raises(driver.DriverError, match="supports RTSP_REQUEST"):
+        driver.build_rtsp_message({}, "RTSP_RESPONSE")
+
+
+def test_rtsp_driver_normalises_raw_message_line_endings() -> None:
+    payload = driver.build_rtsp_message(
+        {"message": "OPTIONS rtsp://media.example/live RTSP/1.0\nCSeq: 3\n\n"},
+        "RTSP_REQUEST",
+    )
+    assert payload == b"OPTIONS rtsp://media.example/live RTSP/1.0\r\nCSeq: 3\r\n\r\n"
+
+
 def test_sip_driver_rejects_header_injection_and_adds_content_length() -> None:
     payload = driver.build_sip_message(
         {"method": "OPTIONS", "uri": "sip:test@example.com", "body": "hello"},

@@ -376,6 +376,126 @@ def build_http_request(request: dict[str, Any]) -> bytes:
     return encoded
 
 
+def _rtsp_header_name(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value or not value.isascii() or any(
+        character not in "!#$%&'*+-.^_`|~" and not character.isalnum()
+        for character in value
+    ):
+        raise DriverError(f"RTSP {field} must be a valid header name")
+    return value
+
+
+def _rtsp_header_value(value: Any, field: str, *, allow_empty: bool = True) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise DriverError(f"RTSP {field} must be a string")
+    if "\r" in value or "\n" in value or "\x00" in value:
+        raise DriverError(f"RTSP {field} cannot contain line breaks or NUL")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise DriverError(f"RTSP {field} must be valid UTF-8") from exc
+    if len(encoded) > MAX_HTTP_LINE_BYTES:
+        raise DriverError(f"RTSP {field} is too long")
+    return value
+
+
+def _rtsp_start_line_value(value: Any, field: str) -> str:
+    value = _rtsp_header_value(value, field, allow_empty=False)
+    if not value.isascii() or any(character.isspace() for character in value):
+        raise DriverError(f"RTSP {field} must be an ASCII token")
+    return value
+
+
+def build_rtsp_message(request: dict[str, Any], event: str) -> bytes:
+    """Build one bounded RTSP/1.0 request for the collector driver."""
+    if event not in {"RTSP_REQUEST", "RTSP_REQUEST_DATA"}:
+        raise DriverError(
+            "RTSP protocol driver supports RTSP_REQUEST and RTSP_REQUEST_DATA"
+        )
+    raw = request.get("message")
+    structured_fields = {"method", "uri", "version", "headers", "body"}
+    if raw is not None:
+        if set(request) & structured_fields or "payload" in request or "payload_base64" in request:
+            raise DriverError(
+                "RTSP message cannot be combined with structured request fields"
+            )
+        message = _text(raw, "message", required=True)
+        assert message is not None
+        encoded = message.replace("\r\n", "\n").replace("\r", "\n").replace(
+            "\n", "\r\n"
+        ).encode("utf-8")
+        if len(encoded) > MAX_PAYLOAD_BYTES:
+            raise DriverError("RTSP message exceeds the 2 MiB limit")
+        return encoded
+
+    method = _rtsp_start_line_value(request.get("method", "DESCRIBE"), "method")
+    uri = _rtsp_header_value(
+        request.get("uri", "rtsp://example.test/live"), "uri", allow_empty=False
+    )
+    if not uri.isascii() or any(character.isspace() for character in uri):
+        raise DriverError("RTSP uri must be an ASCII value without whitespace")
+    version = _rtsp_start_line_value(request.get("version", "RTSP/1.0"), "version")
+    if not version.startswith("RTSP/"):
+        raise DriverError("RTSP version must start with RTSP/")
+
+    headers = request.get("headers", {})
+    if not isinstance(headers, dict) or len(headers) > MAX_HTTP_HEADERS:
+        raise DriverError(
+            f"RTSP headers must be an object with at most {MAX_HTTP_HEADERS} items"
+        )
+    normalised_headers: list[tuple[str, str]] = []
+    header_names: set[str] = set()
+    for name, value in headers.items():
+        normalised_name = _rtsp_header_name(name, "header name")
+        normalised_value = _rtsp_header_value(value, "header value")
+        lowered = normalised_name.lower()
+        if lowered in header_names:
+            raise DriverError(f"RTSP header {normalised_name!r} is repeated")
+        header_names.add(lowered)
+        normalised_headers.append((normalised_name, normalised_value))
+    if "cseq" not in header_names:
+        normalised_headers.append(("CSeq", "1"))
+
+    body_sources = [
+        field for field in ("body", "payload", "payload_base64") if field in request
+    ]
+    if len(body_sources) > 1:
+        raise DriverError(
+            "RTSP request must use exactly one of body, payload, or payload_base64"
+        )
+    if body_sources and body_sources[0] in {"payload", "payload_base64"}:
+        body = _payload_bytes(request)
+    else:
+        body_value = request.get("body", "")
+        if not isinstance(body_value, str):
+            raise DriverError("RTSP body must be a string when payload_base64 is not used")
+        try:
+            body = body_value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise DriverError("RTSP body must be valid UTF-8") from exc
+        if len(body) > MAX_PAYLOAD_BYTES:
+            raise DriverError("RTSP body exceeds the 2 MiB limit")
+    if body and "content-length" not in header_names:
+        normalised_headers.append(("Content-Length", str(len(body))))
+    if len(normalised_headers) > MAX_HTTP_HEADERS:
+        raise DriverError(f"RTSP headers must contain at most {MAX_HTTP_HEADERS} items")
+
+    start_line = f"{method} {uri} {version}"
+    try:
+        encoded_headers = (
+            "\r\n".join(
+                [start_line] + [f"{name}: {value}" for name, value in normalised_headers]
+            )
+            + "\r\n\r\n"
+        ).encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise DriverError("RTSP request line and headers must contain ASCII bytes") from exc
+    encoded = encoded_headers + body
+    if len(encoded) > MAX_PAYLOAD_BYTES:
+        raise DriverError("RTSP request exceeds the 2 MiB limit")
+    return encoded
+
+
 WEBSOCKET_OPCODES = {
     "continuation": 0x0,
     "text": 0x1,
@@ -844,6 +964,12 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
         return (
             endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="udp", default_port=5060),
             build_sip_message(request, event),
+            timeout,
+        )
+    if event.startswith("RTSP_"):
+        return (
+            endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="tcp", default_port=554),
+            build_rtsp_message(request, event),
             timeout,
         )
     if event == "PCP_REQUEST":

@@ -80,6 +80,12 @@ def test_render_probe_irule_quotes_command_arguments_without_substitution() -> N
     assert "TESTCL_CAPTURE_V1|$testcl_capture_id" in source
 
 
+def test_render_probe_irule_primes_rtsp_data_collection() -> None:
+    case = collector.validate_plan(_plan("RTSP_REQUEST_DATA"))["observations"][0]
+    source = collector.render_probe_irule(case, "testcl_capture_123")
+    assert source.startswith("when RTSP_REQUEST { RTSP::collect }\nwhen RTSP_REQUEST_DATA {")
+
+
 def test_parse_capture_line_decodes_observed_value_and_error() -> None:
     value = base64.b64encode("observed value".encode()).decode()
     error = base64.b64encode("no error".encode()).decode()

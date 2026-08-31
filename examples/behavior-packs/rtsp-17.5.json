@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "rtsp-17.5",
+  "cases": [
+    {
+      "id": "method",
+      "probe": {
+        "command": "RTSP::method",
+        "event": "RTSP_REQUEST",
+        "profiles": ["TCP", "RTSP"],
+        "request": {
+          "method": "DESCRIBE",
+          "uri": "rtsp://media.example/live",
+          "headers": {"CSeq": "7"}
+        }
+      },
+      "expect": {"status": "ok", "value": "DESCRIBE"}
+    },
+    {
+      "id": "uri",
+      "probe": {
+        "command": "RTSP::uri",
+        "event": "RTSP_REQUEST",
+        "profiles": ["TCP", "RTSP"],
+        "request": {
+          "method": "DESCRIBE",
+          "uri": "rtsp://media.example/live",
+          "headers": {"CSeq": "7"}
+        }
+      },
+      "expect": {"status": "ok", "value": "rtsp://media.example/live"}
+    },
+    {
+      "id": "cseq-header",
+      "probe": {
+        "command": "RTSP::header",
+        "args": ["value", "CSeq"],
+        "event": "RTSP_REQUEST",
+        "profiles": ["TCP", "RTSP"],
+        "request": {
+          "method": "OPTIONS",
+          "uri": "rtsp://media.example/live",
+          "headers": {"CSeq": "8"}
+        }
+      },
+      "expect": {"status": "ok", "value": "8"}
+    },
+    {
+      "id": "collected-payload",
+      "scenario": {
+        "profiles": ["TCP", "RTSP"],
+        "irule": "when RTSP_REQUEST { RTSP::collect 4 } when RTSP_REQUEST_DATA { RTSP::payload replace 0 4 PONG; RTSP::release }",
+        "packets": [
+          {
+            "protocol": "rtsp",
+            "type": "request",
+            "direction": "client_to_server",
+            "method": "DESCRIBE",
+            "uri": "rtsp://media.example/live",
+            "headers": {"CSeq": "7"},
+            "payload": "ping"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "RTSP_REQUEST"},
+          {"path": ["trace", 0, "events", 3, "event"], "equals": "RTSP_REQUEST_DATA"},
+          {"path": ["trace", 0, "payload_after"], "equals": "PONG"}
+        ]
+      }
+    }
+  ]
+}

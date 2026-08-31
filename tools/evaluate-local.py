@@ -116,6 +116,15 @@ def _probe_requests(emulator: Any) -> list[dict[str, Any]]:
                 "request": templates("WS_REQUEST"),
             },
         },
+        {
+            "name": "RTSP::method",
+            "request": {
+                "command": "RTSP::method",
+                "event": "RTSP_REQUEST",
+                "profiles": ["TCP", "RTSP"],
+                "request": templates("RTSP_REQUEST"),
+            },
+        },
     ]
 
 

@@ -295,7 +295,7 @@ PROTOCOL_REQUEST_FIELDS = frozenset(
     {
         "destination", "timeout", "payload", "payload_base64", "qname", "qtype",
         "qclass", "transaction_id", "recursion_desired", "client_id", "topic",
-        "keepalive", "message", "method", "uri", "status", "headers", "body", "pcp",
+        "keepalive", "message", "method", "uri", "version", "status", "headers", "body", "pcp",
         "radius", "websocket",
     }
 )
@@ -2923,6 +2923,13 @@ def _protocol_request_template(event: str) -> dict[str, Any] | None:
             "method": "OPTIONS",
             "uri": "sip:test@example.invalid",
         }
+    if event.startswith("RTSP_"):
+        return {
+            "method": "DESCRIBE",
+            "uri": "rtsp://example.test/live",
+            "version": "RTSP/1.0",
+            "headers": {"CSeq": "1"},
+        }
     if event == "WS_REQUEST":
         return {
             "websocket": {
@@ -3278,11 +3285,11 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
 
     text_fields = (
         "destination", "payload", "payload_base64", "qname", "qtype", "client_id", "topic",
-        "message", "method", "uri", "status", "body",
+        "message", "method", "uri", "version", "status", "body",
     )
     non_empty_text_fields = {
         "destination", "qname", "qtype", "client_id", "topic", "message", "method",
-        "uri", "status",
+        "uri", "version", "status",
     }
     for field in text_fields:
         if field not in request:
@@ -3501,6 +3508,66 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
             raise EmulatorInputError(
                 "WS_REQUEST protocol driver requests do not accept payload fields"
             )
+    if event.startswith("RTSP_"):
+        if event not in {"RTSP_REQUEST", "RTSP_REQUEST_DATA"}:
+            raise EmulatorInputError(
+                "protocol driver request RTSP supports RTSP_REQUEST and RTSP_REQUEST_DATA only"
+            )
+        if "message" in request:
+            if set(request) & {
+                "method", "uri", "version", "headers", "body", "payload", "payload_base64"
+            }:
+                raise EmulatorInputError(
+                    "RTSP message cannot be combined with structured request fields"
+                )
+        else:
+            for field, default in (
+                ("method", "DESCRIBE"),
+                ("uri", "rtsp://example.test/live"),
+                ("version", "RTSP/1.0"),
+            ):
+                value = request.get(field, default)
+                if not isinstance(value, str) or not value:
+                    raise EmulatorInputError(
+                        f"protocol driver request RTSP {field} must be a non-empty string"
+                    )
+                if "\x00" in value or "\r" in value or "\n" in value:
+                    raise EmulatorInputError(
+                        f"protocol driver request RTSP {field} must not contain NUL or line breaks"
+                    )
+            headers = request.get("headers", {})
+            if not isinstance(headers, dict) or len(headers) > 128:
+                raise EmulatorInputError(
+                    "protocol driver request RTSP headers must be an object with at most 128 items"
+                )
+            header_names: set[str] = set()
+            for name, value in headers.items():
+                if (
+                    not isinstance(name, str)
+                    or not name.isascii()
+                    or not name
+                    or any(
+                        character not in "!#$%&'*+-.^_`|~" and not character.isalnum()
+                        for character in name
+                    )
+                    or not isinstance(value, str)
+                    or "\x00" in value
+                    or "\r" in value
+                    or "\n" in value
+                ):
+                    raise EmulatorInputError(
+                        "protocol driver request RTSP headers must use valid names and values"
+                    )
+                lowered = name.lower()
+                if lowered in header_names:
+                    raise EmulatorInputError(
+                        f"protocol driver request RTSP header {name!r} is repeated"
+                    )
+                header_names.add(lowered)
+        if "body" in request and ({"payload", "payload_base64"} & set(request)):
+            raise EmulatorInputError(
+                "RTSP request must use exactly one of body, payload, or payload_base64"
+            )
     if event == "PCP_REQUEST":
         if "pcp" not in request:
             raise EmulatorInputError("PCP protocol driver requests require pcp")
@@ -3594,7 +3661,7 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
     if event.startswith("MQTT_") and "topic" not in request:
         raise EmulatorInputError("MQTT protocol driver requests require topic")
     if (
-        not event.startswith(("DNS_", "MQTT_", "SIP_"))
+        not event.startswith(("DNS_", "MQTT_", "SIP_", "RTSP_"))
         and event not in {
             "PCP_REQUEST", "RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST",
             "WS_REQUEST",
@@ -3752,9 +3819,65 @@ def _protocol_request_packet(event: str, request: dict[str, Any]) -> dict[str, A
             "host": websocket_request.get("host", "example.test"),
             "headers": headers,
         }
+    elif event.startswith("RTSP_"):
+        if event not in {"RTSP_REQUEST", "RTSP_REQUEST_DATA"}:
+            raise EmulatorInputError(
+                "local protocol replay supports RTSP_REQUEST and RTSP_REQUEST_DATA only"
+            )
+        if "message" in request:
+            raw = request["message"].replace("\r\n", "\n").replace("\r", "\n")
+            header_text, separator, body = raw.partition("\n\n")
+            lines = header_text.split("\n")
+            if not lines or len(lines[0].split()) != 3:
+                raise EmulatorInputError(
+                    "protocol driver request RTSP message must have a valid request line"
+                )
+            method, uri, version = lines[0].split()
+            headers: dict[str, str] = {}
+            for line in lines[1:]:
+                if not line:
+                    continue
+                if ":" not in line:
+                    raise EmulatorInputError(
+                        "protocol driver request RTSP message has an invalid header"
+                    )
+                name, value = line.split(":", 1)
+                if not name or name.lower() in {key.lower() for key in headers}:
+                    raise EmulatorInputError(
+                        "protocol driver request RTSP message has duplicate or empty headers"
+                    )
+                headers[name] = value.strip()
+            if not separator:
+                body = ""
+        else:
+            method = request.get("method", "DESCRIBE")
+            uri = request.get("uri", "rtsp://example.test/live")
+            version = request.get("version", "RTSP/1.0")
+            headers = request.get("headers", {})
+            body = request.get("body", request.get("payload", ""))
+            if "payload_base64" in request:
+                try:
+                    body = base64.b64decode(request["payload_base64"], validate=True).decode(
+                        "utf-8"
+                    )
+                except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+                    raise EmulatorInputError(
+                        "protocol driver request RTSP payload_base64 must contain UTF-8 bytes"
+                    ) from exc
+        packet = {
+            **common,
+            "protocol": "rtsp",
+            "destination": {"address": "192.0.2.53", "port": 554},
+            "type": "request",
+            "method": method,
+            "uri": uri,
+            "version": version,
+            "headers": headers,
+            "body": body,
+        }
     else:
         raise EmulatorInputError(
-            "local protocol replay currently supports HTTP, DNS, MQTT, SIP, PCP, RADIUS, and WebSocket requests"
+            "local protocol replay currently supports HTTP, DNS, MQTT, SIP, RTSP, PCP, RADIUS, and WebSocket requests"
         )
     try:
         return _normalise_packets([packet])[0]
@@ -3878,7 +4001,7 @@ def _normalise_command_probe_request(
         if event_name not in {"HTTP_REQUEST", "HTTP_RESPONSE"}:
             if not allow_external_protocol_request:
                 raise EmulatorInputError(
-                    "command probe request input is supported only for HTTP_REQUEST or HTTP_RESPONSE"
+                    "command probe request input is supported only for HTTP_REQUEST or HTTP_RESPONSE unless an external protocol allowance is enabled"
                 )
             http_request = _normalise_protocol_request(event_name, http_request)
             if prepare_external_protocol_request:
@@ -27819,7 +27942,12 @@ def _normalise_behavior_pack(root: Path, pack: Any) -> dict[str, Any]:
             probe = case["probe"]
             if not isinstance(probe, dict):
                 raise EmulatorInputError(f"behavior pack case {case_id!r} probe must be an object")
-            _normalise_command_probe_request(root, probe)
+            _normalise_command_probe_request(
+                root,
+                probe,
+                allow_external_protocol_request=True,
+                prepare_external_protocol_request=True,
+            )
             normalised_cases.append(
                 {
                     "id": case_id,
@@ -27967,6 +28095,7 @@ def run_behavior_pack(
                     case["probe"],
                     tcl_lsp_root=str(root),
                     backend=backend,
+                    allow_external_protocol_request=True,
                 )
                 actual = _command_probe_observation(result)
             except EmulatorInputError as exc:

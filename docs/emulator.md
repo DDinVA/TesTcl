@@ -149,7 +149,7 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 The command exits non-zero when a case fails and prints every mismatch without
 discarding the passing cases. The same runner is available as
 `POST /v1/behavior-packs` and the MCP tool `irule_behavior_pack`. The checked-in
-packs cover HTTP, DNS, TCP, TLS/SSL, UDP/datagram, WebSocket, SIP/SDP/SIPALG,
+packs cover HTTP, DNS, TCP, TLS/SSL, UDP/datagram, WebSocket, RTSP, SIP/SDP/SIPALG,
 load-balancing, URI, and stateful session/table contracts for the pinned 17.5
 profile. The SIP pack exercises all 16 catalogued `SIP::` commands, nine SDP
 accessors, and three SIPALG controls across command probes and request/response
@@ -2585,9 +2585,14 @@ before assembly.
 The repository includes a dependency-light starter driver at
 `tools/tmos17-protocol-driver.py`, with the local `uv`-enforcing wrapper
 `scripts/tmos17-protocol-driver.sh`. It supports DNS queries, MQTT 3.1.1
-CONNECT plus PUBLISH traffic, generated or raw SIP messages, and generic raw
-UDP/TCP payloads. Protocol fixtures belong in the plan's optional `request`
-object. For example, a DNS case can use:
+CONNECT plus PUBLISH traffic, generated or raw SIP messages, structured RTSP
+requests, and generic raw UDP/TCP payloads. Protocol fixtures belong in the
+plan's optional `request` object. For example, a DNS case can use:
+
+For `RTSP_REQUEST_DATA`, the collector adds a short `RTSP_REQUEST` primer that
+requests collection before invoking the target data event. The driver sends
+the structured RTSP request and optional UTF-8 body; it does not emulate an
+RTSP server response.
 
 ```json
 {
@@ -2620,8 +2625,8 @@ In a local checkout, use `--trigger-command ./scripts/tmos17-protocol-driver.sh`
 in the emulator image, use
 `--trigger-command /opt/testcl/tools/tmos17-protocol-driver.py`.
 
-The same bounded HTTP, DNS, MQTT, SIP, PCP, and RADIUS request fixtures can be replayed through
-the local differential path with `--golden-vectors` or the command-workbench
+The same bounded HTTP, DNS, MQTT, SIP, RTSP, PCP, and RADIUS request fixtures
+can be replayed through the local differential path with `--golden-vectors` or the command-workbench
 API. The adapter converts those request objects into deterministic protocol
 packets before firing the catalogued event, so command results can be compared
 with an assembled observation pack. Generic raw UDP/TCP request fixtures remain

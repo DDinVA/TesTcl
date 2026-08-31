@@ -279,7 +279,12 @@ def render_probe_irule(
     )
     case_id = _tcl_quote(log_id or case["id"])
     event = request["event"]
-    return f"""when {event} {{
+    primer = ""
+    if event == "RTSP_REQUEST_DATA":
+        # RTSP data events are opt-in: the ingress handler must request
+        # collection before the driver sends the request body.
+        primer = "when RTSP_REQUEST { RTSP::collect }\n"
+    return f"""{primer}when {event} {{
     set testcl_capture_rule {_tcl_quote(rule_name)}
     set testcl_capture_id {case_id}
     set testcl_capture_value ""
