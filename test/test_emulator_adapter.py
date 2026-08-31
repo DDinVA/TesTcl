@@ -4744,6 +4744,7 @@ when HTTP_RESPONSE_RELEASE {
         expected_counts = {
             "aaa-17.5.json": 3,
             "antifraud-controls-17.5.json": 2,
+            "asm-controls-17.5.json": 2,
             "category-17.5.json": 6,
             "tcp-controls-17.5.json": 2,
             "tcp-introspection-17.5.json": 15,
@@ -5410,7 +5411,7 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["status_counts"], {"ok": 46})
         self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
 
-    def test_dns_candidate_sweep_uses_nested_rr_fixtures(self) -> None:
+    def test_dns_candidate_queue_is_empty_after_control_pack(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         packs = [
             json.loads(path.read_text(encoding="utf-8"))
@@ -5419,36 +5420,21 @@ when HTTP_RESPONSE_RELEASE {
         candidates = self.adapter._build_behavior_vector_candidates(
             root, packs, 0, 21, namespace="DNS", variants=1
         )
-        by_command = {
-            candidate["command"]: candidate for candidate in candidates["candidates"]
-        }
-        self.assertEqual(
-            {candidate["event"] for candidate in candidates["candidates"]},
-            {"DNS_REQUEST"},
-        )
-        self.assertEqual(
-            by_command["DNS::answer"]["input"]["state"]["dns"]["answers"],
-            "{example.com. A IN 30 192.0.2.10}",
-        )
-        self.assertEqual(
-            by_command["DNS::answer"]["input"]["args"], ["count"],
-        )
-        self.assertEqual(
-            by_command["DNS::rr"]["input"]["args"],
-            ["example.com. A IN 30 192.0.2.10"],
-        )
-        self.assertEqual(
-            by_command["DNS::query"]["input"]["args"],
-            ["dnsx", "example.com.", "A"],
-        )
+        self.assertEqual(candidates["candidates"], [])
+        self.assertIsNone(candidates["capture_plan"])
+        self.assertEqual(candidates["summary"]["candidate_command_count"], 0)
+        self.assertEqual(candidates["summary"]["plan_observation_count"], 0)
 
         sweep = self.adapter._build_behavior_vector_sweep(
             root, packs, 0, 21, namespace="DNS", variants=8
         )
-        self.assertEqual(sweep["summary"]["candidate_command_count"], 21)
-        self.assertEqual(sweep["summary"]["variant_count"], 54)
-        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 54})
-        self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 0)
+        self.assertEqual(sweep["summary"]["variant_count"], 0)
+        self.assertEqual(sweep["summary"]["status_counts"], {})
+        self.assertEqual(
+            sweep["summary"]["execution_status_counts"],
+            {"ok": 0, "error": 0, "profile-gated": 0},
+        )
 
     def test_dnsmsg_candidate_sweep_seeds_opaque_message_handles(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
