@@ -100,6 +100,10 @@ jobs:
             testcl-irule-emulator:ci \
             --data-plane --host 0.0.0.0 --port 18082 \
             --scenario /opt/testcl/examples/scenarios/live-tcp-17.5.json
+          sleep 1
+          docker inspect "$raw_container_name" \
+            --format 'raw container status={{.State.Status}} exit={{.State.ExitCode}}'
+          docker logs "$raw_container_name"
           for attempt in $(seq 1 30); do
             if (exec 3<>/dev/tcp/127.0.0.1/18082) 2>/dev/null; then
               exec 3>&- 3<&-
