@@ -4744,6 +4744,7 @@ when HTTP_RESPONSE_RELEASE {
         expected_counts = {
             "aaa-17.5.json": 3,
             "access-controls-17.5.json": 3,
+            "adapt-controls-17.5.json": 2,
             "auth-controls-17.5.json": 4,
             "antifraud-controls-17.5.json": 2,
             "asm-controls-17.5.json": 2,
