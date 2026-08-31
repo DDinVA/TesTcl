@@ -31896,6 +31896,11 @@ def _live_tcp_handler(
             total_read = 0
             self._response_bytes = 0
             try:
+                print(
+                    "testcl raw TCP connection accepted from "
+                    f"{self.client_address[0]}:{self.client_address[1]}",
+                    file=sys.stderr,
+                )
                 session_id = manager.create(scenario)
                 self.request.settimeout(config["read_timeout"])
 
@@ -31918,6 +31923,10 @@ def _live_tcp_handler(
                     if not payload:
                         break
                     total_read += len(payload)
+                    print(
+                        f"testcl raw TCP received {len(payload)} bytes",
+                        file=sys.stderr,
+                    )
                     result = manager.execute(
                         session_id,
                         lambda session, payload=payload: session.run_packet_trace(
