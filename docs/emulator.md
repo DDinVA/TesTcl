@@ -243,6 +243,11 @@ their protocol, phase, direction, and emulator session ID. Use
 not persisted and is diagnostic emulator output, not independent TMOS/vLab
 evidence. A ready-to-run smoke test is available at
 [`scripts/live-observation-smoke.sh`](../scripts/live-observation-smoke.sh).
+To turn captured HTTP request inputs into an external-reference plan, POST a
+scenario and optional observation IDs to
+`/v1/live-observations/capture-plan`; the response is a plan without outputs.
+Fill its records from BIG-IP/vLab, then send the plan and records to
+`/v1/observations/assemble` before running `/v1/differential-vectors`.
 
 ## Command workbench
 
@@ -2395,7 +2400,8 @@ The service exposes `GET /healthz`, `GET /v1/capabilities`,
 `POST /v1/sessions/{session_id}/requests`,
 `POST /v1/sessions/{session_id}/packets`, and
 `DELETE /v1/sessions/{session_id}`. Combined API/data-plane mode additionally
-provides `GET` and `DELETE /v1/live-observations`. It binds to `127.0.0.1` by default, caps
+provides `GET` and `DELETE /v1/live-observations`, plus
+`POST /v1/live-observations/capture-plan`. It binds to `127.0.0.1` by default, caps
 JSON request bodies at 2 MiB, and does not expose arbitrary Tcl evaluation.
 The HTTP API accepts inline `irule` text only; use the CLI's `irule_file` field
 when a rule must be loaded from a local file.

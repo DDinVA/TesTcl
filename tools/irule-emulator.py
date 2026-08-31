@@ -29523,6 +29523,162 @@ class _LiveObservationStore:
             self._total_bytes = 0
 
 
+def _build_live_observation_capture_plan(
+    root: Path,
+    request: Any,
+    observations: _LiveObservationStore,
+) -> dict[str, Any]:
+    """Build an external-reference capture plan from live HTTP request inputs.
+
+    Live observations contain emulator output, so this function deliberately
+    emits a plan with no reference output. A BIG-IP or vLab collector must fill
+    the matching records before the existing assembly/golden-vector boundary
+    can be used.
+    """
+    if not isinstance(request, dict):
+        raise EmulatorInputError("live capture-plan request must be a JSON object")
+    allowed = {
+        "scenario",
+        "observation_ids",
+        "name",
+        "source",
+        "collector",
+        "tmos_build",
+        "capture_id",
+        "comparisons",
+    }
+    unknown = sorted(set(request) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            "unsupported live capture-plan field(s): " + ", ".join(unknown)
+        )
+    raw_scenario = request.get("scenario")
+    if not isinstance(raw_scenario, dict):
+        raise EmulatorInputError("live capture-plan requires a scenario object")
+    if "irule_file" in raw_scenario:
+        raise EmulatorInputError("live capture-plan scenario must use inline irule")
+    if any(field in raw_scenario for field in ("request", "requests", "packets")):
+        raise EmulatorInputError(
+            "live capture-plan scenario cannot contain request, requests, or packets"
+        )
+    scenario = dict(raw_scenario)
+    # These fields configure the real listener and deterministic peer; they do
+    # not belong in the replay input sent to a BIG-IP/vLab collector.
+    scenario.pop("live_data_plane", None)
+    scenario.pop("live_origin", None)
+
+    observation_ids = request.get("observation_ids")
+    if observation_ids is not None:
+        if (
+            not isinstance(observation_ids, list)
+            or not observation_ids
+            or len(observation_ids) > LIVE_OBSERVATION_MAX_RECORDS
+            or any(
+                not isinstance(item, str) or not item
+                for item in observation_ids
+            )
+            or len(set(observation_ids)) != len(observation_ids)
+        ):
+            raise EmulatorInputError(
+                "observation_ids must be a non-empty array of unique strings"
+            )
+        selected_ids = set(observation_ids)
+    else:
+        selected_ids = None
+
+    snapshot = observations.snapshot(observations._max_records)
+    available = snapshot["observations"]
+    if selected_ids is not None:
+        selected = [
+            item for item in available if item["observation_id"] in selected_ids
+        ]
+        missing = sorted(selected_ids - {item["observation_id"] for item in selected})
+        if missing:
+            raise EmulatorInputError(
+                "unknown live observation id(s): " + ", ".join(missing[:8])
+            )
+        selected.sort(key=lambda item: observation_ids.index(item["observation_id"]))
+    else:
+        selected = available
+    if not selected:
+        raise EmulatorInputError("no live observations are available for export")
+    if len(selected) > CAPTURE_MAX_RECORDS:
+        raise EmulatorInputError(
+            f"live capture-plan export accepts at most {CAPTURE_MAX_RECORDS} observations"
+        )
+
+    comparisons = request.get("comparisons")
+    if comparisons is None:
+        comparisons = [
+            {
+                "label": "response status",
+                "actual_path": ["results", 0, "response", "status"],
+                "reference_path": ["response", "status"],
+            }
+        ]
+    if not isinstance(comparisons, list) or not comparisons:
+        raise EmulatorInputError("comparisons must be a non-empty array")
+
+    plan_observations: list[dict[str, Any]] = []
+    for item in selected:
+        if item.get("protocol") != "http" or item.get("phase") != "transaction":
+            raise EmulatorInputError(
+                "live capture-plan export currently accepts HTTP transaction observations only"
+            )
+        result = item.get("result")
+        live_request = result.get("request") if isinstance(result, dict) else None
+        if not isinstance(live_request, dict):
+            raise EmulatorInputError(
+                f"live observation {item['observation_id']!r} is missing an HTTP request"
+            )
+        replay_request = {
+            field: live_request[field]
+            for field in (
+                "method",
+                "uri",
+                "host",
+                "headers",
+                "body",
+                "sni",
+                "http2",
+                "http_class",
+                "lb_failure",
+                "persist_down",
+                "lb_queue",
+                "dosl7",
+                "antifraud",
+                "access",
+                "adapt",
+            )
+            if field in live_request
+        }
+        vector_scenario = dict(scenario)
+        vector_scenario["requests"] = [replay_request]
+        plan_observations.append(
+            {
+                "id": f"live:{item['observation_id']}",
+                "operation": "scenario",
+                "input": vector_scenario,
+                "comparisons": comparisons,
+            }
+        )
+
+    plan = {
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "name": request.get("name", "live-http-capture-plan"),
+        "source": request.get("source", "external-bigip-or-vlab"),
+        "provenance": {
+            "collector": request.get("collector", "external-collector"),
+            "tmos_build": request.get("tmos_build", "17.5"),
+            "capture_id": request.get("capture_id", "live-observations"),
+            "generator": "tmos-17.5-live-observation-plan-v1",
+        },
+        "observations": plan_observations,
+    }
+    return _normalise_capture_plan(root, plan)
+
+
 class _LivePoolScheduler:
     """Coordinate bounded member rotation across real live-data-plane flows."""
 
@@ -35310,6 +35466,39 @@ def _http_handler(
                     self._error(exc)
                     return
                 _json_response(self, 200, payload)
+                return
+            if parsed.path == "/v1/live-observations/capture-plan":
+                try:
+                    request = self._read_json()
+                    payload = _build_live_observation_capture_plan(
+                        root, request, live_observations
+                    )
+                except (
+                    json.JSONDecodeError,
+                    EmulatorInputError,
+                    EmulatorResourceError,
+                    OSError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    self._error(exc)
+                    return
+                _json_response(
+                    self,
+                    200,
+                    {
+                        "status": "ok",
+                        "schema_version": 1,
+                        "profile": "tmos-17.5",
+                        "tmos_version": TMOS_VERSION,
+                        "plan": payload,
+                        "summary": {
+                            "observation_count": len(payload["observations"]),
+                            "executed": False,
+                            "reference_output_included": False,
+                        },
+                    },
+                )
                 return
             if parsed.path == "/v1/simulations/pcap":
                 try:

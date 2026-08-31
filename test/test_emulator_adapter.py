@@ -20947,6 +20947,77 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             thread.join(timeout=5)
             server.server_close()
 
+    def test_live_observations_export_to_capture_plan_and_golden_vector(self) -> None:
+        store = self.adapter._LiveObservationStore()
+        store.append(
+            session_id="live-session",
+            protocol="http",
+            phase="transaction",
+            direction="client_to_server",
+            result={
+                "request": {
+                    "method": "GET",
+                    "uri": "/from-live",
+                    "host": "live.example",
+                    "headers": {"host": "live.example"},
+                    "body": "",
+                },
+                "response": {"status": 200, "body": "modeled"},
+            },
+        )
+        server = self.adapter.ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            self.adapter._http_handler(
+                Path(self.tcl_lsp_root), observations=store
+            ),
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            export_request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/live-observations/capture-plan",
+                data=json.dumps(
+                    {
+                        "scenario": {
+                            "profiles": ["TCP", "HTTP"],
+                            "irule": "when HTTP_REQUEST {}",
+                            "live_data_plane": {"protocol": "http"},
+                            "live_origin": {"body": "not part of replay"},
+                        },
+                        "name": "live-export",
+                        "source": "test-external-tmos-17.5",
+                        "collector": "test-collector",
+                        "capture_id": "capture-live-1",
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(export_request) as response:
+                exported = json.loads(response.read())
+            plan = exported["plan"]
+            self.assertEqual(exported["summary"]["reference_output_included"], False)
+            self.assertEqual(plan["observations"][0]["operation"], "scenario")
+            replay = plan["observations"][0]["input"]
+            self.assertNotIn("live_data_plane", replay)
+            self.assertNotIn("live_origin", replay)
+            self.assertEqual(replay["requests"][0]["uri"], "/from-live")
+            self.assertNotIn("output", plan["observations"][0])
+
+            assembled = self.adapter.run_capture_assemble(
+                plan,
+                [{"id": "live:live_1", "output": {"response": {"status": 200}}}],
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+            compared = self.adapter.run_golden_vectors(
+                assembled["pack"], tcl_lsp_root=self.tcl_lsp_root
+            )
+            self.assertEqual(compared["analysis"]["comparison_passed"], 1)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_live_http_data_plane_runs_persistent_real_client_requests(self) -> None:
         scenario = {
             "profiles": ["TCP", "HTTP"],
