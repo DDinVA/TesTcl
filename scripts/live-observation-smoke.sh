@@ -7,6 +7,7 @@ api_port=${TESTCL_API_PORT:-18090}
 data_port=${TESTCL_DATA_PORT:-18091}
 scenario="$repo_root/examples/scenarios/live-http-17.5.json"
 log_file=$(mktemp -t testcl-live-observation.XXXXXX)
+capture_request=$(mktemp -t testcl-live-capture-request.XXXXXX)
 server_pid=""
 
 cleanup() {
@@ -14,7 +15,7 @@ cleanup() {
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
   fi
-  rm -f "$log_file"
+  rm -f "$log_file" "$capture_request"
 }
 trap cleanup EXIT
 
@@ -74,3 +75,35 @@ print(json.dumps({
 }, indent=2))
 '
 echo
+
+"$repo_root/.venv/bin/python" - "$scenario" "$capture_request" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+scenario = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+Path(sys.argv[2]).write_text(
+    json.dumps({"scenario": scenario}, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+echo "Capture-plan export:"
+curl --silent --show-error --fail \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  --data-binary "@$capture_request" \
+  "http://127.0.0.1:$api_port/v1/live-observations/capture-plan" \
+  | "$repo_root/.venv/bin/python" -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+plan = payload["plan"]
+print(json.dumps({
+    "status": payload.get("status"),
+    "observation_count": payload["summary"].get("observation_count"),
+    "reference_output_included": payload["summary"].get("reference_output_included"),
+    "plan_name": plan.get("name"),
+    "operations": [item.get("operation") for item in plan.get("observations", [])],
+}, indent=2))
+'

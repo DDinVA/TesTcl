@@ -243,11 +243,29 @@ their protocol, phase, direction, and emulator session ID. Use
 not persisted and is diagnostic emulator output, not independent TMOS/vLab
 evidence. A ready-to-run smoke test is available at
 [`scripts/live-observation-smoke.sh`](../scripts/live-observation-smoke.sh).
-To turn captured HTTP request inputs into an external-reference plan, POST a
-scenario and optional observation IDs to
-`/v1/live-observations/capture-plan`; the response is a plan without outputs.
-Fill its records from BIG-IP/vLab, then send the plan and records to
-`/v1/observations/assemble` before running `/v1/differential-vectors`.
+To turn captured live inputs into an external-reference plan, POST a scenario
+and optional observation IDs to `/v1/live-observations/capture-plan`; the
+response is a plan without outputs. HTTP transactions become one request
+scenario per observation. TCP and WebSocket packet observations are grouped by
+live session, preserving connection/frame order. The exporter copies only
+replay inputs, so trace indexes, events, forwarding decisions, and modeled
+outputs are excluded. HTTP/2 live observations remain diagnostic-only until a
+lossless frame export is added. Fill the plan's records from BIG-IP/vLab, then
+send the plan and records to `/v1/observations/assemble` before running
+`/v1/differential-vectors`.
+
+For the HTTP smoke test, the capture-plan request can be generated from the
+same scenario file after the real request has completed:
+
+```sh
+curl -sS -X POST -H 'Content-Type: application/json' \
+  --data "{\"scenario\":$(<examples/scenarios/live-http-17.5.json)}" \
+  http://127.0.0.1:18090/v1/live-observations/capture-plan
+```
+
+The returned plan is intentionally not proof of TMOS behavior. It is the
+portable replay input that an external collector can pair with its observed
+output.
 
 ## Command workbench
 

@@ -29528,12 +29528,14 @@ def _build_live_observation_capture_plan(
     request: Any,
     observations: _LiveObservationStore,
 ) -> dict[str, Any]:
-    """Build an external-reference capture plan from live HTTP request inputs.
+    """Build an external-reference capture plan from live replay inputs.
 
     Live observations contain emulator output, so this function deliberately
-    emits a plan with no reference output. A BIG-IP or vLab collector must fill
-    the matching records before the existing assembly/golden-vector boundary
-    can be used.
+    emits a plan with no reference output. HTTP observations become one request
+    scenario each. TCP and WebSocket observations are grouped by live session
+    so connection lifecycle and frame ordering survive the export. A BIG-IP or
+    vLab collector must fill the matching records before the existing
+    assembly/golden-vector boundary can be used.
     """
     if not isinstance(request, dict):
         raise EmulatorInputError("live capture-plan request must be a JSON object")
@@ -29607,66 +29609,205 @@ def _build_live_observation_capture_plan(
             f"live capture-plan export accepts at most {CAPTURE_MAX_RECORDS} observations"
         )
 
-    comparisons = request.get("comparisons")
-    if comparisons is None:
-        comparisons = [
-            {
-                "label": "response status",
-                "actual_path": ["results", 0, "response", "status"],
-                "reference_path": ["response", "status"],
-            }
-        ]
-    if not isinstance(comparisons, list) or not comparisons:
+    plan_observations: list[dict[str, Any]] = []
+    packet_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    packet_group_order: list[tuple[str, str]] = []
+    supplied_comparisons = request.get("comparisons")
+    if supplied_comparisons is not None and (
+        not isinstance(supplied_comparisons, list) or not supplied_comparisons
+    ):
         raise EmulatorInputError("comparisons must be a non-empty array")
 
-    plan_observations: list[dict[str, Any]] = []
     for item in selected:
-        if item.get("protocol") != "http" or item.get("phase") != "transaction":
-            raise EmulatorInputError(
-                "live capture-plan export currently accepts HTTP transaction observations only"
-            )
+        protocol = item.get("protocol")
         result = item.get("result")
-        live_request = result.get("request") if isinstance(result, dict) else None
-        if not isinstance(live_request, dict):
+        if protocol == "http" and item.get("phase") == "transaction":
+            live_request = result.get("request") if isinstance(result, dict) else None
+            if not isinstance(live_request, dict):
+                raise EmulatorInputError(
+                    f"live observation {item['observation_id']!r} is missing an HTTP request"
+                )
+            replay_request = {
+                field: live_request[field]
+                for field in (
+                    "method",
+                    "uri",
+                    "host",
+                    "headers",
+                    "body",
+                    "sni",
+                    "http2",
+                    "http_class",
+                    "lb_failure",
+                    "persist_down",
+                    "lb_queue",
+                    "dosl7",
+                    "antifraud",
+                    "access",
+                    "adapt",
+                )
+                if field in live_request
+            }
+            vector_scenario = dict(scenario)
+            vector_scenario["requests"] = [replay_request]
+            plan_observations.append(
+                {
+                    "id": f"live:{item['observation_id']}",
+                    "operation": "scenario",
+                    "input": vector_scenario,
+                    "comparisons": supplied_comparisons
+                    or [
+                        {
+                            "label": "response status",
+                            "actual_path": ["results", 0, "response", "status"],
+                            "reference_path": ["response", "status"],
+                        }
+                    ],
+                }
+            )
+            continue
+
+        if protocol not in {"tcp", "websocket"}:
             raise EmulatorInputError(
-                f"live observation {item['observation_id']!r} is missing an HTTP request"
+                "live capture-plan export accepts HTTP transactions, TCP packets, "
+                "and WebSocket packets"
             )
-        replay_request = {
-            field: live_request[field]
-            for field in (
-                "method",
-                "uri",
-                "host",
-                "headers",
-                "body",
-                "sni",
-                "http2",
-                "http_class",
-                "lb_failure",
-                "persist_down",
-                "lb_queue",
-                "dosl7",
-                "antifraud",
-                "access",
-                "adapt",
+        trace = result.get("trace") if isinstance(result, dict) else None
+        if not isinstance(trace, list) or not trace:
+            raise EmulatorInputError(
+                f"live observation {item['observation_id']!r} is missing a packet trace"
             )
-            if field in live_request
-        }
+        session_id = item.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise EmulatorInputError(
+                f"live observation {item['observation_id']!r} is missing a session id"
+            )
+        group_key = (protocol, session_id)
+        if group_key not in packet_groups:
+            packet_groups[group_key] = []
+            packet_group_order.append(group_key)
+        for trace_entry in trace:
+            if not isinstance(trace_entry, dict):
+                raise EmulatorInputError(
+                    f"live observation {item['observation_id']!r} contains an invalid packet trace"
+                )
+            if trace_entry.get("protocol") != protocol:
+                raise EmulatorInputError(
+                    f"live observation {item['observation_id']!r} contains a mixed-protocol trace"
+                )
+            allowed_packet_fields = {
+                "protocol",
+                "direction",
+                "source",
+                "destination",
+                "flags",
+                "src_addr",
+                "src_port",
+                "dst_addr",
+                "dst_port",
+                "timestamp",
+                "seq",
+                "ack",
+                "hops",
+                "ttl",
+                "tos",
+                "datagram",
+                "flow_id",
+            }
+            if protocol == "tcp":
+                allowed_packet_fields.add("payload_hex")
+            else:
+                allowed_packet_fields.update(
+                    {
+                        "type",
+                        "method",
+                        "uri",
+                        "host",
+                        "headers",
+                        "status",
+                        "response_headers",
+                        "frame_type",
+                        "fin",
+                        "masked",
+                        "mask",
+                        "payload_hex",
+                        "payload",
+                    }
+                )
+            replay_packet = {
+                field: trace_entry[field]
+                for field in (
+                    "protocol",
+                    "direction",
+                    "source",
+                    "destination",
+                    "flags",
+                    "src_addr",
+                    "src_port",
+                    "dst_addr",
+                    "dst_port",
+                    "timestamp",
+                    "seq",
+                    "ack",
+                    "hops",
+                    "ttl",
+                    "tos",
+                    "datagram",
+                    "flow_id",
+                    "type",
+                    "method",
+                    "uri",
+                    "host",
+                    "headers",
+                    "status",
+                    "response_headers",
+                    "frame_type",
+                    "fin",
+                    "masked",
+                    "mask",
+                    "payload_hex",
+                    "payload",
+                )
+                if field in allowed_packet_fields and field in trace_entry
+            }
+            # A normalized WebSocket trace may expose UTF-8 payload text even
+            # when the original live frame was captured as bytes. Prefer the
+            # lossless hex representation whenever both are available.
+            if protocol == "websocket" and "payload_hex" in replay_packet:
+                replay_packet.pop("payload", None)
+            if set(replay_packet) <= {"protocol", "direction", "source", "destination"}:
+                raise EmulatorInputError(
+                    f"live observation {item['observation_id']!r} contains a packet without replay data"
+                )
+            packet_groups[group_key].append(replay_packet)
+
+    for group_index, (protocol, session_id) in enumerate(packet_group_order):
+        packets = packet_groups[(protocol, session_id)]
         vector_scenario = dict(scenario)
-        vector_scenario["requests"] = [replay_request]
+        vector_scenario["packets"] = packets
         plan_observations.append(
             {
-                "id": f"live:{item['observation_id']}",
+                "id": f"live:{protocol}-session-{group_index:06d}",
                 "operation": "scenario",
                 "input": vector_scenario,
-                "comparisons": comparisons,
+                "comparisons": supplied_comparisons
+                or [
+                    {
+                        "label": "packets processed",
+                        "actual_path": ["packets_processed"],
+                        "reference_path": ["packets_processed"],
+                    }
+                ],
             }
         )
+
+    if not plan_observations:
+        raise EmulatorInputError("no supported live observations are available for export")
 
     plan = {
         "schema_version": 1,
         "profile": "tmos-17.5",
-        "name": request.get("name", "live-http-capture-plan"),
+        "name": request.get("name", "live-capture-plan"),
         "source": request.get("source", "external-bigip-or-vlab"),
         "provenance": {
             "collector": request.get("collector", "external-collector"),

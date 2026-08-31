@@ -21018,6 +21018,162 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             thread.join(timeout=5)
             server.server_close()
 
+    def test_live_packet_observations_export_grouped_replay_scenarios(self) -> None:
+        store = self.adapter._LiveObservationStore()
+        tcp_trace = [
+            {
+                "index": 0,
+                "protocol": "tcp",
+                "direction": "client_to_server",
+                "source": {"address": "127.0.0.1", "port": 51000},
+                "destination": {"address": "127.0.0.1", "port": 443},
+                "flags": ["SYN"],
+                "events": [],
+            },
+            {
+                "index": 1,
+                "protocol": "tcp",
+                "direction": "client_to_server",
+                "source": {"address": "127.0.0.1", "port": 51000},
+                "destination": {"address": "127.0.0.1", "port": 443},
+                "flags": [],
+                "payload_hex": "6869",
+                "ignored": "tcp payload not collected",
+                "forwarded_payload_hex": "6869",
+                "forwarded_byte_length": 2,
+            },
+        ]
+        store.append(
+            session_id="tcp-session",
+            protocol="tcp",
+            phase="accept",
+            direction="client_to_server",
+            result={"trace": tcp_trace[:1]},
+        )
+        store.append(
+            session_id="tcp-session",
+            protocol="tcp",
+            phase="data",
+            direction="client_to_server",
+            result={"trace": tcp_trace[1:]},
+        )
+        store.append(
+            session_id="ws-session",
+            protocol="websocket",
+            phase="upgrade",
+            direction="client_to_server",
+            result={
+                "trace": [
+                    {
+                        "index": 0,
+                        "protocol": "websocket",
+                        "direction": "client_to_server",
+                        "source": {"address": "127.0.0.1", "port": 51001},
+                        "destination": {"address": "127.0.0.1", "port": 443},
+                        "type": "request",
+                        "method": "GET",
+                        "uri": "/socket",
+                        "host": "example.com",
+                        "headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+                            "Sec-WebSocket-Version": "13",
+                        },
+                        "events": [],
+                    },
+                    {
+                        "index": 1,
+                        "protocol": "websocket",
+                        "direction": "server_to_client",
+                        "source": {"address": "127.0.0.1", "port": 443},
+                        "destination": {"address": "127.0.0.1", "port": 51001},
+                        "type": "response",
+                        "status": 101,
+                        "response_headers": {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Accept": "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+                        },
+                        "events": [],
+                    },
+                ]
+            },
+        )
+        store.append(
+            session_id="ws-session",
+            protocol="websocket",
+            phase="frame",
+            direction="client_to_server",
+            result={
+                "trace": [
+                    {
+                        "index": 2,
+                        "protocol": "websocket",
+                        "direction": "client_to_server",
+                        "source": {"address": "127.0.0.1", "port": 51001},
+                        "destination": {"address": "127.0.0.1", "port": 443},
+                        "type": "frame",
+                        "frame_type": "text",
+                        "fin": "1",
+                        "masked": "1",
+                        "mask": "01020304",
+                        "payload_hex": "6869",
+                        "payload": "hi",
+                        "events": [],
+                    }
+                ]
+            },
+        )
+
+        plan = self.adapter._build_live_observation_capture_plan(
+            Path(self.tcl_lsp_root),
+            {
+                "scenario": {
+                    "profiles": ["TCP", "HTTP", "WS"],
+                    "irule": "when CLIENT_ACCEPTED {}",
+                    "live_data_plane": {"protocol": "tcp"},
+                }
+            },
+            store,
+        )
+        self.assertEqual(len(plan["observations"]), 2)
+        tcp_input = plan["observations"][0]["input"]
+        self.assertEqual(len(tcp_input["packets"]), 2)
+        self.assertEqual(tcp_input["packets"][1]["payload_hex"], "6869")
+        websocket_input = plan["observations"][1]["input"]
+        self.assertEqual(len(websocket_input["packets"]), 3)
+        self.assertNotIn("payload", websocket_input["packets"][2])
+        serialized = json.dumps(plan)
+        for generated_field in (
+            "index",
+            "events",
+            "ignored",
+            "forwarded_payload_hex",
+            "forwarded_byte_length",
+        ):
+            self.assertNotIn(generated_field, serialized)
+
+        assembled = self.adapter.run_capture_assemble(
+            plan,
+            [
+                {
+                    "id": plan["observations"][0]["id"],
+                    "output": {"packets_processed": 2},
+                },
+                {
+                    "id": plan["observations"][1]["id"],
+                    "output": {"packets_processed": 3},
+                },
+            ],
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        compared = self.adapter.run_golden_vectors(
+            assembled["pack"],
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(compared["analysis"]["comparison_passed"], 2)
+
     def test_live_http_data_plane_runs_persistent_real_client_requests(self) -> None:
         scenario = {
             "profiles": ["TCP", "HTTP"],
