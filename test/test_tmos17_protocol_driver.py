@@ -203,6 +203,92 @@ def test_rtsp_driver_normalises_raw_message_line_endings() -> None:
     assert payload == b"OPTIONS rtsp://media.example/live RTSP/1.0\r\nCSeq: 3\r\n\r\n"
 
 
+def test_icap_driver_builds_structured_and_raw_messages() -> None:
+    payload = driver.build_icap_message(
+        {
+            "icap": {
+                "method": "REQMOD",
+                "uri": "icap://icap.example.net/reqmod",
+                "headers": {"Host": "icap.example.net"},
+                "encapsulated": {
+                    "headers": "GET /inspect HTTP/1.1\r\nHost: origin.example\r\n\r\n",
+                    "body": "hello",
+                },
+            }
+        },
+        "ICAP_REQUEST",
+    )
+    assert payload.startswith(
+        b"REQMOD icap://icap.example.net/reqmod ICAP/1.0\r\n"
+        b"Host: icap.example.net\r\n"
+    )
+    assert b"Encapsulated: req-hdr=0, req-body=47\r\n" in payload
+    assert payload.endswith(b"5\r\nhello\r\n0\r\n\r\n")
+    headers_only = driver.build_icap_message(
+        {"icap": {"encapsulated": {"headers": "GET / HTTP/1.1\r\n\r\n"}}},
+        "ICAP_REQUEST",
+    )
+    assert b"Encapsulated: req-hdr=0, null-body=18\r\n" in headers_only
+    assert headers_only.endswith(b"GET / HTTP/1.1\r\n\r\n")
+    response = driver.build_icap_message(
+        {"icap": {"status": 204, "headers": {"ISTag": "v1"}}},
+        "ICAP_RESPONSE",
+    )
+    assert response == (
+        b"ICAP/1.0 204 OK\r\nISTag: v1\r\nEncapsulated: null-body=0\r\n\r\n"
+    )
+    raw = base64.b64encode(response).decode("ascii")
+    assert driver.build_icap_message(
+        {"icap": {"message_base64": raw}}, "ICAP_RESPONSE"
+    ) == response
+    endpoint, generated, timeout = driver.build_payload(
+        {
+            "event": "ICAP_REQUEST",
+            "traffic_url": "tcp://192.0.2.20:1344",
+            "request": {"icap": {"method": "OPTIONS"}},
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 1344)
+    assert generated.startswith(b"OPTIONS icap://example.test/reqmod ICAP/1.0\r\n")
+    assert timeout == 10.0
+
+
+def test_icap_driver_rejects_ambiguous_or_unsafe_fields() -> None:
+    with pytest.raises(driver.DriverError, match="mutually exclusive"):
+        driver.build_icap_message(
+            {"icap": {"message_hex": "00", "message_base64": "AA=="}},
+            "ICAP_REQUEST",
+        )
+    with pytest.raises(driver.DriverError, match="line breaks"):
+        driver.build_icap_message(
+            {"icap": {"headers": {"X-Test": "ok\r\nInjected: yes"}}},
+            "ICAP_REQUEST",
+        )
+    with pytest.raises(driver.DriverError, match="ASCII"):
+        driver.build_icap_message(
+            {"icap": {"uri": "icap://café.example/reqmod"}}, "ICAP_REQUEST"
+        )
+    with pytest.raises(driver.DriverError, match="cannot be combined"):
+        driver.build_icap_message(
+            {"icap": {"message_hex": "494341502f", "status": 200}},
+            "ICAP_RESPONSE",
+        )
+    with pytest.raises(driver.DriverError, match="generated"):
+        driver.build_icap_message(
+            {"icap": {"headers": {"Encapsulated": "null-body=0"}}},
+            "ICAP_REQUEST",
+        )
+    with pytest.raises(driver.DriverError, match="Latin-1"):
+        driver.build_icap_message(
+            {
+                "icap": {
+                    "encapsulated": {"headers": "X-Origin: €\r\n"},
+                }
+            },
+            "ICAP_REQUEST",
+        )
+
+
 def test_fix_driver_builds_framed_tags_and_accepts_raw_bytes() -> None:
     payload = driver.build_fix_message(
         {

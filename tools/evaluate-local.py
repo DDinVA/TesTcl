@@ -126,6 +126,15 @@ def _probe_requests(emulator: Any) -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "ICAP::method",
+            "request": {
+                "command": "ICAP::method",
+                "event": "ICAP_REQUEST",
+                "profiles": ["TCP", "ICAP"],
+                "request": templates("ICAP_REQUEST"),
+            },
+        },
+        {
             "name": "FTP::ftps_mode",
             "request": {
                 "command": "FTP::ftps_mode",

@@ -665,8 +665,12 @@ the `ICAP` profile is attached. The four TMOS 17.5 `ICAP::*` commands expose
 request method and URI, response status, and case-insensitive ICAP header
 lookup, enumeration, insertion, replacement, removal, and replacement of
 the complete header block. Header and URI mutations are retained in the event
-trace. This is a deterministic adaptation-message model; it does not run an
-ICAP server, parse encapsulated HTTP bodies, or require an LTM/PEM license.
+trace. Raw ICAP/1.0 control messages on port 1344 (or streams with an ICAP
+prefix) are also reassembled across TCP packets, including coalesced messages,
+`null-body` framing, and bounded ICAP chunked encapsulated bodies. The raw
+adapter exposes the full ICAP wire message through `ICAP::payload`; it does not
+run an ICAP server, interpret the encapsulated HTTP semantics, or require an
+LTM/PEM license.
 Structured `ntlm` packet traces use the TCP lifecycle and model the
 connection-scoped `NTLM::enable` and `NTLM::disable` controls. They expose
 bounded payload bytes and enablement state, but do not parse NTLM messages or
@@ -2620,8 +2624,9 @@ The repository includes a dependency-light starter driver at
 `tools/tmos17-protocol-driver.py`, with the local `uv`-enforcing wrapper
 `scripts/tmos17-protocol-driver.sh`. It supports DNS queries, MQTT 3.1.1
 CONNECT plus PUBLISH traffic, generated or raw SIP messages, structured RTSP
-requests, FTP control-channel commands/responses, LDAP BER messages, and
-generic raw UDP/TCP payloads, plus IMAP/POP3/SMTPS control lines. Protocol
+requests, raw or structured ICAP/1.0 requests/responses, FTP control-channel
+commands/responses, LDAP BER messages, and generic raw UDP/TCP payloads, plus
+IMAP/POP3/SMTPS control lines. Protocol
 fixtures belong in the plan's optional `request` object. For example, a DNS
 case can use:
 

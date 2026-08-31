@@ -32,6 +32,9 @@ MAX_HTTP_LINE_BYTES = 8 * 1024
 MAX_FTP_LINE_BYTES = 64 * 1024
 MAX_LDAP_MESSAGE_BYTES = 2 * 1024 * 1024
 MAX_FIX_MESSAGE_BYTES = 2 * 1024 * 1024
+MAX_ICAP_MESSAGE_BYTES = 2 * 1024 * 1024
+MAX_ICAP_HEADERS = 128
+MAX_ICAP_LINE_BYTES = 64 * 1024
 # Three framing tags (8, 9, and 10) are added to structured input.  Keep the
 # generated message within the emulator's total field bound.
 MAX_FIX_FIELDS = 509
@@ -511,6 +514,192 @@ def build_rtsp_message(request: dict[str, Any], event: str) -> bytes:
     encoded = encoded_headers + body
     if len(encoded) > MAX_PAYLOAD_BYTES:
         raise DriverError("RTSP request exceeds the 2 MiB limit")
+    return encoded
+
+
+def _icap_raw_bytes(value: Any, field: str, *, encoding: str) -> bytes:
+    if not isinstance(value, str) or not value:
+        raise DriverError(f"ICAP {field} must be a non-empty string")
+    try:
+        if encoding == "hex":
+            if len(value) % 2:
+                raise ValueError("odd hexadecimal length")
+            data = bytes.fromhex(value)
+        else:
+            data = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise DriverError(f"ICAP {field} is not valid {encoding}") from exc
+    if not data or len(data) > MAX_ICAP_MESSAGE_BYTES:
+        raise DriverError("ICAP raw message must be between 1 byte and 2 MiB")
+    return data
+
+
+def _icap_header_name(value: Any) -> str:
+    if not isinstance(value, str) or not value or not value.isascii():
+        raise DriverError("ICAP header names must be non-empty ASCII strings")
+    if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", value):
+        raise DriverError("ICAP header name is invalid")
+    return value
+
+
+def _icap_header_value(value: Any) -> str:
+    if not isinstance(value, str) or "\x00" in value or "\r" in value or "\n" in value:
+        raise DriverError("ICAP header values must be strings without NUL or line breaks")
+    try:
+        encoded = value.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        raise DriverError("ICAP header values must contain Latin-1 characters") from exc
+    if len(encoded) > MAX_ICAP_LINE_BYTES:
+        raise DriverError("ICAP header value is too long")
+    return value
+
+
+def build_icap_message(request: dict[str, Any], event: str) -> bytes:
+    """Build one bounded ICAP/1.0 request or response for the collector driver."""
+    if event not in {"ICAP_REQUEST", "ICAP_RESPONSE"}:
+        raise DriverError("ICAP protocol driver supports ICAP_REQUEST and ICAP_RESPONSE")
+    icap = request.get("icap", {})
+    if not isinstance(icap, dict):
+        raise DriverError("ICAP request icap must be an object")
+    allowed = {
+        "message_hex", "message_base64", "method", "uri", "version", "status",
+        "phrase", "headers", "encapsulated",
+    }
+    unknown = sorted(set(icap) - allowed)
+    if unknown:
+        raise DriverError("ICAP request unsupported field(s): " + ", ".join(unknown))
+    raw_hex = icap.get("message_hex")
+    raw_base64 = icap.get("message_base64")
+    if raw_hex is not None and raw_base64 is not None:
+        raise DriverError("ICAP message_hex and message_base64 are mutually exclusive")
+    if raw_hex is not None:
+        if set(icap) != {"message_hex"}:
+            raise DriverError("ICAP raw message cannot be combined with structured fields")
+        return _icap_raw_bytes(raw_hex, "message_hex", encoding="hex")
+    if raw_base64 is not None:
+        if set(icap) != {"message_base64"}:
+            raise DriverError("ICAP raw message cannot be combined with structured fields")
+        return _icap_raw_bytes(raw_base64, "message_base64", encoding="base64")
+
+    version = icap.get("version", "ICAP/1.0")
+    if not isinstance(version, str) or version != "ICAP/1.0":
+        raise DriverError("ICAP version must be ICAP/1.0")
+    headers = icap.get("headers", {})
+    if not isinstance(headers, dict) or len(headers) > MAX_ICAP_HEADERS:
+        raise DriverError(
+            f"ICAP headers must be an object with at most {MAX_ICAP_HEADERS} items"
+        )
+    normalised_headers: list[tuple[str, str]] = []
+    header_names: set[str] = set()
+    for name, value in headers.items():
+        normalised_name = _icap_header_name(name)
+        lowered = normalised_name.lower()
+        if lowered in header_names:
+            raise DriverError(f"ICAP header {normalised_name!r} is repeated")
+        header_names.add(lowered)
+        normalised_headers.append((normalised_name, _icap_header_value(value)))
+
+    encapsulated = icap.get("encapsulated")
+    if "encapsulated" in header_names:
+        raise DriverError("ICAP Encapsulated header is generated from encapsulated fields")
+    if encapsulated is None:
+        normalised_headers.append(("Encapsulated", "null-body=0"))
+        encapsulated_bytes = b""
+    else:
+        if not isinstance(encapsulated, dict):
+            raise DriverError("ICAP encapsulated must be an object")
+        if set(encapsulated) - {"headers", "body", "body_base64"}:
+            raise DriverError("ICAP encapsulated supports headers, body, or body_base64")
+        if "body" in encapsulated and "body_base64" in encapsulated:
+            raise DriverError("ICAP encapsulated body and body_base64 are mutually exclusive")
+        encapsulated_headers = encapsulated.get("headers", "")
+        if not isinstance(encapsulated_headers, str):
+            raise DriverError("ICAP encapsulated headers must be a string")
+        if "\x00" in encapsulated_headers:
+            raise DriverError("ICAP encapsulated headers cannot contain NUL")
+        try:
+            encapsulated_header_bytes = encapsulated_headers.replace(
+                "\r\n", "\n"
+            ).replace("\r", "\n").replace("\n", "\r\n").encode("latin-1")
+        except UnicodeEncodeError as exc:
+            raise DriverError("ICAP encapsulated headers must contain Latin-1 characters") from exc
+        if len(encapsulated_header_bytes) > MAX_ICAP_MESSAGE_BYTES:
+            raise DriverError("ICAP encapsulated headers exceed the 2 MiB limit")
+        if "body_base64" in encapsulated:
+            body = _icap_raw_bytes(
+                encapsulated["body_base64"], "encapsulated body_base64", encoding="base64"
+            )
+        elif "body" in encapsulated:
+            body_value = encapsulated["body"]
+            if not isinstance(body_value, str):
+                raise DriverError("ICAP encapsulated body must be a string")
+            try:
+                body = body_value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise DriverError("ICAP encapsulated body must be valid UTF-8") from exc
+        else:
+            body = b""
+        if len(body) > MAX_ICAP_MESSAGE_BYTES:
+            raise DriverError("ICAP encapsulated body exceeds the 2 MiB limit")
+        if body:
+            body_part = "req-body" if event == "ICAP_REQUEST" else "res-body"
+            normalised_headers.append(
+                ("Encapsulated", f"req-hdr=0, {body_part}={len(encapsulated_header_bytes)}")
+            )
+            chunks = bytearray()
+            for position in range(0, len(body), 64 * 1024):
+                chunk = body[position : position + 64 * 1024]
+                chunks.extend(f"{len(chunk):x}\r\n".encode("ascii"))
+                chunks.extend(chunk)
+                chunks.extend(b"\r\n")
+            chunks.extend(b"0\r\n\r\n")
+            encapsulated_bytes = encapsulated_header_bytes + bytes(chunks)
+        else:
+            if encapsulated_header_bytes:
+                header_part = "req-hdr" if event == "ICAP_REQUEST" else "res-hdr"
+                normalised_headers.append(
+                    (
+                        "Encapsulated",
+                        f"{header_part}=0, null-body={len(encapsulated_header_bytes)}",
+                    )
+                )
+            else:
+                normalised_headers.append(("Encapsulated", "null-body=0"))
+            encapsulated_bytes = encapsulated_header_bytes
+
+    if len(normalised_headers) > MAX_ICAP_HEADERS:
+        raise DriverError(f"ICAP headers must contain at most {MAX_ICAP_HEADERS} items")
+    if event == "ICAP_REQUEST":
+        method = icap.get("method", "REQMOD")
+        uri = icap.get("uri", "icap://example.test/reqmod")
+        if not isinstance(method, str) or method.upper() not in {"REQMOD", "RESPMOD", "OPTIONS"}:
+            raise DriverError("ICAP method must be REQMOD, RESPMOD, or OPTIONS")
+        if not isinstance(uri, str) or not uri or not uri.isascii() or any(character.isspace() for character in uri):
+            raise DriverError("ICAP uri must be an ASCII value without whitespace")
+        start_line = f"{method.upper()} {uri} {version}"
+    else:
+        status = icap.get("status", 200)
+        if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 999:
+            raise DriverError("ICAP status must be an integer from 100 to 999")
+        phrase = icap.get("phrase", "OK")
+        if not isinstance(phrase, str) or "\r" in phrase or "\n" in phrase or "\x00" in phrase:
+            raise DriverError("ICAP phrase must be a string without NUL or line breaks")
+        start_line = f"{version} {status} {phrase}".rstrip()
+    try:
+        start_line_bytes = start_line.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise DriverError("ICAP start line must contain ASCII characters") from exc
+    if len(start_line_bytes) > MAX_ICAP_LINE_BYTES:
+        raise DriverError("ICAP start line is too long")
+    try:
+        encoded = (
+            "\r\n".join([start_line] + [f"{name}: {value}" for name, value in normalised_headers])
+            + "\r\n\r\n"
+        ).encode("latin-1") + encapsulated_bytes
+    except UnicodeEncodeError as exc:
+        raise DriverError("ICAP message contains non-Latin-1 characters") from exc
+    if len(encoded) > MAX_ICAP_MESSAGE_BYTES:
+        raise DriverError("ICAP message exceeds the 2 MiB limit")
     return encoded
 
 
@@ -1525,6 +1714,17 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
         return (
             endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="tcp", default_port=554),
             build_rtsp_message(request, event),
+            timeout,
+        )
+    if event in {"ICAP_REQUEST", "ICAP_RESPONSE"}:
+        return (
+            endpoint_from_request(
+                request,
+                trigger.get("traffic_url"),
+                default_scheme="tcp",
+                default_port=1344,
+            ),
+            build_icap_message(request, event),
             timeout,
         )
     if event in {"CLIENT_DATA", "SERVER_DATA", "FIX_HEADER", "FIX_MESSAGE"} and "fix" in request:

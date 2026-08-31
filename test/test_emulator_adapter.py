@@ -7563,6 +7563,110 @@ when ICAP_RESPONSE {
         self.assertIn("ICAP_REQUEST", result["registered_events"])
         self.assertIn("ICAP_RESPONSE", result["registered_events"])
 
+    def test_raw_icap_messages_are_reassembled_and_decode_encapsulation(self) -> None:
+        encapsulated_headers = b"GET /inspect HTTP/1.1\r\nHost: origin.example\r\n\r\n"
+        request = (
+            b"REQMOD icap://icap.example.net/reqmod ICAP/1.0\r\n"
+            b"Host: icap.example.net\r\n"
+            + f"Encapsulated: req-hdr=0, req-body={len(encapsulated_headers)}\r\n".encode(
+                "ascii"
+            )
+            + b"\r\n"
+            + encapsulated_headers
+            + b"5\r\nhello\r\n0\r\n\r\n"
+        )
+        split_at = request.index(b"\r\n\r\n") + 2
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "ICAP"],
+                "irule": """
+when ICAP_REQUEST {
+    log local0. "method=[ICAP::method] uri=[ICAP::uri] host=[ICAP::header value Host]"
+    ICAP::header add X-Raw yes
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "source": {"address": "192.0.2.10", "port": 41000},
+                        "destination": {"address": "198.51.100.20", "port": 1344},
+                        "payload_hex": request[:split_at].hex(),
+                    },
+                    {
+                        "protocol": "tcp",
+                        "source": {"address": "192.0.2.10", "port": 41000},
+                        "destination": {"address": "198.51.100.20", "port": 1344},
+                        "payload_hex": request[split_at:].hex(),
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        icap_events = [
+            event
+            for trace in result["trace"]
+            for event in trace["events"]
+            if event["event"] == "ICAP_REQUEST"
+        ]
+        self.assertEqual(len(icap_events), 1)
+        self.assertTrue(
+            any(
+                "method=REQMOD uri=icap://icap.example.net/reqmod host=icap.example.net"
+                in log
+                for log in icap_events[0]["logs"]
+            )
+        )
+        self.assertIn("X-Raw", icap_events[0]["state"]["icap"]["headers"])
+        self.assertEqual(icap_events[0]["state"]["icap"]["payload_length"], str(len(request)))
+        self.assertTrue(result["trace"][0]["buffered"])
+
+        response_one = b"ICAP/1.0 204 No Content\r\nEncapsulated: null-body=0\r\n\r\n"
+        response_two = b"ICAP/1.0 200 OK\r\nEncapsulated: null-body=0\r\n\r\n"
+        coalesced = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "ICAP"],
+                "irule": "when ICAP_RESPONSE { log local0. \"status=[ICAP::status]\" }",
+                "packets": [
+                    {
+                        "protocol": "tcp",
+                        "direction": "server_to_client",
+                        "source": {"address": "198.51.100.20", "port": 1344},
+                        "destination": {"address": "192.0.2.10", "port": 41000},
+                        "payload_hex": (response_one + response_two).hex(),
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        responses = [
+            event
+            for trace in coalesced["trace"]
+            for event in trace["events"]
+            if event["event"] == "ICAP_RESPONSE"
+        ]
+        self.assertEqual([event["state"]["icap"]["status"] for event in responses], ["204", "200"])
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "ICAP requests must be client_to_server",
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "ICAP"],
+                    "irule": "when ICAP_REQUEST { log local0. request }",
+                    "packets": [
+                        {
+                            "protocol": "tcp",
+                            "direction": "server_to_client",
+                            "source": {"address": "198.51.100.20", "port": 1344},
+                            "destination": {"address": "192.0.2.10", "port": 41000},
+                            "payload_hex": request.hex(),
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_starttls_protocol_controls_and_packet_state(self) -> None:
         for protocol, namespace, port in (
             ("imap", "IMAP", 143),

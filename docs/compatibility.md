@@ -212,7 +212,11 @@ The ICAP adapter models the four 17.5 `ICAP::*` commands and dispatches
 `ICAP_REQUEST`/`ICAP_RESPONSE` for structured messages with an `ICAP` profile.
 It supports method, URI, status, and case-insensitive header reads and
 mutations, including complete header replacement. It does not implement an
-ICAP server, encapsulated HTTP-body parsing, or license/control-plane behavior.
+ICAP server or encapsulated HTTP semantics, but raw ICAP/1.0 control messages
+on port 1344 are reassembled across TCP fragments and coalesced messages.
+`null-body` framing and bounded ICAP chunked encapsulated bodies are decoded;
+the complete raw message remains available through `ICAP::payload`. License
+and control-plane behavior are not emulated.
 The NTLM adapter models the connection-scoped `NTLM::enable` and
 `NTLM::disable` controls on bounded structured TCP payloads; it does not parse
 NTLM messages or negotiate authentication. The protocol-inspection adapter

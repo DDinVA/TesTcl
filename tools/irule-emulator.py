@@ -296,7 +296,7 @@ PROTOCOL_REQUEST_FIELDS = frozenset(
         "destination", "timeout", "payload", "payload_base64", "qname", "qtype",
         "qclass", "transaction_id", "recursion_desired", "client_id", "topic",
         "keepalive", "message", "method", "uri", "version", "status", "headers", "body", "pcp",
-        "radius", "websocket", "ldap", "fix",
+        "radius", "websocket", "ldap", "fix", "icap",
     }
 )
 IRULE_ANALYSIS_MAX_SOURCE_BYTES = 512 * 1024
@@ -2939,6 +2939,21 @@ def _protocol_request_template(event: str) -> dict[str, Any] | None:
             "version": "RTSP/1.0",
             "headers": {"CSeq": "1"},
         }
+    if event == "ICAP_REQUEST":
+        return {
+            "icap": {
+                "method": "REQMOD",
+                "uri": "icap://example.test/reqmod",
+                "headers": {"Host": "example.test"},
+            }
+        }
+    if event == "ICAP_RESPONSE":
+        return {
+            "icap": {
+                "status": 204,
+                "headers": {"ISTag": "testcl-1705"},
+            }
+        }
     if event in {"FIX_HEADER", "FIX_MESSAGE"}:
         return {
             "fix": {
@@ -3738,6 +3753,104 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
             raise EmulatorInputError(
                 "WS_REQUEST protocol driver requests do not accept payload fields"
             )
+    if event in {"ICAP_REQUEST", "ICAP_RESPONSE"}:
+        icap = request.get("icap")
+        if not isinstance(icap, dict):
+            raise EmulatorInputError(
+                f"{event} protocol driver requests require icap"
+            )
+        allowed_icap_fields = {
+            "message_hex", "message_base64", "method", "uri", "version", "status",
+            "phrase", "headers", "encapsulated",
+        }
+        unknown_icap = sorted(set(icap) - allowed_icap_fields)
+        if unknown_icap:
+            raise EmulatorInputError(
+                "protocol driver request ICAP unsupported field(s): "
+                + ", ".join(unknown_icap)
+            )
+        raw_fields = {"message_hex", "message_base64"}.intersection(icap)
+        if len(raw_fields) > 1:
+            raise EmulatorInputError(
+                "protocol driver request ICAP message_hex and message_base64 are mutually exclusive"
+            )
+        if raw_fields:
+            if set(icap) != raw_fields:
+                raise EmulatorInputError(
+                    "protocol driver request ICAP raw message cannot be combined with structured fields"
+                )
+            raw_value = icap[next(iter(raw_fields))]
+            if not isinstance(raw_value, str) or not raw_value:
+                raise EmulatorInputError(
+                    "protocol driver request ICAP raw message must be a non-empty string"
+                )
+        else:
+            version = icap.get("version", "ICAP/1.0")
+            if version != "ICAP/1.0":
+                raise EmulatorInputError(
+                    "protocol driver request ICAP version must be ICAP/1.0"
+                )
+            if event == "ICAP_REQUEST":
+                method = icap.get("method", "REQMOD")
+                uri = icap.get("uri", "icap://example.test/reqmod")
+                if (
+                    not isinstance(method, str)
+                    or method.upper() not in {"REQMOD", "RESPMOD", "OPTIONS"}
+                ):
+                    raise EmulatorInputError(
+                        "protocol driver request ICAP method must be REQMOD, RESPMOD, or OPTIONS"
+                    )
+                if (
+                    not isinstance(uri, str)
+                    or not uri
+                    or not uri.isascii()
+                    or any(character.isspace() for character in uri)
+                ):
+                    raise EmulatorInputError(
+                        "protocol driver request ICAP uri must be an ASCII value without whitespace"
+                    )
+            else:
+                status = icap.get("status", 200)
+                if (
+                    isinstance(status, bool)
+                    or not isinstance(status, int)
+                    or not 100 <= status <= 999
+                ):
+                    raise EmulatorInputError(
+                        "protocol driver request ICAP status must be an integer from 100 to 999"
+                    )
+            headers = icap.get("headers", {})
+            if not isinstance(headers, dict) or len(headers) > 128:
+                raise EmulatorInputError(
+                    "protocol driver request ICAP headers must be an object with at most 128 items"
+                )
+            header_names: set[str] = set()
+            for name, value in headers.items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or not name.isascii()
+                    or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
+                    or not isinstance(value, str)
+                    or "\x00" in value
+                    or "\r" in value
+                    or "\n" in value
+                ):
+                    raise EmulatorInputError(
+                        "protocol driver request ICAP headers must use valid names and values"
+                    )
+                lowered = name.lower()
+                if lowered in header_names:
+                    raise EmulatorInputError(
+                        f"protocol driver request ICAP header {name!r} is repeated"
+                    )
+                header_names.add(lowered)
+            encapsulated = icap.get("encapsulated")
+            if encapsulated is not None and not isinstance(encapsulated, dict):
+                raise EmulatorInputError(
+                    "protocol driver request ICAP encapsulated must be an object"
+                )
+        return dict(request)
     if event.startswith("RTSP_"):
         if event not in {"RTSP_REQUEST", "RTSP_REQUEST_DATA"}:
             raise EmulatorInputError(
@@ -3891,7 +4004,7 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
     if event.startswith("MQTT_") and "topic" not in request:
         raise EmulatorInputError("MQTT protocol driver requests require topic")
     if (
-        not event.startswith(("DNS_", "MQTT_", "SIP_", "RTSP_"))
+        not event.startswith(("DNS_", "MQTT_", "SIP_", "RTSP_", "ICAP_"))
         and event not in {
             "PCP_REQUEST", "RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST",
             "WS_REQUEST", "FIX_HEADER", "FIX_MESSAGE",
@@ -4047,6 +4160,38 @@ def _protocol_request_packet(event: str, request: dict[str, Any]) -> dict[str, A
             "host": websocket_request.get("host", "example.test"),
             "headers": headers,
         }
+    elif event in {"ICAP_REQUEST", "ICAP_RESPONSE"}:
+        icap_request = request.get("icap")
+        if not isinstance(icap_request, dict):
+            raise EmulatorInputError(
+                f"{event} protocol driver requests require icap"
+            )
+        if "message_hex" in icap_request or "message_base64" in icap_request:
+            raise EmulatorInputError(
+                "local ICAP replay accepts structured fields; use the external driver for raw message bytes"
+            )
+        direction = (
+            "client_to_server" if event == "ICAP_REQUEST" else "server_to_client"
+        )
+        packet = {
+            "protocol": "icap",
+            "direction": direction,
+            "source": (
+                {"address": "192.0.2.10", "port": 53000}
+                if event == "ICAP_REQUEST"
+                else {"address": "192.0.2.53", "port": 1344}
+            ),
+            "destination": (
+                {"address": "192.0.2.53", "port": 1344}
+                if event == "ICAP_REQUEST"
+                else {"address": "192.0.2.10", "port": 53000}
+            ),
+            "type": "request" if event == "ICAP_REQUEST" else "response",
+            "method": icap_request.get("method", "REQMOD"),
+            "uri": icap_request.get("uri", "icap://example.test/reqmod"),
+            "status": icap_request.get("status", 204),
+            "headers": icap_request.get("headers", {}),
+        }
     elif event in {"FIX_HEADER", "FIX_MESSAGE"}:
         fix_request = request.get("fix")
         if not isinstance(fix_request, dict):
@@ -4175,7 +4320,7 @@ def _protocol_request_packet(event: str, request: dict[str, Any]) -> dict[str, A
         }
     else:
         raise EmulatorInputError(
-            "local protocol replay currently supports HTTP, DNS, MQTT, SIP, RTSP, PCP, RADIUS, LDAP, FIX, and WebSocket requests"
+        "local protocol replay currently supports HTTP, DNS, MQTT, SIP, RTSP, ICAP, PCP, RADIUS, LDAP, FIX, and WebSocket requests"
         )
     try:
         return _normalise_packets([packet])[0]
@@ -16907,6 +17052,14 @@ RTSP_MAX_HEADERS = 128
 FIX_RAW_PORTS = frozenset({9876, 9880})
 FIX_MAX_MESSAGE_BYTES = 2 * 1024 * 1024
 FIX_MAX_FIELDS = 512
+ICAP_RAW_PORTS = frozenset({1344})
+ICAP_MAX_MESSAGE_BYTES = 2 * 1024 * 1024
+ICAP_MAX_LINE_BYTES = 64 * 1024
+ICAP_MAX_HEADERS = 128
+ICAP_METHODS = frozenset({"REQMOD", "RESPMOD", "OPTIONS"})
+ICAP_ENCAPSULATED_PARTS = frozenset(
+    {"req-hdr", "req-body", "res-hdr", "res-body", "opt-body", "null-body"}
+)
 RTSP_METHODS = frozenset(
     {
         "ANNOUNCE",
@@ -17492,6 +17645,228 @@ def _decode_rtsp_messages(
         if len(messages) > PACKET_MAX_COUNT:
             raise EmulatorInputError(
                 f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} RTSP messages"
+            )
+        position += consumed
+    return messages, payload[position:]
+
+
+def _looks_like_icap_prefix(payload: bytes) -> bool:
+    """Avoid treating arbitrary TCP bytes as ICAP when port 1344 is absent."""
+    if not payload:
+        return False
+    if payload.startswith(b"ICAP/"):
+        return True
+    return any(
+        method.startswith(payload) or payload.startswith(method + b" ")
+        for method in (name.encode("ascii") for name in ICAP_METHODS)
+    )
+
+
+def _icap_header_value(headers: dict[str, str], name: str) -> str:
+    wanted = name.lower()
+    for header_name, value in headers.items():
+        if header_name.lower() == wanted:
+            return value
+    return ""
+
+
+def _decode_icap_message(
+    payload: bytes, direction: str
+) -> tuple[dict[str, Any], int] | None:
+    """Decode one bounded ICAP/1.0 message from a TCP stream.
+
+    ICAP's header block frames the encapsulated HTTP headers/body.  Header-only
+    messages use ``null-body``; messages with an encapsulated body use the
+    ICAP chunked-body framing.  Offsets are relative to the bytes immediately
+    following the ICAP header block.
+    """
+    if not payload:
+        return None
+    if len(payload) > ICAP_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"ICAP stream exceeds the {ICAP_MAX_MESSAGE_BYTES} byte limit"
+        )
+    header_end = payload.find(b"\r\n\r\n")
+    delimiter_width = 4
+    if header_end < 0:
+        header_end = payload.find(b"\n\n")
+        delimiter_width = 2
+    if header_end < 0:
+        if b"\r" in payload and not payload.endswith(b"\r") and b"\r\n" not in payload:
+            raise EmulatorInputError("ICAP headers contain a bare carriage return")
+        return None
+    header_bytes = payload[:header_end]
+    if b"\r" in header_bytes.replace(b"\r\n", b"\n"):
+        raise EmulatorInputError("ICAP headers contain a bare carriage return")
+    lines = header_bytes.replace(b"\r\n", b"\n").split(b"\n")
+    if not lines or not lines[0]:
+        raise EmulatorInputError("ICAP message has no start line")
+    if any(len(line) > ICAP_MAX_LINE_BYTES for line in lines):
+        raise EmulatorInputError(
+            f"ICAP header line exceeds the {ICAP_MAX_LINE_BYTES} byte limit"
+        )
+    text_lines = [line.decode("iso-8859-1") for line in lines]
+    if any("\x00" in line for line in text_lines):
+        raise EmulatorInputError("ICAP headers cannot contain NUL bytes")
+
+    start_line = text_lines[0]
+    request_match = re.fullmatch(
+        r"([A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*)\s+(\S+)\s+(ICAP/1\.0)",
+        start_line,
+    )
+    response_match = re.fullmatch(
+        r"(ICAP/1\.0)\s+([1-9][0-9]{2})(?:\s+(.*))?", start_line
+    )
+    if request_match is None and response_match is None:
+        raise EmulatorInputError("ICAP message start line is invalid")
+    if request_match is not None:
+        if direction != "client_to_server":
+            raise EmulatorInputError("ICAP requests must be client_to_server")
+        method = request_match.group(1).upper()
+        if method not in ICAP_METHODS:
+            raise EmulatorInputError(f"unsupported ICAP method: {method}")
+    elif direction != "server_to_client":
+        raise EmulatorInputError("ICAP responses must be server_to_client")
+
+    headers: dict[str, str] = {}
+    header_names: dict[str, str] = {}
+    for line in text_lines[1:]:
+        if ":" not in line:
+            raise EmulatorInputError("ICAP header is missing a colon")
+        name, value = line.split(":", 1)
+        name = name.strip()
+        if not name or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
+            raise EmulatorInputError("ICAP header name is invalid")
+        lower_name = name.lower()
+        if len(headers) >= ICAP_MAX_HEADERS and lower_name not in header_names:
+            raise EmulatorInputError("ICAP message contains too many headers")
+        value = value.strip()
+        duplicate = header_names.get(lower_name)
+        if duplicate is None:
+            headers[name] = value
+            header_names[lower_name] = name
+        else:
+            if lower_name == "encapsulated":
+                raise EmulatorInputError("ICAP Encapsulated header must not be repeated")
+            headers[duplicate] = f"{headers[duplicate]}, {value}"
+
+    body_start = header_end + delimiter_width
+    encapsulated_value = _icap_header_value(headers, "Encapsulated")
+    if not encapsulated_value:
+        total_length = body_start
+        encapsulated_body = b""
+    else:
+        parts: list[tuple[str, int]] = []
+        seen_parts: set[str] = set()
+        previous_offset = -1
+        for item in encapsulated_value.split(","):
+            name_offset = item.strip().split("=", 1)
+            if len(name_offset) != 2:
+                raise EmulatorInputError("ICAP Encapsulated header is invalid")
+            name, offset_text = (part.strip().lower() for part in name_offset)
+            if name not in ICAP_ENCAPSULATED_PARTS or name in seen_parts:
+                raise EmulatorInputError("ICAP Encapsulated part is invalid")
+            if not offset_text.isdigit():
+                raise EmulatorInputError("ICAP Encapsulated offset is invalid")
+            offset = int(offset_text, 10)
+            if offset < previous_offset:
+                raise EmulatorInputError("ICAP Encapsulated offsets must be ordered")
+            if offset > ICAP_MAX_MESSAGE_BYTES:
+                raise EmulatorInputError("ICAP Encapsulated offset is too large")
+            parts.append((name, offset))
+            seen_parts.add(name)
+            previous_offset = offset
+        if not parts or parts[0][1] != 0:
+            raise EmulatorInputError("ICAP Encapsulated offsets must start at zero")
+        if request_match is not None:
+            expected_header = "res-hdr" if method == "RESPMOD" else "req-hdr"
+            if method == "OPTIONS":
+                expected_headers = {"req-hdr", "res-hdr", "opt-body"}
+            else:
+                expected_headers = {expected_header}
+        else:
+            expected_headers = {"res-hdr"}
+        if parts[0][0] != "null-body" and parts[0][0] not in expected_headers:
+            raise EmulatorInputError("ICAP Encapsulated header part does not match the message")
+        body_parts = [
+            (name, offset)
+            for name, offset in parts
+            if name in {"req-body", "res-body", "opt-body"}
+        ]
+        null_parts = [offset for name, offset in parts if name == "null-body"]
+        if body_parts and null_parts:
+            raise EmulatorInputError(
+                "ICAP Encapsulated cannot contain both a body and null-body"
+            )
+        if len(body_parts) > 1 or len(null_parts) > 1:
+            raise EmulatorInputError("ICAP Encapsulated contains duplicate body parts")
+        if null_parts:
+            total_length = body_start + null_parts[0]
+            if total_length > len(payload):
+                return None
+            encapsulated_body = bytes(payload[body_start:total_length])
+        elif body_parts:
+            body_offset = body_parts[0][1]
+            chunk_start = body_start + body_offset
+            if chunk_start > len(payload):
+                return None
+            decoded_body = _decode_chunked_body(payload, chunk_start)
+            if decoded_body is None:
+                return None
+            encapsulated_body, consumed = decoded_body
+            # _decode_chunked_body returns the absolute stream position, not
+            # a length relative to its starting offset.
+            total_length = consumed
+        else:
+            raise EmulatorInputError(
+                "ICAP Encapsulated must terminate with null-body or a body part"
+            )
+    if total_length > ICAP_MAX_MESSAGE_BYTES:
+        raise EmulatorInputError(
+            f"ICAP message exceeds the {ICAP_MAX_MESSAGE_BYTES} byte limit"
+        )
+    if total_length > len(payload):
+        return None
+    packet: dict[str, Any] = {
+        "protocol": "icap",
+        "direction": direction,
+        "type": "request" if request_match is not None else "response",
+        "version": "ICAP/1.0",
+        "headers": headers,
+        "payload": _decode_wire_text(encapsulated_body),
+        "_icap_payload": encapsulated_body,
+        "_wire_payload": bytes(payload[:total_length]),
+        "message_length": total_length,
+    }
+    if request_match is not None:
+        packet.update({"method": method, "uri": request_match.group(2)})
+    else:
+        packet.update(
+            {
+                "status": int(response_match.group(2)),
+                "phrase": response_match.group(3) or "",
+                "response_headers": headers,
+            }
+        )
+    return packet, total_length
+
+
+def _decode_icap_messages(
+    payload: bytes, direction: str
+) -> tuple[list[dict[str, Any]], bytes]:
+    messages: list[dict[str, Any]] = []
+    position = 0
+    while position < len(payload):
+        decoded = _decode_icap_message(payload[position:], direction)
+        if decoded is None:
+            break
+        message, consumed = decoded
+        if consumed <= 0:
+            raise EmulatorInputError("ICAP decoder returned an invalid message length")
+        messages.append(message)
+        if len(messages) > PACKET_MAX_COUNT:
+            raise EmulatorInputError(
+                f"a TCP segment cannot contain more than {PACKET_MAX_COUNT} ICAP messages"
             )
         position += consumed
     return messages, payload[position:]
@@ -21124,6 +21499,9 @@ class EmulatorSession:
         )
         self._fix_raw_active = any(
             str(profile).upper() == "FIX" for profile in self._profiles
+        )
+        self._icap_raw_active = any(
+            str(profile).upper() == "ICAP" for profile in self._profiles
         )
         self._sip_raw_active = any(
             str(profile).upper() in {"SIP", "SIPROUTER", "SIPSESSION"}
@@ -25033,6 +25411,38 @@ class EmulatorSession:
                 self._packet_streams.pop(key, None)
                 raise EmulatorInputError(
                     f"FIX stream exceeds the {FIX_MAX_MESSAGE_BYTES} byte limit"
+                )
+            return None, stream.buffered_bytes
+        icap_ports = {
+            packet.get("source", {}).get("port"),
+            packet.get("destination", {}).get("port"),
+        }
+        if self._icap_raw_active and (
+            icap_ports.intersection(ICAP_RAW_PORTS)
+            or _looks_like_icap_prefix(combined)
+        ):
+            decoded_messages, remaining = _decode_icap_messages(
+                combined, packet["direction"]
+            )
+            if decoded_messages:
+                stream.buffer = remaining
+                if not has_gap:
+                    stream.segments.clear()
+                for message in decoded_messages:
+                    for field in ("source", "destination", "timestamp"):
+                        if field in packet:
+                            message[field] = packet[field]
+                first = decoded_messages[0]
+                if len(decoded_messages) > 1:
+                    first["_coalesced_packets"] = decoded_messages[1:]
+                return first, len(combined) - len(remaining)
+            stream.buffer = combined
+            if not has_gap:
+                stream.segments.clear()
+            if stream.buffered_bytes > ICAP_MAX_MESSAGE_BYTES:
+                self._packet_streams.pop(key, None)
+                raise EmulatorInputError(
+                    f"ICAP stream exceeds the {ICAP_MAX_MESSAGE_BYTES} byte limit"
                 )
             return None, stream.buffered_bytes
         ftp_ports = {
