@@ -5169,6 +5169,35 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(sweep["summary"]["status_counts"], {"ok": 39})
         self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
 
+    def test_botdefense_candidate_sweep_uses_boolean_fixtures(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 25, namespace="BOTDEFENSE", variants=1
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        self.assertEqual(
+            [variant["args"] for variant in by_command["BOTDEFENSE::cs_allowed"]["argument_candidates"]],
+            [[], ["1"], ["0"]],
+        )
+        self.assertEqual(
+            [variant["args"] for variant in by_command["BOTDEFENSE::cs_attribute"]["argument_candidates"]],
+            [["device_id"], ["device_id", "1"], ["device_id", "0"]],
+        )
+
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 0, 25, namespace="BOTDEFENSE", variants=8
+        )
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 25)
+        self.assertEqual(sweep["summary"]["variant_count"], 29)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 29})
+        self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(

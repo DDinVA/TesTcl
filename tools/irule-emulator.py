@@ -3033,6 +3033,12 @@ _CANDIDATE_ARGUMENT_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
     "MQTT::respond": (("type", "CONNACK", "return_code", "0"),),
     "MQTT::return_code": ((), ("0",)),
     "MQTT::topic": ((), ("testcl/command",)),
+    "BOTDEFENSE::cs_allowed": ((), ("1",), ("0",)),
+    "BOTDEFENSE::cs_attribute": (
+        ("device_id",),
+        ("device_id", "1"),
+        ("device_id", "0"),
+    ),
 }
 _CANDIDATE_EVENT_HINTS = {
     "TCP::recvwnd": "CLIENT_ACCEPTED",
