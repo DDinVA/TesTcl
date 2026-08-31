@@ -28481,6 +28481,37 @@ class EmulatorSession:
 
         return self._call(read_selection)
 
+    def force_pool_member(self, pool: str, member: str) -> None:
+        """Apply a live scheduler's member choice to the active Tcl flow."""
+        if not isinstance(pool, str) or not isinstance(member, str):
+            raise EmulatorInputError("live pool selection requires string names")
+        if pool not in self._pools or member not in self._pools[pool]:
+            raise EmulatorInputError(
+                f"live pool selection {pool!r}/{member!r} is not configured"
+            )
+        if ":" in member:
+            node_addr, node_port = member.rsplit(":", 1)
+        else:
+            node_addr, node_port = member, "0"
+
+        def apply_selection(session: Any) -> None:
+            for field, value in (
+                ("pool", pool),
+                ("pool_member", member),
+                ("node_addr", node_addr),
+                ("node_port", node_port),
+                ("selected", "1"),
+            ):
+                session.eval_tcl(
+                    f"set ::state::lb::{field} {_tcl_quote(value)}"
+                )
+            session.eval_tcl(
+                "::itest::log_decision lb live_pool_member_select "
+                f"{_tcl_quote(member)}"
+            )
+
+        self._call(apply_selection)
+
     def metadata(self, session_id: str) -> dict[str, Any]:
         def read_metadata(session: Any) -> dict[str, Any]:
             return {
@@ -28835,6 +28866,13 @@ class _PersistentEmulatorSession:
                 raise EmulatorInputError("emulator session is closed")
             return self._state_session().selected_pool_member()
 
+    def force_pool_member(self, pool: str, member: str) -> None:
+        """Apply a shared live scheduler choice to the active flow."""
+        with self._lock:
+            if self._closed:
+                raise EmulatorInputError("emulator session is closed")
+            self._state_session().force_pool_member(pool, member)
+
     def metadata(self, session_id: str, flow_id: Any = None) -> dict[str, Any]:
         with self._lock:
             if self._closed:
@@ -29075,6 +29113,63 @@ class SessionManager:
             self._sessions.clear()
         for session in sessions:
             session.close()
+
+
+class _LivePoolScheduler:
+    """Coordinate bounded member rotation across real live-data-plane flows."""
+
+    def __init__(self, scenario: dict[str, Any], failure_cooldown: float) -> None:
+        self._pools = _normalise_pools(scenario.get("pools"))
+        self._pool_modes = _normalise_pool_modes(scenario.get("pool_modes"))
+        self._failure_cooldown = failure_cooldown
+        self._cursors: dict[str, int] = {}
+        self._down_until: dict[tuple[str, str], float] = {}
+        self._lock = threading.RLock()
+
+    def candidates(self, pool: str, preferred: str) -> list[str]:
+        """Return eligible members and reserve the next round-robin position."""
+        with self._lock:
+            configured = list(dict.fromkeys(self._pools.get(pool, [])))
+            if not configured:
+                return []
+            mode = self._pool_modes.get(pool, "first")
+            if mode == "round_robin":
+                start = self._cursors.get(pool, 0) % len(configured)
+                ordered = configured[start:] + configured[:start]
+                self._cursors[pool] = (start + 1) % len(configured)
+            else:
+                ordered = ([preferred] if preferred in configured else []) + [
+                    member for member in configured if member != preferred
+                ]
+            now = time.monotonic()
+            return [
+                member
+                for member in ordered
+                if self._down_until.get((pool, member), 0.0) <= now
+            ]
+
+    def mark_success(self, pool: str, member: str) -> None:
+        with self._lock:
+            self._down_until.pop((pool, member), None)
+
+    def mark_failure(self, pool: str, member: str) -> None:
+        with self._lock:
+            self._down_until[(pool, member)] = (
+                time.monotonic() + self._failure_cooldown
+            )
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return bounded scheduler state for tests and diagnostics."""
+        with self._lock:
+            now = time.monotonic()
+            return {
+                "cursors": dict(self._cursors),
+                "down": [
+                    {"pool": pool, "member": member, "remaining": max(0.0, until - now)}
+                    for (pool, member), until in sorted(self._down_until.items())
+                    if until > now
+                ],
+            }
 
 
 MCP_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -31792,7 +31887,14 @@ def _normalise_live_data_plane_scenario(
             raise EmulatorInputError("live_data_plane.upstream must be an object")
         unknown_upstream = sorted(
             set(upstream_config)
-            - {"host", "port", "pool", "targets", "connect_timeout"}
+            - {
+                "host",
+                "port",
+                "pool",
+                "targets",
+                "connect_timeout",
+                "failure_cooldown",
+            }
         )
         if unknown_upstream:
             raise EmulatorInputError(
@@ -31868,6 +31970,10 @@ def _normalise_live_data_plane_scenario(
                 raise EmulatorInputError(
                     "live_data_plane.upstream host/port form cannot include pool"
                 )
+            if "failure_cooldown" in upstream_config:
+                raise EmulatorInputError(
+                    "live_data_plane.upstream.failure_cooldown requires targets"
+                )
             endpoint = normalise_endpoint(
                 {"host": upstream_config.get("host"), "port": upstream_config.get("port")},
                 "live_data_plane.upstream",
@@ -31910,6 +32016,16 @@ def _normalise_live_data_plane_scenario(
                         "live_data_plane.upstream.pool must name a configured pool"
                     )
             endpoint = None
+        failure_cooldown = upstream_config.get("failure_cooldown", 1.0)
+        if (
+            isinstance(failure_cooldown, bool)
+            or not isinstance(failure_cooldown, (int, float))
+            or not math.isfinite(float(failure_cooldown))
+            or not 0.05 <= float(failure_cooldown) <= 300.0
+        ):
+            raise EmulatorInputError(
+                "live_data_plane.upstream.failure_cooldown must be between 0.05 and 300 seconds"
+            )
         connect_timeout = upstream_config.get("connect_timeout", timeout)
         if (
             isinstance(connect_timeout, bool)
@@ -31926,6 +32042,8 @@ def _normalise_live_data_plane_scenario(
             "targets": targets,
             "connect_timeout": float(connect_timeout),
         }
+        if targets is not None:
+            upstream["failure_cooldown"] = float(failure_cooldown)
     else:
         upstream = None
     return scenario, {
@@ -32116,6 +32234,7 @@ def _live_tcp_handler(
     scenario: dict[str, Any],
     config: dict[str, Any],
     manager: "SessionManager",
+    scheduler: _LivePoolScheduler | None = None,
 ) -> type[socketserver.BaseRequestHandler]:
     """Build a bounded raw TCP adapter over a persistent iRule session."""
 
@@ -32286,13 +32405,15 @@ def _live_tcp_handler(
                 return True
             return False
 
-        def _resolve_upstream_endpoint(self, session_id: str) -> dict[str, Any]:
+        def _resolve_upstream_candidates(
+            self, session_id: str
+        ) -> list[tuple[str, str, dict[str, Any]]]:
             upstream_config = config.get("upstream")
             if upstream_config is None:
                 raise EmulatorInputError("live upstream configuration is missing")
             endpoint = upstream_config.get("endpoint")
             if endpoint is not None:
-                return dict(endpoint)
+                return [("", "", dict(endpoint))]
             targets = upstream_config.get("targets")
             if not isinstance(targets, dict):
                 raise EmulatorInputError("live upstream target map is invalid")
@@ -32318,13 +32439,21 @@ def _live_tcp_handler(
                     f"{selected_pool!r}, but live upstream is configured for "
                     f"{configured_pool!r}"
                 )
-            member = selection["pool_member"]
-            endpoint = targets.get(member)
-            if endpoint is None:
+            preferred_member = selection["pool_member"]
+            if scheduler is None:
+                members = [preferred_member]
+            else:
+                members = scheduler.candidates(selected_pool, preferred_member)
+            candidates = [
+                (selected_pool, member, dict(targets[member]))
+                for member in members
+                if member in targets
+            ]
+            if not candidates:
                 raise EmulatorInputError(
-                    f"no live upstream target is mapped for selected pool member {member!r}"
+                    f"no eligible live upstream target is mapped for pool {selected_pool!r}"
                 )
-            return dict(endpoint)
+            return candidates
 
         def handle(self) -> None:  # noqa: D401 - socketserver API
             session_id: str | None = None
@@ -32354,19 +32483,50 @@ def _live_tcp_handler(
 
                 upstream_config = config.get("upstream")
                 if upstream_config is not None:
-                    try:
-                        endpoint = self._resolve_upstream_endpoint(session_id)
-                        upstream = socket.create_connection(
-                            (endpoint["host"], endpoint["port"]),
-                            timeout=upstream_config["connect_timeout"],
-                        )
-                        upstream.settimeout(config["read_timeout"])
-                        if self._open_upstream(session_id, upstream):
-                            return
-                    except (OSError, ValueError) as exc:
+                    candidates = self._resolve_upstream_candidates(session_id)
+                    connect_error: OSError | ValueError | None = None
+                    for selected_pool, member, endpoint in candidates:
+                        if member:
+                            manager.execute(
+                                session_id,
+                                lambda session, selected_pool=selected_pool, selected_member=member: session.force_pool_member(
+                                    selected_pool, selected_member
+                                ),
+                            )
+                        candidate_socket: socket.socket | None = None
+                        try:
+                            candidate_socket = socket.create_connection(
+                                (endpoint["host"], endpoint["port"]),
+                                timeout=upstream_config["connect_timeout"],
+                            )
+                            candidate_socket.settimeout(config["read_timeout"])
+                            if self._open_upstream(session_id, candidate_socket):
+                                candidate_socket.close()
+                                return
+                            upstream = candidate_socket
+                            if scheduler is not None:
+                                scheduler.mark_success(selected_pool, member)
+                            break
+                        except (OSError, ValueError) as exc:
+                            connect_error = exc
+                            if candidate_socket is not None:
+                                try:
+                                    candidate_socket.close()
+                                except OSError:
+                                    pass
+                            if scheduler is not None and member:
+                                scheduler.mark_failure(selected_pool, member)
+                        except BaseException:
+                            if candidate_socket is not None:
+                                try:
+                                    candidate_socket.close()
+                                except OSError:
+                                    pass
+                            raise
+                    if upstream is None:
                         print(
                             "testcl raw TCP upstream connection failed: "
-                            f"{exc}",
+                            f"{connect_error or 'no candidate accepted the connection'}",
                             file=sys.stderr,
                         )
                         return
@@ -32494,6 +32654,12 @@ def _data_plane_server(
         raise EmulatorInputError("data-plane port must be between 0 and 65535")
     scenario, config = _normalise_live_data_plane_scenario(raw_scenario)
     manager = SessionManager(root, max_sessions=128)
+    scheduler = None
+    upstream = config.get("upstream")
+    if isinstance(upstream, dict) and upstream.get("targets") is not None:
+        scheduler = _LivePoolScheduler(
+            scenario, float(upstream["failure_cooldown"])
+        )
     try:
         if config["protocol"] == "http":
             server = ThreadingHTTPServer(
@@ -32502,12 +32668,13 @@ def _data_plane_server(
             )
         else:
             server = _LiveTCPServer(
-                (host, port), _live_tcp_handler(scenario, config, manager)
+                (host, port), _live_tcp_handler(scenario, config, manager, scheduler)
             )
     except BaseException:
         manager.close_all()
         raise
     setattr(server, "_testcl_protocol", config["protocol"])
+    setattr(server, "_testcl_pool_scheduler", scheduler)
     server.daemon_threads = True
     return server, manager
 

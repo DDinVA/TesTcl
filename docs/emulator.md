@@ -101,9 +101,12 @@ target is opt-in and supports only a hostname/address, port, and connect
 timeout in its direct form. For pool-aware testing, use upstream.pool plus a
 targets map keyed by the member names in pools; the iRule must select that pool
 (for example, pool app_pool) and the selected member must have a target mapping.
-This live adapter is still not a kernel TCP stack, TLS endpoint, pool scheduler,
-or full database peer. Protocol-specific TDS, FTP, LDAP, and similar parsers are
-exercised through the packet/API drivers.
+Set the scenario's `pool_modes` entry to `round_robin` to rotate mapped members
+across separate real client connections. A failed target is quarantined for
+`upstream.failure_cooldown` seconds (one second by default), and the handler
+tries the remaining eligible members. This is still not a kernel TCP stack, TLS
+endpoint, or full database peer. Protocol-specific TDS, FTP, LDAP, and similar
+parsers are exercised through the packet/API drivers.
 
 For example, a raw TCP scenario can bridge to a local test service with:
 
@@ -111,6 +114,7 @@ For example, a raw TCP scenario can bridge to a local test service with:
 {
   "profiles": ["TCP"],
   "pools": {"app_pool": ["backend-a:19000"]},
+  "pool_modes": {"app_pool": "round_robin"},
   "irule": "when CLIENT_ACCEPTED { pool app_pool; TCP::collect } when CLIENT_DATA { TCP::release; TCP::collect } when SERVER_DATA { TCP::release; TCP::collect }",
   "live_data_plane": {
     "protocol": "tcp",
@@ -120,17 +124,19 @@ For example, a raw TCP scenario can bridge to a local test service with:
       "targets": {
         "backend-a:19000": {"host": "127.0.0.1", "port": 19000}
       },
-      "connect_timeout": 2.0
+      "connect_timeout": 2.0,
+      "failure_cooldown": 1.0
     }
   }
 }
 ```
 
 The bridge is deliberately bounded to `max_read_bytes` per direction (2 MiB
-by default), does not interpret the backend protocol, and closes the stream on
-backend connect failure or idle timeout. That makes it useful for exercising
-iRule control flow against a disposable service without claiming to reproduce
-TMM scheduling or BIG-IP networking internals.
+by default), does not interpret the backend protocol, and closes the stream
+when no eligible backend can be connected or after an idle timeout. Its shared
+live scheduler is intentionally limited to configured target maps, one
+round-robin cursor per pool, and temporary failure cooldowns; it does not claim
+to reproduce all TMM scheduling, monitor, or BIG-IP networking internals.
 
 The API and data plane can run together by starting the normal API with
 `--serve --data-plane-scenario PATH`; the API remains on `--host/--port`, while

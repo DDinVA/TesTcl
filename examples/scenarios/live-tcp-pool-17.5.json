@@ -1,0 +1,30 @@
+{
+  "tmos_version": "17.5",
+  "profiles": ["TCP"],
+  "pools": {
+    "app_pool": ["backend-a:19000", "backend-b:19001"]
+  },
+  "pool_modes": {
+    "app_pool": "round_robin"
+  },
+  "irule": "when CLIENT_ACCEPTED { pool app_pool; TCP::collect } when CLIENT_DATA { TCP::release; TCP::collect } when SERVER_DATA { TCP::respond [TCP::payload]; TCP::release; TCP::collect }",
+  "live_data_plane": {
+    "protocol": "tcp",
+    "read_timeout": 1.0,
+    "upstream": {
+      "pool": "app_pool",
+      "targets": {
+        "backend-a:19000": {
+          "host": "127.0.0.1",
+          "port": 19000
+        },
+        "backend-b:19001": {
+          "host": "127.0.0.1",
+          "port": 19001
+        }
+      },
+      "connect_timeout": 2.0,
+      "failure_cooldown": 1.0
+    }
+  }
+}

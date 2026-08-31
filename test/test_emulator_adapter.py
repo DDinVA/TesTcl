@@ -21160,6 +21160,159 @@ when SERVER_DATA {
             upstream_thread.join(timeout=5)
             upstream_server.server_close()
 
+    def test_live_tcp_pool_scheduler_rotates_separate_real_clients(self) -> None:
+        class PrefixHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:  # noqa: D401 - socketserver API
+                payload = self.request.recv(64)
+                self.request.sendall(self.server.prefix + payload)
+
+        class PrefixServer(socketserver.ThreadingTCPServer):
+            allow_reuse_address = True
+
+            def __init__(self, prefix: bytes) -> None:
+                self.prefix = prefix
+                super().__init__(("127.0.0.1", 0), PrefixHandler)
+
+        upstream_a = PrefixServer(b"a:")
+        upstream_b = PrefixServer(b"b:")
+        upstream_threads = [
+            threading.Thread(target=upstream.serve_forever)
+            for upstream in (upstream_a, upstream_b)
+        ]
+        for upstream_thread in upstream_threads:
+            upstream_thread.start()
+        scenario = {
+            "profiles": ["TCP"],
+            "pools": {
+                "app_pool": ["backend-a:19000", "backend-b:19001"],
+            },
+            "pool_modes": {"app_pool": "round_robin"},
+            "irule": """
+when CLIENT_ACCEPTED { pool app_pool; TCP::collect }
+when CLIENT_DATA { TCP::release; TCP::collect }
+when SERVER_DATA { TCP::respond [TCP::payload]; TCP::release; TCP::collect }
+""",
+            "live_data_plane": {
+                "protocol": "tcp",
+                "read_timeout": 0.5,
+                "upstream": {
+                    "pool": "app_pool",
+                    "targets": {
+                        "backend-a:19000": {
+                            "host": "127.0.0.1",
+                            "port": upstream_a.server_address[1],
+                        },
+                        "backend-b:19001": {
+                            "host": "127.0.0.1",
+                            "port": upstream_b.server_address[1],
+                        },
+                    },
+                    "failure_cooldown": 0.2,
+                },
+            },
+        }
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            responses: list[bytes] = []
+            for payload in (b"one", b"two"):
+                client = socket.create_connection(
+                    ("127.0.0.1", self.adapter._data_plane_bound_port(server)),
+                    timeout=2,
+                )
+                client.settimeout(2)
+                try:
+                    client.sendall(payload)
+                    responses.append(client.recv(64))
+                finally:
+                    client.close()
+            self.assertEqual(responses, [b"a:one", b"b:two"])
+            scheduler = getattr(server, "_testcl_pool_scheduler")
+            self.assertEqual(scheduler.snapshot()["cursors"], {"app_pool": 0})
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+            for upstream in (upstream_a, upstream_b):
+                upstream.shutdown()
+            for upstream_thread in upstream_threads:
+                upstream_thread.join(timeout=5)
+            for upstream in (upstream_a, upstream_b):
+                upstream.server_close()
+
+    def test_live_tcp_pool_scheduler_skips_failed_member(self) -> None:
+        class PrefixHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:  # noqa: D401 - socketserver API
+                payload = self.request.recv(64)
+                self.request.sendall(b"healthy:" + payload)
+
+        upstream_server = socketserver.ThreadingTCPServer(
+            ("127.0.0.1", 0), PrefixHandler
+        )
+        upstream_server.daemon_threads = True
+        upstream_thread = threading.Thread(target=upstream_server.serve_forever)
+        upstream_thread.start()
+        unused = socket.socket()
+        unused.bind(("127.0.0.1", 0))
+        failed_port = unused.getsockname()[1]
+        unused.close()
+        scenario = {
+            "profiles": ["TCP"],
+            "pools": {
+                "app_pool": ["backend-a:19000", "backend-b:19001"],
+            },
+            "pool_modes": {"app_pool": "round_robin"},
+            "irule": "when CLIENT_ACCEPTED { pool app_pool; TCP::collect } when CLIENT_DATA { TCP::release; TCP::collect } when SERVER_DATA { TCP::respond [TCP::payload]; TCP::release; TCP::collect }",
+            "live_data_plane": {
+                "protocol": "tcp",
+                "read_timeout": 0.5,
+                "upstream": {
+                    "pool": "app_pool",
+                    "targets": {
+                        "backend-a:19000": {
+                            "host": "127.0.0.1",
+                            "port": failed_port,
+                        },
+                        "backend-b:19001": {
+                            "host": "127.0.0.1",
+                            "port": upstream_server.server_address[1],
+                        },
+                    },
+                    "connect_timeout": 0.1,
+                    "failure_cooldown": 60.0,
+                },
+            },
+        }
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        client = socket.create_connection(
+            ("127.0.0.1", self.adapter._data_plane_bound_port(server)), timeout=2
+        )
+        client.settimeout(2)
+        try:
+            client.sendall(b"fallback")
+            self.assertEqual(client.recv(64), b"healthy:fallback")
+            scheduler = getattr(server, "_testcl_pool_scheduler")
+            down = scheduler.snapshot()["down"]
+            self.assertEqual(len(down), 1)
+            self.assertEqual(down[0]["member"], "backend-a:19000")
+        finally:
+            client.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+            upstream_server.shutdown()
+            upstream_thread.join(timeout=5)
+            upstream_server.server_close()
+
     def test_packet_pool_selection_is_visible_to_live_target_resolution(self) -> None:
         session = self.adapter.EmulatorSession(
             Path(self.tcl_lsp_root),
