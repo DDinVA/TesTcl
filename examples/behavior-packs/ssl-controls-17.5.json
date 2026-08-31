@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "ssl-controls-17.5",
+  "cases": [
+    {
+      "id": "client-and-server-handshake-controls",
+      "scenario": {
+        "profiles": ["TCP", "CLIENTSSL", "SERVERSSL"],
+        "irule": "when CLIENTSSL_CLIENTHELLO { SSL::alpn set h2 http/1.1; SSL::handshake hold; SSL::renegotiate disable; SSL::secure_renegotiation require-strict; SSL::allow_nonssl 1; SSL::allow_dynamic_record_sizing 1; SSL::authenticate always; SSL::authenticate depth 4; SSL::maximum_record_size 1200; SSL::unclean_shutdown enable; SSL::profile /Common/clientssl_alt; SSL::session invalidate nodrop; log local0. \"mode=[SSL::mode] alpn=[SSL::alpn] max=[SSL::maximum_record_size] dynamic=[SSL::allow_dynamic_record_sizing] secure=[SSL::is_renegotiation_secure] random=[SSL::clientrandom] ticket=[SSL::sessionticket]\" } when SERVERSSL_HANDSHAKE { SSL::alpn set http/1.1; SSL::handshake resume; SSL::renegotiate; log local0. \"mode=[SSL::mode] alpn=[SSL::alpn]\" }",
+        "packets": [
+          {
+            "protocol": "tls",
+            "direction": "client_to_server",
+            "type": "client_hello",
+            "renegotiation_secure": true,
+            "clientrandom": "001122aabbcc",
+            "sessionticket": "ticket-1"
+          },
+          {"protocol": "tls", "direction": "server_to_client", "type": "server_handshake"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "CLIENTSSL_CLIENTHELLO"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "alpn"], "equals": "h2 http/1.1"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "handshake_held"], "equals": "1"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "renegotiation_enabled"], "equals": "0"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "secure_renegotiation"], "equals": "2"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "allow_nonssl"], "equals": "1"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "dynamic_record_sizing"], "equals": "1"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "authenticate_frequency"], "equals": "always"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "authenticate_depth"], "equals": "4"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "maximum_record_size"], "equals": "1200"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "profile"], "equals": "/Common/clientssl_alt"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "session_invalidated"], "equals": "1"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "session_drop"], "equals": "0"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "unclean_shutdown"], "equals": "1"},
+          {"path": ["trace", 1, "events", 2, "event"], "equals": "SERVERSSL_HANDSHAKE"},
+          {"path": ["trace", 1, "events", 2, "state", "tls_server", "alpn"], "equals": "http/1.1"},
+          {"path": ["trace", 1, "events", 2, "state", "tls_server", "handshake_held"], "equals": "0"},
+          {"path": ["trace", 1, "events", 2, "state", "tls_server", "renegotiation_requested"], "equals": "1"}
+        ]
+      }
+    },
+    {
+      "id": "forward-proxy-and-tls-payload-controls",
+      "scenario": {
+        "profiles": ["TCP", "CLIENTSSL", "SERVERSSL"],
+        "irule": "when CLIENTSSL_HANDSHAKE { SSL::c3d extension 1.2.3.4 extension-value; SSL::c3d cert forged-client-cert; SSL::c3d subject commonName forged.example; SSL::cert_constraint 1.2.3.4 constraint-value; SSL::forward_proxy policy intercept; SSL::forward_proxy cert response_control mask; SSL::forward_proxy cert status verified; SSL::forward_proxy extension 1.2.3.5 proxy-extension; SSL::forward_proxy verified_handshake enable; SSL::nextproto http/1.1; log local0. \"c3d=[set ::state::tls::client::c3d_subject_cn] proxy=[SSL::forward_proxy policy] cert=[SSL::forward_proxy cert] control=[SSL::forward_proxy cert response_control] verified=[SSL::forward_proxy verified_handshake] next=[SSL::nextproto] modssl=[SSL::modssl_sessionid_headers initial] secret=[SSL::sessionsecret] tls13=[SSL::tls13_secret client hs]\"; SSL::collect 4 } when CLIENTSSL_DATA { log local0. \"client=[SSL::payload] length=[SSL::payload length] first=[SSL::payload 2]\"; SSL::payload replace 0 2 XY; SSL::release 2 } when SERVERSSL_HANDSHAKE { log local0. \"server-tls13=[SSL::tls13_secret server hs]\"; SSL::collect 3 } when SERVERSSL_DATA { log local0. \"server=[SSL::payload]\"; SSL::release }",
+        "packets": [
+          {
+            "protocol": "tls",
+            "direction": "client_to_server",
+            "type": "handshake",
+            "session_id": "current-session",
+            "initial_session_id": "initial-session",
+            "forward_proxy_cert": "forged-cert",
+            "session_secret": "master-secret",
+            "tls13_client_hs_secret": "client-hs-secret"
+          },
+          {"protocol": "tls", "direction": "client_to_server", "type": "client_data", "payload": "ab"},
+          {"protocol": "tls", "direction": "client_to_server", "type": "client_data", "payload": "cd"},
+          {"protocol": "tls", "direction": "server_to_client", "type": "server_handshake", "tls13_server_hs_secret": "server-hs-secret"},
+          {"protocol": "tls", "direction": "server_to_client", "type": "server_data", "payload": "xyz"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "CLIENTSSL_HANDSHAKE"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "c3d_extensions"], "equals": "1.2.3.4 extension-value"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "c3d_cert"], "equals": "forged-client-cert"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "c3d_subject_cn"], "equals": "forged.example"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "forward_proxy_policy"], "equals": "intercept"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "forward_proxy_cert_status"], "equals": "verified"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "forward_proxy_verified_handshake"], "equals": "1"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "nextproto"], "equals": "http/1.1"},
+          {"path": ["trace", 0, "events", 2, "state", "tls_client", "collect_length"], "equals": "4"},
+          {"path": ["trace", 2, "events", 0, "event"], "equals": "CLIENTSSL_DATA"},
+          {"path": ["trace", 2, "events", 0, "state", "tls_client", "payload"], "equals": "cd"},
+          {"path": ["trace", 2, "events", 0, "state", "tls_client", "released_length"], "equals": "2"},
+          {"path": ["trace", 3, "events", 2, "event"], "equals": "SERVERSSL_HANDSHAKE"},
+          {"path": ["trace", 3, "events", 2, "state", "tls_server", "tls13_server_hs_secret"], "equals": "server-hs-secret"},
+          {"path": ["trace", 3, "events", 2, "state", "tls_server", "collect_length"], "equals": "3"},
+          {"path": ["trace", 4, "events", 0, "event"], "equals": "SERVERSSL_DATA"},
+          {"path": ["trace", 4, "events", 0, "state", "tls_server", "payload"], "equals": ""},
+          {"path": ["trace", 4, "events", 0, "state", "tls_server", "released_length"], "equals": "3"}
+        ]
+      }
+    }
+  ]
+}
