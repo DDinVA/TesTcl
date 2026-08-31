@@ -100,38 +100,36 @@ jobs:
             testcl-irule-emulator:ci \
             --data-plane --host 0.0.0.0 --port 18082 \
             --scenario /opt/testcl/examples/scenarios/live-tcp-17.5.json
-          for attempt in $(seq 1 30); do
-            if (exec 3<>/dev/tcp/127.0.0.1/18082) 2>/dev/null; then
-              exec 3>&- 3<&-
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              docker logs "$raw_container_name"
-              exit 1
-            fi
-            sleep 1
-          done
           set +e
           python3 - <<'PY'
           import socket
+          import time
 
           expected = b"container-tcp"
-          received = bytearray()
-          with socket.create_connection(("127.0.0.1", 18082), timeout=5) as client:
-              client.sendall(expected)
-              while len(received) < len(expected):
-                  try:
-                      chunk = client.recv(len(expected) - len(received))
-                  except ConnectionResetError:
+          deadline = time.monotonic() + 30
+          last_error = RuntimeError("no connection attempt completed")
+          while time.monotonic() < deadline:
+              received = bytearray()
+              try:
+                  with socket.create_connection(("127.0.0.1", 18082), timeout=2) as client:
+                      client.settimeout(2)
+                      client.sendall(expected)
+                      while len(received) < len(expected):
+                          chunk = client.recv(len(expected) - len(received))
+                          if not chunk:
+                              break
+                          received.extend(chunk)
+                  if bytes(received) == expected:
+                      print(bytes(received).decode("ascii"))
                       break
-                  if not chunk:
-                      break
-                  received.extend(chunk)
-          if bytes(received) != expected:
-              raise SystemExit(
-                  f"raw TCP smoke response mismatch: {bytes(received)!r}"
-              )
-          print(bytes(received).decode("ascii"))
+                  last_error = RuntimeError(
+                      f"response mismatch: {bytes(received)!r}"
+                  )
+              except OSError as exc:
+                  last_error = exc
+              time.sleep(0.5)
+          else:
+              raise SystemExit(f"raw TCP smoke failed: {last_error!r}")
           PY
           raw_status=$?
           set -e
