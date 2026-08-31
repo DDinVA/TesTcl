@@ -5339,6 +5339,40 @@ when HTTP_RESPONSE_RELEASE {
             {"ok": 51, "error": 0, "profile-gated": 0},
         )
 
+    def test_mr_candidate_sweep_uses_message_routing_fixtures(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        pack = json.loads(
+            (ROOT / "examples" / "behavior-packs" / "http-core-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        candidates = self.adapter._build_behavior_vector_candidates(
+            root, [pack], 0, 23, namespace="MR", variants=1
+        )
+        by_command = {
+            candidate["command"]: candidate for candidate in candidates["candidates"]
+        }
+        self.assertEqual(
+            {candidate["event"] for candidate in candidates["candidates"]},
+            {"MR_INGRESS"},
+        )
+        self.assertEqual(by_command["MR::collect"]["input"]["args"], [])
+        self.assertEqual(
+            by_command["MR::message"]["input"]["args"], ["clone", "1"],
+        )
+        self.assertEqual(by_command["MR::peer"]["input"]["args"], ["testcl"])
+        self.assertEqual(
+            by_command["MR::prime"]["input"]["args"],
+            ["virtual", "testcl", "pool", "api_pool"],
+        )
+
+        sweep = self.adapter._build_behavior_vector_sweep(
+            root, [pack], 0, 23, namespace="MR", variants=8
+        )
+        self.assertEqual(sweep["summary"]["candidate_command_count"], 23)
+        self.assertEqual(sweep["summary"]["variant_count"], 46)
+        self.assertEqual(sweep["summary"]["status_counts"], {"ok": 46})
+        self.assertEqual(sweep["summary"]["execution_status_counts"]["error"], 0)
+
     def test_behavior_sweep_can_execute_multiple_registry_argument_variants(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
         pack = json.loads(
