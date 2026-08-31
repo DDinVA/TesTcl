@@ -20895,6 +20895,38 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
             [item["result"]["request"]["uri"] for item in snapshot["observations"]],
             ["/two", "/three"],
         )
+        replay_store = self.adapter._LiveObservationStore(max_records=2, max_bytes=4096)
+        replay_store.append(
+            session_id="live-session",
+            protocol="http2",
+            phase="wire",
+            direction="client_to_server",
+            result={"packet": {"payload_hex": "00"}},
+            retain_for_replay=True,
+        )
+        replay_store.append(
+            session_id="live-session",
+            protocol="http",
+            phase="transaction",
+            direction="client_to_server",
+            result={"request": {"uri": "/diagnostic"}},
+        )
+        replay_store.append(
+            session_id="live-session",
+            protocol="http",
+            phase="transaction",
+            direction="client_to_server",
+            result={"request": {"uri": "/new-diagnostic"}},
+        )
+        replay_snapshot = replay_store.snapshot()
+        self.assertEqual(
+            [
+                item["result"].get("packet", {}).get("payload_hex")
+                or item["result"]["request"]["uri"]
+                for item in replay_snapshot["observations"]
+            ],
+            ["00", "/new-diagnostic"],
+        )
         snapshot["observations"][0]["result"]["request"]["uri"] = "/mutated"
         self.assertEqual(
             store.snapshot()["observations"][0]["result"]["request"]["uri"],
@@ -21174,6 +21206,81 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status] [HTTP::payload]" }
         )
         self.assertEqual(compared["analysis"]["comparison_passed"], 2)
 
+    def test_live_http2_wire_observations_export_lossless_chunks(self) -> None:
+        store = self.adapter._LiveObservationStore()
+        first_chunk = HTTP2_CLIENT_PREFACE[:7]
+        second_chunk = HTTP2_CLIENT_PREFACE[7:] + _http2_frame(0x4, 0x0, 0)
+        store.append(
+            session_id="h2-session",
+            protocol="http2",
+            phase="wire",
+            direction="client_to_server",
+            result={
+                "packet": {
+                    "protocol": "http2",
+                    "direction": "client_to_server",
+                    "payload_hex": first_chunk.hex(),
+                }
+            },
+        )
+        store.append(
+            session_id="h2-session",
+            protocol="http2",
+            phase="wire",
+            direction="client_to_server",
+            result={
+                "packet": {
+                    "protocol": "http2",
+                    "direction": "client_to_server",
+                    "payload_hex": second_chunk.hex(),
+                }
+            },
+        )
+        # Decoded stream output is useful diagnostics, but must not replace or
+        # duplicate the raw wire chunks in a replay plan.
+        store.append(
+            session_id="h2-session",
+            protocol="http2",
+            phase="stream",
+            direction="client_to_server",
+            result={"request": {"uri": "/decoded"}},
+        )
+
+        plan = self.adapter._build_live_observation_capture_plan(
+            Path(self.tcl_lsp_root),
+            {
+                "scenario": {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when HTTP_REQUEST {}",
+                    "live_data_plane": {"protocol": "http2"},
+                }
+            },
+            store,
+        )
+        self.assertEqual(len(plan["observations"]), 1)
+        packets = plan["observations"][0]["input"]["packets"]
+        self.assertEqual(
+            [packet["payload_hex"] for packet in packets],
+            [first_chunk.hex(), second_chunk.hex()],
+        )
+        self.assertEqual(plan["observations"][0]["comparisons"][0]["label"], "packets processed")
+
+        assembled = self.adapter.run_capture_assemble(
+            plan,
+            [
+                {
+                    "id": plan["observations"][0]["id"],
+                    "output": {"packets_processed": 2},
+                }
+            ],
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        compared = self.adapter.run_golden_vectors(
+            assembled["pack"],
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(compared["analysis"]["comparison_passed"], 1)
+
     def test_live_http_data_plane_runs_persistent_real_client_requests(self) -> None:
         scenario = {
             "profiles": ["TCP", "HTTP"],
@@ -21430,8 +21537,10 @@ when HTTP_RESPONSE {
                     },
                 },
             }
+            observations = self.adapter._LiveObservationStore()
             server, manager = self.adapter._data_plane_server(
-                Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+                Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario,
+                observations=observations,
             )
             thread = threading.Thread(target=server.serve_forever)
             thread.start()
@@ -21455,11 +21564,12 @@ when HTTP_RESPONSE {
                         (":path", "/h2"),
                     ]
                 )
-                secure_client.sendall(
+                wire_request = (
                     HTTP2_CLIENT_PREFACE
                     + _http2_frame(0x4, 0, 0)
                     + _http2_frame(0x1, 0x5, 1, request_headers)
                 )
+                secure_client.sendall(wire_request)
                 decoder = Http2ConnectionDecoder()
                 events: list[dict[str, Any]] = []
                 secure_client.settimeout(2)
@@ -21483,6 +21593,17 @@ when HTTP_RESPONSE {
                 self.assertEqual(response_headers["headers"].get("x-processed"), "h2")
                 self.assertEqual(response_data["data"], b"h2-origin")
                 self.assertEqual(getattr(server, "_testcl_protocol"), "https")
+                plan = self.adapter._build_live_observation_capture_plan(
+                    Path(self.tcl_lsp_root),
+                    {"scenario": scenario},
+                    observations,
+                )
+                self.assertEqual(len(plan["observations"]), 1)
+                exported_wire = b"".join(
+                    bytes.fromhex(packet["payload_hex"])
+                    for packet in plan["observations"][0]["input"]["packets"]
+                )
+                self.assertEqual(exported_wire, wire_request)
             finally:
                 secure_client.close()
                 server.shutdown()

@@ -237,7 +237,8 @@ the data plane defaults to `127.0.0.1:18080` and can be changed with
 
 In combined mode, the API also retains a bounded, in-memory observation stream
 from real-client data-plane traffic. `GET /v1/live-observations?limit=50`
-returns the most recent transaction, stream, frame, or TCP data results with
+returns the most recent transaction, stream, frame, TCP data, or HTTP/2 wire
+results with
 their protocol, phase, direction, and emulator session ID. Use
 `DELETE /v1/live-observations` between test cases. The stream is intentionally
 not persisted and is diagnostic emulator output, not independent TMOS/vLab
@@ -247,10 +248,11 @@ To turn captured live inputs into an external-reference plan, POST a scenario
 and optional observation IDs to `/v1/live-observations/capture-plan`; the
 response is a plan without outputs. HTTP transactions become one request
 scenario per observation. TCP and WebSocket packet observations are grouped by
-live session, preserving connection/frame order. The exporter copies only
+live session, preserving connection/frame order. HTTP/2 wire observations
+retain the decrypted application bytes exactly as received, including arbitrary
+preface/frame chunking, and export as `protocol: "http2"` packets. The exporter copies only
 replay inputs, so trace indexes, events, forwarding decisions, and modeled
-outputs are excluded. HTTP/2 live observations remain diagnostic-only until a
-lossless frame export is added. Fill the plan's records from BIG-IP/vLab, then
+outputs are excluded. Fill the plan's records from BIG-IP/vLab, then
 send the plan and records to `/v1/observations/assemble` before running
 `/v1/differential-vectors`.
 

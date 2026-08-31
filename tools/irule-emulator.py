@@ -29422,7 +29422,7 @@ class _LiveObservationStore:
             raise ValueError("live observation limits must be positive")
         self._max_records = max_records
         self._max_bytes = max_bytes
-        self._records: list[tuple[int, dict[str, Any], int]] = []
+        self._records: list[tuple[int, dict[str, Any], int, bool]] = []
         self._next_id = 1
         self._total_bytes = 0
         self._lock = threading.RLock()
@@ -29435,8 +29435,14 @@ class _LiveObservationStore:
         phase: str,
         direction: str,
         result: Any,
+        retain_for_replay: bool = False,
     ) -> None:
-        """Append one JSON-safe result, evicting oldest records when bounded."""
+        """Append one JSON-safe result, evicting oldest records when bounded.
+
+        Replay-critical wire records can request preferential retention so a
+        verbose diagnostic stream cannot evict the bytes needed to reconstruct
+        a session. The normal record and byte bounds still apply.
+        """
         if not all(
             isinstance(value, str) and value
             for value in (session_id, protocol, phase, direction)
@@ -29486,9 +29492,19 @@ class _LiveObservationStore:
                 len(self._records) >= self._max_records
                 or self._total_bytes + encoded_size > self._max_bytes
             ):
-                _, _, old_size = self._records.pop(0)
+                eviction_index = next(
+                    (
+                        index
+                        for index, (_, _, _, retained) in enumerate(self._records)
+                        if not retained
+                    ),
+                    0,
+                )
+                _, _, old_size, _ = self._records.pop(eviction_index)
                 self._total_bytes -= old_size
-            self._records.append((self._next_id - 1, record, encoded_size))
+            self._records.append(
+                (self._next_id - 1, record, encoded_size, retain_for_replay)
+            )
             self._total_bytes += encoded_size
 
     def snapshot(self, limit: int | None = None) -> dict[str, Any]:
@@ -29504,7 +29520,7 @@ class _LiveObservationStore:
             # values so callers cannot mutate the store through the snapshot.
             records = [
                 json.loads(json.dumps(record, ensure_ascii=False))
-                for _, record, _ in self._records[-limit:]
+                for _, record, _, _ in self._records[-limit:]
             ]
             return {
                 "status": "ok",
@@ -29612,6 +29628,7 @@ def _build_live_observation_capture_plan(
     plan_observations: list[dict[str, Any]] = []
     packet_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     packet_group_order: list[tuple[str, str]] = []
+    http2_stream_sessions: set[str] = set()
     supplied_comparisons = request.get("comparisons")
     if supplied_comparisons is not None and (
         not isinstance(supplied_comparisons, list) or not supplied_comparisons
@@ -29667,12 +29684,25 @@ def _build_live_observation_capture_plan(
             )
             continue
 
-        if protocol not in {"tcp", "websocket"}:
+        if protocol == "http2" and item.get("phase") == "stream":
+            session_id = item.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                http2_stream_sessions.add(session_id)
+            continue
+        if protocol not in {"tcp", "http2", "websocket"}:
             raise EmulatorInputError(
-                "live capture-plan export accepts HTTP transactions, TCP packets, "
-                "and WebSocket packets"
+                "live capture-plan export accepts HTTP transactions, HTTP/2 wire "
+                "packets, TCP packets, and WebSocket packets"
             )
-        trace = result.get("trace") if isinstance(result, dict) else None
+        if protocol == "http2":
+            if item.get("phase") != "wire":
+                raise EmulatorInputError(
+                    f"live observation {item['observation_id']!r} has an unsupported HTTP/2 phase"
+                )
+            packet = result.get("packet") if isinstance(result, dict) else None
+            trace = [packet] if isinstance(packet, dict) else None
+        else:
+            trace = result.get("trace") if isinstance(result, dict) else None
         if not isinstance(trace, list) or not trace:
             raise EmulatorInputError(
                 f"live observation {item['observation_id']!r} is missing a packet trace"
@@ -29714,7 +29744,7 @@ def _build_live_observation_capture_plan(
                 "datagram",
                 "flow_id",
             }
-            if protocol == "tcp":
+            if protocol in {"tcp", "http2"}:
                 allowed_packet_fields.add("payload_hex")
             else:
                 allowed_packet_fields.update(
@@ -29781,6 +29811,17 @@ def _build_live_observation_capture_plan(
                 )
             packet_groups[group_key].append(replay_packet)
 
+    missing_http2_wire = sorted(
+        session_id
+        for session_id in http2_stream_sessions
+        if ("http2", session_id) not in packet_groups
+    )
+    if missing_http2_wire:
+        raise EmulatorInputError(
+            "HTTP/2 stream observations require their wire observations; "
+            "omit observation_ids to export the complete live session"
+        )
+
     for group_index, (protocol, session_id) in enumerate(packet_group_order):
         packets = packet_groups[(protocol, session_id)]
         vector_scenario = dict(scenario)
@@ -29813,7 +29854,7 @@ def _build_live_observation_capture_plan(
             "collector": request.get("collector", "external-collector"),
             "tmos_build": request.get("tmos_build", "17.5"),
             "capture_id": request.get("capture_id", "live-observations"),
-            "generator": "tmos-17.5-live-observation-plan-v1",
+            "generator": "tmos-17.5-live-observation-plan-v2",
         },
         "observations": plan_observations,
     }
@@ -35128,6 +35169,24 @@ def _live_http2_handler(
                     if total_bytes > config["max_read_bytes"]:
                         raise EmulatorResourceError(
                             "live HTTP/2 connection exceeds the configured byte limit"
+                        )
+                    if observations is not None:
+                        # Retain the decrypted HTTP/2 application bytes exactly
+                        # as received. The decoder below may coalesce or split
+                        # frames, but replay only needs these ordered chunks.
+                        observations.append(
+                            session_id=session_id,
+                            protocol="http2",
+                            phase="wire",
+                            direction="client_to_server",
+                            result={
+                                "packet": {
+                                    "protocol": "http2",
+                                    "direction": "client_to_server",
+                                    "payload_hex": payload.hex(),
+                                }
+                            },
+                            retain_for_replay=True,
                         )
                     wire_payload = payload
                     if not preface_seen:

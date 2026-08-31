@@ -57,8 +57,8 @@ member selection.
 In combined `--serve --data-plane-scenario` mode, query
 `/v1/live-observations` for a bounded in-memory stream of real-client emulator
 results and use `/v1/live-observations/capture-plan` to export replayable
-HTTP/TCP/WebSocket inputs; run `scripts/live-observation-smoke.sh` for a quick
-evaluation.
+HTTP/HTTP2/TCP/WebSocket inputs; run `scripts/live-observation-smoke.sh` for a
+quick evaluation.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:
