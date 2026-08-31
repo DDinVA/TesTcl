@@ -4743,6 +4743,7 @@ when HTTP_RESPONSE_RELEASE {
     def test_behavior_packs_cover_dns_tcp_lb_uri_sip_and_stateful_scenarios(self) -> None:
         expected_counts = {
             "aaa-17.5.json": 3,
+            "antifraud-controls-17.5.json": 2,
             "category-17.5.json": 6,
             "tcp-controls-17.5.json": 2,
             "dns-17.5.json": 7,
