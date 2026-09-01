@@ -74,6 +74,13 @@ def _event_counts(observations: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _driver_preflight_url(event: str) -> str:
+    """Return a transport-appropriate placeholder URL for driver preflight."""
+    if event.startswith(("DNS_", "SIP_", "PCP_", "RADIUS_AAA_")):
+        return "udp://192.0.2.10:1024"
+    return "tcp://192.0.2.10:1024"
+
+
 def _stimulus_group_id(result: dict[str, Any]) -> str:
     """Return a stable live-capture grouping key for one driver fixture.
 
@@ -197,7 +204,7 @@ def _driver_preflight(observation: dict[str, Any]) -> dict[str, Any]:
         "event": event,
         "request": request,
         "profiles": observation["input"].get("profiles", []),
-        "traffic_url": "tcp://192.0.2.10:1024",
+        "traffic_url": _driver_preflight_url(event),
     }
     mode = "unknown"
     try:

@@ -33,6 +33,23 @@ def test_driver_preflight_does_not_require_network_for_rule_init() -> None:
     }
 
 
+def test_driver_preflight_uses_datagram_url_for_datagram_protocols() -> None:
+    result = batch._driver_preflight(
+        {
+            "id": "command_probe:sip",
+            "input": {
+                "event": "SIP_REQUEST",
+                "request": {"method": "OPTIONS", "uri": "sip:test@example.invalid"},
+                "profiles": ["UDP", "SIP"],
+            },
+            "event_supported": False,
+        }
+    )
+    assert result["mode"] == "sip"
+    assert result["status"] == "buildable"
+    assert result["endpoint_scheme"] == "udp"
+
+
 def test_profile_driven_events_get_http_capture_fixtures() -> None:
     assert batch.EMULATOR._capture_plan_request_template(
         "ACCESS_POLICY_AGENT_EVENT", ["TCP", "HTTP", "ACCESS"]
