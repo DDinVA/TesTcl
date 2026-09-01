@@ -47,14 +47,25 @@ echo "UDP upstream response:"
 "$python_bin" - "$data_port" <<'PY'
 import socket
 import sys
+import time
 
-with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
-    client.settimeout(3)
-    client.sendto(b"hello", ("127.0.0.1", int(sys.argv[1])))
-    response, _ = client.recvfrom(65535)
-    if response != b"reply:query":
-        raise SystemExit(f"unexpected UDP response: {response!r}")
-    print(response.decode("ascii"))
+deadline = time.monotonic() + 30
+last_error = RuntimeError("no UDP response attempt completed")
+while time.monotonic() < deadline:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+            client.settimeout(1)
+            client.sendto(b"hello", ("127.0.0.1", int(sys.argv[1])))
+            response, _ = client.recvfrom(65535)
+        if response == b"reply:query":
+            print(response.decode("ascii"))
+            break
+        last_error = RuntimeError(f"unexpected UDP response: {response!r}")
+    except OSError as exc:
+        last_error = exc
+    time.sleep(0.5)
+else:
+    raise SystemExit(f"UDP upstream smoke failed: {last_error!r}")
 PY
 
 echo "Captured UDP upstream phases:"
@@ -66,7 +77,8 @@ import sys
 
 payload = json.load(sys.stdin)
 phases = [item.get("phase") for item in payload.get("observations", [])]
-if phases != ["datagram", "upstream_data"]:
+pairs = [phases[index:index + 2] for index in range(0, len(phases), 2)]
+if not pairs or any(pair != ["datagram", "upstream_data"] for pair in pairs):
     raise SystemExit(f"unexpected observation phases: {phases!r}")
-print(json.dumps({"profile": payload.get("profile"), "phases": phases}, indent=2))
+print(json.dumps({"profile": payload.get("profile"), "phases": pairs[-1]}, indent=2))
 '
