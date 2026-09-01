@@ -4763,6 +4763,7 @@ when HTTP_RESPONSE_RELEASE {
             "tcp-introspection-17.5.json": 15,
             "dns-17.5.json": 7,
             "dns-controls-17.5.json": 21,
+            "dosl7-controls-17.5.json": 1,
             "tcp-17.5.json": 6,
             "ssl-controls-17.5.json": 2,
             "lb-17.5.json": 5,

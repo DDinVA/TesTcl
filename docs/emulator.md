@@ -348,7 +348,7 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 The command exits non-zero when a case fails and prints every mismatch without
 discarding the passing cases. The same runner is available as
 `POST /v1/behavior-packs` and the MCP tool `irule_behavior_pack`. The checked-in
-packs cover AAA, ACCESS, ADAPT, AM, AUTH, BWC, CACHE, CATEGORY, DHCPv4, DHCPv6, ECA, GTP, HTTP, HTTP/2, IKE, LSN, PCP, PSC, DNS, TCP, TLS/SSL, X509, UDP/datagram, WebSocket, XLAT, RTSP, SCTP,
+packs cover AAA, ACCESS, ADAPT, AM, AUTH, BWC, CACHE, CATEGORY, DHCPv4, DHCPv6, DOSL7, ECA, GTP, HTTP, HTTP/2, IKE, LSN, PCP, PSC, DNS, TCP, TLS/SSL, X509, UDP/datagram, WebSocket, XLAT, RTSP, SCTP,
 SIP/SDP/SIPALG, load-balancing, URI, stream filtering, route metrics, TMM CMP
 topology, FLOWTABLE queries, classification lifecycle, profile introspection,
 Message Routing controls, HTTP edge controls, MQTT protocol controls, and stateful
@@ -374,7 +374,7 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 709 of 989 target F5 commands (71.69%). This is test-input
+current report covers 716 of 989 target F5 commands (72.40%). This is test-input
 coverage, not a semantic-fidelity score.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
@@ -424,6 +424,14 @@ configuration, allowed-request fields, and denied-request state:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/eca-controls-17.5.json
+```
+
+Run the DOSL7 controls behavior pack to verify policy inspection, enable/disable
+overrides, slowdown state, and connection reset:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/dosl7-controls-17.5.json
 ```
 
 Run the GTP controls behavior pack to verify v2 signalling headers and
