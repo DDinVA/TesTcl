@@ -30,7 +30,9 @@ The same listener can expose bounded raw TCP or UDP data planes for iRule
 fixtures by adding `"live_data_plane": {"protocol": "tcp"}` or
 `{"protocol": "udp"}` to the scenario. UDP keeps one persistent emulator
 session per client endpoint and forwards `UDP::respond` datagrams back with
-lossless bytes.
+lossless bytes. When the scenario includes the DNS profile, valid DNS queries
+also run through `DNS_REQUEST`/`DNS_RESPONSE`, and `DNS::return` produces a
+real response datagram.
 `TCP::respond` emissions are written back to the client. An explicit
 `live_data_plane.upstream` target can opt into a bounded, bidirectional TCP or
 HTTP bridge for testing a real backend peer; it is not a kernel TCP stack, TLS

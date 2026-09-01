@@ -22643,8 +22643,9 @@ when HTTP_RESPONSE {
                 },
             },
         }
+        observations = self.adapter._LiveObservationStore()
         server, manager = self.adapter._data_plane_server(
-            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario, observations
         )
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
@@ -24720,6 +24721,58 @@ when CLIENT_DATA {
             tcl_lsp_root=self.tcl_lsp_root,
         )
         self.assertEqual(result["emitted"][0]["payload_hex"], "00ff10")
+
+    def test_live_udp_dns_return_sends_serialized_response(self) -> None:
+        scenario = {
+            "profiles": ["UDP", "DNS"],
+            "irule": """
+when DNS_REQUEST {
+    set rr [DNS::rr "[DNS::question name]. 30 IN A 192.0.2.10"]
+    DNS::answer clear
+    DNS::answer insert $rr
+    DNS::header aa 1
+    DNS::return
+}
+""",
+            "live_data_plane": {"protocol": "udp", "read_timeout": 0.2},
+        }
+        observations = self.adapter._LiveObservationStore()
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario, observations
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(2)
+        endpoint = ("127.0.0.1", self.adapter._data_plane_bound_port(server))
+        query = (
+            struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+            + b"\x07example\x03com\x00"
+            + struct.pack("!HH", 1, 1)
+        )
+        try:
+            client.sendto(query, endpoint)
+            response, _ = client.recvfrom(65535)
+            self.assertEqual(response[:2], b"\x12\x34")
+            _response_id, flags, qdcount, ancount, nscount, arcount = struct.unpack(
+                "!HHHHHH", response[:12]
+            )
+            self.assertTrue(flags & 0x8000)
+            self.assertTrue(flags & 0x0400)
+            self.assertEqual((qdcount, ancount, nscount, arcount), (1, 1, 0, 0))
+            self.assertIn(b"\xc0\x00\x02\x0a", response)
+            plan = self.adapter._build_live_observation_capture_plan(
+                Path(self.tcl_lsp_root), {"scenario": scenario}, observations
+            )
+            replay_packet = plan["observations"][0]["input"]["packets"][0]
+            self.assertEqual(replay_packet["protocol"], "udp")
+            self.assertEqual(replay_packet["payload_hex"], query.hex())
+        finally:
+            client.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
 
     def test_live_udp_data_plane_rejects_stream_and_upstream_options(self) -> None:
         with self.assertRaisesRegex(

@@ -268,6 +268,16 @@ semantics remain available through the packet/API and capture-driver paths.
 Live UDP observations can be exported through
 `/v1/live-observations/capture-plan` for external BIG-IP/vLab comparison.
 
+If the scenario also attaches the `DNS` profile, valid DNS-shaped datagrams
+are decoded by the normal DNS packet adapter. `DNS_REQUEST` can mutate the
+question/records and call `DNS::return`; the resulting serialized message is
+sent back to the client, including the original transaction ID. The checked-in
+[`live-dns-17.5.json`](../examples/scenarios/live-dns-17.5.json) fixture and
+[`live-dns-observation-smoke.sh`](../scripts/live-dns-observation-smoke.sh)
+exercise this path. The response serializer is deterministic and bounded; it
+does not provide recursive resolution, DNSSEC, compression preservation, or a
+live upstream nameserver.
+
 The API and data plane can run together by starting the normal API with
 `--serve --data-plane-scenario PATH`; the API remains on `--host/--port`, while
 the data plane defaults to `127.0.0.1:18080` and can be changed with

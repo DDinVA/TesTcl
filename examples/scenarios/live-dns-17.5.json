@@ -1,0 +1,9 @@
+{
+  "profiles": ["UDP", "DNS"],
+  "irule": "when DNS_REQUEST { set rr [DNS::rr \"[DNS::question name]. 30 IN A 192.0.2.10\" ]; DNS::answer clear; DNS::answer insert $rr; DNS::header aa 1; DNS::return }",
+  "live_data_plane": {
+    "protocol": "udp",
+    "read_timeout": 1.0,
+    "max_read_bytes": 2097152
+  }
+}

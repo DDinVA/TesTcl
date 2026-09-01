@@ -32277,7 +32277,18 @@ def _build_live_observation_capture_plan(
                 raise EmulatorInputError(
                     f"live observation {item['observation_id']!r} contains an invalid packet trace"
                 )
-            if trace_entry.get("protocol") != protocol:
+            trace_protocol = trace_entry.get("protocol")
+            if trace_protocol == "dns" and protocol == "udp":
+                # The packet adapter may promote a valid UDP payload to its
+                # DNS protocol view. Replay the original wire datagram as UDP
+                # so the same deterministic decoder can promote it again.
+                if not isinstance(trace_entry.get("payload_hex"), str):
+                    raise EmulatorInputError(
+                        f"live observation {item['observation_id']!r} DNS trace is missing payload hex"
+                    )
+                trace_entry = dict(trace_entry)
+                trace_entry["protocol"] = "udp"
+            elif trace_protocol != protocol:
                 raise EmulatorInputError(
                     f"live observation {item['observation_id']!r} contains a mixed-protocol trace"
                 )
@@ -38298,6 +38309,54 @@ def _live_udp_handler(
                     )
                 socket_object.sendto(payload, self.client_address)
 
+        def _send_dns_response(self, result: Any) -> None:
+            """Forward a DNS::return message produced by the packet adapter."""
+            if not isinstance(result, dict):
+                return
+            trace = result.get("trace", [])
+            if not isinstance(trace, list) or not trace:
+                return
+            packet_result = trace[-1]
+            if not isinstance(packet_result, dict) or packet_result.get("dropped"):
+                return
+            if not packet_result.get("responded"):
+                return
+            events = packet_result.get("events", [])
+            if not isinstance(events, list):
+                raise EmulatorInputError("emulator returned invalid DNS events")
+            response_hex: str | None = None
+            for event in reversed(events):
+                if not isinstance(event, dict) or event.get("event") != "DNS_RESPONSE":
+                    continue
+                event_state = event.get("state")
+                dns_state = (
+                    event_state.get("dns")
+                    if isinstance(event_state, dict)
+                    else None
+                )
+                if isinstance(dns_state, dict) and isinstance(
+                    dns_state.get("message_hex"), str
+                ):
+                    response_hex = dns_state["message_hex"]
+                    break
+            if response_hex is None:
+                return
+            if len(response_hex) % 2:
+                raise EmulatorInputError("emulator returned invalid DNS response hex")
+            try:
+                payload = bytes.fromhex(response_hex)
+            except ValueError as exc:
+                raise EmulatorInputError(
+                    "emulator returned invalid DNS response hex"
+                ) from exc
+            if len(payload) < 12:
+                raise EmulatorInputError("emulator returned an incomplete DNS response")
+            if len(payload) > config["max_read_bytes"]:
+                raise EmulatorResourceError(
+                    "DNS response exceeds the configured byte limit"
+                )
+            self.request[1].sendto(payload, self.client_address)
+
         def handle(self) -> None:  # noqa: D401 - socketserver API
             payload, _socket_object = self.request
             if not isinstance(payload, bytes):
@@ -38338,6 +38397,7 @@ def _live_udp_handler(
                         result=result,
                     )
                 self._send_emissions(result)
+                self._send_dns_response(result)
                 trace = result.get("trace", []) if isinstance(result, dict) else []
                 if (
                     isinstance(trace, list)

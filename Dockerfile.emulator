@@ -36,6 +36,7 @@ COPY examples/golden-vectors /opt/testcl/examples/golden-vectors
 COPY examples/scenarios/live-http-17.5.json /opt/testcl/examples/scenarios/live-http-17.5.json
 COPY examples/scenarios/live-http2-17.5.json /opt/testcl/examples/scenarios/live-http2-17.5.json
 COPY examples/scenarios/live-http-upstream-17.5.json /opt/testcl/examples/scenarios/live-http-upstream-17.5.json
+COPY examples/scenarios/live-dns-17.5.json /opt/testcl/examples/scenarios/live-dns-17.5.json
 COPY examples/scenarios/live-tcp-17.5.json /opt/testcl/examples/scenarios/live-tcp-17.5.json
 COPY examples/scenarios/live-tcp-pool-17.5.json /opt/testcl/examples/scenarios/live-tcp-pool-17.5.json
 COPY examples/scenarios/live-udp-17.5.json /opt/testcl/examples/scenarios/live-udp-17.5.json
