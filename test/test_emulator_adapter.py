@@ -25042,6 +25042,12 @@ when SIP_REQUEST {
             self.assertEqual(replay_packet["protocol"], "sip")
             self.assertEqual(replay_packet["transport"], "udp")
             self.assertEqual(replay_packet["type"], "request")
+            replayed = self.adapter.run_scenario(
+                plan["observations"][0]["input"],
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+            self.assertEqual(replayed["packets_processed"], 1)
+            self.assertEqual(replayed["trace"][0]["response"]["status"], 200)
         finally:
             client.close()
             server.shutdown()
