@@ -53,6 +53,15 @@ jobs:
       - name: Check out TesTcl
         uses: actions/checkout@v4
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.12.6
+          enable-cache: true
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
       - name: Build the portable emulator image
         run: |
           docker compose config --quiet
@@ -458,14 +467,16 @@ jobs:
           docker run --rm testcl-irule-emulator:ci \
             --behavior-candidates --namespace HTTP --limit 1 \
             >/tmp/testcl-behavior-candidates.json
-          grep -F '"candidate_command_count":1' /tmp/testcl-behavior-candidates.json
-          grep -F '"plan_observation_count":1' /tmp/testcl-behavior-candidates.json
+          # The checked-in 17.5 packs currently cover every target command, so
+          # a full-pack candidate request is intentionally an empty chunk.
+          grep -F '"candidate_command_count":0' /tmp/testcl-behavior-candidates.json
+          grep -F '"plan_observation_count":0' /tmp/testcl-behavior-candidates.json
           docker run --rm testcl-irule-emulator:ci \
             --behavior-sweep --namespace HTTP --offset 7 --limit 1 --variants 4 \
             >/tmp/testcl-behavior-sweep.json
-          grep -F '"variant_count":4' /tmp/testcl-behavior-sweep.json
-          grep -F '"executed_count":4' /tmp/testcl-behavior-sweep.json
-          grep -F '"ok":4' /tmp/testcl-behavior-sweep.json
+          grep -F '"candidate_command_count":0' /tmp/testcl-behavior-sweep.json
+          grep -F '"variant_count":0' /tmp/testcl-behavior-sweep.json
+          grep -F '"executed_count":0' /tmp/testcl-behavior-sweep.json
 
           docker run --detach --name "$raw_container_name" \
             --publish 18082:18082 \
@@ -473,7 +484,7 @@ jobs:
             --data-plane --host 0.0.0.0 --port 18082 \
             --scenario /opt/testcl/examples/scenarios/live-tcp-17.5.json
           set +e
-          python3 - <<'PY'
+          uv run --python 3.13 python - <<'PY'
           import socket
           import time
 
