@@ -651,10 +651,52 @@ def _virtual_path(value: str) -> tuple[str, str]:
     return f"/mgmt/tm/ltm/virtual/{encoded_reference}", f"/{partition}/{name}"
 
 
+def _validate_traffic_url(base_url: str) -> Any:
+    """Validate an external stimulus endpoint without opening a connection.
+
+    HTTP/RULE_INIT cases use an HTTP URL directly. Protocol-driver cases may
+    use TCP or UDP, so validation must happen at the common boundary without
+    pretending every stimulus is an HTTP request.
+    """
+    if not isinstance(base_url, str) or not base_url or any(
+        character in base_url for character in "\r\n\x00"
+    ):
+        raise CollectorError(
+            "traffic URL must be a non-empty URL without line breaks or NUL"
+        )
+    try:
+        parsed = urlparse(base_url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        if "Port out of range" in str(exc):
+            raise CollectorError(
+                "traffic URL has invalid port; it must be between 1 and 65535"
+            ) from exc
+        raise CollectorError("traffic URL has invalid host or port syntax") from exc
+    if parsed.scheme not in {"http", "https", "tcp", "udp"} or not parsed.netloc:
+        raise CollectorError(
+            "traffic URL must use http://, https://, tcp://, or udp://"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise CollectorError("traffic URL must not contain embedded credentials")
+    if not hostname or any(character in hostname for character in "\r\n\x00"):
+        raise CollectorError("traffic URL must include a valid host")
+    if any(character.isspace() for character in parsed.netloc):
+        raise CollectorError("traffic URL host must not contain whitespace")
+    if port is not None and not 1 <= port <= 65535:
+        raise CollectorError("traffic URL port must be between 1 and 65535")
+    if parsed.query or parsed.fragment:
+        raise CollectorError("traffic URL must not contain a query or fragment")
+    if parsed.scheme in {"tcp", "udp"} and parsed.path not in {"", "/"}:
+        raise CollectorError("TCP/UDP traffic URL must not contain a path")
+    return parsed
+
+
 def _request_url(base_url: str, request_data: dict[str, Any]) -> str:
-    parsed = urlparse(base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise CollectorError("traffic URL must include an http:// or https:// scheme")
+    parsed = _validate_traffic_url(base_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise CollectorError("HTTP traffic requires an http:// or https:// URL")
     uri = request_data.get("uri", "/")
     if not isinstance(uri, str) or not uri.startswith("/") or "\x00" in uri:
         raise CollectorError("plan HTTP request uri must be an absolute path")
@@ -698,6 +740,7 @@ class PlanCollector:
             raise CollectorError("capture-wire must be a boolean")
         if not isinstance(allow_scenario_rule, bool):
             raise CollectorError("allow-scenario-rule must be a boolean")
+        _validate_traffic_url(traffic_url)
         self.client = client
         self.run_id = uuid.uuid4().hex[:12]
         self.virtual_path, self.rule_ref_prefix = _virtual_path(virtual)
@@ -1107,7 +1150,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.execute and not args.allow_device_write:
             raise CollectorError("--execute requires --allow-device-write")
-        _request_url(args.traffic_url, {"uri": "/"})
+        _validate_traffic_url(args.traffic_url)
         _virtual_path(args.virtual)
         username = os.environ.get("BIGIP_USERNAME")
         password = os.environ.get("BIGIP_PASSWORD")

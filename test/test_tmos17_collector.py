@@ -112,6 +112,48 @@ def test_validate_plan_accepts_inline_scenario_for_external_driver() -> None:
     assert case["input"]["packets"][0]["type"] == "CONNECT"
 
 
+@pytest.mark.parametrize(
+    "traffic_url",
+    [
+        "http://vip.example.test/",
+        "https://vip.example.test:8443/",
+        "tcp://198.18.0.10:18082",
+        "udp://198.18.0.10:5353",
+    ],
+)
+def test_validate_traffic_url_accepts_driver_transports(traffic_url: str) -> None:
+    parsed = collector._validate_traffic_url(traffic_url)
+    assert parsed.hostname in {"vip.example.test", "198.18.0.10"}
+
+
+@pytest.mark.parametrize(
+    "traffic_url, message",
+    [
+        ("ftp://vip.example.test:21", "use http://"),
+        ("udp://vip.example.test/path", "must not contain a path"),
+        ("https://user:pass@vip.example.test/", "embedded credentials"),
+        ("tcp://vip.example.test:65536", "invalid port"),
+        ("https://vip.example.test/?token=secret", "query or fragment"),
+        ("tcp://[2001:db8::10", "invalid host or port"),
+        ("udp://vip.example.test/with whitespace", "must not contain a path"),
+    ],
+)
+def test_validate_traffic_url_rejects_unsafe_or_ambiguous_endpoints(
+    traffic_url: str, message: str
+) -> None:
+    with pytest.raises(collector.CollectorError, match=message):
+        collector._validate_traffic_url(traffic_url)
+
+
+def test_request_url_keeps_http_only_for_direct_http_stimuli() -> None:
+    assert collector._request_url(
+        "https://vip.example.test:8443/ignored",
+        {"uri": "/health?probe=1"},
+    ) == "https://vip.example.test:8443/health?probe=1"
+    with pytest.raises(collector.CollectorError, match="HTTP traffic requires"):
+        collector._request_url("udp://vip.example.test:5353", {"uri": "/"})
+
+
 def test_parse_scenario_trigger_output_requires_successful_bounded_envelope() -> None:
     raw = json.dumps(
         {"status": "ok", "output": {"packets_processed": 1, "wire_outputs": []}}

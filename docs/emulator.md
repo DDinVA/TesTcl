@@ -3896,7 +3896,12 @@ BIGIP_USERNAME=admin BIGIP_PASSWORD='…' \
 ```
 
 For an explicit live run, set `BIGIP_USERNAME` and `BIGIP_PASSWORD`, then
-provide an existing virtual server and a URL that reaches it:
+provide an existing virtual server and a stimulus endpoint that reaches it.
+The endpoint may be `http://` or `https://` for direct HTTP/RULE_INIT cases,
+or `tcp://` / `udp://` when a protocol driver supplies the stimulus. A
+protocol-specific request may override the endpoint with its own `destination`
+field; the collector still validates the top-level URL before it mutates the
+device:
 
 ```sh
 BIGIP_USERNAME=admin BIGIP_PASSWORD='…' \
@@ -3919,7 +3924,27 @@ preflight immediately before collection and refuses a device outside TMOS
 opt-out.
 
 For events that require a protocol-specific stimulus, pass an executable
-protocol driver:
+protocol driver and use a transport-appropriate endpoint. For example, a
+DNS-over-UDP plan can use:
+
+```sh
+BIGIP_USERNAME=admin BIGIP_PASSWORD='…' \
+  ./scripts/collect-tmos17.sh \
+  --plan dns-capture-plan.json \
+  --execute --allow-device-write \
+  --bigip-url https://bigip.example \
+  --virtual /Common/irule-test-vs \
+  --traffic-url udp://198.18.0.10:53 \
+  --trigger-command ./scripts/tmos17-protocol-driver.sh \
+  --capture-wire \
+  > dns-records.ndjson
+```
+
+The same shape works with `tcp://` for MQTT, SIP-over-TCP, LDAP, RTSP, or
+other stream-oriented plans. Pass an `http://` or `https://` endpoint when the
+selected plan uses the collector's direct HTTP path.
+
+The generic driver invocation looks like this:
 
 ```sh
 BIGIP_USERNAME=admin BIGIP_PASSWORD='…' \
