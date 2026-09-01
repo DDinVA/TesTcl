@@ -4755,6 +4755,7 @@ when HTTP_RESPONSE_RELEASE {
             "bwc-controls-17.5.json": 1,
             "cache-controls-17.5.json": 3,
             "category-17.5.json": 6,
+            "compress-controls-17.5.json": 1,
             "crypto-controls-17.5.json": 1,
             "dhcpv4-controls-17.5.json": 2,
             "dhcpv6-controls-17.5.json": 2,
