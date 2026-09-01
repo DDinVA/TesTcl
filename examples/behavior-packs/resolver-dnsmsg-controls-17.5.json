@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "resolver-dnsmsg-controls-17.5",
+  "cases": [
+    {
+      "id": "resolver-lookup-and-dns-message-accessors",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "resolvers": {
+          "/Common/r1": [
+            {
+              "name": "www.example.com.",
+              "type": "A",
+              "class": "IN",
+              "ttl": 120,
+              "rdata": "192.0.2.20"
+            }
+          ]
+        },
+        "irule": "when CLIENT_ACCEPTED {\n  set message [RESOLVER::name_lookup /Common/r1 www.example.com. A]\n  set question [lindex [DNSMSG::section $message question] 0]\n  set answer [lindex [DNSMSG::section $message answer] 0]\n  set summary [RESOLVER::summarize $message]\n  if {[DNSMSG::header $message qr] != 1 || [DNSMSG::header $message rcode] != 0 || [DNSMSG::record $question owner] ne \"www.example.com.\" || [DNSMSG::record $answer type] ne \"A\" || [DNSMSG::record $answer rdata] ne \"192.0.2.20\" || [llength $summary] != 1} { error resolver-dnsmsg-mismatch }\n}",
+        "request": {"uri": "/"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired"], "equals": ["CLIENT_ACCEPTED"]}
+        ]
+      }
+    }
+  ]
+}

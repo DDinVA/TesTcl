@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "ipfix-controls-17.5",
+  "cases": [
+    {
+      "id": "template-message-destination-lifecycle",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when RULE_INIT {\n  set static::ipfix_destination \"\"\n  set static::ipfix_template \"\"\n}\nwhen CLIENT_ACCEPTED {\n  if {$static::ipfix_destination eq \"\"} {\n    set static::ipfix_destination [IPFIX::destination open -publisher /Common/ipfix_publisher]\n  }\n  if {$static::ipfix_template eq \"\"} {\n    set static::ipfix_template [IPFIX::template create {sourceIPv4Address action action}]\n  }\n}\nwhen HTTP_REQUEST {\n  set static::ipfix_message [IPFIX::msg create $static::ipfix_template]\n  IPFIX::msg set $static::ipfix_message sourceIPv4Address client\n  IPFIX::msg set $static::ipfix_message action -pos 0 Request\n}\nwhen HTTP_RESPONSE_RELEASE {\n  IPFIX::msg set $static::ipfix_message action -pos 1 Response\n  IPFIX::destination send $static::ipfix_destination $static::ipfix_message\n}",
+        "requests": [
+          {"uri": "/first", "close_after": true}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "ipfix", "templates"], "equals": [{"handle": "template-1", "fields": ["sourceIPv4Address", "action", "action"]}]},
+          {"path": ["results", 0, "semantic", "ipfix", "destinations"], "equals": [{"handle": "destination-1", "publisher": "/Common/ipfix_publisher", "closed": false}]},
+          {"path": ["results", 0, "semantic", "ipfix", "sends"], "equals": [{"destination": "destination-1", "message": "message-1", "template": "template-1", "fields": [{"name": "sourceIPv4Address", "position": 0, "field_position": 0, "set": true, "value": "client"}, {"name": "action", "position": 1, "field_position": 0, "set": true, "value": "Request"}, {"name": "action", "position": 2, "field_position": 1, "set": true, "value": "Response"}]}]}
+        ]
+      }
+    }
+  ]
+}

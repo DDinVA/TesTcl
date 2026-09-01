@@ -348,7 +348,7 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 The command exits non-zero when a case fails and prints every mismatch without
 discarding the passing cases. The same runner is available as
 `POST /v1/behavior-packs` and the MCP tool `irule_behavior_pack`. The checked-in
-packs cover AAA, ACCESS, ADAPT, AM, AUTH, AVR, BWC, CACHE, CATEGORY, COMPRESS, CONNECTOR, CRYPTO, DATAGRAM, DHCPv4, DHCPv6, DOSL7, ECA, FLOW, FTP, GTP, HSL, HTML, HTTP, HTTP/2, IKE, IMAP, ISTATS, LDAP, LINK, LSN, NSH, ONECONNECT, POLICY, PCP, PEM, PLUGIN, POP3, PSM, RADIUS, REST, REWRITE, SMTPS, STATS, TAP, DNS, TCP, TLS/SSL, VALIDATE, X509, UDP/datagram, WebSocket, XLAT, RTSP, SCTP,
+packs cover AAA, ACCESS, ADAPT, AM, AUTH, AVR, BWC, CACHE, CATEGORY, COMPRESS, CONNECTOR, CRYPTO, DATAGRAM, DHCPv4, DHCPv6, DNSMSG, DOSL7, ECA, FLOW, FTP, GTP, HSL, HTML, HTTP, HTTP/2, IKE, IMAP, IPFIX, ISTATS, LDAP, LINK, LSN, NSH, ONECONNECT, POLICY, PCP, PEM, PLUGIN, POP3, PSM, RADIUS, RESOLVER, REST, REWRITE, SMTPS, STATS, TAP, DNS, TCP, TLS/SSL, VALIDATE, X509, UDP/datagram, WebSocket, XLAT, RTSP, SCTP,
 SIP/SDP/SIPALG, load-balancing, URI, stream filtering, route metrics, TMM CMP
 topology, FLOWTABLE queries, classification lifecycle, profile introspection,
 Message Routing controls, HTTP edge controls, MQTT protocol controls, and stateful
@@ -374,7 +374,7 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 827 of 989 target F5 commands (83.62%). This is test-input
+current report covers 835 of 989 target F5 commands (84.43%). This is test-input
 coverage, not a semantic-fidelity score.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
@@ -860,6 +860,22 @@ FTP, IMAP, LDAP, POP3, and SMTPS protocol profiles:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/starttls-controls-17.5.json
+```
+
+Run the resolver/DNSMSG behavior pack to verify deterministic resolver lookup,
+DNS message handles, sections, headers, and resource records:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/resolver-dnsmsg-controls-17.5.json
+```
+
+Run the IPFIX behavior pack to verify template creation, message fields,
+destination handles, and response-release sends:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/ipfix-controls-17.5.json
 ```
 
 Run the utility controls behavior pack to verify bounded HSL sends, local REST
