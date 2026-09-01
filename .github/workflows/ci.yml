@@ -261,6 +261,11 @@ jobs:
           grep -F '"status":"passed"' /tmp/testcl-integration-controls-pack.json
           grep -F '"case_count":3' /tmp/testcl-integration-controls-pack.json
           docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/protocol-controls-17.5.json \
+            >/tmp/testcl-protocol-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-protocol-controls-pack.json
+          grep -F '"case_count":8' /tmp/testcl-protocol-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
             --behavior-pack /opt/testcl/examples/behavior-packs/am-controls-17.5.json \
             >/tmp/testcl-am-controls-pack.json
           grep -F '"status":"passed"' /tmp/testcl-am-controls-pack.json

@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "protocol-controls-17.5",
+  "cases": [
+    {
+      "id": "l7check-protocol-persists-across-directions",
+      "scenario": {
+        "profiles": ["TCP", "L7CHECK"],
+        "irule": "when L7CHECK_CLIENT_DATA {\n  set before [L7CHECK::protocol get]\n  L7CHECK::protocol set https\n  log local0. \"before=$before after=[L7CHECK::protocol get]\"\n}\nwhen L7CHECK_SERVER_DATA { log local0. \"server=[L7CHECK::protocol get]\" }",
+        "packets": [
+          {"protocol": "event", "event": "L7CHECK_CLIENT_DATA", "state": {"l7check": {"protocol": "http"}}},
+          {"protocol": "event", "event": "L7CHECK_SERVER_DATA", "state": {"l7check": {}}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "l7check", "protocol"], "equals": "https"},
+          {"path": ["trace", 1, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 1, "events", 0, "state", "l7check", "protocol"], "equals": "https"}
+        ]
+      }
+    },
+    {
+      "id": "socks-destination-and-allow-decision",
+      "scenario": {
+        "profiles": ["TCP", "SOCKS"],
+        "irule": "when SOCKS_REQUEST {\n  SOCKS::destination host internal.example\n  SOCKS::destination port 8443\n  SOCKS::allowed 0\n  log local0. \"version=[SOCKS::version] destination=[SOCKS::destination]\"\n}",
+        "packets": [
+          {"protocol": "event", "event": "SOCKS_REQUEST", "state": {"socks": {"version": "5", "destination_host": "proxy.example", "destination_port": 1080, "allowed": 1}}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "socks", "version"], "equals": "5"},
+          {"path": ["trace", 0, "events", 0, "state", "socks", "destination_host"], "equals": "internal.example"},
+          {"path": ["trace", 0, "events", 0, "state", "socks", "destination_port"], "equals": "8443"},
+          {"path": ["trace", 0, "events", 0, "state", "socks", "allowed"], "equals": "0"}
+        ]
+      }
+    },
+    {
+      "id": "icap-status-response-state",
+      "scenario": {
+        "profiles": ["TCP", "ICAP"],
+        "irule": "when ICAP_RESPONSE { log local0. \"status=[ICAP::status]\" }",
+        "packets": [
+          {"protocol": "event", "event": "ICAP_RESPONSE", "state": {"icap": {"status": 204}}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "icap", "status"], "equals": "204"}
+        ]
+      }
+    },
+    {
+      "id": "rtsp-response-source-status-and-version",
+      "scenario": {
+        "profiles": ["TCP", "RTSP"],
+        "irule": "when RTSP_RESPONSE { log local0. \"source=[RTSP::msg_source] status=[RTSP::status] version=[RTSP::version]\" }",
+        "packets": [
+          {"protocol": "event", "event": "RTSP_RESPONSE", "state": {"rtsp": {"msg_source": "server", "status": 454, "version": "RTSP/1.0"}}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "rtsp", "msg_source"], "equals": "server"},
+          {"path": ["trace", 0, "events", 0, "state", "rtsp", "status"], "equals": "454"},
+          {"path": ["trace", 0, "events", 0, "state", "rtsp", "version"], "equals": "RTSP/1.0"}
+        ]
+      }
+    },
+    {
+      "id": "udp-hold-release-and-debug-queue",
+      "scenario": {
+        "profiles": ["UDP"],
+        "irule": "when CLIENT_ACCEPTED { UDP::hold; UDP::debug_queue enable }\nwhen CLIENT_DATA { UDP::release }",
+        "packets": [
+          {"protocol": "event", "event": "CLIENT_ACCEPTED", "state": {"udp": {}}},
+          {"protocol": "event", "event": "CLIENT_DATA", "state": {"udp": {}}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "state", "udp", "held"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "udp", "debug_queue"], "equals": "1"},
+          {"path": ["trace", 1, "events", 0, "state", "udp", "released"], "equals": "1"}
+        ]
+      }
+    },
+    {
+      "id": "qoe-video-and-connection-toggle",
+      "scenario": {
+        "profiles": ["QOE"],
+        "irule": "when QOE_PARSE_DONE { log local0. \"video=[QOE::video width]/[QOE::video height]/[QOE::video mos]\"; QOE::disable }\nwhen CLIENT_CLOSED { QOE::enable }",
+        "packets": [
+          {"protocol": "event", "event": "QOE_PARSE_DONE", "state": {"qoe": {"width": 1920, "height": 1080, "mos": "4.7", "available": true}}},
+          {"protocol": "event", "event": "CLIENT_CLOSED", "state": {"qoe": {"available": false}}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "state", "qoe", "width"], "equals": "1920"},
+          {"path": ["trace", 0, "events", 0, "state", "qoe", "available"], "equals": "1"},
+          {"path": ["trace", 1, "events", 0, "state", "qoe", "available"], "equals": "0"}
+        ]
+      }
+    },
+    {
+      "id": "ntlm-and-protocol-inspection-controls",
+      "scenario": {
+        "profiles": ["TCP", "PROTOCOL_INSPECTION"],
+        "irule": "when CLIENT_ACCEPTED { NTLM::enable }\nwhen PROTOCOL_INSPECTION_MATCH { log local0. \"ids=[PROTOCOL_INSPECTION::id]\"; PROTOCOL_INSPECTION::disable }",
+        "packets": [
+          {"protocol": "event", "event": "CLIENT_ACCEPTED", "state": {"ntlm": {}}},
+          {"protocol": "event", "event": "PROTOCOL_INSPECTION_MATCH", "state": {"protocol_inspection": {"ids": "{\"tls handshake\" \"http\"}", "matched": true}}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "state", "ntlm", "enabled"], "equals": "1"},
+          {"path": ["trace", 1, "events", 0, "state", "protocol_inspection", "ids"], "equals": "{\"tls handshake\" \"http\"}"},
+          {"path": ["trace", 1, "events", 0, "state", "protocol_inspection", "disabled"], "equals": "1"}
+        ]
+      }
+    },
+    {
+      "id": "tds-session-field-access",
+      "scenario": {
+        "profiles": ["TDS"],
+        "irule": "when TDS_REQUEST { log local0. \"user=[TDS::session username] db=[TDS::session dbname] version=[TDS::session version]\" }",
+        "packets": [
+          {"protocol": "event", "event": "TDS_REQUEST", "state": {"tds": {"username": "alice", "dbname": "app", "version": "7.4"}}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "tds", "username"], "equals": "alice"},
+          {"path": ["trace", 0, "events", 0, "state", "tds", "dbname"], "equals": "app"},
+          {"path": ["trace", 0, "events", 0, "state", "tds", "version"], "equals": "7.4"}
+        ]
+      }
+    }
+  ]
+}
