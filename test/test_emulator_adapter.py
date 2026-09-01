@@ -4781,6 +4781,7 @@ when HTTP_RESPONSE_RELEASE {
             "classification-17.5.json": 10,
             "ip-controls-17.5.json": 2,
             "profile-17.5.json": 25,
+            "psm-controls-17.5.json": 1,
             "psc-controls-17.5.json": 1,
             "pcp-controls-17.5.json": 1,
             "mr-17.5.json": 23,
