@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "radius-controls-17.5",
+  "cases": [
+    {
+      "id": "authentication-attributes-and-session-controls",
+      "scenario": {
+        "profiles": ["UDP", "RADIUS"],
+        "irule": "when RADIUS_AAA_AUTH_REQUEST {\n  log local0. \"code=[RADIUS::code] id=[RADIUS::id] user=[RADIUS::avp User-Name string] ip=[RADIUS::avp 4 ip4]\"\n  RADIUS::avp replace User-Name alice\n  RADIUS::rtdom 7\n  RADIUS::subscriber subscriber-1\n}",
+        "packets": [
+          {
+            "protocol": "radius",
+            "direction": "client_to_server",
+            "code": 1,
+            "id": 9,
+            "avps": [
+              {"code": "User-Name", "data": "bob"},
+              {"code": "NAS-IP-Address", "type": "ip4", "data": "192.0.2.20"},
+              {"code": 26, "vendor_id": 10415, "vendor_type": 1, "data": "imsi-1"}
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "protocol"], "equals": "radius"},
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "radius", "code"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "radius", "id"], "equals": "9"},
+          {"path": ["trace", 0, "events", 0, "state", "radius", "rtdom"], "equals": "7"},
+          {"path": ["trace", 0, "events", 0, "state", "radius", "subscriber"], "equals": "subscriber-1"},
+          {"path": ["trace", 0, "events", 0, "state", "radius", "message_hex"], "equals": "0109002f000000000000000000000000000000000107616c6963650406c00002141a0e000028af0108696d73692d31"}
+        ]
+      }
+    }
+  ]
+}

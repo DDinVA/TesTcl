@@ -4786,6 +4786,7 @@ when HTTP_RESPONSE_RELEASE {
             "psm-controls-17.5.json": 1,
             "psc-controls-17.5.json": 1,
             "pcp-controls-17.5.json": 1,
+            "radius-controls-17.5.json": 1,
             "mr-17.5.json": 23,
             "http-edge-17.5.json": 23,
             "mqtt-17.5.json": 29,
