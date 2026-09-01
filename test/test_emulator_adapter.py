@@ -566,6 +566,87 @@ class EmulatorAdapterTests(unittest.TestCase):
         self.assertEqual(usage["HTTP::payload"]["runtime_status"], "semantic-mock")
         self.assertEqual(result["fidelity"]["warnings"], [])
 
+    def test_request_event_trace_reconciles_tcl_lifecycle_order(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { HTTP::respond 200 content traced }",
+                "requests": [{"uri": "/trace", "include_event_trace": True}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_result = result["results"][0]
+        event_trace = request_result["event_trace"]
+        self.assertEqual(
+            [entry["sequence"] for entry in event_trace],
+            list(range(len(event_trace))),
+        )
+        self.assertEqual([entry["event"] for entry in event_trace], ["HTTP_REQUEST"])
+        self.assertFalse(event_trace[0]["state_observed"])
+        self.assertEqual(event_trace[0]["reason"], "orchestrator_lifecycle")
+
+        without_trace = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { HTTP::respond 200 content traced }",
+                "request": {"uri": "/trace"},
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertNotIn("event_trace", without_trace["results"][0])
+
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "include_event_trace must be a boolean"
+        ):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["TCP", "HTTP"],
+                    "irule": "when HTTP_REQUEST {}",
+                    "request": {"include_event_trace": "yes"},
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
+    def test_packet_trace_exposes_ordered_state_transition_ledger(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": "when HTTP_REQUEST { HTTP::respond 200 content ok }",
+                "packets": [
+                    {
+                        "protocol": "http",
+                        "direction": "client_to_server",
+                        "source": {"address": "10.0.0.1", "port": 5000},
+                        "destination": {"address": "192.0.2.1", "port": 80},
+                        "flow_id": "__base__",
+                        "host": "example.test",
+                        "uri": "/",
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        packet_result = result
+        event_trace = packet_result["event_trace"]
+        self.assertTrue(all(entry["flow_id"] == "__base__" for entry in event_trace))
+        event_names = [entry["event"] for entry in event_trace]
+        self.assertIn("RULE_INIT", event_names)
+        self.assertIn("CLIENT_ACCEPTED", event_names)
+        self.assertIn("HTTP_REQUEST", event_names)
+        self.assertEqual(
+            [entry["sequence"] for entry in event_trace],
+            list(range(len(event_trace))),
+        )
+        accepted = next(entry for entry in event_trace if entry["event"] == "CLIENT_ACCEPTED")
+        self.assertTrue(accepted["state_observed"])
+        self.assertTrue(accepted["state_changes"])
+        http_request = next(entry for entry in event_trace if entry["event"] == "HTTP_REQUEST")
+        self.assertFalse(http_request["state_observed"])
+        self.assertEqual(http_request["reason"], "http_orchestrator")
+        self.assertRegex(http_request["state_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(packet_result["event_trace_summary"]["returned_count"], len(event_trace))
+        self.assertFalse(packet_result["event_trace_summary"]["truncated"])
+
     def test_interleaved_packet_flows_are_isolated_and_merged(self) -> None:
         result = self.adapter.run_scenario(
             {
@@ -640,6 +721,23 @@ when HTTP_REQUEST {
         self.assertEqual(
             [item["response"]["body"] for item in result["results"]],
             ["a-response", "b-response"],
+        )
+        self.assertIn("event_trace", result)
+        self.assertFalse(result["event_trace_summary"]["truncated"])
+        flow_ids = {entry["flow_id"] for entry in result["event_trace"]}
+        self.assertEqual(
+            flow_ids,
+            {
+                "tcp:10.0.0.1:50001->192.0.2.10:80",
+                "tcp:10.0.0.2:50002->192.0.2.10:80",
+            },
+        )
+        self.assertTrue(
+            all(
+                entry["state_observed"]
+                for entry in result["event_trace"]
+                if entry["source"] == "packet"
+            )
         )
 
     def test_multi_flow_synthetic_events_require_flow_id(self) -> None:
@@ -1228,6 +1326,9 @@ when HTTP_RESPONSE { log local0. "response=[HTTP::status]" }
         self.assertEqual(result["results"][1]["response"]["status"], 204)
         self.assertFalse(any(entry.get("buffered") for entry in result["trace"]))
         self.assertTrue(any("request=/second" in log for log in result["results"][1]["logs"]))
+        event_names = [entry["event"] for entry in result["event_trace"]]
+        self.assertEqual(event_names.count("HTTP_REQUEST"), 2)
+        self.assertEqual(event_names.count("HTTP_RESPONSE"), 2)
 
     def test_raw_http_defers_next_request_in_a_later_segment(self) -> None:
         crlf = "\r\n"

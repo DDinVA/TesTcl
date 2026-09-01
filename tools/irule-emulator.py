@@ -302,6 +302,12 @@ DEFAULT_MAX_SESSIONS = 32
 DEFAULT_SESSION_IDLE_SECONDS = 1800
 MAX_HTTP_RETRIES = 8
 MAX_HTTP_PROXY_CHAIN_RETRIES = 1
+EVENT_TRACE_MAX_EVENTS = 256
+EVENT_TRACE_MAX_ITEMS = 32
+EVENT_TRACE_MAX_VALUE_BYTES = 4096
+EVENT_TRACE_MAX_BYTES = 512 * 1024
+PACKET_EVENT_TRACE_MAX_EVENTS = 1024
+PACKET_EVENT_TRACE_MAX_BYTES = 1024 * 1024
 COMMAND_PROBE_MAX_ARGS = 64
 COMMAND_PROBE_MAX_ARG_BYTES = 16 * 1024
 COMMAND_PROBE_MAX_TOTAL_ARG_BYTES = 64 * 1024
@@ -13567,6 +13573,7 @@ def _request_kwargs(request: dict[str, Any]) -> dict[str, Any]:
         "antifraud",
         "access",
         "adapt",
+        "include_event_trace",
     }
     unknown = sorted(set(request) - allowed - {"close_before", "close_after", "new_connection"})
     if unknown:
@@ -23812,6 +23819,8 @@ class EmulatorSession:
         self._name_resolution_dispatching = False
         self._tcp_notify_dispatching = False
         self._packet_trace_active = False
+        self._event_trace: list[dict[str, Any]] | None = None
+        self._event_trace_last_state: dict[str, dict[str, Any]] = {}
         self._thread = threading.Thread(
             target=self._worker_main,
             name="testcl-irule-session",
@@ -23962,6 +23971,183 @@ class EmulatorSession:
         if [row["name"] for row in rows] != list(command_names):
             raise EmulatorInputError("runtime probe returned an unexpected command order")
         return rows
+
+    @staticmethod
+    def _event_trace_value(value: Any) -> Any:
+        """Keep one trace value JSON-safe and bounded without losing identity."""
+        if isinstance(value, (bytes, bytearray)):
+            raw = bytes(value)
+            encoded = raw.hex().encode("ascii")
+            if len(encoded) <= EVENT_TRACE_MAX_VALUE_BYTES:
+                return encoded.decode("ascii")
+            return {
+                "truncated": True,
+                "encoding": "hex",
+                "bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "preview": encoded[:EVENT_TRACE_MAX_VALUE_BYTES].decode("ascii"),
+            }
+        try:
+            encoded = json.dumps(
+                value, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeEncodeError):
+            value = str(value)
+            encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        if len(encoded) <= EVENT_TRACE_MAX_VALUE_BYTES:
+            return value
+        if isinstance(value, str):
+            preview_bytes = value.encode("utf-8")[:EVENT_TRACE_MAX_VALUE_BYTES]
+            preview = preview_bytes.decode("utf-8", errors="ignore")
+        else:
+            preview = str(value)[:EVENT_TRACE_MAX_VALUE_BYTES]
+        return {
+            "truncated": True,
+            "bytes": len(encoded),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "preview": preview,
+        }
+
+    @classmethod
+    def _event_trace_state(cls, state: Any) -> dict[str, dict[str, Any]]:
+        if not isinstance(state, dict):
+            return {}
+        bounded: dict[str, dict[str, Any]] = {}
+        for layer, fields in sorted(state.items()):
+            if not isinstance(layer, str) or not isinstance(fields, dict):
+                continue
+            bounded[layer] = {
+                field: cls._event_trace_value(value)
+                for field, value in sorted(fields.items())
+                if isinstance(field, str)
+            }
+        return bounded
+
+    @classmethod
+    def _event_trace_items(cls, values: Any) -> list[Any]:
+        if not isinstance(values, list):
+            return []
+        return [cls._event_trace_value(value) for value in values[:EVENT_TRACE_MAX_ITEMS]]
+
+    def _event_trace_begin(self, event_name: str) -> dict[str, Any] | None:
+        if self._event_trace is None:
+            return None
+        if len(self._event_trace) >= EVENT_TRACE_MAX_EVENTS:
+            raise EmulatorResourceError(
+                f"event trace exceeds the {EVENT_TRACE_MAX_EVENTS} event limit"
+            )
+        entry = {"sequence": len(self._event_trace), "event": event_name}
+        self._event_trace.append(entry)
+        return entry
+
+    def _event_trace_finish(
+        self, entry: dict[str, Any] | None, result: dict[str, Any]
+    ) -> None:
+        if entry is None or self._event_trace is None:
+            return
+        state = self._event_trace_state(result.get("state"))
+        changes: dict[str, dict[str, Any]] = {}
+        for layer, fields in state.items():
+            previous = self._event_trace_last_state.get(layer, {})
+            changed = {
+                field: value
+                for field, value in fields.items()
+                if previous.get(field) != value
+            }
+            if changed:
+                changes[layer] = changed
+            self._event_trace_last_state[layer] = fields
+        entry.update(
+            {
+                "fired": bool(result.get("fired", False)),
+                "reason": result.get("reason", ""),
+                "events_fired": [
+                    value
+                    for value in result.get("events_fired", [])[:EVENT_TRACE_MAX_ITEMS]
+                    if isinstance(value, str)
+                ],
+                "state_observed": result.get("reason")
+                not in {"profile_gate", "bigtcp_passthrough"},
+                "state": state,
+                "state_changes": changes,
+                "decisions": self._event_trace_items(result.get("decisions")),
+                "logs": self._event_trace_items(result.get("logs")),
+            }
+        )
+        try:
+            encoded = json.dumps(
+                self._event_trace,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeEncodeError) as exc:
+            raise EmulatorInputError("event trace contains non-JSON data") from exc
+        if len(encoded) > EVENT_TRACE_MAX_BYTES:
+            raise EmulatorResourceError(
+                f"event trace exceeds the {EVENT_TRACE_MAX_BYTES} byte limit"
+            )
+
+    def _complete_request_event_trace(self, result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Reconcile adapter snapshots with the Tcl orchestrator event order."""
+        captured = self._event_trace or []
+        captured_by_event: dict[str, list[dict[str, Any]]] = {}
+        for entry in captured:
+            event_name = entry.get("event")
+            if isinstance(event_name, str):
+                captured_by_event.setdefault(event_name, []).append(entry)
+
+        completed: list[dict[str, Any]] = []
+        events_fired = result.get("events_fired", [])
+        if not isinstance(events_fired, list):
+            events_fired = []
+        for event_name in events_fired:
+            if not isinstance(event_name, str):
+                continue
+            candidates = captured_by_event.get(event_name, [])
+            if candidates:
+                entry = dict(candidates.pop(0))
+                entry["state_observed"] = bool(entry.get("state_observed", True))
+            else:
+                entry = {
+                    "event": event_name,
+                    "fired": True,
+                    "reason": "orchestrator_lifecycle",
+                    "events_fired": [event_name],
+                    "state": {},
+                    "state_changes": {},
+                    "decisions": [],
+                    "logs": [],
+                    "state_observed": False,
+                }
+            entry["sequence"] = len(completed)
+            completed.append(entry)
+            if len(completed) > EVENT_TRACE_MAX_EVENTS:
+                raise EmulatorResourceError(
+                    f"event trace exceeds the {EVENT_TRACE_MAX_EVENTS} event limit"
+                )
+        try:
+            encoded = json.dumps(
+                completed,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeEncodeError) as exc:
+            raise EmulatorInputError("event trace contains non-JSON data") from exc
+        if len(encoded) > EVENT_TRACE_MAX_BYTES:
+            raise EmulatorResourceError(
+                f"event trace exceeds the {EVENT_TRACE_MAX_BYTES} byte limit"
+            )
+        return completed
+
+    def _begin_request_event_trace(self, request: dict[str, Any]) -> bool:
+        include = request.get("include_event_trace", False)
+        if not isinstance(include, bool):
+            raise EmulatorInputError("include_event_trace must be a boolean")
+        self._event_trace = [] if include else None
+        self._event_trace_last_state = {}
+        return include
 
     def _run_command_probe_on_worker(
         self,
@@ -25390,7 +25576,10 @@ class EmulatorSession:
             event_errors_before_close = len(_event_error_snapshot(session))
             connection_active = session.eval_tcl("set ::orch::_connection_active")
             if str(connection_active) == "1":
-                session.fire_event("CLIENT_CLOSED")
+                if self._event_trace is not None:
+                    self._fire_event_on_worker(session, "CLIENT_CLOSED", {})
+                else:
+                    session.fire_event("CLIENT_CLOSED")
                 session.eval_tcl("::itest::semantic::access_auto_close_session")
                 close_errors = _event_error_snapshot(session)
                 if len(close_errors) > event_errors_before_close:
@@ -25511,7 +25700,21 @@ class EmulatorSession:
         return result
 
     def run_request(self, request: dict[str, Any]) -> dict[str, Any]:
-        return self._call(lambda session: self._run_request_on_worker(session, request))
+        if not isinstance(request, dict):
+            raise EmulatorInputError("request must be an object")
+
+        def dispatch(session: Any) -> dict[str, Any]:
+            include_trace = self._begin_request_event_trace(request)
+            try:
+                result = self._run_request_on_worker(session, request)
+                if include_trace:
+                    result["event_trace"] = self._complete_request_event_trace(result)
+                return result
+            finally:
+                self._event_trace = None
+                self._event_trace_last_state = {}
+
+        return self._call(dispatch)
 
     @staticmethod
     def _mqtt_event_outputs(
@@ -25656,6 +25859,7 @@ class EmulatorSession:
         state: dict[str, dict[str, str]],
         packet: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        trace_entry = self._event_trace_begin(event_name)
         session.eval_tcl("::itest::semantic::diagnostics_begin_packet")
         session.eval_tcl("::itest::semantic::tcp_clear_event_state")
         if "mqtt" in state:
@@ -25697,7 +25901,7 @@ class EmulatorSession:
         required_profiles = self._event_profiles.get(event_name, set())
         attached_profiles = {profile.upper() for profile in self._profiles}
         if required_profiles and not required_profiles.intersection(attached_profiles):
-            return {
+            result = {
                 "event": event_name,
                 "fired": False,
                 "reason": "profile_gate",
@@ -25706,6 +25910,8 @@ class EmulatorSession:
                 "decisions": [],
                 "logs": [],
             }
+            self._event_trace_finish(trace_entry, result)
+            return result
         session.eval_tcl(
             "::itest::semantic::adapt_prepare_event "
             f"{_tcl_quote(event_name)}"
@@ -25724,7 +25930,7 @@ class EmulatorSession:
             and session.eval_tcl("info exists ::state::bigtcp::released") == "1"
             and session.eval_tcl("set ::state::bigtcp::released") == "1"
         ):
-            return {
+            result = {
                 "event": event_name,
                 "fired": False,
                 "reason": "bigtcp_passthrough",
@@ -25733,6 +25939,8 @@ class EmulatorSession:
                 "decisions": [],
                 "logs": [],
             }
+            self._event_trace_finish(trace_entry, result)
+            return result
         if event_name in {"FIX_HEADER", "FIX_MESSAGE"} or "fix" in state:
             session.eval_tcl("::itest::semantic::fix_prepare_event")
         if event_name == "HTTP_REQUEST":
@@ -25783,6 +25991,8 @@ class EmulatorSession:
             session.eval_tcl("::itest::semantic::xml_prepare_event")
         event_errors_before = len(_event_error_snapshot(session))
         fired_before = len(_split_tcl_list(session.eval_tcl("::itest::get_fired_events")))
+        trace_decisions_before = len(session.get_decisions())
+        trace_logs_before = len(session.get_logs())
         event_result = session.fire_event(event_name)
         tcp_notifications: list[dict[str, Any]] = []
         # Direct event injection is intentionally synchronous.  Packet replay
@@ -25825,7 +26035,10 @@ class EmulatorSession:
                     session.eval_tcl("::itest::semantic::name_resolution_clear_pending")
                     name_resolution_dispatches += 1
                     if "NAME_RESOLVED" in self._registered_events:
-                        session.fire_event("NAME_RESOLVED")
+                        if self._event_trace is not None:
+                            self._fire_event_on_worker(session, "NAME_RESOLVED", {})
+                        else:
+                            session.fire_event("NAME_RESOLVED")
             finally:
                 self._name_resolution_dispatching = False
         event_errors = _event_error_snapshot(session)
@@ -25951,6 +26164,10 @@ class EmulatorSession:
         emissions.extend(mqtt_emissions)
         if emissions:
             result["emissions"] = emissions
+        trace_result = dict(result)
+        trace_result["decisions"] = result["decisions"][trace_decisions_before:]
+        trace_result["logs"] = result["logs"][trace_logs_before:]
+        self._event_trace_finish(trace_entry, trace_result)
         return result
 
     def fire_event(self, event: Any, state: Any = None) -> dict[str, Any]:
@@ -28400,6 +28617,194 @@ class EmulatorSession:
         finally:
             self._packet_trace_active = previous_packet_trace_active
 
+    @classmethod
+    def _build_packet_event_trace(
+        cls, packet_trace: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Flatten packet event results into a bounded differential ledger."""
+        timeline: list[tuple[int, int, dict[str, Any]]] = []
+        insertion_order = 0
+        last_state_by_flow: dict[tuple[str, str | None], dict[str, dict[str, Any]]] = {}
+
+        def add_event(
+            event: Any,
+            *,
+            packet_index: int,
+            event_index: int,
+            source: str,
+            order: int,
+            flow_key: tuple[str, str | None],
+        ) -> None:
+            nonlocal insertion_order
+            if not isinstance(event, dict):
+                return
+            event_name = event.get("event")
+            if not isinstance(event_name, str) or not event_name:
+                return
+            state = cls._event_trace_state(event.get("state", {}))
+            state_observed = source in {"packet", "notification"} and isinstance(
+                event.get("state"), dict
+            )
+            state_changes: dict[str, dict[str, Any]] = {}
+            if state_observed:
+                last_state = last_state_by_flow.setdefault(flow_key, {})
+                for layer, fields in state.items():
+                    previous = last_state.get(layer, {})
+                    changed = {
+                        field: value
+                        for field, value in fields.items()
+                        if previous.get(field) != value
+                    }
+                    if changed:
+                        state_changes[layer] = changed
+                    last_state[layer] = fields
+            entry = {
+                "packet_index": packet_index,
+                "event_index": event_index,
+                "event": event_name,
+                "fired": bool(event.get("fired", False)),
+                "reason": event.get("reason", ""),
+                "source": source,
+                "state_observed": state_observed,
+                "state_changes": state_changes,
+                "state_sha256": hashlib.sha256(
+                    json.dumps(
+                        state,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "decision_count": len(event.get("decisions", []))
+                if isinstance(event.get("decisions"), list)
+                else 0,
+                "log_count": len(event.get("logs", []))
+                if isinstance(event.get("logs"), list)
+                else 0,
+            }
+            if flow_key[0] == "flow":
+                entry["flow_id"] = flow_key[1]
+            emissions = event.get("emissions")
+            if isinstance(emissions, list) and emissions:
+                entry["emissions"] = cls._event_trace_items(emissions)
+            timeline.append((order, insertion_order, entry))
+            insertion_order += 1
+            notifications = event.get("notifications")
+            if isinstance(notifications, list):
+                for notification_index, notification in enumerate(notifications):
+                    add_event(
+                        notification,
+                        packet_index=packet_index,
+                        event_index=event_index * EVENT_TRACE_MAX_ITEMS
+                        + notification_index,
+                        source="notification",
+                        order=order,
+                        flow_key=flow_key,
+                    )
+
+        for packet_entry in packet_trace:
+            packet_index = packet_entry.get("index", 0)
+            if not isinstance(packet_index, int):
+                continue
+            flow_id = packet_entry.get("flow_id")
+            flow_key = (
+                ("flow", flow_id)
+                if isinstance(flow_id, str) and flow_id
+                else ("base", None)
+            )
+            events = packet_entry.get("events", [])
+            packet_event_counts: dict[str, int] = {}
+
+            def count_event_names(event: Any) -> None:
+                if not isinstance(event, dict):
+                    return
+                event_name = event.get("event")
+                if isinstance(event_name, str):
+                    packet_event_counts[event_name] = packet_event_counts.get(event_name, 0) + 1
+                notifications = event.get("notifications")
+                if isinstance(notifications, list):
+                    for notification in notifications:
+                        count_event_names(notification)
+
+            if isinstance(events, list):
+                for event_index, event in enumerate(events):
+                    count_event_names(event)
+                    add_event(
+                        event,
+                        packet_index=packet_index,
+                        event_index=event_index,
+                        source="packet",
+                        order=packet_index,
+                        flow_key=flow_key,
+                    )
+            http_results = packet_entry.get("http_results")
+            if not isinstance(http_results, list):
+                http_result = packet_entry.get("http_result")
+                http_results = [http_result] if isinstance(http_result, dict) else []
+            if http_results:
+                completed_at = packet_entry.get("completed_at", packet_index)
+                if not isinstance(completed_at, int):
+                    completed_at = packet_index
+                for result_index, http_result in enumerate(http_results):
+                    if not isinstance(http_result, dict):
+                        continue
+                    http_events = http_result.get("events_fired", [])
+                    if not isinstance(http_events, list):
+                        continue
+                    for event_index, event_name in enumerate(http_events):
+                        if not isinstance(event_name, str):
+                            continue
+                        represented = packet_event_counts.get(event_name, 0)
+                        if represented:
+                            packet_event_counts[event_name] = represented - 1
+                            continue
+                        add_event(
+                            {
+                                "event": event_name,
+                                "fired": True,
+                                "reason": "http_orchestrator",
+                            },
+                            packet_index=packet_index,
+                            event_index=result_index * EVENT_TRACE_MAX_ITEMS + event_index,
+                            source="http_result",
+                            order=completed_at,
+                            flow_key=flow_key,
+                        )
+
+        timeline.sort(key=lambda item: (item[0], item[1]))
+        total = len(timeline)
+        encoded_size = 0
+        output: list[dict[str, Any]] = []
+        truncated = False
+        for sequence, (_, _, entry) in enumerate(timeline):
+            candidate = dict(entry)
+            candidate["sequence"] = sequence
+            try:
+                candidate_size = len(
+                    json.dumps(
+                        candidate,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+            except (TypeError, ValueError, UnicodeEncodeError):
+                continue
+            if (
+                sequence >= PACKET_EVENT_TRACE_MAX_EVENTS
+                or encoded_size + candidate_size > PACKET_EVENT_TRACE_MAX_BYTES
+            ):
+                truncated = True
+                break
+            output.append(candidate)
+            encoded_size += candidate_size
+        return output, {
+            "event_count": total,
+            "returned_count": len(output),
+            "truncated": truncated,
+        }
+
     def _run_packet_trace_body_on_worker(
         self,
         session: Any,
@@ -28447,6 +28852,7 @@ class EmulatorSession:
             target_trace_index = trace_index if trace_index is not None else at_index
             if target_trace_index is not None:
                 trace[target_trace_index]["http_result"] = result
+                trace[target_trace_index].setdefault("http_results", []).append(result)
                 trace[target_trace_index]["pending"] = False
                 if trace_index is not None and at_index is not None:
                     trace[target_trace_index]["completed_at"] = at_index
@@ -30700,6 +31106,7 @@ class EmulatorSession:
                             "event": event["event"],
                         }
                     )
+        event_trace, event_trace_summary = self._build_packet_event_trace(trace)
         return {
             "status": "ok",
             "schema_version": 1,
@@ -30707,6 +31114,8 @@ class EmulatorSession:
             "tmos_version": TMOS_VERSION,
             "packets_processed": len(packets),
             "trace": trace,
+            "event_trace": event_trace,
+            "event_trace_summary": event_trace_summary,
             "emitted": emitted,
             "results": http_results,
         }
@@ -30984,6 +31393,7 @@ def _run_isolated_packet_trace(
             original_index = original_index_for(local_entry.get("index"), local_order)
             trace_entry = dict(local_entry)
             trace_entry["index"] = original_index
+            trace_entry["flow_id"] = _packet_flow_label(flow_key)
             if "completed_at" in trace_entry:
                 trace_entry["completed_at"] = original_index_for(
                     trace_entry["completed_at"], local_order
@@ -31036,6 +31446,10 @@ def _run_isolated_packet_trace(
     trace_rows.sort(key=lambda row: (row[0], row[1], row[2]))
     emitted_rows.sort(key=lambda row: (row[0], row[1], row[2]))
     result_rows.sort(key=lambda row: (row[0], row[1], row[2]))
+    merged_trace = [row[3] for row in trace_rows]
+    event_trace, event_trace_summary = EmulatorSession._build_packet_event_trace(
+        merged_trace
+    )
     return {
         "status": "ok",
         "schema_version": 1,
@@ -31045,7 +31459,9 @@ def _run_isolated_packet_trace(
         "flow_mode": "isolated",
         "flow_count": len(flow_summaries),
         "flows": flow_summaries,
-        "trace": [row[3] for row in trace_rows],
+        "trace": merged_trace,
+        "event_trace": event_trace,
+        "event_trace_summary": event_trace_summary,
         "emitted": [row[3] for row in emitted_rows],
         "results": [row[3] for row in result_rows],
         "registered_events": registered_events or [],

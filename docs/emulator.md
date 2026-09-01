@@ -3821,6 +3821,26 @@ successful upgrade. Compressed frames using unsupported RSV extensions are
 rejected; raw IPv4 and IPv6 fragments are reassembled within bounded resource
 limits before protocol decoding.
 
+For request-based scenarios, set `include_event_trace: true` on an individual
+request to receive a bounded ordered `event_trace` beside that request's
+result. Each entry records the event name, firing result, decisions, logs, a
+bounded state snapshot, and `state_changes`. HTTP lifecycle events reported by
+the request orchestrator are explicitly marked `state_observed: false` when
+the adapter has no event-specific state snapshot; this keeps the trace honest
+for later comparison with TMOS output. The trace is limited to 256 events and
+512 KiB, and an over-limit request fails with a resource error rather than
+silently dropping evidence.
+
+Packet replay always returns a top-level bounded `event_trace` and
+`event_trace_summary`. Packet and nested notification events include state
+hashes and state deltas; lifecycle events synthesized only from an HTTP result
+are marked `state_observed: false`. Isolated multi-flow traces include
+`flow_id` on event entries and compute state deltas independently per flow.
+`event_trace_summary` reports the total event count, returned count, and
+whether the 1 MiB/1024-event packet trace cap truncated the ledger. The nested
+`trace` remains the complete protocol/debug record and is the authoritative
+source when the compact ledger is truncated.
+
 Packet records may optionally include a `flow_id` string of at most 128 UTF-8
 bytes. Without one, the adapter derives a direction-independent flow identity
 from transport family plus the client/server endpoint pair (the endpoints are
