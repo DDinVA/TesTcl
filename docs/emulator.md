@@ -1064,6 +1064,18 @@ TCL_LSP_ROOT=/path/to/tcl-lsp uv run --python 3.13 \
   python tools/tmos17-protocol-driver.py --capabilities
 ```
 
+The container also carries the checked-in behavior packs and golden vectors,
+so a clean local regression can be run without installing a second Python:
+
+```sh
+docker run --rm --entrypoint /opt/venv/bin/python \
+  testcl-irule-emulator:latest \
+  /opt/testcl/tools/evaluate-local.py
+```
+
+The report is intentionally labeled local emulator evidence; it is not a
+substitute for observations collected from TMOS 17.5 or a vLab.
+
 To preflight or execute a whole batch, use the resumable runner. It is
 read-only by default and validates every plan again. It records one checkpoint
 per completed plan, so an interrupted external capture can resume without

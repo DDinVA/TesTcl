@@ -13,7 +13,6 @@ test
 tests
 verification
 irules
-examples/golden-vectors
 examples/observations
 examples/errors
 examples/example_*.tcl
