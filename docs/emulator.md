@@ -1103,6 +1103,21 @@ TCL_LSP_ROOT=/path/to/tcl-lsp uv run --python 3.13 \
   --manifest /tmp/tmos-17.5-capture-batch/manifest.json
 ```
 
+For a batch-level read-only check, run the runner's preflight mode. It checks
+the first plan's device coordinates and confirms the BIG-IP reports TMOS 17.5
+before any collection is started:
+
+```sh
+BIGIP_USERNAME=admin BIGIP_PASSWORD='…' \
+  TCL_LSP_ROOT=/path/to/tcl-lsp uv run --python 3.13 \
+  python tools/tmos17-capture-runner.py \
+  --manifest /tmp/tmos-17.5-capture-batch/manifest.json \
+  --preflight \
+  --bigip-url https://bigip.example \
+  --virtual /Common/test-vs \
+  --traffic-url http://vip.example/health
+```
+
 Execution requires all three device coordinates plus both explicit mutation
 acknowledgements. Credentials remain in `BIGIP_USERNAME` and
 `BIGIP_PASSWORD`; the runner never places them in process arguments:
@@ -3645,6 +3660,22 @@ default and does not need BIG-IP credentials for plan inspection:
 ./scripts/collect-tmos17.sh --plan capture-plan-000.json
 ```
 
+Before permitting any temporary iRule or virtual-server mutation, run the
+read-only device preflight. It verifies REST authentication, confirms that
+the device reports a TMOS 17.5 version, and confirms that the selected virtual
+server exists and has a list-shaped rule attachment. It emits JSON on stdout
+and performs no device mutation:
+
+```sh
+BIGIP_USERNAME=admin BIGIP_PASSWORD='…' \
+  ./scripts/collect-tmos17.sh \
+  --plan capture-plan-000.json \
+  --preflight \
+  --bigip-url https://bigip.example \
+  --virtual /Common/irule-test-vs \
+  --traffic-url http://198.18.0.1:18080
+```
+
 For an explicit live run, set `BIGIP_USERNAME` and `BIGIP_PASSWORD`, then
 provide an existing virtual server and a URL that reaches it:
 
@@ -3663,8 +3694,10 @@ The collector creates one temporary diagnostic iRule per case, attaches it to
 the selected virtual, drives `HTTP_REQUEST` cases (and observes `RULE_INIT`),
 reads a structured `/var/log/ltm` record through iControl REST, and restores
 the virtual before deleting the temporary rule. Both `--execute` and
-`--allow-device-write` are required. TLS verification is enabled by default;
-`--insecure` is an explicit opt-out.
+`--allow-device-write` are required. Execution performs the same read-only
+preflight immediately before collection and refuses a device outside TMOS
+17.5. TLS verification is enabled by default; `--insecure` is an explicit
+opt-out.
 
 For events that require a protocol-specific stimulus, pass an executable
 protocol driver:

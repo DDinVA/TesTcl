@@ -117,6 +117,41 @@ def test_runner_dry_run_revalidates_plans_without_device_mutation(
     assert response["device_mutation"] is False
 
 
+def test_runner_preflight_is_read_only_and_reports_device_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest = _write_batch(tmp_path)
+
+    def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
+        assert "--preflight" in command
+        assert "--execute" not in command
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            b'{"status":"preflight-ok","profile":"tmos-17.5","tmos_version":"17.5.4","device_mutation":false}\n',
+            b"",
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    assert runner.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--preflight",
+            "--bigip-url",
+            "https://bigip.example.test",
+            "--virtual",
+            "/Common/test-vs",
+            "--traffic-url",
+            "http://vip.example.test/health",
+        ]
+    ) == 0
+    response = json.loads(capsys.readouterr().out)
+    assert response["status"] == "preflight-ok"
+    assert response["tmos_version"] == "17.5.4"
+    assert response["batch_observation_count"] == 1
+
+
 def test_runner_checkpoints_and_resumes_collected_plans(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

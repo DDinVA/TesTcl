@@ -340,6 +340,61 @@ def _collector_command(args: argparse.Namespace, entry: PlanEntry) -> list[str]:
     return command
 
 
+def _preflight_command(args: argparse.Namespace, entry: PlanEntry) -> list[str]:
+    if not args.bigip_url or not args.virtual or not args.traffic_url:
+        raise RunnerError(
+            "--preflight requires --bigip-url, --virtual, and --traffic-url"
+        )
+    command = [
+        sys.executable,
+        str(Path(args.collector_script).resolve()),
+        "--plan",
+        str(entry.path),
+        "--preflight",
+        "--bigip-url",
+        args.bigip_url,
+        "--virtual",
+        args.virtual,
+        "--traffic-url",
+        args.traffic_url,
+    ]
+    if args.insecure:
+        command.append("--insecure")
+    return command
+
+
+def _run_preflight(args: argparse.Namespace, entry: PlanEntry) -> dict[str, Any]:
+    if not Path(args.collector_script).is_file():
+        raise RunnerError(f"collector script does not exist: {args.collector_script}")
+    try:
+        completed = subprocess.run(
+            _preflight_command(args, entry),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            shell=False,
+            env=os.environ.copy(),
+        )
+    except OSError as exc:
+        raise RunnerError(f"device preflight could not start: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace")[-2048:]
+        raise RunnerError(f"device preflight failed: {detail}")
+    try:
+        result = json.loads(completed.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RunnerError("device preflight returned invalid JSON") from exc
+    if (
+        not isinstance(result, dict)
+        or result.get("status") != "preflight-ok"
+        or result.get("profile") != TMOS_PROFILE
+        or result.get("device_mutation") is not False
+    ):
+        raise RunnerError("device preflight returned an invalid result")
+    return result
+
+
 def _dry_run(manifest: dict[str, Any], entries: list[PlanEntry]) -> dict[str, Any]:
     return {
         "status": "dry-run",
@@ -517,6 +572,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", required=True, help="batch manifest JSON path")
     parser.add_argument("--collector-script", default=str(COLLECTOR_PATH))
     parser.add_argument("--execute", action="store_true", help="run the external collector")
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="run one read-only TMOS 17.5/device/virtual check for the batch",
+    )
     parser.add_argument("--allow-device-write", action="store_true")
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--records", help="NDJSON output path; required with --execute")
@@ -532,9 +592,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--insecure", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.execute and args.preflight:
+            raise RunnerError("--execute and --preflight are mutually exclusive")
         manifest_path = Path(args.manifest).expanduser().resolve()
         manifest, entries, manifest_sha256 = _load_batch(manifest_path)
-        if args.execute:
+        if args.preflight:
+            result = _run_preflight(args, entries[0])
+            result["batch_plan_count"] = len(entries)
+            result["batch_observation_count"] = sum(
+                entry.observation_count for entry in entries
+            )
+        elif args.execute:
             result = _execute_batch(args, manifest, entries, manifest_sha256)
         else:
             result = _dry_run(manifest, entries)

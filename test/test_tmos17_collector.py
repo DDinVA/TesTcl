@@ -101,6 +101,59 @@ def test_parse_capture_line_decodes_observed_value_and_error() -> None:
     assert collector.parse_capture_line(line, "other") is None
 
 
+def test_extract_tmos_version_accepts_common_sys_version_shape() -> None:
+    assert collector._extract_tmos_version(
+        {
+            "items": [
+                {
+                    "entries": {
+                        "Version": {"value": "17.5.4"},
+                        "Build": {"value": "0.0.12"},
+                    }
+                }
+            ]
+        }
+    ) == "17.5.4"
+    with pytest.raises(collector.CollectorError, match="TMOS 17.5"):
+        collector._extract_tmos_version({"items": [{"entries": {"Version": {"value": "16.1.5"}}}]})
+
+
+def test_device_preflight_is_read_only_and_validates_version_and_virtual() -> None:
+    class _VersionedRest:
+        def __init__(self) -> None:
+            self.paths: list[str] = []
+
+        def get(self, path: str) -> dict:
+            self.paths.append(path)
+            if path == "/mgmt/tm/sys/version":
+                return {"items": [{"entries": {"Version": {"value": "17.5.4"}}}]}
+            return {
+                "name": "test-vs",
+                "fullPath": "/Common/test-vs",
+                "rules": ["/Common/existing-rule"],
+                "enabled": True,
+                "availabilityState": "available",
+            }
+
+    fake = _VersionedRest()
+    result = collector.BigIPRestClient.preflight(fake, "/mgmt/tm/ltm/virtual/~Common~test-vs")
+    assert result == {
+        "status": "preflight-ok",
+        "profile": "tmos-17.5",
+        "tmos_version": "17.5.4",
+        "virtual_path": "/mgmt/tm/ltm/virtual/~Common~test-vs",
+        "virtual": "/Common/test-vs",
+        "rule_count": 1,
+        "enabled": True,
+        "availability": "available",
+        "device_mutation": False,
+    }
+    assert fake.paths == [
+        "/mgmt/tm/sys/version",
+        "/mgmt/tm/ltm/virtual/~Common~test-vs",
+    ]
+
+
 class _FakeRest:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, object | None]] = []

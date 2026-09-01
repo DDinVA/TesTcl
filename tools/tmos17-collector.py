@@ -95,6 +95,7 @@ CAPTURE_PREFIX = "TESTCL_CAPTURE_V1"
 COMMAND_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_:-]*$")
 EVENT_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 ID_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+TMOS_VERSION_RE = re.compile(r"\b(17\.5(?:\.\d+){0,3})\b")
 CAPTURE_LINE_RE = re.compile(
     rf"^{re.escape(CAPTURE_PREFIX)}\|(?P<id>[A-Za-z0-9_.:-]+)\|"
     r"(?P<status>ok|error)\|(?P<rc>[0-9]+)\|(?P<value>[A-Za-z0-9+/=]*)\|"
@@ -412,6 +413,31 @@ class BigIPRestClient:
     def delete(self, path: str) -> Any:
         return self.request("DELETE", path)
 
+    def preflight(self, virtual_path: str) -> dict[str, Any]:
+        """Verify the target device and virtual without changing device state."""
+        version_payload = self.get("/mgmt/tm/sys/version")
+        version = _extract_tmos_version(version_payload)
+        virtual = self.get(virtual_path)
+        if not isinstance(virtual, dict):
+            raise CollectorError("BIG-IP virtual lookup returned a non-object")
+        rules = virtual.get("rules", [])
+        if not isinstance(rules, list):
+            raise CollectorError("BIG-IP virtual returned a non-list rules field")
+        full_path = virtual.get("fullPath")
+        if full_path is not None and not isinstance(full_path, str):
+            raise CollectorError("BIG-IP virtual returned an invalid fullPath")
+        return {
+            "status": "preflight-ok",
+            "profile": TMOS_PROFILE,
+            "tmos_version": version,
+            "virtual_path": virtual_path,
+            "virtual": full_path or virtual.get("name") or virtual_path,
+            "rule_count": len(rules),
+            "enabled": virtual.get("enabled"),
+            "availability": virtual.get("availabilityState"),
+            "device_mutation": False,
+        }
+
 
 def _virtual_ref(value: str) -> tuple[str, str, str]:
     """Return (partition, name, REST ref) from a safe virtual identifier."""
@@ -426,6 +452,38 @@ def _virtual_ref(value: str) -> tuple[str, str, str]:
             raise CollectorError("virtual must be ~partition~name or /partition/name")
         partition, name = match.groups()
     return partition, name, f"~{partition}~{name}"
+
+
+def _extract_tmos_version(payload: Any) -> str:
+    """Extract and validate a TMOS 17.5 version from common REST shapes."""
+    candidates: list[str] = []
+    stack: list[tuple[str | None, Any]] = [(None, payload)]
+    while stack:
+        key, value = stack.pop()
+        if isinstance(value, dict):
+            for child_key, child_value in value.items():
+                stack.append((str(child_key), child_value))
+            if key is not None and key.lower() in {
+                "version",
+                "softwareversion",
+                "software_version",
+            }:
+                value_field = value.get("value")
+                if isinstance(value_field, str):
+                    candidates.append(value_field)
+        elif isinstance(value, list):
+            stack.extend((key, child) for child in value)
+        elif isinstance(value, str) and key is not None and key.lower() in {
+            "version",
+            "softwareversion",
+            "software_version",
+        }:
+            candidates.append(value)
+    for candidate in candidates:
+        match = TMOS_VERSION_RE.search(candidate)
+        if match is not None:
+            return match.group(1)
+    raise CollectorError("BIG-IP REST response did not identify a TMOS 17.5 version")
 
 
 def _virtual_path(value: str) -> tuple[str, str]:
@@ -728,6 +786,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plan", required=True, help="assembly-ready command-probe plan JSON path, or -")
     parser.add_argument("--execute", action="store_true", help="perform external collection")
     parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="perform a read-only TMOS 17.5/device/virtual check without collecting",
+    )
+    parser.add_argument(
         "--allow-device-write",
         action="store_true",
         help="acknowledge temporary iRule/virtual-server mutation (required with --execute)",
@@ -752,6 +815,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--settle-seconds", type=float, default=0.2, help="seconds to wait after traffic before log polling")
     args = parser.parse_args(argv)
     try:
+        if args.execute and args.preflight:
+            raise CollectorError("--execute and --preflight are mutually exclusive")
         if args.trigger_command is not None and not args.trigger_command.strip():
             raise CollectorError("trigger-command must be a non-empty executable path")
         if not 0 < args.trigger_timeout <= 300:
@@ -759,7 +824,7 @@ def main(argv: list[str] | None = None) -> int:
                 "trigger-timeout must be greater than 0 and at most 300 seconds"
             )
         plan = validate_plan(_read_json_file(args.plan))
-        if not args.execute:
+        if not args.execute and not args.preflight:
             unsupported = [
                 {"id": case["id"], "event": case["input"]["event"]}
                 for case in plan["observations"]
@@ -785,20 +850,31 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
-        if not args.allow_device_write:
-            raise CollectorError("--execute requires --allow-device-write")
         if not args.bigip_url or not args.virtual or not args.traffic_url:
-            raise CollectorError("--execute requires --bigip-url, --virtual, and --traffic-url")
+            raise CollectorError(
+                "--preflight/--execute requires --bigip-url, --virtual, and --traffic-url"
+            )
+        if args.execute and not args.allow_device_write:
+            raise CollectorError("--execute requires --allow-device-write")
+        _request_url(args.traffic_url, {"uri": "/"})
+        _virtual_path(args.virtual)
         username = os.environ.get("BIGIP_USERNAME")
         password = os.environ.get("BIGIP_PASSWORD")
         if not username or not password:
-            raise CollectorError("set BIGIP_USERNAME and BIGIP_PASSWORD for --execute")
+            raise CollectorError(
+                "set BIGIP_USERNAME and BIGIP_PASSWORD for --preflight/--execute"
+            )
         client = BigIPRestClient(
             args.bigip_url,
             username,
             password,
             verify_tls=not args.insecure,
         )
+        virtual_path, _ = _virtual_path(args.virtual)
+        preflight = client.preflight(virtual_path)
+        if args.preflight:
+            print(json.dumps(preflight, ensure_ascii=False, allow_nan=False))
+            return 0
         collector = PlanCollector(
             client,
             args.virtual,
@@ -808,6 +884,10 @@ def main(argv: list[str] | None = None) -> int:
             log_lines=args.log_lines,
             log_timeout=args.log_timeout,
             settle_seconds=args.settle_seconds,
+        )
+        print(
+            json.dumps(preflight, ensure_ascii=False, allow_nan=False),
+            file=sys.stderr,
         )
         result = collector.collect(plan, allow_partial=args.allow_partial)
         _print_records(result.records)
