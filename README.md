@@ -77,6 +77,9 @@ For catalog-wide progress, run `./scripts/emulate-irule.sh --catalog-smoke
 reports which commands work, need arguments, or fail in the current emulator.
 To see semantic test-input coverage across all checked-in packs, run
 `./scripts/emulate-irule.sh --behavior-coverage`.
+For one repeatable checkpoint covering the local 17.5 contracts and all six
+real-client data-plane smoke tests, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/checkpoint-17.5.sh`.
 To generate the next executable reference-capture chunk, including up to eight
 registry-derived argument forms per command, run
 `./scripts/emulate-irule.sh --behavior-candidates --limit 16 --variants 8`.
