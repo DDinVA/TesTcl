@@ -11,7 +11,8 @@ for smoke_script in \
   live-sip-observation-smoke.sh \
   live-sip-tcp-observation-smoke.sh \
   live-dns-observation-smoke.sh \
-  live-websocket-observation-smoke.sh; do
+  live-websocket-observation-smoke.sh \
+  live-http2-observation-smoke.sh; do
   echo "== $smoke_script =="
   "$repo_root/scripts/$smoke_script"
   echo
