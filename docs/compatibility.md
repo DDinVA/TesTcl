@@ -424,6 +424,16 @@ exposed under `semantic.sipalg`. This records the iRule controls without
 implementing SIP ALG address translation, hairpin routing, or ephemeral
 listener creation.
 
+The SIP `SIP::persist` model also includes a bounded emulator-owned persistence
+table shared across packet-flow contexts. A structured packet may provide
+`route_target` as the fixture's selected route; `use`, `replace`, `bypass`,
+`ignore`, and `reset` then produce observable cross-flow routing decisions.
+`timeout`, `bidirectional`, and `direction` are honored, with packet timestamps
+or deterministic logical ticks driving expiry. The table is limited to 1,024
+entries and is neither durable nor shared with external emulator processes; the
+BIG-IP Message Routing Framework route table and production TMM scheduler
+remain outside the model.
+
 The legacy connection controls `DEMANGLE::enable`, `DEMANGLE::disable`,
 `ISESSION::deduplication`, `PLUGIN::enable`, and `PLUGIN::disable` are modeled
 as bounded connection state under `semantic.feature_controls`. The emulator

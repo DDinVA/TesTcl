@@ -4131,14 +4131,25 @@ coalesced messages; raw SIP over UDP accepts one complete datagram. Header
 names are case-insensitive and compact aliases such as `v` and `i` are
 handled. The semantic overlay covers SIP header/payload access and mutation,
 request/response fields, Via/Route helpers, `SIP::respond`, `SIP::discard`,
-and message-level `SIP::persist` settings. The latter does not yet implement
-the BIG-IP Message Routing Framework route table or persistence store. See the
-F5 [`SIP`](https://clouddocs.f5.com/api/irules/SIP.html),
+and message-level `SIP::persist` settings. The emulator does not implement the
+BIG-IP Message Routing Framework route table, but it now includes a bounded
+emulator-owned persistence table. Supply `route_target` on a SIP packet to
+represent the route selected by the fixture; a rule's `SIP::persist` key can
+then reuse that target across flow contexts. The `use`, `replace`, `bypass`,
+`ignore`, and `reset` modes are modeled, as are `timeout`, `bidirectional`, and
+`direction`. `timestamp` values advance the logical expiry clock; packets
+without timestamps advance it by one logical second. Each packet exposes a
+`persistence` decision object with hit, route, and store details. The table is
+in-memory, bounded to 1,024 entries, and is not a shared or durable BIG-IP
+persistence database. See the F5 [`SIP`](https://clouddocs.f5.com/api/irules/SIP.html),
 [`SIP::header`](https://clouddocs.f5.com/api/irules/SIP__header.html),
 [`SIP::payload`](https://clouddocs.f5.com/api/irules/SIP__payload.html),
 [`SIP::respond`](https://clouddocs.f5.com/api/irules/SIP__respond.html), and
 [`SIP::persist`](https://clouddocs.f5.com/api/irules/SIP__persist.html)
 references for the production command/event contract.
+The runnable [`sip-persistence-17.5.json`](../examples/scenarios/sip-persistence-17.5.json)
+scenario demonstrates one flow creating an affinity record and a second flow
+reusing it.
 The SIPALG controls `SIPALG::hairpin`, `SIPALG::hairpin_default`, and
 `SIPALG::nonregister_subscriber_listener` are modeled on the same structured
 SIP lifecycle. Hairpin mode is message-scoped and supports `detect`, `enable`,

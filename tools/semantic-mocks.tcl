@@ -570,6 +570,7 @@ namespace eval ::itest::semantic {
     variable sip_persist_timeout 0
     variable sip_persist_bidirectional 0
     variable sip_persist_direction "detect"
+    variable sip_persist_reset_key ""
     variable sipalg_hairpin "detect"
     variable sipalg_hairpin_default "detect"
     variable sipalg_nonregister_subscriber_listener 0
@@ -4816,6 +4817,7 @@ namespace eval ::itest::semantic {
         variable sip_persist_timeout
         variable sip_persist_bidirectional
         variable sip_persist_direction
+        variable sip_persist_reset_key
         variable sipalg_hairpin
         variable sipalg_hairpin_default
         variable sipalg_nonregister_subscriber_listener
@@ -4829,6 +4831,7 @@ namespace eval ::itest::semantic {
         set sip_persist_timeout 0
         set sip_persist_bidirectional 0
         set sip_persist_direction detect
+        set sip_persist_reset_key ""
         set sipalg_hairpin detect
         set sipalg_hairpin_default detect
         set sipalg_nonregister_subscriber_listener 0
@@ -4853,6 +4856,7 @@ namespace eval ::itest::semantic {
             from ""
             to ""
             route_status unrouted
+            route_target ""
             persist_key ""
             record_route {}
             route {}
@@ -4873,6 +4877,7 @@ namespace eval ::itest::semantic {
         variable sip_persist_timeout
         variable sip_persist_bidirectional
         variable sip_persist_direction
+        variable sip_persist_reset_key
         variable sipalg_hairpin
         variable sipalg_hairpin_default
         set sip_discarded 0
@@ -4885,6 +4890,7 @@ namespace eval ::itest::semantic {
         set sip_persist_timeout 0
         set sip_persist_bidirectional 0
         set sip_persist_direction detect
+        set sip_persist_reset_key ""
         set sipalg_hairpin $sipalg_hairpin_default
         _sip_clear_message_state
     }
@@ -5783,13 +5789,17 @@ namespace eval ::itest::semantic {
         variable sip_persist_timeout
         variable sip_persist_bidirectional
         variable sip_persist_direction
+        variable sip_persist_reset_key
         _sip_require_event {SIP_REQUEST SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_SEND} SIP::persist
         if {[llength $args] == 0} { return $sip_persist_key }
         set command [lindex $args 0]
         if {$command in {reset use ignore bypass replace}} {
             if {[llength $args] != 1} { error "SIP::persist $command takes no arguments" }
             set sip_persist_mode $command
-            if {$command eq "reset"} { set sip_persist_key "" }
+            if {$command eq "reset"} {
+                set sip_persist_reset_key $sip_persist_key
+                set sip_persist_key ""
+            }
         } elseif {$command eq "timeout"} {
             if {[llength $args] > 2} { error "SIP::persist timeout accepts zero or one value" }
             if {[llength $args] == 1} { return $sip_persist_timeout }

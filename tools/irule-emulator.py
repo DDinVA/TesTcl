@@ -713,6 +713,7 @@ EVENT_STATE_FIELDS = {
         "from",
         "to",
         "route_status",
+        "route_target",
         "persist_key",
         "record_route",
         "route",
@@ -14583,6 +14584,10 @@ IKE_PAYLOAD_TYPES = {
 MAX_PACKET_STREAMS = 128
 MAX_PACKET_FLOWS = 64
 PACKET_FLOW_ID_MAX_BYTES = 128
+SIP_PERSISTENCE_MAX_ENTRIES = 1024
+SIP_PERSISTENCE_MAX_KEY_BYTES = 4096
+SIP_PERSISTENCE_MAX_ROUTE_TARGET_BYTES = 4096
+SIP_PERSISTENCE_MAX_TIMEOUT = 7 * 24 * 60 * 60
 MAX_IP_FRAGMENT_SETS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
@@ -14907,6 +14912,7 @@ PACKET_PROTOCOL_FIELDS = {
         "from",
         "to",
         "route_status",
+        "route_target",
         "persist_key",
         "record_route",
         "route",
@@ -22201,6 +22207,24 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                 normalised[field] = _require_string(
                     packet[field], f"packet {index} {field}"
                 )
+            elif protocol == "sip" and field in {"route_target", "route_status"}:
+                value = _require_string(packet[field], f"packet {index} {field}")
+                if field == "route_status" and value not in {
+                    "unrouted",
+                    "unprocessed",
+                    "route found",
+                    "no route found",
+                    "dropped",
+                    "queue full",
+                    "no connection",
+                    "connection closing",
+                    "internal error",
+                    "routed",
+                }:
+                    raise EmulatorInputError(
+                        f"packet {index} SIP route_status is not a supported status"
+                    )
+                normalised[field] = value
             elif protocol == "ldap" and field == "message_hex":
                 normalised[field] = _require_string(
                     packet[field], f"packet {index} message_hex"
@@ -23720,6 +23744,138 @@ def _prepare_http_class_request_state(session: Any, kwargs: dict[str, Any]) -> N
     )
 
 
+class _SIPPersistenceStore:
+    """Bounded, deterministic SIP persistence records shared by flow contexts.
+
+    This is intentionally an emulator-owned store.  It models the routing
+    decision that a BIG-IP persistence table would make without claiming to be
+    a shared or durable TMM database.  A packet timestamp advances the logical
+    clock; packets without timestamps advance it by one logical second.
+    """
+
+    def __init__(self, *, max_entries: int = SIP_PERSISTENCE_MAX_ENTRIES) -> None:
+        if max_entries < 1:
+            raise ValueError("SIP persistence store must allow at least one entry")
+        self._max_entries = max_entries
+        self._clock = 0.0
+        self._records: dict[str, dict[str, Any]] = {}
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _endpoint_matches(left: Any, right: Any) -> bool:
+        return left is not None and right is not None and left == right
+
+    def advance(self, timestamp: Any = None) -> float:
+        """Advance time monotonically and remove expired records."""
+        with self._lock:
+            if timestamp is None:
+                self._clock += 1.0
+            else:
+                try:
+                    candidate = float(timestamp)
+                except (TypeError, ValueError):
+                    candidate = self._clock
+                if math.isfinite(candidate):
+                    self._clock = max(self._clock, candidate)
+            for key, record in list(self._records.items()):
+                expires_at = record.get("expires_at")
+                if expires_at is not None and self._clock >= expires_at:
+                    del self._records[key]
+            return self._clock
+
+    def lookup(
+        self,
+        key: str,
+        *,
+        source: Any,
+        direction: str,
+        bidirectional: bool,
+    ) -> tuple[dict[str, Any], str] | None:
+        """Return a record and its matched orientation, if it is usable."""
+        with self._lock:
+            record = self._records.get(key)
+            if record is None or source is None:
+                return None
+            matched_direction: str | None = None
+            if direction == "forward":
+                matched_direction = "forward"
+            elif direction == "reverse" and (
+                record["bidirectional"] or bidirectional
+            ) and self._endpoint_matches(source, record["destination"]):
+                matched_direction = "reverse"
+            elif direction == "detect":
+                # The SIP persistence key is authoritative for the lookup.
+                # A forward request may arrive on a different client flow;
+                # bidirectional records additionally recognize the reverse
+                # endpoint when it is unambiguous.
+                if (
+                    record["bidirectional"] or bidirectional
+                ) and self._endpoint_matches(source, record["destination"]):
+                    matched_direction = "reverse"
+                else:
+                    matched_direction = "forward"
+            if matched_direction is None:
+                return None
+            timeout = record["timeout"]
+            if timeout:
+                record["expires_at"] = self._clock + timeout
+            return dict(record), matched_direction
+
+    def remove(self, key: str) -> bool:
+        with self._lock:
+            return self._records.pop(key, None) is not None
+
+    def upsert(
+        self,
+        key: str,
+        *,
+        source: Any,
+        destination: Any,
+        route_target: str,
+        timeout: int,
+        bidirectional: bool,
+    ) -> bool:
+        if not key:
+            return False
+        key_bytes = len(key.encode("utf-8"))
+        route_bytes = len(route_target.encode("utf-8"))
+        if key_bytes > SIP_PERSISTENCE_MAX_KEY_BYTES:
+            raise EmulatorInputError(
+                f"SIP persistence key exceeds {SIP_PERSISTENCE_MAX_KEY_BYTES} bytes"
+            )
+        if route_bytes > SIP_PERSISTENCE_MAX_ROUTE_TARGET_BYTES:
+            raise EmulatorInputError(
+                "SIP persistence route target exceeds "
+                f"{SIP_PERSISTENCE_MAX_ROUTE_TARGET_BYTES} bytes"
+            )
+        if timeout < 0 or timeout > SIP_PERSISTENCE_MAX_TIMEOUT:
+            raise EmulatorInputError(
+                "SIP persistence timeout must be between 0 and "
+                f"{SIP_PERSISTENCE_MAX_TIMEOUT} seconds"
+            )
+        if source is None or destination is None or not route_target:
+            return False
+        with self._lock:
+            if key not in self._records and len(self._records) >= self._max_entries:
+                oldest_key = next(iter(self._records))
+                del self._records[oldest_key]
+            self._records[key] = {
+                "key": key,
+                "source": source,
+                "destination": destination,
+                "route_target": route_target,
+                "timeout": timeout,
+                "bidirectional": bidirectional,
+                "created_at": self._clock,
+                "expires_at": self._clock + timeout if timeout else None,
+            }
+            return True
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._records)
+
+
 class EmulatorSession:
     """Own one Tcl interpreter on a dedicated thread.
 
@@ -23737,6 +23893,7 @@ class EmulatorSession:
         allow_requests: bool,
         allow_packets: bool = False,
         backend: str = "inprocess",
+        sip_persistence_store: _SIPPersistenceStore | None = None,
     ) -> None:
         (
             source,
@@ -23777,6 +23934,11 @@ class EmulatorSession:
         )
         self._root = root
         self._backend = backend
+        self._sip_persistence_store = (
+            sip_persistence_store
+            if sip_persistence_store is not None
+            else _SIPPersistenceStore()
+        )
         self._source = source
         self._prepared_source, self._event_controls = _prepare_irule_source(root, source)
         self._profiles = profiles
@@ -24315,6 +24477,7 @@ class EmulatorSession:
                 session.eval_tcl("::itest::semantic::link_reset_connection")
                 session.eval_tcl("::itest::semantic::name_reset_connection")
                 session.eval_tcl("::itest::semantic::socks_reset_connection")
+                session.eval_tcl("::itest::semantic::sip_reset_connection")
                 session.eval_tcl("::itest::semantic::sdp_reset_connection")
                 session.eval_tcl("::itest::semantic::dhcp_reset_connection")
                 session.eval_tcl("::itest::semantic::tds_reset_connection")
@@ -25866,6 +26029,169 @@ class EmulatorSession:
             "message_after": _decode_wire_text(message),
             "wire_hex": message.hex(),
         }
+
+    @staticmethod
+    def _sip_persistence_endpoint(
+        packet: dict[str, Any], side: str
+    ) -> tuple[str, ...] | None:
+        """Build a stable endpoint identity for SIP persistence directionality."""
+        endpoint = packet.get(side, {})
+        if not isinstance(endpoint, dict):
+            return None
+        address = endpoint.get("address")
+        port = endpoint.get("port")
+        if address not in (None, "") and port not in (None, ""):
+            return ("endpoint", str(address), str(port))
+        flow_id = packet.get("flow_id")
+        if isinstance(flow_id, str) and flow_id:
+            # A flow identifier is a safe fallback for traces that omit wire
+            # endpoints.  Include the side so a reverse message can still be
+            # distinguished from the original direction.
+            return ("flow", flow_id, side)
+        return None
+
+    def _prepare_sip_persistence_on_worker(
+        self, session: Any, packet: dict[str, Any], entry: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Apply a SIP persistence hit before the message's SEND event."""
+        self._sip_persistence_store.advance(packet.get("timestamp"))
+        key = str(session.eval_tcl("set ::state::sip::persist_key"))
+        mode = str(session.eval_tcl("set ::itest::semantic::sip_persist_mode"))
+        timeout_text = str(
+            session.eval_tcl("set ::itest::semantic::sip_persist_timeout")
+        )
+        try:
+            timeout = int(timeout_text)
+        except ValueError as exc:
+            raise EmulatorInputError("invalid SIP persistence timeout state") from exc
+        if timeout < 0 or timeout > SIP_PERSISTENCE_MAX_TIMEOUT:
+            raise EmulatorInputError(
+                "SIP persistence timeout must be between 0 and "
+                f"{SIP_PERSISTENCE_MAX_TIMEOUT} seconds"
+            )
+        bidirectional = session.eval_tcl(
+            "set ::itest::semantic::sip_persist_bidirectional"
+        ) == "1"
+        direction = str(
+            session.eval_tcl("set ::itest::semantic::sip_persist_direction")
+        )
+        if mode not in {"reset", "use", "ignore", "bypass", "replace"}:
+            raise EmulatorInputError("invalid SIP persistence mode state")
+        if direction not in {"detect", "forward", "reverse"}:
+            raise EmulatorInputError("invalid SIP persistence direction state")
+
+        reset_key = str(
+            session.eval_tcl("set ::itest::semantic::sip_persist_reset_key")
+        )
+        removed = self._sip_persistence_store.remove(reset_key) if reset_key else False
+        source = self._sip_persistence_endpoint(packet, "source")
+        destination = self._sip_persistence_endpoint(packet, "destination")
+        route_target = str(session.eval_tcl("set ::state::sip::route_target"))
+        route_status = str(session.eval_tcl("set ::state::sip::route_status"))
+        if route_target and route_status in {"", "unrouted", "unprocessed"}:
+            route_status = "route found"
+            session.eval_tcl("set ::state::sip::route_status {route found}")
+
+        context: dict[str, Any] = {
+            "key": key,
+            "mode": mode,
+            "timeout": timeout,
+            "bidirectional": bidirectional,
+            "direction": direction,
+            "source": source,
+            "destination": destination,
+            "route_target_before": route_target,
+            "route_status_before": route_status,
+            "reset_key": reset_key,
+            "reset_removed": removed,
+            "hit": False,
+            "matched_direction": None,
+            "route_target_after": route_target,
+            "route_status_after": route_status,
+            "stored": False,
+        }
+        hit = None
+        if key and mode in {"use", "bypass", "replace"}:
+            hit = self._sip_persistence_store.lookup(
+                key,
+                source=source,
+                direction=direction,
+                bidirectional=bidirectional,
+            )
+        if hit is not None:
+            record, matched_direction = hit
+            context["hit"] = True
+            context["matched_direction"] = matched_direction
+            context["stored_route_target"] = record["route_target"]
+            if mode == "use":
+                route_target = str(record["route_target"])
+                route_status = "route found"
+                session.eval_tcl(
+                    "set ::state::sip::route_target " + _tcl_quote(route_target)
+                )
+                session.eval_tcl("set ::state::sip::route_status {route found}")
+                context["route_target_after"] = route_target
+                context["route_status_after"] = route_status
+        context["pending_store"] = bool(
+            key
+            and mode in {"use", "bypass", "replace"}
+            and not (mode in {"use", "bypass"} and context["hit"])
+        )
+        entry["persistence"] = {
+            "key": key,
+            "mode": mode,
+            "timeout": timeout,
+            "bidirectional": bidirectional,
+            "direction": direction,
+            "hit": context["hit"],
+            "matched_direction": context["matched_direction"],
+            "route_target_before": context["route_target_before"],
+            "route_target_after": context["route_target_after"],
+            "route_status": context["route_status_after"],
+            "reset_key": reset_key,
+            "reset_removed": removed,
+            "stored": False,
+        }
+        return context
+
+    def _finish_sip_persistence_on_worker(
+        self, session: Any, context: dict[str, Any], entry: dict[str, Any]
+    ) -> None:
+        """Commit a new SIP record only after the message survives routing."""
+        if not context.get("pending_store"):
+            entry.get("persistence", {})["store_size"] = self._sip_persistence_store.size()
+            return
+        if entry.get("discarded") or entry.get("responded"):
+            entry.get("persistence", {})["store_skipped"] = "message_not_routed"
+            entry.get("persistence", {})["store_size"] = self._sip_persistence_store.size()
+            return
+        route_target = str(session.eval_tcl("set ::state::sip::route_target"))
+        route_status = str(session.eval_tcl("set ::state::sip::route_status"))
+        context["route_target_after"] = route_target
+        context["route_status_after"] = route_status
+        entry.get("persistence", {}).update(
+            {
+                "route_target_after": route_target,
+                "route_status": route_status,
+            }
+        )
+        if route_status not in {"route found", "routed"} or not route_target:
+            entry.get("persistence", {})["store_skipped"] = "no_route"
+            entry.get("persistence", {})["store_size"] = self._sip_persistence_store.size()
+            return
+        stored = self._sip_persistence_store.upsert(
+            context["key"],
+            source=context["source"],
+            destination=context["destination"],
+            route_target=route_target,
+            timeout=context["timeout"],
+            bidirectional=context["bidirectional"],
+        )
+        context["stored"] = stored
+        entry.get("persistence", {})["stored"] = stored
+        if not stored:
+            entry.get("persistence", {})["store_skipped"] = "missing_identity_or_route"
+        entry.get("persistence", {})["store_size"] = self._sip_persistence_store.size()
 
     def _fire_event_on_worker(
         self,
@@ -30078,6 +30404,9 @@ class EmulatorSession:
                     packet=packet,
                 )
                 entry["events"].append(ingress_result)
+                sip_persistence_context = self._prepare_sip_persistence_on_worker(
+                    session, packet, entry
+                )
                 raw_flags = _split_tcl_list(
                     session.eval_tcl("::itest::semantic::sip_flags_snapshot")
                 )
@@ -30135,6 +30464,9 @@ class EmulatorSession:
                                     packet=packet,
                                 )
                             )
+                self._finish_sip_persistence_on_worker(
+                    session, sip_persistence_context, entry
+                )
                 entry.update(self._sip_output_from_tcl(session))
                 continue
 
@@ -31493,6 +31825,7 @@ def _run_isolated_packet_trace(
     *,
     backend: str,
     persistent_sessions: dict[tuple[str, ...], EmulatorSession] | None = None,
+    sip_persistence_store: _SIPPersistenceStore | None = None,
     finalize_http: bool = True,
 ) -> dict[str, Any]:
     """Replay multiple packet flows in bounded, independent Tcl contexts."""
@@ -31502,6 +31835,8 @@ def _run_isolated_packet_trace(
         raise EmulatorInputError(
             f"packet trace cannot contain more than {MAX_PACKET_FLOWS} flows"
         )
+    if sip_persistence_store is None:
+        sip_persistence_store = _SIPPersistenceStore()
 
     child_scenario = dict(scenario)
     child_scenario.pop("packets", None)
@@ -31536,6 +31871,7 @@ def _run_isolated_packet_trace(
                 allow_requests=persistent_sessions is not None,
                 allow_packets=False,
                 backend=backend,
+                sip_persistence_store=sip_persistence_store,
             )
             if persistent_sessions is not None:
                 persistent_sessions[flow_key] = child
@@ -31657,12 +31993,14 @@ class _PersistentEmulatorSession:
         self._root = root
         self._scenario = dict(scenario)
         self._backend = backend
+        self._sip_persistence_store = _SIPPersistenceStore()
         self._base = EmulatorSession(
             root,
             self._scenario,
             allow_irule_file=False,
             allow_requests=True,
             backend=backend,
+            sip_persistence_store=self._sip_persistence_store,
         )
         self._base_flow_key: tuple[str, ...] | None = None
         self._flow_sessions: dict[tuple[str, ...], EmulatorSession] = {}
@@ -31710,6 +32048,7 @@ class _PersistentEmulatorSession:
             allow_requests=True,
             allow_packets=False,
             backend=self._backend,
+            sip_persistence_store=self._sip_persistence_store,
         )
 
     def _select_flow_session(
@@ -31937,6 +32276,7 @@ class _PersistentEmulatorSession:
                         flow_groups,
                         backend=self._backend,
                         persistent_sessions=self._flow_sessions,
+                        sip_persistence_store=self._sip_persistence_store,
                         finalize_http=False,
                     )
                     self._retire_closed_flows(flow_groups)
@@ -31976,6 +32316,7 @@ class _PersistentEmulatorSession:
                     allow_requests=True,
                     allow_packets=False,
                     backend=self._backend,
+                    sip_persistence_store=self._sip_persistence_store,
                 )
                 self._flow_sessions[flow_key] = session
             try:

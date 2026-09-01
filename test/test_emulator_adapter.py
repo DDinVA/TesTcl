@@ -16862,6 +16862,176 @@ when SIP_RESPONSE_DONE { log local0. response-done }
         self.assertTrue(any("via=UDP" in log for log in response_events[0]["logs"]))
         self.assertEqual(response_events[-1]["state"]["sip"]["status"], "202")
 
+    def test_sip_persistence_is_shared_across_flow_contexts(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["SIP"],
+                "irule": "when SIP_REQUEST { SIP::persist [SIP::call_id] }",
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "flow_id": "first-call",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.10", "port": 5060},
+                        "destination": {"address": "198.51.100.10", "port": 5060},
+                        "type": "request",
+                        "method": "INVITE",
+                        "uri": "sip:bob@example.com",
+                        "route_target": "member-a",
+                        "timestamp": 10,
+                        "headers": {"Call-ID": "shared-call"},
+                    },
+                    {
+                        "protocol": "sip",
+                        "flow_id": "second-call",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.11", "port": 5060},
+                        "destination": {"address": "198.51.100.10", "port": 5060},
+                        "type": "request",
+                        "method": "BYE",
+                        "uri": "sip:bob@example.com",
+                        "route_target": "member-b",
+                        "timestamp": 11,
+                        "headers": {"Call-ID": "shared-call"},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        first = result["trace"][0]
+        second = result["trace"][1]
+        self.assertEqual(first["persistence"]["stored"], True)
+        self.assertEqual(first["persistence"]["route_target_after"], "member-a")
+        self.assertEqual(second["persistence"]["hit"], True)
+        self.assertEqual(second["persistence"]["matched_direction"], "forward")
+        self.assertEqual(second["persistence"]["route_target_after"], "member-a")
+        send_event = next(
+            event
+            for event in second["events"]
+            if event["event"] == "SIP_REQUEST_SEND"
+        )
+        self.assertEqual(send_event["state"]["sip"]["route_target"], "member-a")
+
+    def test_sip_persistence_honors_bidirectional_and_timestamp_expiry(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["SIP"],
+                "irule": """
+when SIP_REQUEST {
+    SIP::persist [SIP::call_id] 2
+    SIP::persist bidirectional true
+}
+when SIP_RESPONSE {
+    SIP::persist [SIP::call_id]
+    SIP::persist bidirectional true
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "flow_id": "seed",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.20", "port": 5060},
+                        "destination": {"address": "198.51.100.20", "port": 5060},
+                        "type": "request",
+                        "method": "INVITE",
+                        "uri": "sip:bob@example.com",
+                        "route_target": "member-a",
+                        "timestamp": 20,
+                        "headers": {"Call-ID": "expiring-call"},
+                    },
+                    {
+                        "protocol": "sip",
+                        "flow_id": "reverse",
+                        "direction": "server_to_client",
+                        "source": {"address": "198.51.100.20", "port": 5060},
+                        "destination": {"address": "192.0.2.20", "port": 5060},
+                        "type": "response",
+                        "status": 200,
+                        "phrase": "OK",
+                        "route_target": "member-b",
+                        "timestamp": 21,
+                        "headers": {"Call-ID": "expiring-call"},
+                    },
+                    {
+                        "protocol": "sip",
+                        "flow_id": "expired",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.20", "port": 5060},
+                        "destination": {"address": "198.51.100.20", "port": 5060},
+                        "type": "request",
+                        "method": "BYE",
+                        "uri": "sip:bob@example.com",
+                        "route_target": "member-c",
+                        "timestamp": 23,
+                        "headers": {"Call-ID": "expiring-call"},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(result["trace"][1]["persistence"]["hit"], True)
+        self.assertEqual(result["trace"][1]["persistence"]["matched_direction"], "reverse")
+        self.assertEqual(result["trace"][1]["persistence"]["route_target_after"], "member-a")
+        self.assertEqual(result["trace"][2]["persistence"]["hit"], False)
+        self.assertEqual(result["trace"][2]["persistence"]["route_target_after"], "member-c")
+
+    def test_sip_persistence_reset_removes_the_current_key(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["SIP"],
+                "irule": """
+when SIP_REQUEST {
+    SIP::persist [SIP::call_id]
+    if {[SIP::method] eq "BYE"} { SIP::persist reset }
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "flow_id": "seed",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.30", "port": 5060},
+                        "destination": {"address": "198.51.100.30", "port": 5060},
+                        "type": "request",
+                        "method": "INVITE",
+                        "uri": "sip:bob@example.com",
+                        "route_target": "member-a",
+                        "headers": {"Call-ID": "reset-call"},
+                    },
+                    {
+                        "protocol": "sip",
+                        "flow_id": "reset",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.31", "port": 5060},
+                        "destination": {"address": "198.51.100.30", "port": 5060},
+                        "type": "request",
+                        "method": "BYE",
+                        "uri": "sip:bob@example.com",
+                        "route_target": "member-b",
+                        "headers": {"Call-ID": "reset-call"},
+                    },
+                    {
+                        "protocol": "sip",
+                        "flow_id": "after-reset",
+                        "direction": "client_to_server",
+                        "source": {"address": "192.0.2.32", "port": 5060},
+                        "destination": {"address": "198.51.100.30", "port": 5060},
+                        "type": "request",
+                        "method": "BYE",
+                        "uri": "sip:bob@example.com",
+                        "route_target": "member-c",
+                        "headers": {"Call-ID": "reset-call"},
+                    },
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(result["trace"][0]["persistence"]["stored"], True)
+        self.assertEqual(result["trace"][1]["persistence"]["reset_removed"], True)
+        self.assertEqual(result["trace"][2]["persistence"]["hit"], False)
+        self.assertEqual(result["trace"][2]["persistence"]["route_target_after"], "member-c")
+
     def test_sip_sdp_payload_is_parsed_mutated_and_reencoded(self) -> None:
         body = (
             "v=0\r\n"
