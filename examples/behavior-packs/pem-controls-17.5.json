@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "pem-controls-17.5",
+  "cases": [
+    {
+      "id": "session-and-subscriber-database-controls",
+      "scenario": {
+        "profiles": ["PEM"],
+        "irule": "when CLIENT_ACCEPTED {\n  PEM::disable\n  PEM::flow transactional disable\n  PEM::flow eval\n  PEM::session create 192.0.2.30 subscriber-id 4086007577 subscriber-type e164 imsi 310150123456789 user-name alice tower-id tower-a provision yes plan premium policy {/Common/data /Common/voice}\n  PEM::session info attr 192.0.2.30 region east\n  PEM::session config policy referential update 192.0.2.30 add /Common/video delete /Common/voice\n  set session_info \"[PEM::session info 192.0.2.30 subscriber-id]/[PEM::session info 192.0.2.30 state]/[PEM::session info attr 192.0.2.30 region]/[PEM::session config policy get 192.0.2.30]/[PEM::session ip 4086007577 e164]\"\n  PEM::subscriber create 310150999 subscriber-type imsi ip-address 198.51.100.30 ip-address 2001:db8::30 imsi 310150999 user-name bob policy {/Common/mobile /Common/data}\n  PEM::subscriber info attr 310150999 imsi tier gold\n  PEM::subscriber config policy referential update 310150999 imsi add /Common/premium delete /Common/data\n  set subscriber_info \"[PEM::subscriber info 310150999 imsi user-name]/[PEM::subscriber info attr 310150999 imsi tier]/[PEM::subscriber config policy get 310150999 imsi]/[PEM::subscriber ip 310150999 imsi all]\"\n  PEM::enable\n  log local0. \"session=$session_info subscriber=$subscriber_info flow=[set ::state::pem::flow_enabled]/[set ::state::pem::transactional_enabled]/[set ::state::pem::eval_count]\"\n}\nwhen PEM_SUBS_SESS_CREATED { log local0. \"pem-event=[set ::state::pem::action]\" }",
+        "packets": [
+          {"protocol": "event", "event": "CLIENT_ACCEPTED", "state": {"pem": {}}},
+          {
+            "protocol": "event",
+            "event": "PEM_SUBS_SESS_CREATED",
+            "state": {
+              "pem": {
+                "session_ip": "192.0.2.30",
+                "subscriber_id": "4086007577",
+                "subscriber_type": "e164",
+                "action": "created"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "pem", "flow_enabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "pem", "transactional_enabled"], "equals": "0"},
+          {"path": ["trace", 0, "events", 0, "state", "pem", "eval_count"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "pem", "subscriber_id"], "equals": "310150999"},
+          {"path": ["trace", 0, "events", 0, "state", "pem", "subscriber_type"], "equals": "imsi"},
+          {"path": ["trace", 0, "events", 0, "state", "pem", "ip_addresses"], "equals": "198.51.100.30 2001:db8::30"},
+          {"path": ["trace", 0, "events", 0, "state", "pem", "policies"], "equals": "/Common/mobile /Common/premium"},
+          {"path": ["trace", 0, "events", 0, "state", "pem", "attrs"], "equals": "tier gold"},
+          {"path": ["trace", 1, "events", 0, "event"], "equals": "PEM_SUBS_SESS_CREATED"},
+          {"path": ["trace", 1, "events", 0, "state", "pem", "action"], "equals": "created"}
+        ]
+      }
+    }
+  ]
+}
