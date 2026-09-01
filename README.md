@@ -101,6 +101,9 @@ To turn every exported chunk into a resumable collector batch, run
 the catalog manifest and every chunk hash before generating runner-compatible
 plans; change `--variants` to 2 through 8 only when the exported chunk size
 keeps each plan at or below 256 observations.
+For one end-to-end local catalog checkpoint that exports, evaluates every
+chunk, and builds the external capture batch, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/catalog-evaluation-checkpoint-17.5.sh`.
 To see semantic test-input coverage across all checked-in packs, run
 `./scripts/emulate-irule.sh --behavior-coverage`.
 For one repeatable checkpoint covering the local 17.5 contracts and all eight

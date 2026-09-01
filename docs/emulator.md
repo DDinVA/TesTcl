@@ -3818,6 +3818,18 @@ the protocol-driver stimulus schedule. It does not contact a device; pass the
 resulting batch to the existing preflight/execute runner only after selecting
 an authorized TMOS 17.5 BIG-IP or vLab target.
 
+For a single repeatable local catalog checkpoint covering export, evaluation of
+every chunk, and capture-batch generation, run:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp \
+  ./scripts/catalog-evaluation-checkpoint-17.5.sh
+```
+
+It uses the repository's uv-managed Python 3.13 environment, reports aggregate
+local statuses, and clearly labels the generated batch as reference-free until
+an authorized TMOS 17.5 collector supplies observations.
+
 To turn one campaign chunk into an assembly-ready plan, use the capture-plan
 template mode:
 
