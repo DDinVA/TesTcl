@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "ike-controls-17.5",
+  "cases": [
+    {
+      "id": "ike-auth-certificate-and-subject-alternative-name-controls",
+      "scenario": {
+        "profiles": ["IPSEC"],
+        "irule": "when IKE_AUTH { set ::ike_values [list [IKE::cert 0] [IKE::san_dirname] [IKE::san_dns] [IKE::san_ediparty] [IKE::san_email] [IKE::san_ipadd] [IKE::san_othername] [IKE::san_rid] [IKE::san_uri] [IKE::san_x400] [IKE::subjectAltName]]; if {[lindex $::ike_values 2] eq \"vpn.example.test\"} { IKE::auth_success }; log local0. \"ike=[join $::ike_values |]\" }",
+        "packets": [
+          {
+            "protocol": "ike",
+            "source": {"address": "192.0.2.10", "port": 500},
+            "destination": {"address": "198.51.100.20", "port": 500},
+            "ike": {
+              "exchange_type": "IKE_AUTH",
+              "version": "2.0",
+              "message_id": 7,
+              "payloads": ["IDi", "CERT", "AUTH"],
+              "cert": "CERTIFICATE-DATA",
+              "san_dirname": "ou=VPN,o=Example",
+              "san_dns": "vpn.example.test",
+              "san_ediparty": "",
+              "san_email": "vpn@example.test",
+              "san_ipadd": "192.0.2.10",
+              "san_othername": "",
+              "san_rid": "",
+              "san_uri": "https://vpn.example.test",
+              "san_x400": "",
+              "subjectAltName": "DNS:vpn.example.test,email:vpn@example.test"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "IKE_AUTH"},
+          {"path": ["trace", 0, "events", 2, "state", "ike", "auth_success"], "equals": "1"},
+          {"path": ["trace", 0, "events", 2, "state", "ike", "cert"], "equals": "CERTIFICATE-DATA"},
+          {"path": ["trace", 0, "events", 2, "state", "ike", "san_dirname"], "equals": "ou=VPN,o=Example"},
+          {"path": ["trace", 0, "events", 2, "state", "ike", "san_dns"], "equals": "vpn.example.test"},
+          {"path": ["trace", 0, "events", 2, "state", "ike", "san_ediparty"], "equals": ""},
+          {"path": ["trace", 0, "events", 2, "state", "ike", "san_email"], "equals": "vpn@example.test"},
+          {"path": ["trace", 0, "events", 2, "state", "ike", "san_ipadd"], "equals": "192.0.2.10"},
+          {"path": ["trace", 0, "events", 2, "state", "ike", "san_othername"], "equals": ""},
+          {"path": ["trace", 0, "events", 2, "state", "ike", "san_rid"], "equals": ""},
+          {"path": ["trace", 0, "events", 2, "state", "ike", "san_uri"], "equals": "https://vpn.example.test"},
+          {"path": ["trace", 0, "events", 2, "state", "ike", "san_x400"], "equals": ""},
+          {"path": ["trace", 0, "events", 2, "state", "ike", "subjectAltName"], "equals": "DNS:vpn.example.test,email:vpn@example.test"}
+        ]
+      }
+    }
+  ]
+}

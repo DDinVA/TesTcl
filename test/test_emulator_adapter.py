@@ -4779,6 +4779,7 @@ when HTTP_RESPONSE_RELEASE {
             "ssl-controls-17.5.json": 2,
             "ssl-lifecycle-controls-17.5.json": 3,
             "http2-17.5.json": 11,
+            "ike-controls-17.5.json": 1,
             "udp-datagram-17.5.json": 15,
             "sip-17.5.json": 41,
             "sctp-controls-17.5.json": 1,
