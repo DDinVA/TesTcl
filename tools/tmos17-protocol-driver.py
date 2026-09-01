@@ -5,8 +5,10 @@ This executable consumes one JSON object on stdin, matching the contract sent
 by ``tools/tmos17-collector.py --trigger-command``.  It does not attempt to
 inspect BIG-IP state.  The collector remains responsible for the temporary
 iRule and observation log; this driver only generates bounded traffic toward
-the requested endpoint.  HTTP/2 request generation uses the pinned ``hpack``
-dependency installed by the uv-managed environment and container image.
+the requested endpoint.  It supports both one command-probe stimulus and the
+collector's multi-request/multi-packet ``operation: scenario`` contract.
+HTTP/2 request generation uses the pinned ``hpack`` dependency installed by
+the uv-managed environment and container image.
 """
 
 from __future__ import annotations
@@ -52,6 +54,7 @@ TDS_PACKET_MAX_BYTES = 65535
 # generated message within the emulator's total field bound.
 MAX_FIX_FIELDS = 509
 MAX_WEBSOCKET_FRAME_BYTES = MAX_PAYLOAD_BYTES
+MAX_SCENARIO_ITEMS = 256
 DEFAULT_TIMEOUT = 10.0
 MAX_TIMEOUT = 60.0
 DNS_TYPES = {
@@ -2235,6 +2238,361 @@ def send_payload(
     return None
 
 
+def _scenario_endpoint(
+    value: Any, *, default_scheme: str, default_port: int
+) -> Endpoint:
+    """Parse a scenario destination while retaining HTTP/TLS scheme metadata."""
+    if not isinstance(value, str) or not value:
+        raise DriverError("scenario destination must be a non-empty URL")
+    parsed = urlparse(value)
+    scheme = parsed.scheme.lower() or default_scheme
+    if scheme not in {"http", "https", "tcp", "udp"}:
+        raise DriverError("scenario destinations must use http, https, tcp, or udp")
+    if parsed.username is not None or parsed.password is not None:
+        raise DriverError("scenario destination must not contain embedded credentials")
+    if not parsed.hostname:
+        raise DriverError("scenario destination must include a host")
+    try:
+        port = parsed.port or default_port
+    except ValueError as exc:
+        raise DriverError("scenario destination has an invalid port") from exc
+    if not 1 <= port <= 65535:
+        raise DriverError("scenario destination port must be between 1 and 65535")
+    server_name = parsed.hostname
+    return Endpoint(scheme, parsed.hostname, port, server_name if scheme == "https" else None)
+
+
+def _scenario_send(
+    endpoint: Endpoint,
+    payload: bytes,
+    timeout: float,
+    *,
+    shutdown_write: bool = False,
+) -> dict[str, Any]:
+    """Send one scenario payload and always return a bounded response envelope."""
+    if endpoint.scheme in {"udp", "h2c", "h2s"}:
+        response = send_payload(endpoint, payload, timeout, capture_response=True)
+        if response is None:
+            raise DriverError("scenario transport did not produce a response envelope")
+        return response
+    if endpoint.scheme not in {"http", "https", "tcp"}:
+        raise DriverError("scenario endpoint uses an unsupported transport")
+    try:
+        with socket.create_connection((endpoint.host, endpoint.port), timeout=timeout) as raw_sock:
+            if endpoint.scheme == "https":
+                context = ssl.create_default_context()
+                context.set_alpn_protocols(["http/1.1"])
+                with context.wrap_socket(
+                    raw_sock,
+                    server_hostname=endpoint.server_name or endpoint.host,
+                ) as sock:
+                    sock.sendall(payload)
+                    if shutdown_write:
+                        sock.shutdown(socket.SHUT_WR)
+                    response, truncated = _receive_stream(sock, timeout)
+            else:
+                raw_sock.sendall(payload)
+                if shutdown_write:
+                    raw_sock.shutdown(socket.SHUT_WR)
+                response, truncated = _receive_stream(raw_sock, timeout)
+    except OSError as exc:
+        raise DriverError(
+            f"scenario stimulus failed for {endpoint.host}:{endpoint.port}: {exc}"
+        ) from exc
+    return _response_record(endpoint, response, truncated)
+
+
+def _scenario_http_response(response: dict[str, Any]) -> dict[str, Any]:
+    """Decode enough HTTP/1 response structure for differential comparisons."""
+    encoded = response.get("payload_base64")
+    if not isinstance(encoded, str):
+        raise DriverError("scenario HTTP response is missing payload bytes")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise DriverError("scenario HTTP response payload is invalid") from exc
+    separator = raw.find(b"\r\n\r\n")
+    if separator < 0:
+        raise DriverError("scenario HTTP response did not contain a complete header block")
+    header_lines = raw[:separator].split(b"\r\n")
+    if not header_lines:
+        raise DriverError("scenario HTTP response is missing a status line")
+    try:
+        status_match = re.fullmatch(rb"HTTP/[^ ]+ ([0-9]{3})(?: (.*))?", header_lines[0])
+    except TypeError as exc:  # defensive: header_lines are always bytes
+        raise DriverError("scenario HTTP response status line is invalid") from exc
+    if status_match is None:
+        raise DriverError("scenario HTTP response status line is invalid")
+    status = int(status_match.group(1))
+    if not 100 <= status <= 999:
+        raise DriverError("scenario HTTP response status is out of range")
+    headers: dict[str, str] = {}
+    for line in header_lines[1:]:
+        if b":" not in line:
+            raise DriverError("scenario HTTP response contains an invalid header")
+        name, value = line.split(b":", 1)
+        if not name:
+            raise DriverError("scenario HTTP response contains an empty header name")
+        try:
+            header_name = name.decode("latin-1").lower()
+            header_value = value.lstrip().decode("latin-1")
+        except UnicodeDecodeError as exc:
+            raise DriverError("scenario HTTP response contains invalid header bytes") from exc
+        headers[header_name] = header_value
+    body = raw[separator + 4 :]
+    try:
+        body_text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        body_text = ""
+    try:
+        reason = status_match.group(2).decode("latin-1") if status_match.group(2) else ""
+    except UnicodeDecodeError as exc:
+        raise DriverError("scenario HTTP response reason is invalid") from exc
+    result: dict[str, Any] = {
+        "status": status,
+        "reason": reason,
+        "headers": headers,
+        "body": body_text,
+        "truncated": bool(response.get("truncated", False)),
+    }
+    if body_text == "" and body:
+        result["body_base64"] = base64.b64encode(body).decode("ascii")
+    return result
+
+
+def _scenario_packet_payload(packet: dict[str, Any], index: int) -> bytes:
+    sources = [field for field in ("payload_hex", "payload", "payload_base64") if field in packet]
+    if len(sources) != 1:
+        raise DriverError(
+            f"scenario packet {index} must contain exactly one payload source"
+        )
+    source = sources[0]
+    if source == "payload_hex":
+        value = packet[source]
+        if not isinstance(value, str) or len(value) % 2:
+            raise DriverError(f"scenario packet {index} payload_hex must be complete hexadecimal bytes")
+        try:
+            payload = bytes.fromhex(value)
+        except ValueError as exc:
+            raise DriverError(f"scenario packet {index} payload_hex is invalid") from exc
+    elif source == "payload_base64":
+        value = packet[source]
+        if not isinstance(value, str):
+            raise DriverError(f"scenario packet {index} payload_base64 must be a string")
+        try:
+            payload = base64.b64decode(value, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise DriverError(f"scenario packet {index} payload_base64 is invalid") from exc
+    else:
+        value = packet[source]
+        if not isinstance(value, str):
+            raise DriverError(f"scenario packet {index} payload must be a string")
+        try:
+            payload = value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise DriverError(f"scenario packet {index} payload is not valid UTF-8") from exc
+    if not payload and packet.get("protocol", "").lower() == "udp":
+        raise DriverError(f"scenario packet {index} payload must not be empty")
+    if len(payload) > MAX_PAYLOAD_BYTES:
+        raise DriverError(f"scenario packet {index} payload exceeds the 2 MiB limit")
+    return payload
+
+
+def _scenario_from_requests(trigger: dict[str, Any], scenario: dict[str, Any]) -> dict[str, Any]:
+    raw_requests = scenario.get("requests")
+    if raw_requests is None:
+        raw_requests = [scenario.get("request")]
+    if not isinstance(raw_requests, list) or not raw_requests or len(raw_requests) > MAX_SCENARIO_ITEMS:
+        raise DriverError(f"scenario requests must contain 1 to {MAX_SCENARIO_ITEMS} objects")
+    results: list[dict[str, Any]] = []
+    for index, request in enumerate(raw_requests):
+        if not isinstance(request, dict):
+            raise DriverError(f"scenario request {index} must be an object")
+        timeout = _timeout(request)
+        if isinstance(request.get("http2"), dict):
+            endpoint, payload, _ = build_payload(
+                {
+                    "event": "HTTP_REQUEST",
+                    "profiles": scenario.get("profiles", ["TCP", "HTTP"]),
+                    "traffic_url": trigger.get("traffic_url"),
+                    "request": request,
+                }
+            )
+            mode = "http2"
+        elif isinstance(request.get("websocket"), dict):
+            endpoint = _scenario_endpoint(
+                request.get("destination", trigger.get("traffic_url")),
+                default_scheme="tcp",
+                default_port=80,
+            )
+            websocket = request["websocket"]
+            event = "WS_CLIENT_FRAME" if "payload" in websocket or "payload_base64" in websocket else "WS_REQUEST"
+            payload = build_websocket_request(request, event)
+            mode = "websocket"
+        else:
+            endpoint = _scenario_endpoint(
+                request.get("destination", trigger.get("traffic_url")),
+                default_scheme="http",
+                default_port=80,
+            )
+            payload = build_http_request(request)
+            mode = "http1"
+        response = _scenario_send(endpoint, payload, timeout)
+        result: dict[str, Any] = {
+            "request": request,
+            "response": (
+                _scenario_http_response(response) if mode == "http1" else response
+            ),
+        }
+        if trigger.get("capture_wire") is True:
+            result["wire"] = response
+        results.append(result)
+    output: dict[str, Any] = {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "requests_processed": len(results),
+        "results": results,
+    }
+    return output
+
+
+def _scenario_from_packets(trigger: dict[str, Any], scenario: dict[str, Any]) -> dict[str, Any]:
+    packets = scenario.get("packets")
+    if not isinstance(packets, list) or not packets or len(packets) > MAX_SCENARIO_ITEMS:
+        raise DriverError(f"scenario packets must contain 1 to {MAX_SCENARIO_ITEMS} objects")
+    client_packets: list[tuple[int, str, bytes, bool]] = []
+    protocol: str | None = None
+    for index, packet in enumerate(packets):
+        if not isinstance(packet, dict):
+            raise DriverError(f"scenario packet {index} must be an object")
+        packet_protocol = packet.get("protocol")
+        if not isinstance(packet_protocol, str) or not packet_protocol:
+            raise DriverError(f"scenario packet {index} protocol must be a string")
+        packet_protocol = packet_protocol.lower()
+        if protocol is None:
+            protocol = packet_protocol
+        elif packet_protocol != protocol:
+            raise DriverError("scenario packet sequence must use one protocol")
+        direction = packet.get("direction", "client_to_server")
+        if direction not in {"client_to_server", "server_to_client"}:
+            raise DriverError(f"scenario packet {index} direction is invalid")
+        flags = packet.get("flags", [])
+        if not isinstance(flags, list) or any(
+            not isinstance(flag, str) or not flag for flag in flags
+        ):
+            raise DriverError(f"scenario packet {index} flags must be an array of strings")
+        if direction == "client_to_server":
+            client_packets.append(
+                (
+                    index,
+                    packet_protocol,
+                    _scenario_packet_payload(packet, index),
+                    any(flag.upper() == "FIN" for flag in flags),
+                )
+            )
+    if protocol is None or not client_packets:
+        raise DriverError("scenario packet sequence must contain client_to_server payloads")
+    default_scheme = "udp" if protocol == "udp" else "tcp"
+    endpoint = _scenario_endpoint(
+        trigger.get("traffic_url"),
+        default_scheme=default_scheme,
+        default_port=53 if protocol == "udp" else 80,
+    )
+    if protocol == "http2":
+        if endpoint.scheme == "https":
+            endpoint = Endpoint("h2s", endpoint.host, endpoint.port, endpoint.server_name)
+        elif endpoint.scheme in {"http", "tcp"}:
+            endpoint = Endpoint("h2c", endpoint.host, endpoint.port, endpoint.server_name)
+        else:
+            raise DriverError("HTTP/2 scenario packets require an HTTP/TCP traffic_url")
+    if protocol == "udp" and endpoint.scheme not in {"udp"}:
+        raise DriverError("UDP scenario packets require a udp:// traffic_url")
+    if protocol != "udp" and endpoint.scheme == "udp":
+        raise DriverError("stream scenario packets require a TCP/HTTP traffic_url")
+    timeout = _timeout({"timeout": trigger.get("timeout", DEFAULT_TIMEOUT)})
+    response_items: list[tuple[int, dict[str, Any]]] = []
+    if protocol == "udp":
+        for index, _packet_protocol, payload, _fin in client_packets:
+            response_items.append((index, _scenario_send(endpoint, payload, timeout)))
+    else:
+        sent = b"".join(payload for _, _, payload, _ in client_packets)
+        response_items.append(
+            (
+                len(packets),
+                _scenario_send(
+                    endpoint,
+                    sent,
+                    timeout,
+                    shutdown_write=any(fin for _, _, _, fin in client_packets),
+                ),
+            )
+        )
+    trace: list[dict[str, Any]] = [
+        {
+            "index": index,
+            "protocol": packet_protocol,
+            "direction": "client_to_server",
+            "payload_hex": payload.hex(),
+            "bytes": len(payload),
+        }
+        for index, packet_protocol, payload, _ in client_packets
+    ]
+    for response_index, response in response_items:
+        response_payload = base64.b64decode(response["payload_base64"], validate=True)
+        if response_payload:
+            trace.append(
+                {
+                    "index": response_index,
+                    "protocol": protocol,
+                    "direction": "server_to_client",
+                    "payload_hex": response_payload.hex(),
+                    "bytes": len(response_payload),
+                }
+            )
+    output: dict[str, Any] = {
+        "status": "ok",
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "packets_processed": len(packets),
+        "trace": trace,
+    }
+    if len(response_items) > 1:
+        output["responses"] = [response for _, response in response_items]
+    if trigger.get("capture_wire") is True:
+        wire_outputs = []
+        for response_index, response in response_items:
+            response_payload = base64.b64decode(response["payload_base64"], validate=True)
+            if response_payload:
+                wire_outputs.append(
+                    {
+                        "protocol": protocol,
+                        "direction": "server_to_client",
+                        "packet_index": response_index,
+                        "payload_hex": response_payload.hex(),
+                        "bytes": len(response_payload),
+                    }
+                )
+        output["wire_outputs"] = wire_outputs
+    return output
+
+
+def run_scenario_trigger(trigger: dict[str, Any]) -> dict[str, Any]:
+    """Drive a bounded scenario against the selected virtual server."""
+    if trigger.get("operation") != "scenario":
+        raise DriverError("scenario trigger operation must be scenario")
+    scenario = trigger.get("scenario")
+    if not isinstance(scenario, dict):
+        raise DriverError("scenario trigger scenario must be an object")
+    if not isinstance(scenario.get("irule"), str) or not scenario["irule"].strip():
+        raise DriverError("scenario trigger scenario requires an inline irule")
+    if "requests" in scenario and "packets" in scenario:
+        raise DriverError("scenario trigger cannot combine requests and packets")
+    if "packets" in scenario:
+        return _scenario_from_packets(trigger, scenario)
+    return _scenario_from_requests(trigger, scenario)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Send bounded TMOS 17.5 protocol stimuli or report driver capabilities"
@@ -2250,6 +2608,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         trigger = read_request()
+        if trigger.get("operation") == "scenario":
+            output = run_scenario_trigger(trigger)
+            print(
+                json.dumps(
+                    {"status": "ok", "output": output},
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+            )
+            return 0
         endpoint, payload, timeout = build_payload(trigger)
         capture_response = trigger.get("capture_response", False)
         if not isinstance(capture_response, bool):

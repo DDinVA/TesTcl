@@ -3815,9 +3815,15 @@ output in this envelope:
 The collector preserves that `output` as the external record and still
 restores the virtual and deletes the temporary rule on success or failure. It
 does not synthesize event logs or emulator output for a scenario. The bundled
-`tmos17-protocol-driver.py` is a command-probe driver; use a purpose-built
-scenario driver for a live transaction or packet sequence. A minimal live
-scenario run therefore looks like:
+`tmos17-protocol-driver.py` can act as the scenario driver for HTTP request
+sequences and raw TCP/UDP/HTTP/2 packet traces. It sends only
+`client_to_server` packets from a recorded trace; `server_to_client` packets
+are observation context, not replay stimuli. It returns bounded response
+metadata and, with `capture_wire`, the received bytes. It does not parse every
+protocol's response into a semantic object, so packet plans should compare
+`packets_processed`, `trace`, or `wire_outputs` unless a purpose-built driver
+returns a richer protocol-specific result. A minimal live scenario run
+therefore looks like:
 
 ```sh
 BIGIP_USERNAME=admin BIGIP_PASSWORD='…' \
@@ -3827,7 +3833,7 @@ BIGIP_USERNAME=admin BIGIP_PASSWORD='…' \
   --bigip-url https://bigip.example \
   --virtual /Common/irule-test-vs \
   --traffic-url https://198.18.0.10:443 \
-  --trigger-command /opt/drivers/scenario-driver \
+  --trigger-command ./scripts/tmos17-protocol-driver.sh \
   --capture-wire \
   > records.ndjson
 ```

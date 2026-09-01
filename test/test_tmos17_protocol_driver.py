@@ -814,3 +814,141 @@ def test_read_request_rejects_non_finite_json() -> None:
 
     with pytest.raises(driver.DriverError, match="non-finite"):
         driver.read_request(_Stream())
+
+
+def test_scenario_driver_runs_http_request_sequence_and_returns_comparable_output() -> None:
+    response = driver._response_record(
+        driver.Endpoint("http", "127.0.0.1", 8080),
+        b"HTTP/1.1 201 Created\r\nX-Test: yes\r\nContent-Length: 2\r\n\r\nok",
+        False,
+    )
+    trigger = {
+        "operation": "scenario",
+        "traffic_url": "http://127.0.0.1:8080",
+        "capture_wire": True,
+        "scenario": {
+            "profiles": ["TCP", "HTTP"],
+            "irule": "when HTTP_REQUEST { HTTP::respond 201 content ok }",
+            "requests": [{"method": "GET", "uri": "/health", "host": "vip.test"}],
+        },
+    }
+    with patch.object(driver, "_scenario_send", return_value=response) as send:
+        output = driver.run_scenario_trigger(trigger)
+    assert output["requests_processed"] == 1
+    assert output["results"][0]["response"] == {
+        "status": 201,
+        "reason": "Created",
+        "headers": {
+            "x-test": "yes",
+            "content-length": "2",
+        },
+        "body": "ok",
+        "truncated": False,
+    }
+    assert output["results"][0]["wire"] == response
+    sent_endpoint, sent_payload, sent_timeout = send.call_args.args
+    assert sent_endpoint == driver.Endpoint("http", "127.0.0.1", 8080)
+    assert sent_payload.startswith(b"GET /health HTTP/1.1\r\n")
+    assert sent_timeout == 10.0
+
+
+def test_scenario_driver_can_drive_a_real_local_http_socket() -> None:
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    received: list[bytes] = []
+
+    def serve_once() -> None:
+        connection, _address = server.accept()
+        with connection:
+            received.append(connection.recv(65536))
+            connection.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nhealthy"
+            )
+            connection.shutdown(socket.SHUT_WR)
+
+    thread = threading.Thread(target=serve_once)
+    thread.start()
+    try:
+        output = driver.run_scenario_trigger(
+            {
+                "operation": "scenario",
+                "traffic_url": f"http://127.0.0.1:{server.getsockname()[1]}",
+                "scenario": {
+                    "irule": "when HTTP_REQUEST { HTTP::respond 200 content healthy }",
+                    "requests": [{"method": "GET", "uri": "/health", "host": "vip.test"}],
+                },
+            }
+        )
+    finally:
+        thread.join(timeout=2)
+        server.close()
+    assert not thread.is_alive()
+    assert received == [
+        b"GET /health HTTP/1.1\r\nHost: vip.test\r\nConnection: close\r\n\r\n"
+    ]
+    assert output["results"][0]["response"]["status"] == 200
+    assert output["results"][0]["response"]["body"] == "healthy"
+
+
+def test_scenario_driver_replays_only_client_packet_directions_and_preserves_udp_responses() -> None:
+    first = driver._response_record(
+        driver.Endpoint("udp", "127.0.0.1", 5353), b"\x01\x02", False
+    )
+    second = driver._response_record(
+        driver.Endpoint("udp", "127.0.0.1", 5353), b"\x03", False
+    )
+    trigger = {
+        "operation": "scenario",
+        "traffic_url": "udp://127.0.0.1:5353",
+        "capture_wire": True,
+        "scenario": {
+            "irule": "when DNS_REQUEST { DNS::return }",
+            "packets": [
+                {"protocol": "udp", "direction": "client_to_server", "payload_hex": "0102"},
+                {"protocol": "udp", "direction": "server_to_client", "payload_hex": "ffff"},
+                {"protocol": "udp", "direction": "client_to_server", "payload_hex": "0304"},
+            ],
+        },
+    }
+    with patch.object(driver, "_scenario_send", side_effect=[first, second]) as send:
+        output = driver.run_scenario_trigger(trigger)
+    assert send.call_count == 2
+    assert [call.args[1] for call in send.call_args_list] == [b"\x01\x02", b"\x03\x04"]
+    assert output["packets_processed"] == 3
+    assert len(output["responses"]) == 2
+    assert output["wire_outputs"] == [
+        {
+            "protocol": "udp",
+            "direction": "server_to_client",
+            "packet_index": 0,
+            "payload_hex": "0102",
+            "bytes": 2,
+        },
+        {
+            "protocol": "udp",
+            "direction": "server_to_client",
+            "packet_index": 2,
+            "payload_hex": "03",
+            "bytes": 1,
+        },
+    ]
+
+
+def test_scenario_driver_maps_http2_packet_transport_to_h2c() -> None:
+    response = driver._response_record(
+        driver.Endpoint("h2c", "127.0.0.1", 8080), b"\x00\x00\x00", False
+    )
+    trigger = {
+        "operation": "scenario",
+        "traffic_url": "http://127.0.0.1:8080",
+        "scenario": {
+            "irule": "when HTTP_REQUEST { log local0. h2 }",
+            "packets": [
+                {"protocol": "http2", "direction": "client_to_server", "payload_hex": "00"}
+            ],
+        },
+    }
+    with patch.object(driver, "_scenario_send", return_value=response) as send:
+        driver.run_scenario_trigger(trigger)
+    assert send.call_args.args[0] == driver.Endpoint("h2c", "127.0.0.1", 8080)
