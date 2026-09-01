@@ -356,7 +356,10 @@ session/table contracts for
 the pinned 17.5 profile. The integration pack exercises ILX extension calls,
 request-scoped PLUGIN toggles, and network-free OFFBOX request recording. The
 protocol pack exercises L7CHECK, SOCKS, ICAP, RTSP, UDP, QOE, NTLM,
-PROTOCOL_INSPECTION, and TDS event state. The
+PROTOCOL_INSPECTION, and TDS event state. The legacy pack exercises HTTP
+logging, feature controls, diagnostics, message routing, deterministic name
+resolution, DHCP versioning, HA/DS-Lite/BIGPROTO state, and response
+decompression. The
 SIP pack exercises all 16 catalogued `SIP::`
 commands, nine SDP accessors, and three SIPALG controls across command probes
 and request/response packet lifecycles. The HTTP/2 pack exercises active
@@ -378,7 +381,7 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 867 of 989 target F5 commands (87.66%). This is test-input
+current report covers 891 of 989 target F5 commands (90.09%). This is test-input
 coverage, not a semantic-fidelity score.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
@@ -904,6 +907,14 @@ L7CHECK, SOCKS, ICAP, RTSP, UDP, QOE, NTLM, protocol inspection, and TDS:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/protocol-controls-17.5.json
+```
+
+Run the legacy controls behavior pack to verify diagnostics, feature controls,
+message routing, deterministic name resolution, and decompression:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/legacy-controls-17.5.json
 ```
 
 Run the utility controls behavior pack to verify bounded HSL sends, local REST

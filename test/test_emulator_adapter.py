@@ -4777,6 +4777,7 @@ when HTTP_RESPONSE_RELEASE {
             "crypto-data-controls-17.5.json": 3,
             "integration-controls-17.5.json": 3,
             "protocol-controls-17.5.json": 8,
+            "legacy-controls-17.5.json": 8,
             "x509-controls-17.5.json": 1,
             "diameter-controls-17.5.json": 3,
             "tcp-controls-17.5.json": 2,
