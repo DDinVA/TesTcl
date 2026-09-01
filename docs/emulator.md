@@ -1015,6 +1015,17 @@ auditable. The tool uses a staging directory and refuses to overwrite an
 existing output directory. Building and validating plans never connects to or
 mutates a device.
 
+The manifest also includes the bundled protocol driver's capability report and
+fixture preflight. `buildable` means the driver can construct a specialized
+protocol stimulus without opening a socket; `raw-fallback` means it can send a
+bounded payload but cannot claim event-specific framing or lifecycle parity.
+Use the driver report directly with:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp uv run --python 3.13 \
+  python tools/tmos17-protocol-driver.py --capabilities
+```
+
 Candidates are chunked over the uncovered-command queue, with a maximum of 64
 commands per request. The argument hypotheses are intentionally reviewable:
 they start from the pinned tcl-lsp synopsis metadata and use bounded TMOS-safe

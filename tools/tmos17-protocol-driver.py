@@ -12,6 +12,7 @@ dependency installed by the uv-managed environment and container image.
 from __future__ import annotations
 
 import base64
+import argparse
 import binascii
 import ipaddress
 import json
@@ -105,6 +106,30 @@ LDAP_SERVER_OPERATIONS = {
     "searchresdone": ("searchResDone", 0x65),
     "extendedresp": ("extendedResp", 0x78),
 }
+
+_PROTOCOL_DRIVER_CAPABILITIES = (
+    ("http2", ("HTTP_REQUEST",), "request.http2", "h2c or h2s HTTP/2 frames"),
+    ("http1", ("HTTP_*",), "HTTP request fields", "HTTP/1.1 request"),
+    ("websocket", ("WS_*",), "request.websocket", "WebSocket upgrade/frame"),
+    ("dns", ("DNS_*",), "request", "DNS query"),
+    ("mqtt", ("MQTT_*",), "request", "MQTT CONNECT and PUBLISH"),
+    ("ftp", ("CLIENT_DATA", "SERVER_DATA"), "request.ftp", "FTP line"),
+    ("ldap", ("CLIENT_DATA", "SERVER_DATA"), "request.ldap", "LDAP BER message"),
+    ("starttls", ("CLIENT_DATA", "SERVER_DATA"), "request.starttls", "IMAP/POP3/SMTPS line"),
+    ("sip", ("SIP_*",), "request", "SIP message"),
+    ("rtsp", ("RTSP_*",), "request", "RTSP message"),
+    ("icap", ("ICAP_REQUEST", "ICAP_RESPONSE"), "request.icap", "ICAP message"),
+    ("tds", ("TDS_REQUEST", "TDS_RESPONSE"), "request.tds", "TDS packet"),
+    ("fix", ("CLIENT_DATA", "SERVER_DATA", "FIX_HEADER", "FIX_MESSAGE"), "request.fix", "FIX message"),
+    ("pcp", ("PCP_REQUEST",), "request.pcp", "PCP UDP request"),
+    ("radius", ("RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST"), "request.radius", "RADIUS request"),
+    (
+        "raw",
+        ("*",),
+        "request.payload or request.payload_base64",
+        "raw payload fallback; event-specific framing is the caller's responsibility",
+    ),
+)
 
 
 class DriverError(RuntimeError):
@@ -1897,6 +1922,71 @@ def build_radius_request(request: dict[str, Any], event: str) -> bytes:
     return bytes([code, identifier]) + struct.pack(">H", length) + authenticator + encoded_avps
 
 
+def payload_mode(trigger: dict[str, Any]) -> str:
+    """Return the pure stimulus builder selected for one collector request."""
+    event = _text(trigger.get("event"), "event", required=True)
+    assert event is not None
+    request = trigger.get("request", {})
+    if not isinstance(request, dict):
+        raise DriverError("request must be an object")
+    if event == "HTTP_REQUEST" and "http2" in request:
+        return "http2"
+    if event.startswith("HTTP_") and any(
+        field in request
+        for field in ("method", "uri", "host", "headers", "body", "payload_base64")
+    ):
+        return "http1"
+    if event.startswith("WS_") and "websocket" in request:
+        return "websocket"
+    if event.startswith("DNS_"):
+        return "dns"
+    if event.startswith("MQTT_"):
+        return "mqtt"
+    if event in {"CLIENT_DATA", "SERVER_DATA"} and "ftp" in request:
+        return "ftp"
+    if event in {"CLIENT_DATA", "SERVER_DATA"} and "ldap" in request:
+        return "ldap"
+    if event in {"CLIENT_DATA", "SERVER_DATA"} and "starttls" in request:
+        return "starttls"
+    if event.startswith("SIP_"):
+        return "sip"
+    if event.startswith("RTSP_"):
+        return "rtsp"
+    if event in {"ICAP_REQUEST", "ICAP_RESPONSE"}:
+        return "icap"
+    if event in {"TDS_REQUEST", "TDS_RESPONSE"}:
+        return "tds"
+    if event in {"CLIENT_DATA", "SERVER_DATA", "FIX_HEADER", "FIX_MESSAGE"} and "fix" in request:
+        return "fix"
+    if event == "PCP_REQUEST":
+        return "pcp"
+    if event in {"RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST"}:
+        return "radius"
+    return "raw"
+
+
+def capability_report() -> dict[str, Any]:
+    """Return the driver's pure, machine-readable stimulus capabilities."""
+    return {
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "driver": "tmos17-protocol-driver",
+        "modes": [
+            {
+                "mode": mode,
+                "events": list(events),
+                "selector": selector,
+                "stimulus": stimulus,
+            }
+            for mode, events, selector, stimulus in _PROTOCOL_DRIVER_CAPABILITIES
+        ],
+        "preflight": (
+            "payload_mode and build_payload validate the fixture without opening "
+            "a socket; send_payload performs network I/O"
+        ),
+    }
+
+
 def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
     event = _text(trigger.get("event"), "event", required=True)
     assert event is not None
@@ -1904,16 +1994,10 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
     if not isinstance(request, dict):
         raise DriverError("request must be an object")
     timeout = _timeout(request)
-    if event == "HTTP_REQUEST" and "http2" in request:
-        return (
-            _http2_endpoint(trigger, request),
-            build_http2_request(request),
-            timeout,
-        )
-    if event.startswith("HTTP_") and any(
-        field in request
-        for field in ("method", "uri", "host", "headers", "body", "payload_base64")
-    ):
+    mode = payload_mode(trigger)
+    if mode == "http2":
+        return _http2_endpoint(trigger, request), build_http2_request(request), timeout
+    if mode == "http1":
         return (
             endpoint_from_request(
                 request,
@@ -1924,7 +2008,7 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
             build_http_request(request),
             timeout,
         )
-    if event.startswith("WS_") and "websocket" in request:
+    if mode == "websocket":
         return (
             endpoint_from_request(
                 request,
@@ -1935,108 +2019,78 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
             build_websocket_request(request, event),
             timeout,
         )
-    if event.startswith("DNS_"):
+    if mode == "dns":
         return (
             endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="udp", default_port=53),
             build_dns_query(request),
             timeout,
         )
-    if event.startswith("MQTT_"):
+    if mode == "mqtt":
         return (
             endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="tcp", default_port=1883),
             build_mqtt_connect_publish(request),
             timeout,
         )
-    if event in {"CLIENT_DATA", "SERVER_DATA"} and "ftp" in request:
+    if mode == "ftp":
         return (
-            endpoint_from_request(
-                request,
-                trigger.get("traffic_url"),
-                default_scheme="tcp",
-                default_port=21,
-            ),
+            endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="tcp", default_port=21),
             build_ftp_message(request, event),
             timeout,
         )
-    if event in {"CLIENT_DATA", "SERVER_DATA"} and "ldap" in request:
+    if mode == "ldap":
         return (
-            endpoint_from_request(
-                request,
-                trigger.get("traffic_url"),
-                default_scheme="tcp",
-                default_port=389,
-            ),
+            endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="tcp", default_port=389),
             build_ldap_message(request, event),
             timeout,
         )
-    if event in {"CLIENT_DATA", "SERVER_DATA"} and "starttls" in request:
+    if mode == "starttls":
         starttls = request.get("starttls")
         protocol = starttls.get("protocol") if isinstance(starttls, dict) else None
         default_port = {"imap": 143, "pop3": 110, "smtps": 465}.get(
             str(protocol).lower(), 0
         )
         return (
-            endpoint_from_request(
-                request,
-                trigger.get("traffic_url"),
-                default_scheme="tcp",
-                default_port=default_port,
-            ),
+            endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="tcp", default_port=default_port),
             build_starttls_message(request, event),
             timeout,
         )
-    if event.startswith("SIP_"):
+    if mode == "sip":
         return (
             endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="udp", default_port=5060),
             build_sip_message(request, event),
             timeout,
         )
-    if event.startswith("RTSP_"):
+    if mode == "rtsp":
         return (
             endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="tcp", default_port=554),
             build_rtsp_message(request, event),
             timeout,
         )
-    if event in {"ICAP_REQUEST", "ICAP_RESPONSE"}:
+    if mode == "icap":
         return (
-            endpoint_from_request(
-                request,
-                trigger.get("traffic_url"),
-                default_scheme="tcp",
-                default_port=1344,
-            ),
+            endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="tcp", default_port=1344),
             build_icap_message(request, event),
             timeout,
         )
-    if event in {"TDS_REQUEST", "TDS_RESPONSE"}:
+    if mode == "tds":
         return (
-            endpoint_from_request(
-                request,
-                trigger.get("traffic_url"),
-                default_scheme="tcp",
-                default_port=1433,
-            ),
+            endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="tcp", default_port=1433),
             build_tds_message(request, event),
             timeout,
         )
-    if event in {"CLIENT_DATA", "SERVER_DATA", "FIX_HEADER", "FIX_MESSAGE"} and "fix" in request:
+    if mode == "fix":
         return (
-            endpoint_from_request(
-                request,
-                trigger.get("traffic_url"),
-                default_scheme="tcp",
-                default_port=9876,
-            ),
+            endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="tcp", default_port=9876),
             build_fix_message(request, event),
             timeout,
         )
-    if event == "PCP_REQUEST":
+    if mode == "pcp":
         return (
             endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="udp", default_port=5351),
             build_pcp_request(request),
             timeout,
         )
-    if event in {"RADIUS_AAA_AUTH_REQUEST", "RADIUS_AAA_ACCT_REQUEST"}:
+    if mode == "radius":
         return (
             endpoint_from_request(
                 request,
@@ -2102,7 +2156,19 @@ def send_payload(endpoint: Endpoint, payload: bytes, timeout: float) -> None:
         raise DriverError(f"protocol stimulus failed for {endpoint.host}:{endpoint.port}: {exc}") from exc
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Send bounded TMOS 17.5 protocol stimuli or report driver capabilities"
+    )
+    parser.add_argument(
+        "--capabilities",
+        action="store_true",
+        help="print the pure protocol-builder capability report and exit",
+    )
+    args = parser.parse_args(argv)
+    if args.capabilities:
+        print(json.dumps(capability_report(), ensure_ascii=False, allow_nan=False))
+        return 0
     try:
         trigger = read_request()
         endpoint, payload, timeout = build_payload(trigger)

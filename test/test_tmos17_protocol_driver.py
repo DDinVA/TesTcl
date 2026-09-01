@@ -72,6 +72,33 @@ def test_http_driver_builds_structured_request_and_body() -> None:
     assert timeout == 10.0
 
 
+def test_payload_mode_reports_specialized_builder_selection() -> None:
+    assert driver.payload_mode(
+        {"event": "HTTP_REQUEST", "request": {"method": "GET"}}
+    ) == "http1"
+    assert driver.payload_mode(
+        {"event": "HTTP_REQUEST", "request": {"http2": {"active": True}}}
+    ) == "http2"
+    assert driver.payload_mode(
+        {"event": "DNS_REQUEST", "request": {}}
+    ) == "dns"
+    assert driver.payload_mode(
+        {"event": "CLIENT_DATA", "request": {"ldap": {}}}
+    ) == "ldap"
+    assert driver.payload_mode(
+        {"event": "CLIENT_ACCEPTED", "request": {}}
+    ) == "raw"
+
+
+def test_capability_report_is_machine_readable_and_mentions_raw_fallback() -> None:
+    report = driver.capability_report()
+    assert report["profile"] == "tmos-17.5"
+    modes = {item["mode"] for item in report["modes"]}
+    assert {"http1", "http2", "dns", "radius", "raw"} <= modes
+    raw = next(item for item in report["modes"] if item["mode"] == "raw")
+    assert "caller" in raw["stimulus"]
+
+
 def test_http_driver_rejects_header_injection_and_conflicting_body_sources() -> None:
     with pytest.raises(driver.DriverError, match="line breaks"):
         driver.build_http_request({"headers": {"X-Test": "ok\r\nInjected: yes"}})

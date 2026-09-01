@@ -20,6 +20,18 @@ SPEC.loader.exec_module(batch)
 TCL_LSP_ROOT = "/tmp/tcl-lsp"
 
 
+def test_driver_preflight_does_not_require_network_for_rule_init() -> None:
+    result = batch._driver_preflight(
+        {"id": "command_probe:test", "input": {"event": "RULE_INIT"}}
+    )
+    assert result == {
+        "id": "command_probe:test",
+        "event": "RULE_INIT",
+        "mode": "none",
+        "status": "not-required",
+    }
+
+
 def test_batch_materializes_complete_tmos_catalog_with_collector_preflight(tmp_path: Path) -> None:
     output_dir = tmp_path / "capture-batch"
     manifest = batch.build_batch(
@@ -36,6 +48,9 @@ def test_batch_materializes_complete_tmos_catalog_with_collector_preflight(tmp_p
     assert manifest["summary"]["plan_count"] == 4
     assert manifest["summary"]["requires_trigger_count"] > 0
     assert sum(manifest["summary"]["event_counts"].values()) == 986
+    assert manifest["protocol_driver"]["driver"] == "tmos17-protocol-driver"
+    assert manifest["summary"]["bundled_driver_preflight_status_counts"]["buildable"] > 0
+    assert "raw" in manifest["summary"]["bundled_driver_mode_counts"]
 
     on_disk = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert on_disk == manifest
@@ -50,6 +65,16 @@ def test_batch_materializes_complete_tmos_catalog_with_collector_preflight(tmp_p
         )
         validated = batch.COLLECTOR.validate_plan(plan)
         assert len(validated["observations"]) == plan_info["observation_count"]
+        if any(
+            item["input"]["event"] == "CLIENT_ACCEPTED"
+            for item in plan["observations"]
+        ):
+            raw_fallback = next(
+                item
+                for item in plan["observations"]
+                if item["input"]["event"] == "CLIENT_ACCEPTED"
+            )
+            assert raw_fallback["input"]["request"] == {"payload": "testcl"}
 
 
 def test_batch_variants_choose_collector_safe_chunk_size(tmp_path: Path) -> None:

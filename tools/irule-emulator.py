@@ -4079,11 +4079,16 @@ def _build_behavior_vector_candidates(
                     f"{row['id']}:variant:{variant_index + 1}"
                 )
                 capture_variant_ids.append(observation_id)
+                capture_input = _capture_plan_probe_input(variant_input)
+                if "request" not in capture_input:
+                    capture_request = _capture_plan_request_template(template["event"])
+                    if capture_request is not None:
+                        capture_input["request"] = capture_request
                 observations.append(
                     {
                         "id": observation_id,
                         "operation": "command_probe",
-                        "input": _capture_plan_probe_input(variant_input),
+                        "input": capture_input,
                         "comparisons": [
                             {
                                 "label": "command status",
@@ -4403,6 +4408,16 @@ def _protocol_request_template(event: str) -> dict[str, Any] | None:
     return None
 
 
+def _capture_plan_request_template(event: str) -> dict[str, Any] | None:
+    """Return an external-driver fixture, including a bounded raw fallback."""
+    request = _protocol_request_template(event)
+    if request is not None:
+        return request
+    if event != "RULE_INIT":
+        return {"payload": "testcl"}
+    return None
+
+
 def _build_capture_plan_template(
     root: Path,
     offset: int,
@@ -4460,7 +4475,7 @@ def _build_capture_plan_template(
     observations: list[dict[str, Any]] = []
     for case in campaign_data["cases"]:
         template = _command_probe_template(root, case["name"], event_inventory)
-        protocol_request = _protocol_request_template(template["event"])
+        protocol_request = _capture_plan_request_template(template["event"])
         probe_input: dict[str, Any] = {
             "command": case["name"],
             "args": list(template["args"]),

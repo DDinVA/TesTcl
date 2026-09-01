@@ -25,6 +25,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 EMULATOR_PATH = ROOT / "tools" / "irule-emulator.py"
 COLLECTOR_PATH = ROOT / "tools" / "tmos17-collector.py"
+PROTOCOL_DRIVER_PATH = ROOT / "tools" / "tmos17-protocol-driver.py"
 
 
 class BatchError(RuntimeError):
@@ -43,6 +44,9 @@ def _load_module(path: Path, name: str) -> ModuleType:
 
 EMULATOR = _load_module(EMULATOR_PATH, "testcl_irule_emulator_for_batch")
 COLLECTOR = _load_module(COLLECTOR_PATH, "testcl_tmos17_collector_for_batch")
+PROTOCOL_DRIVER = _load_module(
+    PROTOCOL_DRIVER_PATH, "testcl_tmos17_protocol_driver_for_batch"
+)
 MAX_METADATA_BYTES = 8 * 1024 * 1024
 
 
@@ -68,6 +72,44 @@ def _event_counts(observations: list[dict[str, Any]]) -> dict[str, int]:
         event = observation["input"]["event"]
         counts[event] = counts.get(event, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def _driver_preflight(observation: dict[str, Any]) -> dict[str, Any]:
+    """Validate one generated driver fixture without opening a network socket."""
+    event = observation["input"]["event"]
+    if event == "RULE_INIT":
+        return {
+            "id": observation["id"],
+            "event": event,
+            "mode": "none",
+            "status": "not-required",
+        }
+    request = observation["input"].get("request", {})
+    trigger = {
+        "event": event,
+        "request": request,
+        "traffic_url": "tcp://192.0.2.10:1024",
+    }
+    mode = "unknown"
+    try:
+        mode = PROTOCOL_DRIVER.payload_mode(trigger)
+        endpoint, payload, _ = PROTOCOL_DRIVER.build_payload(trigger)
+    except PROTOCOL_DRIVER.DriverError as exc:
+        return {
+            "id": observation["id"],
+            "event": event,
+            "mode": mode,
+            "status": "fixture-error",
+            "error": str(exc)[:2048],
+        }
+    return {
+        "id": observation["id"],
+        "event": event,
+        "mode": mode,
+        "status": "raw-fallback" if mode == "raw" else "buildable",
+        "endpoint_scheme": endpoint.scheme,
+        "payload_bytes": len(payload),
+    }
 
 
 def _normalise_optional_string(value: str | None, field: str) -> str | None:
@@ -174,6 +216,9 @@ def build_batch(
     directly_triggerable_count = 0
     requires_trigger_count = 0
     aggregate_events: dict[str, int] = {}
+    aggregate_driver_modes: dict[str, int] = {}
+    aggregate_driver_statuses: dict[str, int] = {}
+    aggregate_driver_failures: list[dict[str, Any]] = []
 
     while True:
         campaign = EMULATOR._build_capture_campaign(
@@ -209,6 +254,27 @@ def build_batch(
         supported = sum(1 for item in observations if item["event_supported"])
         unsupported = len(observations) - supported
         events = _event_counts(observations)
+        driver_results = [_driver_preflight(item) for item in observations]
+        driver_modes: dict[str, int] = {}
+        driver_statuses: dict[str, int] = {}
+        driver_failures: list[dict[str, Any]] = []
+        for result in driver_results:
+            mode = result["mode"]
+            status = result["status"]
+            driver_modes[mode] = driver_modes.get(mode, 0) + 1
+            driver_statuses[status] = driver_statuses.get(status, 0) + 1
+            aggregate_driver_modes[mode] = aggregate_driver_modes.get(mode, 0) + 1
+            aggregate_driver_statuses[status] = aggregate_driver_statuses.get(status, 0) + 1
+            if status == "fixture-error":
+                failure = {
+                    "id": result["id"],
+                    "event": result["event"],
+                    "mode": mode,
+                    "error": result["error"],
+                }
+                driver_failures.append(failure)
+                if len(aggregate_driver_failures) < 32:
+                    aggregate_driver_failures.append(failure)
         for event, count in events.items():
             aggregate_events[event] = aggregate_events.get(event, 0) + count
         plan_filename = f"plan-{plan_index:04d}.json"
@@ -220,6 +286,9 @@ def build_batch(
             "directly_triggerable_count": supported,
             "requires_trigger_count": unsupported,
             "event_counts": events,
+            "driver_mode_counts": dict(sorted(driver_modes.items())),
+            "driver_preflight_status_counts": dict(sorted(driver_statuses.items())),
+            "driver_preflight_failures": driver_failures[:32],
             "commands": [case["name"] for case in cases],
         }
         plan_payloads.append((plan_filename, plan, plan_info))
@@ -262,8 +331,14 @@ def build_batch(
             "directly_triggerable_count": directly_triggerable_count,
             "requires_trigger_count": requires_trigger_count,
             "event_counts": dict(sorted(aggregate_events.items())),
+            "bundled_driver_mode_counts": dict(sorted(aggregate_driver_modes.items())),
+            "bundled_driver_preflight_status_counts": dict(
+                sorted(aggregate_driver_statuses.items())
+            ),
+            "bundled_driver_preflight_failures": aggregate_driver_failures,
         },
         "blocked_catalog_file": "blocked-catalog.json",
+        "protocol_driver": PROTOCOL_DRIVER.capability_report(),
         "plans": [plan_info for _, _, plan_info in plan_payloads],
     }
 
