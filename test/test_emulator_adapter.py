@@ -16720,6 +16720,11 @@ when MQTT_CLIENT_INGRESS {
         self.assertEqual(connect_event["emissions"][1]["kind"], "response")
         self.assertEqual(connect_event["emissions"][1]["to"], "client")
         self.assertEqual(connect_event["emissions"][1]["packet"]["return_code"], "5")
+        self.assertEqual(
+            [(item["protocol"], item["kind"], item["wire_kind"]) for item in result["wire_outputs"]],
+            [("mqtt", "insert", "framed"), ("mqtt", "response", "framed")],
+        )
+        self.assertTrue(all(item["bytes"] == len(bytes.fromhex(item["payload_hex"])) for item in result["wire_outputs"]))
         connect_egress = next(
             event
             for event in result["trace"][0]["events"]
@@ -24736,6 +24741,20 @@ when CLIENT_DATA {
             tcl_lsp_root=self.tcl_lsp_root,
         )
         self.assertEqual(result["emitted"][0]["payload_hex"], "00ff10")
+        self.assertEqual(
+            result["wire_outputs"],
+            [
+                {
+                    "protocol": "udp",
+                    "direction": "server_to_client",
+                    "packet_index": 0,
+                    "event": "CLIENT_DATA",
+                    "wire_kind": "payload",
+                    "payload_hex": "00ff10",
+                    "bytes": 3,
+                }
+            ],
+        )
 
     def test_live_udp_dns_return_sends_serialized_response(self) -> None:
         scenario = {

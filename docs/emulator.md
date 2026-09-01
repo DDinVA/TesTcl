@@ -1255,8 +1255,12 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 
 [`examples/golden-vectors/dns-wire-17.5.json`](../examples/golden-vectors/dns-wire-17.5.json)
 adds a byte-level DNS response contract. Packet replay exposes bounded
-`wire_outputs`, allowing a serialized response to be compared alongside event
-and state results:
+`wire_outputs`, allowing serialized protocol bytes to be compared alongside
+event and state results. DNS messages are emitted as protocol messages;
+deterministic TCP, UDP, MQTT, SCTP, and WebSocket emissions are also projected
+when the adapter has their payload or framed bytes. These are protocol-level
+bytes, not IP/TCP headers, and each non-DNS output identifies whether it is a
+`payload` or `framed` value in `wire_kind`:
 
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \

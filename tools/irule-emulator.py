@@ -28824,7 +28824,7 @@ class EmulatorSession:
     def _build_packet_wire_outputs(
         cls, packet_trace: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Expose deterministic protocol responses produced during packet replay."""
+        """Expose deterministic protocol bytes produced during packet replay."""
         outputs: list[dict[str, Any]] = []
         encoded_size = 0
 
@@ -28836,49 +28836,117 @@ class EmulatorSession:
             return isinstance(value, str) and value.lower() in {"1", "true"}
 
         def visit(event: Any, packet_entry: dict[str, Any]) -> None:
+            if not isinstance(event, dict):
+                return
+            packet_index = packet_entry.get("index", 0)
+            if not isinstance(packet_index, int) or isinstance(packet_index, bool):
+                packet_index = 0
+            if event.get("event") == "DNS_RESPONSE":
+                state = event.get("state")
+                dns_state = state.get("dns") if isinstance(state, dict) else None
+                if isinstance(dns_state, dict):
+                    packet_dropped = packet_entry.get("dropped")
+                    dns_dropped = dns_state.get("dropped")
+                    packet_responded = packet_entry.get("responded")
+                    packet_was_dropped = flag_is_true(packet_dropped)
+                    response_was_emitted = flag_is_true(packet_responded)
+                    payload_hex = dns_state.get("message_hex")
+                    if (
+                        response_was_emitted
+                        and not packet_was_dropped
+                        and not flag_is_true(dns_dropped)
+                        and isinstance(payload_hex, str)
+                        and payload_hex
+                        and len(payload_hex) % 2 == 0
+                    ):
+                        try:
+                            payload = bytes.fromhex(payload_hex)
+                        except ValueError:
+                            payload = None
+                        if payload is not None:
+                            append_output(
+                                {
+                                    "protocol": "dns",
+                                    "direction": "server_to_client",
+                                    "packet_index": packet_index,
+                                    "event": "DNS_RESPONSE",
+                                    "payload_hex": payload.hex(),
+                                    "bytes": len(payload),
+                                }
+                            )
+
+            emissions = event.get("emissions")
+            if isinstance(emissions, list):
+                for emission in emissions:
+                    if not isinstance(emission, dict):
+                        continue
+                    protocol = emission.get("protocol")
+                    if protocol is None:
+                        protocol = packet_entry.get("protocol")
+                    direction = emission.get("direction")
+                    if direction is None and isinstance(emission.get("to"), str):
+                        direction = {
+                            "client": "server_to_client",
+                            "server": "client_to_server",
+                        }.get(emission["to"])
+                    if (
+                        not isinstance(protocol, str)
+                        or not protocol
+                        or not isinstance(direction, str)
+                        or direction not in {"client_to_server", "server_to_client"}
+                    ):
+                        continue
+                    wire_hex = emission.get("wire_hex")
+                    payload_hex = emission.get("payload_hex")
+                    wire_kind = "framed" if isinstance(wire_hex, str) else "payload"
+                    raw_hex = wire_hex if wire_kind == "framed" else payload_hex
+                    if isinstance(raw_hex, str):
+                        try:
+                            payload = bytes.fromhex(raw_hex)
+                        except ValueError:
+                            continue
+                    else:
+                        raw_payload = emission.get("payload")
+                        if not isinstance(raw_payload, str):
+                            continue
+                        try:
+                            payload = raw_payload.encode("utf-8")
+                        except UnicodeEncodeError:
+                            continue
+                    if not payload:
+                        continue
+                    output = {
+                        "protocol": protocol,
+                        "direction": direction,
+                        "packet_index": packet_index,
+                        "event": (
+                            event.get("event")
+                            if isinstance(event.get("event"), str)
+                            else ""
+                        ),
+                        "wire_kind": wire_kind,
+                        "payload_hex": payload.hex(),
+                        "bytes": len(payload),
+                    }
+                    emission_kind = emission.get("kind") or emission.get("type")
+                    if isinstance(emission_kind, str) and emission_kind:
+                        output["kind"] = emission_kind
+                    append_output(output)
+
+            notifications = event.get("notifications")
+            if isinstance(notifications, list):
+                for notification in notifications:
+                    visit(notification, packet_entry)
+
+        def append_output(output: dict[str, Any]) -> None:
             nonlocal encoded_size
-            if not isinstance(event, dict) or event.get("event") != "DNS_RESPONSE":
-                if isinstance(event, dict):
-                    notifications = event.get("notifications")
-                    if isinstance(notifications, list):
-                        for notification in notifications:
-                            visit(notification, packet_entry)
-                return
-            state = event.get("state")
-            dns_state = state.get("dns") if isinstance(state, dict) else None
-            if not isinstance(dns_state, dict):
-                return
-            packet_dropped = packet_entry.get("dropped")
-            dns_dropped = dns_state.get("dropped")
-            packet_responded = packet_entry.get("responded")
-            packet_was_dropped = flag_is_true(packet_dropped)
-            response_was_emitted = flag_is_true(packet_responded)
-            payload_hex = dns_state.get("message_hex")
-            if (
-                not response_was_emitted
-                or packet_was_dropped
-                or flag_is_true(dns_dropped)
-                or not isinstance(payload_hex, str)
-                or not payload_hex
-                or len(payload_hex) % 2
-            ):
-                return
-            try:
-                payload = bytes.fromhex(payload_hex)
-            except ValueError:
-                return
-            output = {
-                "protocol": "dns",
-                "direction": "server_to_client",
-                "packet_index": packet_entry.get("index", 0),
-                "event": "DNS_RESPONSE",
-                "payload_hex": payload.hex(),
-                "bytes": len(payload),
-            }
             encoded_size += len(
-                json.dumps(output, ensure_ascii=False, separators=(",", ":")).encode(
-                    "utf-8"
-                )
+                json.dumps(
+                    output,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
             )
             if len(outputs) >= PACKET_WIRE_OUTPUT_MAX_EVENTS:
                 raise EmulatorResourceError(
