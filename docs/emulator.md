@@ -3567,6 +3567,10 @@ destination and values for the target environment. Replace the placeholder
 provenance when using the defaults. The plan contains no reference output and
 therefore is not evidence until a real BIG-IP or vLab collector produces
 matching records.
+Profile-driven events such as ACCESS and ASM receive an HTTP transaction
+fixture when their selected event requires the HTTP profile; protocol-specific
+events remain on their dedicated builders, and unclassified events retain the
+explicit raw-payload fallback.
 
 The HTTP equivalent is `GET /v1/capture-plan-template`; it accepts the same
 pagination and filtering parameters as the campaign endpoint plus
