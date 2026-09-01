@@ -585,3 +585,4 @@ jobs:
         run: |
           uv venv --python 3.13 --allow-existing .venv
           ./scripts/live-udp-upstream-compose-smoke.sh
+          ./scripts/live-http-upstream-compose-smoke.sh

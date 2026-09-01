@@ -37,6 +37,7 @@ COPY examples/golden-vectors /opt/testcl/examples/golden-vectors
 COPY examples/scenarios/live-http-17.5.json /opt/testcl/examples/scenarios/live-http-17.5.json
 COPY examples/scenarios/live-http2-17.5.json /opt/testcl/examples/scenarios/live-http2-17.5.json
 COPY examples/scenarios/live-http-upstream-17.5.json /opt/testcl/examples/scenarios/live-http-upstream-17.5.json
+COPY examples/scenarios/live-http-upstream-compose-17.5.json /opt/testcl/examples/scenarios/live-http-upstream-compose-17.5.json
 COPY examples/scenarios/live-dns-17.5.json /opt/testcl/examples/scenarios/live-dns-17.5.json
 COPY examples/scenarios/live-tcp-17.5.json /opt/testcl/examples/scenarios/live-tcp-17.5.json
 COPY examples/scenarios/live-tcp-pool-17.5.json /opt/testcl/examples/scenarios/live-tcp-pool-17.5.json
@@ -59,7 +60,7 @@ ENV TCL_LSP_ROOT=/opt/tcl-lsp \
     PYTHONUNBUFFERED=1
 
 WORKDIR /work
-EXPOSE 8080 18080 18082/tcp 18082/udp 18083
+EXPOSE 8080 18080 18082/tcp 18082/udp 18083 18084
 HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=5 \
     CMD python -c "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2); response.read(); response.close(); raise SystemExit(0 if response.status == 200 else 1)"
 ENTRYPOINT ["python", "/opt/testcl/tools/irule-emulator.py"]

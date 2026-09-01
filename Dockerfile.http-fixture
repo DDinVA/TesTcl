@@ -1,0 +1,9 @@
+# Small deterministic HTTP backend used by the Compose upstream workbench.
+
+FROM python:3.13-slim-bookworm
+
+COPY tools/http-fixture.py /opt/testcl/http-fixture.py
+
+EXPOSE 18090
+ENTRYPOINT ["python", "/opt/testcl/http-fixture.py"]
+CMD ["--host", "0.0.0.0", "--port", "18090"]

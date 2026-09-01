@@ -284,6 +284,14 @@ It starts the optional `udp` Compose profile, uses
 and verifies the `CLIENT_DATA` mutation, pool-mapped backend exchange,
 `SERVER_DATA` mutation, and exported observation phases.
 
+For a fully local two-container evaluation with a real HTTP backend, run
+[`live-http-upstream-compose-smoke.sh`](../scripts/live-http-upstream-compose-smoke.sh).
+It starts the optional `http` Compose profile and uses
+[`live-http-upstream-compose-17.5.json`](../examples/scenarios/live-http-upstream-compose-17.5.json)
+to verify that an iRule request-header mutation reaches the backend and an
+iRule response-header mutation returns to the client. The backend is a bounded
+Python 3.13 fixture; it is a transport test and not an application server.
+
 The checked-in [`live-sip-17.5.json`](../examples/scenarios/live-sip-17.5.json)
 fixture and [`live-sip-observation-smoke.sh`](../scripts/live-sip-observation-smoke.sh)
 exercise the SIP-over-UDP listener with a real `OPTIONS` datagram and a

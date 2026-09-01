@@ -76,6 +76,10 @@ For the containerized real-backend UDP checkpoint, run
 `scripts/live-udp-upstream-compose-smoke.sh`; it starts the optional Compose
 `udp` profile, sends a datagram through the pool-mapped upstream, and verifies
 the exported `datagram` and `upstream_data` observations.
+For the containerized real-backend HTTP checkpoint, run
+`scripts/live-http-upstream-compose-smoke.sh`; it starts the optional Compose
+`http` profile, verifies request and response header mutations across the
+pool-mapped upstream, and checks the exported live observation phases.
 For catalog-wide progress, run `./scripts/emulate-irule.sh --catalog-smoke
 --namespace HTTP --limit 16`; this executes safe zero-argument probes and
 reports which commands work, need arguments, or fail in the current emulator.
