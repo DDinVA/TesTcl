@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "link-controls-17.5",
+  "cases": [
+    {
+      "id": "hop-identity-qos-and-vlan-queries",
+      "scenario": {
+        "profiles": ["TCP"],
+        "irule": "when CLIENT_ACCEPTED {\n  set observed [list [LINK::lasthop] [LINK::lasthop id] [LINK::lasthop type] [LINK::lasthop name] [LINK::nexthop] [LINK::nexthop id] [LINK::nexthop type] [LINK::nexthop name] [LINK::qos] [LINK::vlan_id]]\n  log local0. \"observed=$observed\"\n}",
+        "packets": [
+          {
+            "protocol": "event",
+            "event": "CLIENT_ACCEPTED",
+            "state": {
+              "link": {
+                "qos": 5,
+                "vlan_id": 4094,
+                "lasthop_mac": "aa:bb:cc:dd:ee:ff",
+                "lasthop_id": "last-1",
+                "lasthop_type": "router",
+                "lasthop_name": "edge-a",
+                "nexthop_mac": "11:22:33:44:55:66",
+                "nexthop_id": "next-1",
+                "nexthop_type": "router",
+                "nexthop_name": "core-a"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "link", "qos"], "equals": "5"},
+          {"path": ["trace", 0, "events", 0, "state", "link", "vlan_id"], "equals": "4094"},
+          {"path": ["trace", 0, "events", 0, "state", "link", "lasthop_mac"], "equals": "aa:bb:cc:dd:ee:ff"},
+          {"path": ["trace", 0, "events", 0, "state", "link", "lasthop_id"], "equals": "last-1"},
+          {"path": ["trace", 0, "events", 0, "state", "link", "nexthop_mac"], "equals": "11:22:33:44:55:66"},
+          {"path": ["trace", 0, "events", 0, "state", "link", "nexthop_id"], "equals": "next-1"}
+        ]
+      }
+    }
+  ]
+}
