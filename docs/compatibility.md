@@ -168,7 +168,12 @@ Generic UDP traces expose datagram payload bytes, client/server/local/remote
 ports, and the `CLIENT_DATA`/`SERVER_DATA` path. The UDP semantic layer models
 payload replacement, drop, hold/release, response emission, and bounded buffer,
 rate, send-buffer, debug-queue, MSS, and unused-port controls. It does not run
-TMM queue scheduling, NAT, connection tracking, or a live upstream UDP socket.
+TMM queue scheduling, NAT, connection tracking, or a full UDP network stack.
+The real-client UDP data plane can optionally bridge one bounded datagram at a
+time to a direct or pool-mapped upstream target, feed the response through
+`SERVER_DATA`, and fire `LB_FAILED`/`LB::reselect` for failed mapped members;
+that bridge is intentionally not a complete UDP load balancer and does not
+retain a real upstream socket between datagrams.
 The six TMOS 17.5 `DATAGRAM::*` readers are also modeled. They expose validated
 IPv4/IPv6 header values, TCP/UDP payload and header metadata, DNS header fields,
 and Layer-2 destination values from a direct event state layer or a packet's

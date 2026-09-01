@@ -265,9 +265,16 @@ address/port, so Tcl state survives across datagrams from the same client.
 payloads; incoming datagrams are submitted as lossless `payload_hex` packets.
 Datagrams larger than the configured limit are rejected, and idle/evicted
 client sessions are closed rather than allowed to grow without bound. This is
-a local UDP event adapter, not a BIG-IP TMM, DNS server, or upstream UDP load
-balancer. DNS, RADIUS, DHCP, SIP, PCP, and other protocol-specific UDP
-semantics remain available through the packet/API and capture-driver paths.
+a local UDP event adapter, not a BIG-IP TMM, DNS server, or full upstream UDP
+load balancer. For generic UDP, an optional `live_data_plane.upstream` can send
+one iRule-mutated datagram to a direct `{host, port}` endpoint or to a mapped
+pool target, then feed the bounded reply through `SERVER_DATA` before returning
+it to the client. Failed mapped targets fire `LB_FAILED`, honor `pool` plus
+`LB::reselect`, and enter the same temporary scheduler cooldown used by the
+other live bridges. The bridge does not interpret the backend protocol or
+retain a real upstream socket between datagrams. DNS, RADIUS, DHCP, SIP, PCP,
+and other protocol-specific UDP semantics remain available through the
+packet/API and capture-driver paths; SIP upstream proxying remains unsupported.
 Live UDP observations can be exported through
 `/v1/live-observations/capture-plan` for external BIG-IP/vLab comparison.
 
@@ -1706,6 +1713,7 @@ Generic UDP packet traces fire `CLIENT_ACCEPTED`, `CLIENT_DATA`,
 by wire-byte offset, and the adapter records UDP drop, hold/release, respond,
 port, buffer, rate, and debug-queue controls in the event trace. This is a
 bounded datagram model: it does not implement TMM queue scheduling, NAT, or a
+full UDP network stack; the optional live bridge is the only path that opens a
 real upstream UDP socket.
 Structured packet traces may also contain a synthetic `{"protocol":"event"}`
 record with an uppercase catalogued `event` and validated `state` object. This

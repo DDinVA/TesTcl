@@ -28467,7 +28467,11 @@ class EmulatorSession:
                         if field in packet:
                             merged[field] = packet[field]
                     return merged, 0
-        if packet["protocol"] == "udp" and packet.get("_wire_payload"):
+        if (
+            packet["protocol"] == "udp"
+            and packet.get("_wire_payload")
+            and any(str(profile).upper() == "DNS" for profile in self._profiles)
+        ):
             decoded_dns = _decode_dns_payload(
                 packet["_wire_payload"], packet["direction"], packet_index
             )
@@ -31635,6 +31639,12 @@ class EmulatorSession:
                     )
                 if "payload" in udp_state:
                     entry["payload_after"] = udp_state["payload"]
+                if not entry.get("dropped") and not entry.get("held") and not entry.get("responded"):
+                    forwarded_hex = str(
+                        session.eval_tcl("binary encode hex $::state::udp::payload")
+                    )
+                    entry["forwarded_payload_hex"] = forwarded_hex
+                    entry["forwarded_byte_length"] = len(bytes.fromhex(forwarded_hex))
                 continue
             else:  # Generic UDP has no single catalogued iRule data event.
                 entry["ignored"] = "generic UDP packet has no protocol-specific event adapter"
@@ -36379,9 +36389,9 @@ def _normalise_live_data_plane_scenario(
         )
     upstream_config = config.get("upstream")
     if upstream_config is not None:
-        if protocol in {"udp", "sip"}:
+        if protocol == "sip":
             raise EmulatorInputError(
-                f"live_data_plane.upstream is not supported for the {protocol.upper()} data plane"
+                "live_data_plane.upstream is not supported for the SIP data plane"
             )
         if not isinstance(upstream_config, dict):
             raise EmulatorInputError("live_data_plane.upstream must be an object")
@@ -36541,7 +36551,7 @@ def _normalise_live_data_plane_scenario(
         if "tls" in upstream_config and upstream_config["tls"] is not None:
             if protocol not in {"http", "http2", "websocket"}:
                 raise EmulatorInputError(
-                    "live_data_plane.upstream.tls is only valid for HTTP or WebSocket"
+                    "live_data_plane.upstream.tls is only valid for HTTP, HTTP/2, or WebSocket"
                 )
             upstream_tls = _normalise_live_upstream_tls(upstream_config["tls"])
         if protocol == "http2" and upstream_config is not None and upstream_tls is None:
@@ -39267,6 +39277,226 @@ def _live_udp_handler(
                 )
             self.request[1].sendto(payload, self.client_address)
 
+        @staticmethod
+        def _forwarded_payload(result: Any, direction: str) -> bytes | None:
+            """Return one bounded UDP payload that the iRule passed onward."""
+            if not isinstance(result, dict):
+                raise EmulatorInputError("emulator returned an invalid UDP result")
+            trace = result.get("trace", [])
+            if not isinstance(trace, list):
+                raise EmulatorInputError("emulator returned invalid UDP trace")
+            for entry in trace:
+                if not isinstance(entry, dict) or entry.get("direction") != direction:
+                    continue
+                payload_hex = entry.get("forwarded_payload_hex")
+                if payload_hex is None:
+                    continue
+                if not isinstance(payload_hex, str) or len(payload_hex) % 2:
+                    raise EmulatorInputError(
+                        "emulator returned invalid forwarded UDP payload"
+                    )
+                try:
+                    return bytes.fromhex(payload_hex)
+                except ValueError as exc:
+                    raise EmulatorInputError(
+                        "emulator returned invalid forwarded UDP payload"
+                    ) from exc
+            return None
+
+        @staticmethod
+        def _connect_upstream(
+            endpoint: dict[str, Any], timeout: float
+        ) -> socket.socket:
+            """Open one bounded connected UDP socket to a selected target."""
+            host = endpoint.get("host")
+            port = endpoint.get("port")
+            if not isinstance(host, str) or not isinstance(port, int):
+                raise EmulatorInputError("live UDP upstream endpoint is invalid")
+            try:
+                addresses = socket.getaddrinfo(
+                    host, port, type=socket.SOCK_DGRAM, proto=socket.IPPROTO_UDP
+                )
+            except OSError as exc:
+                raise OSError(f"could not resolve live UDP upstream {host!r}") from exc
+            last_error: OSError | None = None
+            for family, socktype, proto, _canonname, sockaddr in addresses[:8]:
+                upstream: socket.socket | None = None
+                try:
+                    upstream = socket.socket(family, socktype, proto)
+                    upstream.settimeout(timeout)
+                    upstream.connect(sockaddr)
+                    return upstream
+                except OSError as exc:
+                    last_error = exc
+                    if upstream is not None:
+                        try:
+                            upstream.close()
+                        except OSError:
+                            pass
+            raise last_error or OSError("could not connect to live UDP upstream")
+
+        def _upstream_packet(
+            self, upstream: socket.socket, payload: bytes
+        ) -> dict[str, Any]:
+            """Build a server-to-client packet from one upstream datagram."""
+            try:
+                source = upstream.getpeername()
+            except OSError:
+                source = ("127.0.0.1", 0)
+            return {
+                "protocol": "udp",
+                "direction": "server_to_client",
+                "source": self._socket_endpoint(source, ("127.0.0.1", 0)),
+                "destination": self._socket_endpoint(
+                    self.client_address, ("127.0.0.1", 0)
+                ),
+                "payload_hex": payload.hex(),
+            }
+
+        def _process_upstream_response(
+            self, session_id: str, upstream: socket.socket, payload: bytes
+        ) -> None:
+            result = manager.execute(
+                session_id,
+                lambda session: session.run_packet_trace(
+                    [self._upstream_packet(upstream, payload)]
+                ),
+            )
+            if observations is not None:
+                observations.append(
+                    session_id=session_id,
+                    protocol="udp",
+                    phase="upstream_data",
+                    direction="server_to_client",
+                    result=result,
+                )
+            self._send_emissions(result)
+            forwarded = self._forwarded_payload(result, "server_to_client")
+            if forwarded is not None:
+                if len(forwarded) > config["max_read_bytes"]:
+                    raise EmulatorResourceError(
+                        "UDP forwarded data exceeds the configured byte limit"
+                    )
+                self.request[1].sendto(forwarded, self.client_address)
+
+        def _forward_upstream(
+            self, session_id: str, payload: bytes
+        ) -> None:
+            upstream_config = config.get("upstream")
+            if not isinstance(upstream_config, dict):
+                return
+            if len(payload) > config["max_read_bytes"]:
+                raise EmulatorResourceError(
+                    "UDP forwarded data exceeds the configured byte limit"
+                )
+            pending = _resolve_live_upstream_candidates(
+                config, manager, session_id, getattr(self.server, "_testcl_pool_scheduler", None)
+            )
+            attempted: set[tuple[str, str, str, int]] = set()
+            last_error: BaseException | None = None
+            while pending:
+                selected_pool, member, endpoint = pending.pop(0)
+                candidate_key = (
+                    selected_pool,
+                    member,
+                    endpoint["host"],
+                    endpoint["port"],
+                )
+                if candidate_key in attempted:
+                    continue
+                attempted.add(candidate_key)
+                upstream: socket.socket | None = None
+                try:
+                    upstream = self._connect_upstream(
+                        endpoint, upstream_config["connect_timeout"]
+                    )
+                    sent = upstream.send(payload)
+                    if sent != len(payload):
+                        raise OSError("live UDP upstream sent a partial datagram")
+                    response = upstream.recv(config["max_read_bytes"] + 1)
+                    if len(response) > config["max_read_bytes"]:
+                        raise EmulatorResourceError(
+                            "live UDP upstream response exceeds the configured byte limit"
+                        )
+                    scheduler = getattr(self.server, "_testcl_pool_scheduler", None)
+                    if scheduler is not None and member:
+                        scheduler.mark_success(selected_pool, member)
+                    self._process_upstream_response(session_id, upstream, response)
+                    return
+                except EmulatorResourceError:
+                    raise
+                except (OSError, socket.timeout) as exc:
+                    last_error = exc
+                    scheduler = getattr(self.server, "_testcl_pool_scheduler", None)
+                    if scheduler is not None and member:
+                        scheduler.mark_failure(selected_pool, member)
+                    failure_cause = (
+                        "connection_timeout" if isinstance(exc, TimeoutError) else "unreachable"
+                    )
+                    failure = manager.execute(
+                        session_id,
+                        lambda session: session.fire_live_lb_failure_event(
+                            failure_cause
+                        ),
+                    )
+                    if observations is not None:
+                        observations.append(
+                            session_id=session_id,
+                            protocol="udp",
+                            phase="lb_failure",
+                            direction="client_to_server",
+                            result=failure,
+                        )
+                    event = failure.get("event", {})
+                    if isinstance(event, dict):
+                        self._send_emissions({"emitted": event.get("emissions", [])})
+                        event_state = event.get("state")
+                        udp_state = (
+                            event_state.get("udp", {})
+                            if isinstance(event_state, dict)
+                            else {}
+                        )
+                        if isinstance(udp_state, dict) and any(
+                            udp_state.get(field) in {"1", "true"}
+                            for field in ("dropped", "held", "responded")
+                        ):
+                            return
+                    if upstream_config.get("endpoint") is not None:
+                        break
+                    try:
+                        selection = failure.get("selection", {})
+                        refreshed = _resolve_live_upstream_candidates(
+                            config,
+                            manager,
+                            session_id,
+                            getattr(self.server, "_testcl_pool_scheduler", None),
+                        )
+                    except EmulatorInputError:
+                        refreshed = []
+                        selection = {}
+                    if selection.get("pool") != selected_pool:
+                        pending = []
+                    pending.extend(
+                        candidate
+                        for candidate in refreshed
+                        if (
+                            candidate[0],
+                            candidate[1],
+                            candidate[2]["host"],
+                            candidate[2]["port"],
+                        ) not in attempted
+                    )
+                finally:
+                    if upstream is not None:
+                        try:
+                            upstream.close()
+                        except OSError:
+                            pass
+            raise EmulatorInputError(
+                "live UDP upstream request failed: "
+                f"{last_error or 'no eligible upstream target'}"
+            )
+
         def handle(self) -> None:  # noqa: D401 - socketserver API
             payload, _socket_object = self.request
             if not isinstance(payload, bytes):
@@ -39307,7 +39537,11 @@ def _live_udp_handler(
                         result=result,
                     )
                 self._send_emissions(result)
-                if config["protocol"] == "sip":
+                if config.get("upstream") is not None:
+                    forwarded = self._forwarded_payload(result, "client_to_server")
+                    if forwarded is not None:
+                        self._forward_upstream(session_id, forwarded)
+                elif config["protocol"] == "sip":
                     for payload in _live_sip_response_payloads(
                         result, config["max_read_bytes"]
                     ):

@@ -25147,6 +25147,242 @@ when CLIENT_DATA {
             server.server_close()
             manager.close_all()
 
+    def test_live_udp_data_plane_bridges_a_real_pool_upstream(self) -> None:
+        received: list[bytes] = []
+
+        class UpstreamHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:  # noqa: D401 - socketserver API
+                payload, socket_object = self.request
+                received.append(bytes(payload))
+                socket_object.sendto(b"origin:" + bytes(payload), self.client_address)
+
+        upstream_server = socketserver.ThreadingUDPServer(
+            ("127.0.0.1", 0), UpstreamHandler
+        )
+        upstream_server.daemon_threads = True
+        upstream_thread = threading.Thread(
+            target=upstream_server.serve_forever, daemon=True
+        )
+        upstream_thread.start()
+        scenario = {
+            "profiles": ["UDP"],
+            "pools": {"app_pool": ["udp-backend:5353"]},
+            "irule": """
+when CLIENT_DATA {
+    UDP::payload replace 0 5 query
+    pool app_pool
+}
+when SERVER_DATA {
+    UDP::payload replace 0 7 reply:
+}
+""",
+            "live_data_plane": {
+                "protocol": "udp",
+                "read_timeout": 0.5,
+                "upstream": {
+                    "pool": "app_pool",
+                    "targets": {
+                        "udp-backend:5353": {
+                            "host": "127.0.0.1",
+                            "port": upstream_server.server_address[1],
+                        }
+                    },
+                },
+            },
+        }
+        observations = self.adapter._LiveObservationStore()
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario, observations
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(2)
+        endpoint = ("127.0.0.1", self.adapter._data_plane_bound_port(server))
+        try:
+            client.sendto(b"hello", endpoint)
+            response, _ = client.recvfrom(1024)
+            self.assertEqual(response, b"reply:query")
+            self.assertEqual(received, [b"query"])
+            snapshot = observations.snapshot(10)
+            self.assertEqual(
+                [item["phase"] for item in snapshot["observations"]],
+                ["datagram", "upstream_data"],
+            )
+            upstream_trace = snapshot["observations"][1]["result"]["trace"]
+            self.assertEqual(
+                [event["event"] for event in upstream_trace[0]["events"][-2:]],
+                ["SERVER_CONNECTED", "SERVER_DATA"],
+            )
+            self.assertEqual(
+                upstream_trace[0]["forwarded_payload_hex"],
+                b"reply:query".hex(),
+            )
+        finally:
+            client.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+            upstream_server.shutdown()
+            upstream_thread.join(timeout=5)
+            upstream_server.server_close()
+
+    def test_live_udp_upstream_failure_fires_lb_failed_and_reselects_pool(self) -> None:
+        received: list[bytes] = []
+
+        class FallbackHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:  # noqa: D401 - BaseRequestHandler API
+                payload, socket_object = self.request
+                received.append(bytes(payload))
+                socket_object.sendto(b"fallback:" + bytes(payload), self.client_address)
+
+        fallback_server = socketserver.ThreadingUDPServer(
+            ("127.0.0.1", 0), FallbackHandler
+        )
+        fallback_server.daemon_threads = True
+        fallback_thread = threading.Thread(
+            target=fallback_server.serve_forever, daemon=True
+        )
+        fallback_thread.start()
+        unused = socket.socket()
+        unused.bind(("127.0.0.1", 0))
+        failed_port = unused.getsockname()[1]
+        unused.close()
+        scenario = {
+            "profiles": ["UDP"],
+            "pools": {
+                "primary_pool": ["primary:19000"],
+                "fallback_pool": ["fallback:19001"],
+            },
+            "irule": """
+when CLIENT_DATA {
+    UDP::payload replace 0 5 query
+    pool primary_pool
+}
+when LB_FAILED {
+    log local0. "udp-live-failure=[event info]"
+    pool fallback_pool
+    LB::reselect
+}
+when SERVER_DATA {
+    UDP::payload replace 0 9 ok:
+}
+""",
+            "live_data_plane": {
+                "protocol": "udp",
+                "read_timeout": 0.5,
+                "upstream": {
+                    "targets": {
+                        "primary:19000": {
+                            "host": "127.0.0.1",
+                            "port": failed_port,
+                        },
+                        "fallback:19001": {
+                            "host": "127.0.0.1",
+                            "port": fallback_server.server_address[1],
+                        },
+                    },
+                    "connect_timeout": 0.1,
+                    "failure_cooldown": 60.0,
+                },
+            },
+        }
+        observations = self.adapter._LiveObservationStore()
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario, observations
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(2)
+        endpoint = ("127.0.0.1", self.adapter._data_plane_bound_port(server))
+        try:
+            client.sendto(b"hello", endpoint)
+            response, _ = client.recvfrom(1024)
+            self.assertEqual(response, b"ok:query")
+            self.assertEqual(received, [b"query"])
+            phases = [
+                item["phase"]
+                for item in observations.snapshot(10)["observations"]
+            ]
+            self.assertEqual(phases, ["datagram", "lb_failure", "upstream_data"])
+            scheduler = getattr(server, "_testcl_pool_scheduler")
+            self.assertEqual(
+                scheduler.snapshot()["down"][0]["member"], "primary:19000"
+            )
+        finally:
+            client.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+            fallback_server.shutdown()
+            fallback_thread.join(timeout=5)
+            fallback_server.server_close()
+
+    def test_live_udp_upstream_respects_local_response_and_drop(self) -> None:
+        received: list[bytes] = []
+
+        class UnexpectedHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:  # noqa: D401 - BaseRequestHandler API
+                payload, _socket_object = self.request
+                received.append(bytes(payload))
+
+        upstream_server = socketserver.ThreadingUDPServer(
+            ("127.0.0.1", 0), UnexpectedHandler
+        )
+        upstream_server.daemon_threads = True
+        upstream_thread = threading.Thread(
+            target=upstream_server.serve_forever, daemon=True
+        )
+        upstream_thread.start()
+        scenario = {
+            "profiles": ["UDP"],
+            "irule": """
+when CLIENT_DATA {
+    if {[UDP::payload] eq "local"} {
+        UDP::respond local
+    } else {
+        UDP::drop
+    }
+}
+""",
+            "live_data_plane": {
+                "protocol": "udp",
+                "read_timeout": 0.2,
+                "upstream": {
+                    "host": "127.0.0.1",
+                    "port": upstream_server.server_address[1],
+                },
+            },
+        }
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(0.8)
+        endpoint = ("127.0.0.1", self.adapter._data_plane_bound_port(server))
+        try:
+            client.sendto(b"local", endpoint)
+            response, _ = client.recvfrom(1024)
+            self.assertEqual(response, b"local")
+            client.sendto(b"drop", endpoint)
+            with self.assertRaises(TimeoutError):
+                client.recvfrom(1024)
+            self.assertEqual(received, [])
+        finally:
+            client.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+            upstream_server.shutdown()
+            upstream_thread.join(timeout=5)
+            upstream_server.server_close()
+
     def test_live_sip_udp_data_plane_returns_irule_response(self) -> None:
         scenario = {
             "profiles": ["SIP"],
@@ -25403,7 +25639,7 @@ when DNS_REQUEST {
             server.server_close()
             manager.close_all()
 
-    def test_live_udp_data_plane_rejects_stream_and_upstream_options(self) -> None:
+    def test_live_udp_data_plane_rejects_stream_and_udp_tls_options(self) -> None:
         with self.assertRaisesRegex(
             self.adapter.EmulatorInputError, "cannot contain request, requests, or packets"
         ):
@@ -25418,7 +25654,7 @@ when DNS_REQUEST {
                 },
             )
         with self.assertRaisesRegex(
-            self.adapter.EmulatorInputError, "upstream is not supported"
+            self.adapter.EmulatorInputError, "upstream.tls is only valid"
         ):
             self.adapter._data_plane_server(
                 Path(self.tcl_lsp_root),
@@ -25428,7 +25664,11 @@ when DNS_REQUEST {
                     "irule": "",
                     "live_data_plane": {
                         "protocol": "udp",
-                        "upstream": {"host": "127.0.0.1", "port": 19000},
+                        "upstream": {
+                            "host": "127.0.0.1",
+                            "port": 19000,
+                            "tls": {"verify": False},
+                        },
                     },
                 },
             )
