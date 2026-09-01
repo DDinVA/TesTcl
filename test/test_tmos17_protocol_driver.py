@@ -88,6 +88,13 @@ def test_payload_mode_reports_specialized_builder_selection() -> None:
     assert driver.payload_mode(
         {"event": "CLIENT_ACCEPTED", "request": {}}
     ) == "raw"
+    assert driver.payload_mode(
+        {
+            "event": "ACCESS_POLICY_AGENT_EVENT",
+            "profiles": ["TCP", "HTTP", "ACCESS"],
+            "request": {"method": "GET", "uri": "/policy", "host": "example.test"},
+        }
+    ) == "http1"
 
 
 def test_capability_report_is_machine_readable_and_mentions_raw_fallback() -> None:

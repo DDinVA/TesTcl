@@ -88,6 +88,7 @@ def _driver_preflight(observation: dict[str, Any]) -> dict[str, Any]:
     trigger = {
         "event": event,
         "request": request,
+        "profiles": observation["input"].get("profiles", []),
         "traffic_url": "tcp://192.0.2.10:1024",
     }
     mode = "unknown"

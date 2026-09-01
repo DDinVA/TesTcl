@@ -32,6 +32,18 @@ def test_driver_preflight_does_not_require_network_for_rule_init() -> None:
     }
 
 
+def test_profile_driven_events_get_http_capture_fixtures() -> None:
+    assert batch.EMULATOR._capture_plan_request_template(
+        "ACCESS_POLICY_AGENT_EVENT", ["TCP", "HTTP", "ACCESS"]
+    ) == {
+        "method": "GET",
+        "uri": "/testcl/command",
+    }
+    assert batch.EMULATOR._capture_plan_request_template(
+        "CLIENT_ACCEPTED", ["TCP"]
+    ) == {"payload": "testcl"}
+
+
 def test_batch_materializes_complete_tmos_catalog_with_collector_preflight(tmp_path: Path) -> None:
     output_dir = tmp_path / "capture-batch"
     manifest = batch.build_batch(

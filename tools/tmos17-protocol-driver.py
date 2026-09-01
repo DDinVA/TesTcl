@@ -1929,9 +1929,14 @@ def payload_mode(trigger: dict[str, Any]) -> str:
     request = trigger.get("request", {})
     if not isinstance(request, dict):
         raise DriverError("request must be an object")
+    profiles = trigger.get("profiles", ())
+    http_profile = isinstance(profiles, (list, tuple)) and any(
+        isinstance(profile, str) and profile.upper() in {"HTTP", "FASTHTTP"}
+        for profile in profiles
+    )
     if event == "HTTP_REQUEST" and "http2" in request:
         return "http2"
-    if event.startswith("HTTP_") and any(
+    if (event.startswith("HTTP_") or http_profile) and any(
         field in request
         for field in ("method", "uri", "host", "headers", "body", "payload_base64")
     ):

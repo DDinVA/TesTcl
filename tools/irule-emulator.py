@@ -4081,7 +4081,9 @@ def _build_behavior_vector_candidates(
                 capture_variant_ids.append(observation_id)
                 capture_input = _capture_plan_probe_input(variant_input)
                 if "request" not in capture_input:
-                    capture_request = _capture_plan_request_template(template["event"])
+                    capture_request = _capture_plan_request_template(
+                        template["event"], template["profiles"]
+                    )
                     if capture_request is not None:
                         capture_input["request"] = capture_request
                 observations.append(
@@ -4408,11 +4410,23 @@ def _protocol_request_template(event: str) -> dict[str, Any] | None:
     return None
 
 
-def _capture_plan_request_template(event: str) -> dict[str, Any] | None:
+def _capture_plan_request_template(
+    event: str, profiles: list[str] | tuple[str, ...] = ()
+) -> dict[str, Any] | None:
     """Return an external-driver fixture, including a bounded raw fallback."""
     request = _protocol_request_template(event)
     if request is not None:
         return request
+    if any(
+        isinstance(profile, str) and profile.upper() in {"HTTP", "FASTHTTP"}
+        for profile in profiles
+    ):
+        # ACCESS, policy, and other profile-driven events are often reached by
+        # an HTTP transaction even though their event names are not HTTP_*.
+        return {
+            "method": "GET",
+            "uri": "/testcl/command",
+        }
     if event != "RULE_INIT":
         return {"payload": "testcl"}
     return None
@@ -4475,7 +4489,9 @@ def _build_capture_plan_template(
     observations: list[dict[str, Any]] = []
     for case in campaign_data["cases"]:
         template = _command_probe_template(root, case["name"], event_inventory)
-        protocol_request = _capture_plan_request_template(template["event"])
+        protocol_request = _capture_plan_request_template(
+            template["event"], template["profiles"]
+        )
         probe_input: dict[str, Any] = {
             "command": case["name"],
             "args": list(template["args"]),
@@ -5018,7 +5034,9 @@ def _command_probe_irule(event: str, command: str, args: list[str]) -> str:
 """
 
 
-def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
+def _normalise_protocol_request(
+    event: str, request: Any, *, profiles: list[str] | None = None
+) -> dict[str, Any]:
     """Validate the bounded, external-only request sent to a protocol driver."""
     if not isinstance(request, dict):
         raise EmulatorInputError("protocol driver request must be a JSON object")
@@ -5098,6 +5116,26 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
             raise EmulatorInputError(
                 "protocol driver request payload_base64 is not valid base64"
             ) from exc
+
+    http_profile = any(
+        isinstance(profile, str) and profile.upper() in {"HTTP", "FASTHTTP"}
+        for profile in (profiles or [])
+    )
+    http_fixture = (
+        http_profile
+        and not event.startswith(
+            ("DNS_", "MQTT_", "SIP_", "RTSP_", "ICAP_", "TDS_")
+        )
+        and event not in {
+            "PCP_REQUEST",
+            "RADIUS_AAA_AUTH_REQUEST",
+            "RADIUS_AAA_ACCT_REQUEST",
+            "WS_REQUEST",
+            "FIX_HEADER",
+            "FIX_MESSAGE",
+        }
+        and any(field in request for field in ("method", "uri", "headers", "body"))
+    )
 
     if "pcp" in request:
         if not isinstance(request["pcp"], dict):
@@ -5784,6 +5822,7 @@ def _normalise_protocol_request(event: str, request: Any) -> dict[str, Any]:
         }
         and "fix" not in request
         and not {"payload", "payload_base64"} & set(request)
+        and not http_fixture
     ):
         raise EmulatorInputError(
             "raw protocol driver requests require payload or payload_base64"
@@ -6248,7 +6287,9 @@ def _normalise_command_probe_request(
                 raise EmulatorInputError(
                     "command probe request input is supported only for HTTP_REQUEST or HTTP_RESPONSE unless an external protocol allowance is enabled"
                 )
-            http_request = _normalise_protocol_request(event_name, http_request)
+            http_request = _normalise_protocol_request(
+                event_name, http_request, profiles=profiles
+            )
             if prepare_external_protocol_request:
                 protocol_packet = _protocol_request_packet(event_name, http_request)
             http_request = None
