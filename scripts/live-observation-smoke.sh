@@ -6,6 +6,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 api_port=${TESTCL_API_PORT:-18090}
 data_port=${TESTCL_DATA_PORT:-18091}
 scenario="$repo_root/examples/scenarios/live-http-17.5.json"
+python_bin="$repo_root/.venv/bin/python"
 log_file=$(mktemp -t testcl-live-observation.XXXXXX)
 capture_request=$(mktemp -t testcl-live-capture-request.XXXXXX)
 server_pid=""
@@ -18,6 +19,13 @@ cleanup() {
   rm -f "$log_file" "$capture_request"
 }
 trap cleanup EXIT
+
+if [[ ! -x "$python_bin" ]] || ! "$python_bin" -c \
+  'import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)'; then
+  echo "TesTcl requires a uv-managed Python 3.13+ environment at $python_bin" >&2
+  echo "Create it with: uv sync --python 3.13" >&2
+  exit 2
+fi
 
 TCL_LSP_ROOT=${TCL_LSP_ROOT:-/tmp/tcl-lsp} \
   "$repo_root/scripts/emulate-irule.sh" \
@@ -52,7 +60,7 @@ echo
 echo "Captured live observations:"
 observations=$(curl --silent --show-error \
   "http://127.0.0.1:$api_port/v1/live-observations?limit=10")
-printf '%s\n' "$observations" | "$repo_root/.venv/bin/python" -c '
+printf '%s\n' "$observations" | "$python_bin" -c '
 import json
 import sys
 
@@ -76,7 +84,7 @@ print(json.dumps({
 '
 echo
 
-"$repo_root/.venv/bin/python" - "$scenario" "$capture_request" <<'PY'
+"$python_bin" - "$scenario" "$capture_request" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -93,7 +101,7 @@ curl --silent --show-error --fail \
   -H 'Content-Type: application/json' \
   --data-binary "@$capture_request" \
   "http://127.0.0.1:$api_port/v1/live-observations/capture-plan" \
-  | "$repo_root/.venv/bin/python" -c '
+  | "$python_bin" -c '
 import json
 import sys
 
