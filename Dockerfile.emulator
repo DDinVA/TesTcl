@@ -40,6 +40,8 @@ COPY examples/scenarios/live-dns-17.5.json /opt/testcl/examples/scenarios/live-d
 COPY examples/scenarios/live-tcp-17.5.json /opt/testcl/examples/scenarios/live-tcp-17.5.json
 COPY examples/scenarios/live-tcp-pool-17.5.json /opt/testcl/examples/scenarios/live-tcp-pool-17.5.json
 COPY examples/scenarios/live-udp-17.5.json /opt/testcl/examples/scenarios/live-udp-17.5.json
+COPY examples/scenarios/live-sip-17.5.json /opt/testcl/examples/scenarios/live-sip-17.5.json
+COPY examples/scenarios/live-sip-tcp-17.5.json /opt/testcl/examples/scenarios/live-sip-tcp-17.5.json
 COPY examples/scenarios/live-websocket-17.5.json /opt/testcl/examples/scenarios/live-websocket-17.5.json
 COPY examples/scenarios/live-websocket-upstream-17.5.json /opt/testcl/examples/scenarios/live-websocket-upstream-17.5.json
 COPY requirements-emulator.txt /opt/testcl/requirements-emulator.txt
