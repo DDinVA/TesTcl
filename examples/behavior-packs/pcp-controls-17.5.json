@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "pcp-controls-17.5",
+  "cases": [
+    {
+      "id": "pcp-request-response-fields-and-rejection",
+      "scenario": {
+        "profiles": ["PCP"],
+        "irule": "when PCP_REQUEST { PCP::reject 7; set ::request_values [list [PCP::request version] [PCP::request opcode] [PCP::request lifetime] [PCP::request protocol] [PCP::request internal-port] [PCP::request prefer-failure] [PCP::request client-addr] [PCP::request third-party] [PCP::request third-party-int-addr] [PCP::request suggested-ext-port] [PCP::request suggested-ext-addr]]; log local0. \"request=$::request_values\" }\nwhen PCP_RESPONSE { set ::response_values [list [PCP::response version] [PCP::response opcode] [PCP::response lifetime] [PCP::response protocol] [PCP::response internal-port] [PCP::response result] [PCP::response assigned-ext-port] [PCP::response assigned-ext-addr]]; log local0. \"response=$::response_values\" }",
+        "packets": [
+          {
+            "protocol": "pcp",
+            "direction": "client_to_server",
+            "source": {"address": "192.0.2.10", "port": 40000},
+            "destination": {"address": "192.0.2.20", "port": 5351},
+            "pcp": {
+              "version": 2,
+              "opcode": "map",
+              "lifetime": 3600,
+              "protocol": "tcp",
+              "internal_port": 22,
+              "prefer_failure": true,
+              "client_addr": "192.0.2.10",
+              "third_party": true,
+              "third_party_int_addr": "192.0.2.11",
+              "suggested_ext_port": 40000,
+              "suggested_ext_addr": "198.51.100.10"
+            }
+          },
+          {
+            "protocol": "pcp",
+            "direction": "server_to_client",
+            "source": {"address": "192.0.2.20", "port": 5351},
+            "destination": {"address": "192.0.2.10", "port": 40000},
+            "pcp": {
+              "version": 2,
+              "opcode": "map",
+              "lifetime": 1800,
+              "protocol": "udp",
+              "internal_port": 5353,
+              "client_addr": "192.0.2.10",
+              "result": 2,
+              "assigned_ext_port": 45000,
+              "assigned_ext_addr": "198.51.100.20"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "PCP_REQUEST"},
+          {"path": ["trace", 0, "events", 2, "state", "pcp", "rejected"], "equals": "1"},
+          {"path": ["trace", 0, "events", 2, "state", "pcp", "reject_result"], "equals": "7"},
+          {"path": ["trace", 1, "events", 0, "event"], "equals": "PCP_RESPONSE"},
+          {"path": ["trace", 1, "events", 0, "state", "pcp", "result"], "equals": "2"},
+          {"path": ["trace", 1, "events", 0, "state", "pcp", "assigned_ext_port"], "equals": "45000"}
+        ]
+      }
+    }
+  ]
+}

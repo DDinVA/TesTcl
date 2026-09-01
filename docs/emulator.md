@@ -348,7 +348,7 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 The command exits non-zero when a case fails and prints every mismatch without
 discarding the passing cases. The same runner is available as
 `POST /v1/behavior-packs` and the MCP tool `irule_behavior_pack`. The checked-in
-packs cover AAA, ACCESS, ADAPT, AUTH, BWC, CACHE, CATEGORY, DHCPv4, DHCPv6, GTP, HTTP, HTTP/2, IKE, LSN, PSC, DNS, TCP, TLS/SSL, X509, UDP/datagram, WebSocket, RTSP, SCTP,
+packs cover AAA, ACCESS, ADAPT, AUTH, BWC, CACHE, CATEGORY, DHCPv4, DHCPv6, GTP, HTTP, HTTP/2, IKE, LSN, PCP, PSC, DNS, TCP, TLS/SSL, X509, UDP/datagram, WebSocket, XLAT, RTSP, SCTP,
 SIP/SDP/SIPALG, load-balancing, URI, stream filtering, route metrics, TMM CMP
 topology, FLOWTABLE queries, classification lifecycle, profile introspection,
 Message Routing controls, HTTP edge controls, MQTT protocol controls, and stateful
@@ -374,7 +374,7 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 685 of 989 target F5 commands (69.26%). This is test-input
+current report covers 695 of 989 target F5 commands (70.27%). This is test-input
 coverage, not a semantic-fidelity score.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
@@ -473,6 +473,22 @@ processing, frame collection/release, message dropping, and close emission:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/ws-controls-17.5.json
+```
+
+Run the XLAT controls behavior pack to verify source-translation accessors,
+listener lifetime, and endpoint reservation state:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/xlat-controls-17.5.json
+```
+
+Run the PCP controls behavior pack to verify request/response field accessors
+and deterministic request rejection:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/pcp-controls-17.5.json
 ```
 
 Run the AUTH controls behavior pack to verify authentication sessions,
