@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "crypto-controls-17.5",
+  "cases": [
+    {
+      "id": "deterministic-digest-signature-cipher-and-keygen",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST { set digest [CRYPTO::hash -alg sha256 hello]; set signature [CRYPTO::sign -alg hmac-sha256 -key secret hello]; set valid [CRYPTO::verify -alg hmac-sha256 -key secret -signature $signature hello]; set invalid [CRYPTO::verify -alg hmac-sha256 -key secret -signature $signature changed]; set keyhex 000102030405060708090a0b0c0d0e0f; set ivhex 101112131415161718191a1b1c1d1e1f; set encrypted [CRYPTO::encrypt -alg aes-128-cbc -keyhex $keyhex -ivhex $ivhex \"hello crypto\"]; set decrypted [CRYPTO::decrypt -alg aes-128-cbc -keyhex $keyhex -ivhex $ivhex $encrypted]; set derived [CRYPTO::keygen -alg pbkdf2-md5 -len 128 -passphrase pass -salthex 73616c74 -rounds 2]; HTTP::respond 200 content \"hash=[b64encode $digest];signature=[b64encode $signature];valid=$valid;invalid=$invalid;plain=$decrypted;derived=[b64encode $derived]\" }",
+        "request": {"method": "GET", "host": "crypto.example", "uri": "/check"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "status"], "equals": 200},
+          {"path": ["results", 0, "response", "body"], "equals": "hash=LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=;signature=iKqz7ejTrflNJquQ07r9SiCDBww7zOnAFO4EpEOEfAs=;valid=1;invalid=0;plain=hello crypto;derived=rK79e7kxC1JxWYnQgxkqYA=="}
+        ]
+      }
+    }
+  ]
+}
