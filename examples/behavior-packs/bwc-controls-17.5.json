@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "bwc-controls-17.5",
+  "cases": [
+    {
+      "id": "flow-policy-measurement-and-connection-reset",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when CLIENT_ACCEPTED { set ::bwc_session \"[IP::remote_addr]:[TCP::remote_port]\"; BWC::policy attach video_policy $::bwc_session; BWC::color set video_policy streaming; BWC::mark $::bwc_session tos 33; BWC::mark $::bwc_session streaming qos 4; BWC::rate $::bwc_session streaming 200 Mbps; BWC::pps 77; BWC::priority tc1 60 tc2 40; BWC::measure identifier video_measure session $::bwc_session; BWC::measure start session $::bwc_session; BWC::debug start }\nwhen HTTP_REQUEST { if {[HTTP::path] eq \"/detach\"} { BWC::color unset video_policy; BWC::measure stop session $::bwc_session; BWC::policy detach video_policy $::bwc_session } }\nwhen HTTP_RESPONSE { if {[HTTP::path] eq \"/measure\"} { set ::measured [list [BWC::measure get rate session $::bwc_session] [BWC::measure get bytes session $::bwc_session]]; log local0. \"measure=$::measured\" } }",
+        "requests": [
+          {"uri": "/measure", "response_body": "hello"},
+          {"uri": "/detach"},
+          {"uri": "/fresh", "new_connection": true}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "bwc", "attached"], "equals": true},
+          {"path": ["results", 0, "semantic", "bwc", "policy"], "equals": "video_policy"},
+          {"path": ["results", 0, "semantic", "bwc", "rate"], "equals": {"value": "200 mbps", "category": "streaming"}},
+          {"path": ["results", 0, "semantic", "bwc", "pps"], "equals": 77},
+          {"path": ["results", 0, "semantic", "bwc", "color"], "equals": {"set": true, "policy": "video_policy", "category": "streaming"}},
+          {"path": ["results", 0, "semantic", "bwc", "mark"], "equals": {"scope": "category", "category": "streaming", "tos": "", "qos": "4"}},
+          {"path": ["results", 0, "semantic", "bwc", "priority"], "equals": {"tc1": 60, "tc2": 40}},
+          {"path": ["results", 0, "semantic", "bwc", "measurement", "identifier"], "equals": "video_measure"},
+          {"path": ["results", 0, "semantic", "bwc", "measurement", "enabled"], "equals": true},
+          {"path": ["results", 0, "semantic", "bwc", "measurement", "bytes"], "equals": 5},
+          {"path": ["results", 0, "semantic", "bwc", "measurement", "rate"], "equals": 5},
+          {"path": ["results", 0, "semantic", "bwc", "debug"], "equals": true},
+          {"path": ["results", 1, "semantic", "bwc", "attached"], "equals": false},
+          {"path": ["results", 1, "semantic", "bwc", "policy"], "equals": ""},
+          {"path": ["results", 2, "semantic", "bwc", "attached"], "equals": true},
+          {"path": ["results", 2, "semantic", "bwc", "policy"], "equals": "video_policy"},
+          {"path": ["results", 2, "semantic", "bwc", "rate"], "equals": {"value": "200 mbps", "category": "streaming"}}
+        ]
+      }
+    }
+  ]
+}

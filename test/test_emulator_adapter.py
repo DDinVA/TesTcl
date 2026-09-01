@@ -4750,6 +4750,7 @@ when HTTP_RESPONSE_RELEASE {
             "antifraud-controls-17.5.json": 2,
             "asm-controls-17.5.json": 2,
             "botdefense-controls-17.5.json": 2,
+            "bwc-controls-17.5.json": 1,
             "cache-controls-17.5.json": 3,
             "category-17.5.json": 6,
             "dhcpv4-controls-17.5.json": 2,
