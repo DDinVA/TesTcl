@@ -4753,6 +4753,7 @@ when HTTP_RESPONSE_RELEASE {
             "cache-controls-17.5.json": 3,
             "category-17.5.json": 6,
             "dhcpv4-controls-17.5.json": 2,
+            "dhcpv6-controls-17.5.json": 2,
             "x509-controls-17.5.json": 1,
             "diameter-controls-17.5.json": 3,
             "tcp-controls-17.5.json": 2,
