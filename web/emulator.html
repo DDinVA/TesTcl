@@ -68,6 +68,7 @@
       padding: .55rem .65rem;
       width: 100%;
     }
+    input[type="checkbox"] { display: inline-block; margin: .55rem .35rem 0 0; width: auto; }
     textarea { min-height: 7rem; resize: vertical; }
     #irule, #packets, #event-state, #scenario-extra { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     #irule { min-height: 14rem; }
@@ -105,6 +106,10 @@
     #catalog-table th, #catalog-table td { border-bottom: 1px solid var(--border); padding: .45rem; text-align: left; }
     #catalog-table th { color: var(--muted); font-size: .75rem; font-weight: 600; }
     #catalog-table td:first-child { font-family: ui-monospace, monospace; }
+    #event-trace-table { border-collapse: collapse; margin-top: .75rem; width: 100%; }
+    #event-trace-table th, #event-trace-table td { border-bottom: 1px solid var(--border); padding: .45rem; text-align: left; vertical-align: top; }
+    #event-trace-table th { color: var(--muted); font-size: .75rem; font-weight: 600; }
+    #event-trace-table td:not(:nth-child(2)) { font-family: ui-monospace, monospace; font-size: .82rem; }
     .badge { border: 1px solid var(--border); border-radius: 999px; color: var(--muted); padding: .12rem .4rem; white-space: nowrap; }
     @media (max-width: 900px) {
       main { grid-template-columns: 1fr; }
@@ -164,6 +169,7 @@ when HTTP_RESPONSE {
         <label>Request body<input id="body" value=""></label>
         <label>Response body<input id="response-body" value="ok"></label>
         <label>Response status<input id="response-status" type="number" value="200"></label>
+        <label>Include event trace<input id="include-event-trace" type="checkbox" checked></label>
       </div>
       <button id="send-request" class="primary" style="margin-top:.7rem">Send request</button>
     </section>
@@ -196,6 +202,15 @@ when HTTP_RESPONSE {
 ]</textarea>
       </label>
       <button id="send-packets" style="margin-top:.7rem">Replay packets</button>
+    </section>
+
+    <section id="event-trace-panel" class="panel wide" hidden>
+      <h2>Event ledger</h2>
+      <p id="event-trace-summary" class="hint">No event trace in the last response.</p>
+      <table id="event-trace-table">
+        <thead><tr><th>#</th><th>Event</th><th>Flow/source</th><th>Outcome</th><th>State</th><th>Changes</th><th>Decisions/logs</th></tr></thead>
+        <tbody></tbody>
+      </table>
     </section>
 
     <section class="panel wide">
@@ -237,9 +252,70 @@ when HTTP_RESPONSE {
     let sessionId = null;
     let catalogCommands = [];
 
+    function eventTraceFrom(value) {
+      if (!value || typeof value !== "object") return null;
+      if (Array.isArray(value.event_trace)) return value.event_trace;
+      if (value.result && typeof value.result === "object") return eventTraceFrom(value.result);
+      if (Array.isArray(value.results) && value.results.length > 0) {
+        return eventTraceFrom(value.results[0]);
+      }
+      return null;
+    }
+
+    function eventTraceSummaryFrom(value, entries) {
+      if (value && typeof value === "object" && value.event_trace_summary &&
+          typeof value.event_trace_summary === "object") {
+        return value.event_trace_summary;
+      }
+      if (value && typeof value === "object" && value.result && typeof value.result === "object") {
+        return eventTraceSummaryFrom(value.result, entries);
+      }
+      return {event_count: entries.length, returned_count: entries.length, truncated: false};
+    }
+
+    function renderEventTrace(value) {
+      const entries = eventTraceFrom(value);
+      const panel = document.getElementById("event-trace-panel");
+      if (!entries) {
+        panel.hidden = true;
+        return;
+      }
+      panel.hidden = false;
+      const summary = eventTraceSummaryFrom(value, entries);
+      const observed = entries.filter((entry) => entry && entry.state_observed).length;
+      document.getElementById("event-trace-summary").textContent =
+        `${summary.returned_count ?? entries.length} events shown · ${observed} with state · ` +
+        `${summary.event_count ?? entries.length} total` +
+        (summary.truncated ? " · ledger truncated; inspect raw trace" : "");
+      const body = document.getElementById("event-trace-table").querySelector("tbody");
+      body.replaceChildren();
+      const compact = (item) => {
+        if (item === undefined || item === null) return "—";
+        if (typeof item === "string") return item;
+        try { return JSON.stringify(item); } catch (_) { return String(item); }
+      };
+      for (const entry of entries) {
+        const safeEntry = entry && typeof entry === "object" ? entry : {};
+        const row = document.createElement("tr");
+        const flow = safeEntry.flow_id || safeEntry.source || "—";
+        const outcome = safeEntry.fired ? "fired" : (safeEntry.reason || "not fired");
+        const state = safeEntry.state_observed ? "observed" : "not observed";
+        const decisions = Array.isArray(safeEntry.decisions) ? safeEntry.decisions.length : (safeEntry.decision_count ?? 0);
+        const logs = Array.isArray(safeEntry.logs) ? safeEntry.logs.length : (safeEntry.log_count ?? 0);
+        for (const item of [safeEntry.sequence ?? "—", safeEntry.event || "—", flow, outcome, state,
+          compact(safeEntry.state_changes), `${decisions}/${logs}`]) {
+          const cell = document.createElement("td");
+          cell.textContent = String(item);
+          row.appendChild(cell);
+        }
+        body.appendChild(row);
+      }
+    }
+
     const $ = (id) => document.getElementById(id);
     const output = (value) => {
       $("output").textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+      renderEventTrace(value);
     };
     const jsonValue = (id, fallback) => {
       const raw = $(id).value.trim();
@@ -300,6 +376,7 @@ when HTTP_RESPONSE {
         response_body: $("response-body").value,
         response_status: Number($("response-status").value),
       };
+      if ($("include-event-trace").checked) payload.include_event_trace = true;
       const id = flow("request-flow");
       if (id) payload.flow_id = id;
       output(await request(`/v1/sessions/${encodeURIComponent(sessionId)}/requests`, {method: "POST", body: JSON.stringify(payload)}));
