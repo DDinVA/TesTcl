@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "rewrite-controls-17.5",
+  "cases": [
+    {
+      "id": "request-response-payload-rewrite-and-post-process",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "REWRITE"],
+        "irule": "when REWRITE_REQUEST_DONE {\n  log local0. \"request=[REWRITE::payload] length=[REWRITE::payload length] first=[REWRITE::payload 2] window=[REWRITE::payload 1 2] post=[REWRITE::post_process]\"\n  REWRITE::disable\n  REWRITE::enable\n  REWRITE::payload replace 0 4 pong!\n  REWRITE::post_process 1\n}\nwhen REWRITE_RESPONSE_DONE {\n  log local0. \"response=[REWRITE::payload] length=[REWRITE::payload length]\"\n  REWRITE::payload replace 0 5 world\n}",
+        "request": {
+          "host": "rewrite.example.com",
+          "body": "ping",
+          "headers": {"Content-Length": "4"},
+          "response_body": "hello",
+          "response_headers": {"Content-Length": "5"}
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired"], "equals": ["HTTP_REQUEST", "REWRITE_REQUEST_DONE", "HTTP_RESPONSE", "REWRITE_RESPONSE_DONE"]},
+          {"path": ["results", 0, "request", "body"], "equals": "pong!"},
+          {"path": ["results", 0, "response", "body"], "equals": "world"},
+          {"path": ["results", 0, "request", "headers", "content-length"], "equals": "5"},
+          {"path": ["results", 0, "response", "headers", "content-length"], "equals": "5"},
+          {"path": ["results", 0, "semantic", "rewrite"], "equals": {"enabled": true, "post_process": true, "payload_side": "response", "payload_replaced": true, "request_payload_length": 5, "response_payload_length": 5}}
+        ]
+      }
+    }
+  ]
+}
