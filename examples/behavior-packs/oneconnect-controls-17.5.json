@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "oneconnect-controls-17.5",
+  "cases": [
+    {
+      "id": "connection-reuse-selection-and-label-state",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "ONECONNECT"],
+        "irule": "when HTTP_REQUEST {\n  if {[HTTP::path] eq \"/first\"} {\n    ONECONNECT::detach disable\n    ONECONNECT::reuse disable\n    ONECONNECT::select persist\n    ONECONNECT::label update tenant-a\n  }\n  log local0. \"reuse=[ONECONNECT::reuse] select=[ONECONNECT::select]\"\n}",
+        "requests": [
+          {"uri": "/first"},
+          {"uri": "/second"},
+          {"uri": "/new", "new_connection": true}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "oneconnect"], "equals": {"detach_enabled": false, "reuse_enabled": false, "select": "persist", "label": "tenant-a"}},
+          {"path": ["results", 1, "semantic", "oneconnect"], "equals": {"detach_enabled": false, "reuse_enabled": false, "select": "persist", "label": "tenant-a"}},
+          {"path": ["results", 2, "semantic", "oneconnect"], "equals": {"detach_enabled": true, "reuse_enabled": true, "select": "none", "label": ""}},
+          {"path": ["results", 0, "server_connection", "id"], "equals": 1},
+          {"path": ["results", 0, "server_connection", "reason"], "equals": "new"},
+          {"path": ["results", 1, "server_connection", "reason"], "equals": "attached"},
+          {"path": ["results", 2, "server_connection", "id"], "equals": 2},
+          {"path": ["results", 2, "server_connection", "reason"], "equals": "new"}
+        ]
+      }
+    }
+  ]
+}
