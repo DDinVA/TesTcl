@@ -4776,6 +4776,7 @@ when HTTP_RESPONSE_RELEASE {
             "route-17.5.json": 10,
             "tmm-17.5.json": 5,
             "flowtable-17.5.json": 7,
+            "flow-controls-17.5.json": 1,
             "classification-17.5.json": 10,
             "ip-controls-17.5.json": 2,
             "profile-17.5.json": 25,
