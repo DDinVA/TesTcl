@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "avr-controls-17.5",
+  "cases": [
+    {
+      "id": "avr-connection-and-cspm-controls",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "AVR"],
+        "irule": "when CLIENT_ACCEPTED {\n  AVR::disable\n  AVR::enable\n  AVR::log\n}\nwhen AVR_CSPM_INJECTION {\n  AVR::disable_cspm_injection\n}",
+        "packets": [
+          {
+            "protocol": "event",
+            "event": "CLIENT_ACCEPTED",
+            "state": {"avr": {}}
+          },
+          {
+            "protocol": "event",
+            "event": "AVR_CSPM_INJECTION",
+            "state": {"avr": {}}
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "avr", "enabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "avr", "log_requested"], "equals": "1"},
+          {"path": ["trace", 1, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 1, "events", 0, "state", "avr", "cspm_injection_enabled"], "equals": "0"}
+        ]
+      }
+    }
+  ]
+}

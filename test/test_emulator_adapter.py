@@ -4769,6 +4769,7 @@ when HTTP_RESPONSE_RELEASE {
             "rewrite-controls-17.5.json": 1,
             "connector-controls-17.5.json": 1,
             "plugin-controls-17.5.json": 1,
+            "avr-controls-17.5.json": 1,
             "x509-controls-17.5.json": 1,
             "diameter-controls-17.5.json": 3,
             "tcp-controls-17.5.json": 2,
