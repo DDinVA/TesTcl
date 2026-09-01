@@ -1057,6 +1057,22 @@ jq '.stimulus_schedule' /tmp/tmos-17.5-capture-batch/manifest.json
 The schedule is an execution aid, not a claim of TMOS parity: it describes the
 stimulus needed for differential capture, while the BIG-IP/vLab remains the
 reference implementation.
+
+To turn that schedule into independently resumable collector batches, split it
+without changing any observation IDs or comparisons:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp uv run --python 3.13 \
+  python tools/tmos17-capture-split.py \
+  --manifest /tmp/tmos-17.5-capture-batch/manifest.json \
+  --output-dir /tmp/tmos-17.5-scheduled-batches
+```
+
+The resulting `schedule.json` points to one `manifest.json` per stimulus group.
+Run `tmos17-capture-runner.py` against each group manifest with the matching
+virtual, traffic URL, and trigger command. Use `--group <id>` to materialize a
+single group. The splitter refuses existing output directories, validates full
+schedule coverage, and retains the original plans as its source of truth.
 Use the driver report directly with:
 
 ```sh

@@ -117,6 +117,12 @@ def test_batch_materializes_complete_tmos_catalog_with_collector_preflight(tmp_p
     assert "http1" in groups
     assert "raw:CLIENT_ACCEPTED" in groups
     assert sum(group["observation_count"] for group in groups.values()) == 986
+    observation_ids = [
+        observation_id
+        for group in groups.values()
+        for observation_id in group["observation_ids"]
+    ]
+    assert len(observation_ids) == len(set(observation_ids)) == 986
     assert all(group["plan_files"] for group in groups.values())
     assert all(group["driver_status_counts"] for group in groups.values())
 

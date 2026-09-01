@@ -98,6 +98,7 @@ def _stimulus_group_template(group_id: str, result: dict[str, Any]) -> dict[str,
         "id": group_id,
         "mode": mode,
         "events": [],
+        "observation_ids": [],
         "observation_count": 0,
         "plan_files": [],
         "requires_trigger": False,
@@ -125,6 +126,7 @@ def _record_stimulus_group(
     event = result["event"]
     if event not in group["events"]:
         group["events"].append(event)
+    group["observation_ids"].append(result["id"])
     if plan_filename not in group["plan_files"]:
         group["plan_files"].append(plan_filename)
     group["observation_count"] += 1
@@ -147,6 +149,7 @@ def _finalise_stimulus_schedule(
     for group_id in sorted(groups):
         group = dict(groups[group_id])
         group["events"] = sorted(group["events"])
+        group["observation_ids"] = sorted(group["observation_ids"])
         group["plan_files"] = sorted(group["plan_files"])
         group["endpoint_schemes"] = sorted(group["endpoint_schemes"])
         group["driver_status_counts"] = dict(sorted(group["driver_status_counts"].items()))
