@@ -26033,6 +26033,53 @@ when DNS_REQUEST {
             thread.join(timeout=5)
             server.server_close()
 
+    def test_http_api_evaluates_catalog_chunk(self) -> None:
+        server = self.adapter.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self.adapter._http_handler(Path(self.tcl_lsp_root))
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            chunk_request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/capabilities"
+                "?namespace=HTTP&target_status=available-in-tmos-17.5&limit=2",
+                method="GET",
+            )
+            with urllib.request.urlopen(chunk_request) as response:
+                self.assertEqual(response.status, 200)
+                chunk = json.loads(response.read())
+
+            evaluate_request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/catalog-chunk-evaluate",
+                data=json.dumps(
+                    {"chunk": chunk, "mode": "both", "variants": 1}
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(evaluate_request) as response:
+                self.assertEqual(response.status, 200)
+                payload = json.loads(response.read())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["summary"]["target_command_count"], 2)
+            self.assertEqual(payload["summary"]["local_status_counts"], {"ok": 2})
+            self.assertEqual(len(payload["capture_plan"]["observations"]), 2)
+
+            invalid_request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/catalog-chunk-evaluate",
+                data=json.dumps({"chunk": {}}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(invalid_request)
+            self.assertEqual(raised.exception.code, 400)
+            self.assertEqual(json.loads(raised.exception.read())["status"], "error")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_http_api_imports_external_observations(self) -> None:
         observation_pack = {
             "name": "http-capture",
@@ -26448,6 +26495,7 @@ when DNS_REQUEST {
         self.assertIn("irule_session_trace", tool_names)
         self.assertIn("irule_capture_plan_template", tool_names)
         self.assertIn("irule_catalog", tool_names)
+        self.assertIn("irule_catalog_chunk_evaluate", tool_names)
         self.assertIn("irule_probe", tool_names)
         self.assertIn("irule_command_probe", tool_names)
         self.assertIn("irule_catalog_smoke", tool_names)
@@ -26520,6 +26568,33 @@ when DNS_REQUEST {
             filtered_payload = filtered["result"]["structuredContent"]
             self.assertEqual(filtered_payload["chunk"]["total"], 18)
             self.assertEqual(filtered_payload["commands"][0]["name"], "AUTH::abort")
+
+            catalog_chunk = self.adapter._build_capabilities(
+                root,
+                0,
+                1,
+                namespace="HTTP",
+                target_status="available-in-tmos-17.5",
+            )
+            evaluated = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 16,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_catalog_chunk_evaluate",
+                        "arguments": {
+                            "chunk": catalog_chunk,
+                            "mode": "plan",
+                            "variants": 1,
+                        },
+                    },
+                }
+            )
+            evaluated_payload = evaluated["result"]["structuredContent"]
+            self.assertEqual(evaluated_payload["status"], "ok")
+            self.assertEqual(evaluated_payload["summary"]["local_status_counts"], {})
+            self.assertEqual(len(evaluated_payload["capture_plan"]["observations"]), 1)
 
             campaign = server.handle_message(
                 {

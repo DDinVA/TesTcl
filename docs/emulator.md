@@ -3395,6 +3395,7 @@ The service exposes `GET /healthz`, `GET /v1/capabilities`,
 `POST /v1/command-probes`, `POST /v1/behavior-packs`,
 `POST /v1/behavior-coverage`, `POST /v1/behavior-candidates`,
 `POST /v1/behavior-sweep`, and
+`POST /v1/catalog-chunk-evaluate`,
 `POST /v1/simulations/pcap`. It also supports persistent sessions through
 `POST /v1/sessions`, `GET /v1/sessions/{session_id}`,
 `POST /v1/sessions/{session_id}/requests`,
@@ -3588,6 +3589,8 @@ clients can discover these tools with `tools/list`:
 - `irule_pcap_replay` replays a base64-encoded classic PCAP or pcapng capture through the same
   packet and Tcl event adapters.
 - `irule_capabilities` returns a chunk of the complete 17.5 catalog.
+- `irule_catalog_chunk_evaluate` consumes one catalog chunk, runs bounded local
+  probes, and returns a reference-free external capture plan.
 - `irule_capture_campaign` returns a chunk of catalog-derived external
   reference work units, defaulting to commands available in TMOS 17.5.
 - `irule_probe` verifies live command registration for a bounded catalog chunk
@@ -3755,6 +3758,27 @@ pretend that a generated probe is valid for every command.
 
 The same view is available from `GET /v1/capture-campaign` and the
 `irule_capture_campaign` MCP tool.
+
+### Evaluate a catalog chunk through the service
+
+The worker is also available without a subprocess boundary. Send the JSON
+object returned by `GET /v1/capabilities` (or one chunk from an exported
+catalog) as the `chunk` field:
+
+```sh
+curl -sS 'http://127.0.0.1:8080/v1/capabilities?namespace=HTTP&target_status=available-in-tmos-17.5&limit=25' \
+  > /tmp/testcl-capability-chunk.json
+jq -n --slurpfile chunk /tmp/testcl-capability-chunk.json \
+  '{chunk: $chunk[0], mode: "both", variants: 1}' |
+  curl -sS -X POST -H 'Content-Type: application/json' \
+    --data-binary @- http://127.0.0.1:8080/v1/catalog-chunk-evaluate
+```
+
+The request accepts `mode` (`local`, `plan`, or `both`), bounded `variants` (1–8),
+and an optional list of `exclude_commands`; the response is the same worker
+report used by the CLI, including local diagnostics and/or a collector-ready
+`capture_plan`. The endpoint is intentionally limited to the 2 MiB HTTP body
+cap and does not contact a BIG-IP.
 
 ### Consume an exported catalog chunk
 

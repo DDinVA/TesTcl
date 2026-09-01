@@ -33296,6 +33296,82 @@ class _LivePoolScheduler:
             }
 
 
+_catalog_worker_module: Any | None = None
+_catalog_worker_lock = threading.Lock()
+
+
+def _catalog_chunk_evaluate(
+    root: Path,
+    request: Any,
+) -> dict[str, Any]:
+    """Run the exported-catalog worker through the in-process API boundary."""
+    if not isinstance(request, dict):
+        raise EmulatorInputError("catalog chunk evaluation request must be a JSON object")
+    allowed = {"chunk", "mode", "variants", "exclude_commands"}
+    unknown = sorted(set(request) - allowed)
+    if unknown:
+        raise EmulatorInputError(
+            "unsupported catalog chunk evaluation field(s): " + ", ".join(unknown)
+        )
+    chunk = request.get("chunk")
+    if not isinstance(chunk, dict):
+        raise EmulatorInputError("catalog chunk evaluation requires a chunk object")
+    mode = request.get("mode", "both")
+    if mode not in {"local", "plan", "both"}:
+        raise EmulatorInputError("catalog chunk evaluation mode must be local, plan, or both")
+    variants = request.get("variants", 1)
+    if isinstance(variants, bool) or not isinstance(variants, int):
+        raise EmulatorInputError("catalog chunk evaluation variants must be an integer")
+    exclude_commands = request.get("exclude_commands", [])
+    if not isinstance(exclude_commands, list) or len(exclude_commands) > 64:
+        raise EmulatorInputError(
+            "catalog chunk evaluation exclude_commands must contain at most 64 items"
+        )
+    if any(
+        not isinstance(command, str) or not command or "\x00" in command
+        for command in exclude_commands
+    ):
+        raise EmulatorInputError(
+            "catalog chunk evaluation exclude_commands must contain non-empty strings"
+        )
+
+    global _catalog_worker_module
+    with _catalog_worker_lock:
+        if _catalog_worker_module is None:
+            worker_path = Path(__file__).with_name("catalog-worker.py")
+            worker_spec = importlib.util.spec_from_file_location(
+                "testcl_catalog_worker_for_http_api", worker_path
+            )
+            if worker_spec is None or worker_spec.loader is None:
+                raise EmulatorInputError(f"could not load catalog worker: {worker_path}")
+            worker_module = importlib.util.module_from_spec(worker_spec)
+            sys.modules[worker_spec.name] = worker_module
+            try:
+                worker_spec.loader.exec_module(worker_module)
+            except Exception as exc:
+                sys.modules.pop(worker_spec.name, None)
+                raise EmulatorInputError(f"could not load catalog worker: {exc}") from exc
+            _catalog_worker_module = worker_module
+        worker = _catalog_worker_module
+    try:
+        chunk = worker._validate_chunk(chunk)
+        return worker._build_report(
+            chunk,
+            tcl_lsp_root=str(root),
+            variants=variants,
+            mode=mode,
+            exclude_commands=frozenset(exclude_commands),
+        )
+    except (
+        worker.CatalogWorkerError,
+        worker.EMULATOR.EmulatorInputError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise EmulatorInputError(str(exc)) from exc
+
+
 MCP_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MCP_MAX_MESSAGE_BYTES = 2 * 1024 * 1024
 MCP_SERVER_INFO = {
@@ -33436,6 +33512,36 @@ class McpProtocolServer:
                             "enum": sorted(TARGET_STATUS_VALUES),
                         },
                     }
+                ),
+            },
+            {
+                "name": "irule_catalog_chunk_evaluate",
+                "title": "Evaluate an exported catalog chunk",
+                "description": "Consume one verified-shaped TMOS 17.5 catalog chunk, run bounded local F5 command probes, and emit a reference-free external capture plan.",
+                "inputSchema": _mcp_object_schema(
+                    {
+                        "chunk": {
+                            "type": "object",
+                            "description": "One chunk from the deterministic catalog export.",
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["local", "plan", "both"],
+                            "default": "both",
+                        },
+                        "variants": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": BEHAVIOR_CANDIDATE_MAX_VARIANTS,
+                            "default": 1,
+                        },
+                        "exclude_commands": {
+                            "type": "array",
+                            "maxItems": 64,
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                    },
+                    ["chunk"],
                 ),
             },
             {
@@ -33885,6 +33991,9 @@ class McpProtocolServer:
                 if field in args
             }
             return self._tool_success(_build_catalog(self._root, chunk_size, **filters))
+
+        if name == "irule_catalog_chunk_evaluate":
+            return self._tool_success(_catalog_chunk_evaluate(self._root, args))
 
         if name == "irule_capture_campaign":
             unknown = sorted(
@@ -39927,6 +40036,22 @@ def _http_handler(
                     EmulatorInputError,
                     EmulatorResourceError,
                     OSError,
+                ) as exc:
+                    self._error(exc)
+                    return
+                _json_response(self, 200, payload)
+                return
+            if parsed.path == "/v1/catalog-chunk-evaluate":
+                try:
+                    request = self._read_json()
+                    payload = _catalog_chunk_evaluate(root, request)
+                except (
+                    json.JSONDecodeError,
+                    EmulatorInputError,
+                    EmulatorResourceError,
+                    OSError,
+                    TypeError,
+                    ValueError,
                 ) as exc:
                     self._error(exc)
                     return

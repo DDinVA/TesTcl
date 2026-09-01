@@ -54,22 +54,7 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON constant {value!r}")
 
 
-def _read_chunk(path: Path) -> dict[str, Any]:
-    if path == Path("-"):
-        raw = sys.stdin.buffer.read(MAX_CHUNK_BYTES + 1)
-    else:
-        try:
-            raw = path.read_bytes()
-        except OSError as exc:
-            raise CatalogWorkerError(f"could not read catalog chunk {path}: {exc}") from exc
-    if len(raw) > MAX_CHUNK_BYTES:
-        raise CatalogWorkerError(
-            f"catalog chunk exceeds the {MAX_CHUNK_BYTES // (1024 * 1024)} MiB limit"
-        )
-    try:
-        value = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise CatalogWorkerError(f"catalog chunk is not valid UTF-8 JSON: {exc}") from exc
+def _validate_chunk(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise CatalogWorkerError("catalog chunk must be a JSON object")
     if value.get("schema_version") != 1 or value.get("profile") != TMOS_PROFILE:
@@ -110,6 +95,25 @@ def _read_chunk(path: Path) -> dict[str, Any]:
         if not isinstance(catalog_kind, str) or not catalog_kind or "\x00" in catalog_kind:
             raise CatalogWorkerError(f"catalog command {name!r} has an invalid catalog kind")
     return value
+
+
+def _read_chunk(path: Path) -> dict[str, Any]:
+    if path == Path("-"):
+        raw = sys.stdin.buffer.read(MAX_CHUNK_BYTES + 1)
+    else:
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise CatalogWorkerError(f"could not read catalog chunk {path}: {exc}") from exc
+    if len(raw) > MAX_CHUNK_BYTES:
+        raise CatalogWorkerError(
+            f"catalog chunk exceeds the {MAX_CHUNK_BYTES // (1024 * 1024)} MiB limit"
+        )
+    try:
+        value = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise CatalogWorkerError(f"catalog chunk is not valid UTF-8 JSON: {exc}") from exc
+    return _validate_chunk(value)
 
 
 def _copy_state(state: dict[str, Any]) -> dict[str, Any]:
