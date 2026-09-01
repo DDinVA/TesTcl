@@ -79,6 +79,18 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 The `scenarios/multi-irule-17.5.json` fixture demonstrates multiple attached
 iRules with priority ordering and a shared pool fixture.
 
+The `behavior-packs/stateful-global-controls-17.5.json` fixture is an
+executable TMOS 17.5 contract for stateful sideband connections, traffic
+intents, datagroup lookups, URL categorization fixtures, top-level procedures,
+event metadata, connection controls, and helper commands. Its sideband and
+traffic outputs are deterministic emulator state, not live socket or TMM
+evidence. Run it locally with:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/stateful-global-controls-17.5.json
+```
+
 The `scenarios/live-http-17.5.json` fixture can be served to a real HTTP client
 with `--data-plane`; it includes a deterministic origin response and a rule
 that blocks `/private`.

@@ -6957,6 +6957,32 @@ def _analyze_rule_capabilities(
                         for nested in scan_command_substitutions(token.text):
                             visit(nested.text, event_name)
 
+        # These are legal top-level iRule constructs, not commands inside an
+        # event body.  Scan only the source's top-level command segments so a
+        # proc/directive nested in a braced handler is not misclassified as a
+        # global construct.  The execution path uses the same segmenter when
+        # loading procedures and applying priority/timing metadata.
+        top_level_commands = segment_commands(
+            source,
+            registry_snapshot=registry,
+            recovery=False,
+        )
+        for command in top_level_commands:
+            if command.name not in {"priority", "timing", "proc"}:
+                continue
+            entry = usage.setdefault(
+                command.name,
+                {"name": command.name, "occurrences": 0, "events": set()},
+            )
+            entry["occurrences"] += 1
+            entry["events"].add("GLOBAL")
+            if command.name == "proc" and len(command.texts) == 4:
+                # Procedure bodies are executable through ``call`` even
+                # though they are declared outside an event handler.  Walk
+                # them for command coverage while retaining GLOBAL as the
+                # only reliable static attribution.
+                visit(command.texts[3], "GLOBAL")
+
         # Reuse the execution path's top-level normalization so compact
         # adjacent ``when`` handlers and outer priority/timing directives are
         # analyzed exactly as they will be executed.

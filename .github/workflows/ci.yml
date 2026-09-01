@@ -99,7 +99,7 @@ jobs:
 
           docker run --rm testcl-irule-emulator:ci --behavior-coverage >/tmp/testcl-behavior-coverage.json
           grep -F '"target_f5_command_count":989' /tmp/testcl-behavior-coverage.json
-          grep -F '"covered_command_count":951' /tmp/testcl-behavior-coverage.json
+          grep -F '"covered_command_count":989' /tmp/testcl-behavior-coverage.json
           docker run --rm testcl-irule-emulator:ci \
             --behavior-pack /opt/testcl/examples/behavior-packs/aaa-17.5.json \
             >/tmp/testcl-aaa-pack.json
@@ -275,6 +275,11 @@ jobs:
             >/tmp/testcl-global-legacy-controls-pack.json
           grep -F '"status":"passed"' /tmp/testcl-global-legacy-controls-pack.json
           grep -F '"case_count":52' /tmp/testcl-global-legacy-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/stateful-global-controls-17.5.json \
+            >/tmp/testcl-stateful-global-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-stateful-global-controls-pack.json
+          grep -F '"case_count":18' /tmp/testcl-stateful-global-controls-pack.json
           docker run --rm testcl-irule-emulator:ci \
             --behavior-pack /opt/testcl/examples/behavior-packs/remaining-target-controls-17.5.json \
             >/tmp/testcl-remaining-target-controls-pack.json

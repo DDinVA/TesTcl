@@ -4779,6 +4779,7 @@ when HTTP_RESPONSE_RELEASE {
             "protocol-controls-17.5.json": 8,
             "legacy-controls-17.5.json": 8,
             "global-legacy-controls-17.5.json": 52,
+            "stateful-global-controls-17.5.json": 18,
             "remaining-target-controls-17.5.json": 3,
             "x509-controls-17.5.json": 1,
             "diameter-controls-17.5.json": 3,
@@ -4977,6 +4978,26 @@ when HTTP_RESPONSE_RELEASE {
             {event for command in analysis["commands"] for event in command["events"]},
             {"CLIENT_ACCEPTED", "CLIENT_DATA"},
         )
+
+    def test_behavior_analysis_includes_top_level_rule_constructs(self) -> None:
+        root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)
+        analysis = self.adapter._analyze_rule_capabilities(
+            root,
+            "priority 100\ntiming off\nproc helper {} { HTTP::host }\n"
+            "when HTTP_REQUEST { set result [call helper] }",
+            ["TCP", "HTTP"],
+        )
+
+        commands = {command["name"]: command for command in analysis["commands"]}
+        self.assertEqual(
+            {"priority", "timing", "proc", "HTTP::host", "set", "call"},
+            set(commands),
+        )
+        self.assertEqual(commands["priority"]["events"], ["GLOBAL"])
+        self.assertEqual(commands["timing"]["events"], ["GLOBAL"])
+        self.assertEqual(commands["proc"]["events"], ["GLOBAL"])
+        self.assertEqual(commands["HTTP::host"]["events"], ["GLOBAL"])
+        self.assertEqual(commands["call"]["events"], ["HTTP_REQUEST"])
 
     def test_behavior_candidates_build_reference_free_plan_from_uncovered_queue(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)

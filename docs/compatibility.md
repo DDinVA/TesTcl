@@ -111,6 +111,12 @@ translation toggles, `rateclass` records the selected rate class, and
 the existing HTTP 302 response path. These outputs describe iRule-visible
 decisions only and are not a claim of live routing, QoS, or packet behavior.
 
+The executable `stateful-global-controls-17.5.json` checkpoint extends this
+coverage with deterministic sideband lifecycle state, traffic-intent ordering,
+datagroup and URL categorization fixtures, top-level `proc`/`priority`/`timing`
+handling, and connection-control outcomes. It validates emulator contracts only;
+it does not open real sideband sockets or claim independent TMOS/vLab evidence.
+
 The optional TMOS 17.5 emulator exposes the pinned `tcl-lsp` registry in
 bounded chunks and reports static command-handler and packet-event coverage
 through its conformance endpoint. Structured packet traces currently cover
