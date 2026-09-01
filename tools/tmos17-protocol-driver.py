@@ -1699,6 +1699,14 @@ def build_sip_message(request: dict[str, Any], event: str) -> bytes:
     return ("\r\n".join(lines) + "\r\n\r\n" + body).encode("utf-8")
 
 
+def _sip_transport(request: dict[str, Any]) -> str:
+    """Validate and return the transport used by a SIP driver stimulus."""
+    value = request.get("transport", "udp")
+    if not isinstance(value, str) or value.lower() not in {"tcp", "udp"}:
+        raise DriverError("SIP transport must be tcp or udp")
+    return value.lower()
+
+
 def _pcp_uint(value: Any, field: str, maximum: int) -> int:
     if isinstance(value, bool):
         raise DriverError(f"PCP {field} must be an integer from 0 to {maximum}")
@@ -2066,8 +2074,19 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
             timeout,
         )
     if mode == "sip":
+        transport = _sip_transport(request)
+        endpoint = endpoint_from_request(
+            request,
+            trigger.get("traffic_url"),
+            default_scheme=transport,
+            default_port=5060,
+        )
+        if "transport" in request and endpoint.scheme != transport:
+            raise DriverError(
+                "SIP transport does not match the destination scheme"
+            )
         return (
-            endpoint_from_request(request, trigger.get("traffic_url"), default_scheme="udp", default_port=5060),
+            endpoint,
             build_sip_message(request, event),
             timeout,
         )
@@ -2463,6 +2482,7 @@ def _scenario_from_packets(trigger: dict[str, Any], scenario: dict[str, Any]) ->
         raise DriverError(f"scenario packets must contain 1 to {MAX_SCENARIO_ITEMS} objects")
     client_packets: list[tuple[int, str, bytes, bool]] = []
     protocol: str | None = None
+    sip_transport: str | None = None
     for index, packet in enumerate(packets):
         if not isinstance(packet, dict):
             raise DriverError(f"scenario packet {index} must be an object")
@@ -2474,6 +2494,22 @@ def _scenario_from_packets(trigger: dict[str, Any], scenario: dict[str, Any]) ->
             protocol = packet_protocol
         elif packet_protocol != protocol:
             raise DriverError("scenario packet sequence must use one protocol")
+        if packet_protocol == "sip":
+            packet_transport = packet.get("transport", "udp")
+            if (
+                not isinstance(packet_transport, str)
+                or packet_transport.lower() not in {"tcp", "udp"}
+            ):
+                raise DriverError(
+                    f"scenario packet {index} SIP transport must be tcp or udp"
+                )
+            packet_transport = packet_transport.lower()
+            if sip_transport is None:
+                sip_transport = packet_transport
+            elif packet_transport != sip_transport:
+                raise DriverError(
+                    "scenario SIP packet sequence must use one transport"
+                )
         direction = packet.get("direction", "client_to_server")
         if direction not in {"client_to_server", "server_to_client"}:
             raise DriverError(f"scenario packet {index} direction is invalid")
@@ -2493,11 +2529,17 @@ def _scenario_from_packets(trigger: dict[str, Any], scenario: dict[str, Any]) ->
             )
     if protocol is None or not client_packets:
         raise DriverError("scenario packet sequence must contain client_to_server payloads")
-    default_scheme = "udp" if protocol == "udp" else "tcp"
+    if protocol == "sip":
+        assert sip_transport is not None
+        default_scheme = sip_transport
+        default_port = 5060
+    else:
+        default_scheme = "udp" if protocol == "udp" else "tcp"
+        default_port = 53 if protocol == "udp" else 80
     endpoint = _scenario_endpoint(
         trigger.get("traffic_url"),
         default_scheme=default_scheme,
-        default_port=53 if protocol == "udp" else 80,
+        default_port=default_port,
     )
     if protocol == "http2":
         if endpoint.scheme == "https":
@@ -2506,13 +2548,17 @@ def _scenario_from_packets(trigger: dict[str, Any], scenario: dict[str, Any]) ->
             endpoint = Endpoint("h2c", endpoint.host, endpoint.port, endpoint.server_name)
         else:
             raise DriverError("HTTP/2 scenario packets require an HTTP/TCP traffic_url")
-    if protocol == "udp" and endpoint.scheme not in {"udp"}:
+    if protocol == "udp" and endpoint.scheme != "udp":
         raise DriverError("UDP scenario packets require a udp:// traffic_url")
-    if protocol != "udp" and endpoint.scheme == "udp":
+    if protocol == "sip" and endpoint.scheme != sip_transport:
+        raise DriverError(
+            f"SIP scenario packets require a {sip_transport}:// traffic_url"
+        )
+    if protocol not in {"udp", "sip"} and endpoint.scheme == "udp":
         raise DriverError("stream scenario packets require a TCP/HTTP traffic_url")
     timeout = _timeout({"timeout": trigger.get("timeout", DEFAULT_TIMEOUT)})
     response_items: list[tuple[int, dict[str, Any]]] = []
-    if protocol == "udp":
+    if endpoint.scheme == "udp":
         for index, _packet_protocol, payload, _fin in client_packets:
             response_items.append((index, _scenario_send(endpoint, payload, timeout)))
     else:

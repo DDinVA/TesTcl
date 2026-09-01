@@ -682,6 +682,107 @@ def test_sip_driver_rejects_header_injection_and_adds_content_length() -> None:
         driver.build_sip_message({"uri": "sip:ok\nInjected"}, "SIP_REQUEST")
 
 
+def test_sip_driver_supports_declared_tcp_transport() -> None:
+    endpoint, payload, timeout = driver.build_payload(
+        {
+            "event": "SIP_REQUEST",
+            "request": {
+                "transport": "tcp",
+                "destination": "tcp://127.0.0.1:5060",
+                "method": "OPTIONS",
+                "uri": "sip:test@example.com",
+            },
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "127.0.0.1", 5060)
+    assert payload.startswith(b"OPTIONS sip:test@example.com SIP/2.0\r\n")
+    assert timeout == driver.DEFAULT_TIMEOUT
+    with pytest.raises(driver.DriverError, match="transport must be tcp or udp"):
+        driver.build_payload(
+            {
+                "event": "SIP_REQUEST",
+                "request": {"transport": "sctp"},
+            }
+        )
+    with pytest.raises(driver.DriverError, match="does not match"):
+        driver.build_payload(
+            {
+                "event": "SIP_REQUEST",
+                "request": {
+                    "transport": "tcp",
+                    "destination": "udp://127.0.0.1:5060",
+                },
+            }
+        )
+
+
+def test_sip_packet_scenario_preserves_tcp_framing(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[driver.Endpoint, bytes]] = []
+
+    def fake_send(
+        endpoint: driver.Endpoint,
+        payload: bytes,
+        timeout: float,
+        *,
+        shutdown_write: bool = False,
+    ) -> dict[str, object]:
+        calls.append((endpoint, payload))
+        assert timeout == driver.DEFAULT_TIMEOUT
+        assert shutdown_write is False
+        return {
+            "endpoint": {
+                "scheme": endpoint.scheme,
+                "host": endpoint.host,
+                "port": endpoint.port,
+            },
+            "payload_base64": "",
+            "bytes": 0,
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(driver, "_scenario_send", fake_send)
+    output = driver.run_scenario_trigger(
+        {
+            "operation": "scenario",
+            "traffic_url": "tcp://127.0.0.1:5060",
+            "scenario": {
+                "irule": "when SIP_REQUEST { return }",
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "transport": "tcp",
+                        "payload": "first",
+                    },
+                    {
+                        "protocol": "sip",
+                        "transport": "tcp",
+                        "payload": "second",
+                    },
+                ],
+            },
+        }
+    )
+    assert calls == [(driver.Endpoint("tcp", "127.0.0.1", 5060), b"firstsecond")]
+    assert output["packets_processed"] == 2
+
+
+def test_sip_packet_scenario_rejects_mixed_transports() -> None:
+    with pytest.raises(driver.DriverError, match="one transport"):
+        driver.run_scenario_trigger(
+            {
+                "operation": "scenario",
+                "traffic_url": "tcp://127.0.0.1:5060",
+                "scenario": {
+                    "irule": "when SIP_REQUEST { return }",
+                    "packets": [
+                        {"protocol": "sip", "transport": "tcp", "payload": "one"},
+                        {"protocol": "sip", "transport": "udp", "payload": "two"},
+                    ],
+                },
+            }
+        )
+
+
 def test_pcp_driver_builds_map_request_and_options() -> None:
     payload = driver.build_pcp_request(
         {
