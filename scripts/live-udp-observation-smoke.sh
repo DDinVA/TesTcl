@@ -3,8 +3,8 @@
 set -euo pipefail
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-api_port=${TESTCL_API_PORT:-18092}
-data_port=${TESTCL_DATA_PORT:-18093}
+api_port=${TESTCL_API_PORT:-18094}
+data_port=${TESTCL_DATA_PORT:-18095}
 scenario="$repo_root/examples/scenarios/live-udp-17.5.json"
 python_bin="$repo_root/.venv/bin/python"
 log_file=$(mktemp -t testcl-live-udp.XXXXXX)
