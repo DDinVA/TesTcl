@@ -99,6 +99,11 @@ histories appear under `semantic.utilities` and reset with the emulated
 connection. No external TMM telemetry, geolocation database, or TAC database
 is contacted. `imid` accepts no arguments and returns an empty string, which
 matches the current F5 reference note that the function does not work.
+The executable checkpoint `global-legacy-controls-17.5.json` exercises these
+compatibility paths alongside the digest, HTTP-reader, connection, IP-list,
+iFile, pool, link, redirect, shared-variable, and RADIUS controls. Its passing
+result is local emulator evidence only; it is not independent TMOS/vLab
+evidence.
 The related legacy connection controls are deterministic as well: `forward`
 records strict-forwarding intent, `translate` tracks address/port/service
 translation toggles, `rateclass` records the selected rate class, and

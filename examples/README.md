@@ -65,6 +65,17 @@ requires the repo's uv-managed Python 3.13 environment. The container can use
 The `behavior-packs/ldap-17.5.json` fixture additionally exercises BER-framed
 LDAP bind request/response traffic split across TCP packets.
 
+The `behavior-packs/global-legacy-controls-17.5.json` fixture is a compact,
+runnable TMOS 17.5 checkpoint for the older global command surface: HTTP and
+connection readers, byte-order and digest helpers, IP-list utilities, iFiles,
+CPU/WHEREIS/PEM lookups, pool enumeration, link/hop controls, redirects,
+shared variables, and the deterministic RADIUS helper. Run it locally with:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/global-legacy-controls-17.5.json
+```
+
 The `scenarios/multi-irule-17.5.json` fixture demonstrates multiple attached
 iRules with priority ordering and a shared pool fixture.
 

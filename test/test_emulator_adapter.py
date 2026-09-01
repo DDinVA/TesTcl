@@ -4778,6 +4778,7 @@ when HTTP_RESPONSE_RELEASE {
             "integration-controls-17.5.json": 3,
             "protocol-controls-17.5.json": 8,
             "legacy-controls-17.5.json": 8,
+            "global-legacy-controls-17.5.json": 52,
             "remaining-target-controls-17.5.json": 3,
             "x509-controls-17.5.json": 1,
             "diameter-controls-17.5.json": 3,
