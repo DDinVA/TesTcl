@@ -9,6 +9,7 @@ for smoke_script in \
   live-packet-observation-smoke.sh \
   live-udp-observation-smoke.sh \
   live-sip-observation-smoke.sh \
+  live-sip-tcp-observation-smoke.sh \
   live-dns-observation-smoke.sh; do
   echo "== $smoke_script =="
   "$repo_root/scripts/$smoke_script"

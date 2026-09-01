@@ -277,6 +277,29 @@ exercise the SIP-over-UDP listener with a real `OPTIONS` datagram and a
 serialized `SIP::respond` result. SIP datagrams must contain exactly one
 complete message; the listener does not proxy SIP to an upstream peer.
 
+For SIP over a persistent TCP connection, keep `protocol` set to `sip` and add
+`"transport": "tcp"`:
+
+```json
+{
+  "profiles": ["SIP"],
+  "irule": "when SIP_REQUEST { SIP::respond 200 OK }",
+  "live_data_plane": {
+    "protocol": "sip",
+    "transport": "tcp",
+    "read_timeout": 1.0
+  }
+}
+```
+
+The listener reuses the packet adapter's bounded SIP stream parser, so a real
+client can fragment a message across TCP reads or send multiple messages in
+one read. Each completed `SIP::respond` result is serialized back to the same
+connection. The checked-in [`live-sip-tcp-17.5.json`](../examples/scenarios/live-sip-tcp-17.5.json)
+fixture and [`live-sip-tcp-observation-smoke.sh`](../scripts/live-sip-tcp-observation-smoke.sh)
+provide a runnable checkpoint. This remains a local TCP listener rather than a
+full SIP proxy, transaction engine, or upstream SIP load balancer.
+
 If the scenario also attaches the `DNS` profile, valid DNS-shaped datagrams
 are decoded by the normal DNS packet adapter. `DNS_REQUEST` can mutate the
 question/records and call `DNS::return`; the resulting serialized message is

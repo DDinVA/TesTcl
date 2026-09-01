@@ -25055,6 +25055,64 @@ when SIP_REQUEST {
             server.server_close()
             manager.close_all()
 
+    def test_live_sip_tcp_data_plane_reassembles_and_serializes_responses(self) -> None:
+        scenario = {
+            "profiles": ["SIP"],
+            "irule": "when SIP_REQUEST { if {[SIP::method] eq \"OPTIONS\"} { SIP::respond 200 OK } }",
+            "live_data_plane": {
+                "protocol": "sip",
+                "transport": "tcp",
+                "read_timeout": 1.0,
+            },
+        }
+        observations = self.adapter._LiveObservationStore()
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario, observations
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        client = socket.create_connection(
+            ("127.0.0.1", self.adapter._data_plane_bound_port(server)), timeout=2
+        )
+        client.settimeout(2)
+        message = (
+            b"OPTIONS sip:service.example.com SIP/2.0\r\n"
+            b"Via: SIP/2.0/TCP client.example.com;branch=z9\r\n"
+            b"From: <sip:alice@example.com>;tag=1\r\n"
+            b"To: <sip:service.example.com>\r\n"
+            b"Call-ID: live-tcp-options\r\n"
+            b"CSeq: 1 OPTIONS\r\n"
+            b"Content-Length: 0\r\n\r\n"
+        )
+        try:
+            client.sendall(message[:37])
+            client.sendall(message[37:])
+            response = client.recv(4096)
+            self.assertTrue(response.startswith(b"SIP/2.0 200 OK\r\n"))
+            self.assertTrue(response.endswith(b"Content-Length: 0\r\n\r\n"))
+            coalesced_request = message.replace(
+                b"live-tcp-options", b"live-tcp-coalesced"
+            )
+            client.sendall(coalesced_request + coalesced_request)
+            coalesced_response = b""
+            while coalesced_response.count(b"SIP/2.0 200 OK\r\n") < 2:
+                coalesced_response += client.recv(4096)
+            self.assertEqual(
+                coalesced_response.count(b"SIP/2.0 200 OK\r\n"), 2
+            )
+            snapshot = observations.snapshot(10)
+            self.assertTrue(any(
+                item["protocol"] == "sip"
+                and any(entry.get("protocol") == "sip" for entry in item["result"]["trace"])
+                for item in snapshot["observations"]
+            ))
+        finally:
+            client.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+
     def test_live_sip_data_plane_rejects_udp_only_options(self) -> None:
         with self.assertRaisesRegex(
             self.adapter.EmulatorInputError, "SIP data plane"
@@ -25072,6 +25130,35 @@ when SIP_REQUEST {
                     },
                 },
             )
+
+    def test_live_data_plane_transport_is_sip_only_and_bounded(self) -> None:
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "transport is only valid for the SIP data plane",
+        ):
+            self.adapter._normalise_live_data_plane_scenario(
+                {
+                    "profiles": ["TCP"],
+                    "live_data_plane": {"protocol": "tcp", "transport": "udp"},
+                }
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError,
+            "transport must be tcp or udp",
+        ):
+            self.adapter._normalise_live_data_plane_scenario(
+                {
+                    "profiles": ["SIP"],
+                    "live_data_plane": {"protocol": "sip", "transport": "sctp"},
+                }
+            )
+        _, config = self.adapter._normalise_live_data_plane_scenario(
+            {
+                "profiles": ["SIP"],
+                "live_data_plane": {"protocol": "sip", "transport": "tcp"},
+            }
+        )
+        self.assertEqual(config["transport"], "tcp")
 
     def test_udp_packet_payload_hex_is_lossless(self) -> None:
         result = self.adapter.run_scenario(

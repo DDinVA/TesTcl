@@ -31,7 +31,10 @@ for iRule fixtures by adding `"live_data_plane": {"protocol": "tcp"}` or
 `{"protocol": "udp"}`/`{"protocol": "sip"}` to the scenario. UDP and SIP
 keep one persistent emulator session per client endpoint. UDP forwards
 `UDP::respond` datagrams back with lossless bytes; SIP parses one complete
-datagram and serializes `SIP::respond` responses. When the scenario includes the DNS profile, valid DNS queries
+datagram and serializes `SIP::respond` responses. Set
+`live_data_plane.transport` to `tcp` with `protocol: "sip"` to use the same
+bounded SIP parser over a persistent TCP connection, including fragmented and
+coalesced messages. When the scenario includes the DNS profile, valid DNS queries
 also run through `DNS_REQUEST`/`DNS_RESPONSE`, and `DNS::return` produces a
 real response datagram.
 `TCP::respond` emissions are written back to the client. An explicit
@@ -68,6 +71,7 @@ quick HTTP evaluation, or `scripts/live-packet-observation-smoke.sh` for a
 real TCP byte-to-replay-plan check. Run
 `scripts/live-all-observation-smoke.sh` to exercise the HTTP, TCP, UDP,
 SIP-over-UDP, and DNS-over-UDP checkpoints in one sequential command.
+The SIP-over-TCP checkpoint is included as well.
 For catalog-wide progress, run `./scripts/emulate-irule.sh --catalog-smoke
 --namespace HTTP --limit 16`; this executes safe zero-argument probes and
 reports which commands work, need arguments, or fail in the current emulator.
