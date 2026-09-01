@@ -26,11 +26,12 @@ catalog through the same local API.
 For real-client HTTP smoke tests, use `--data-plane` with a scenario file, or
 combine `--serve --data-plane-scenario PATH`; the container exposes the API on
 8080 and the optional data plane on 18080.
-The same listener can expose bounded raw TCP or UDP data planes for iRule
-fixtures by adding `"live_data_plane": {"protocol": "tcp"}` or
-`{"protocol": "udp"}` to the scenario. UDP keeps one persistent emulator
-session per client endpoint and forwards `UDP::respond` datagrams back with
-lossless bytes. When the scenario includes the DNS profile, valid DNS queries
+The same listener can expose bounded raw TCP, UDP, or SIP-over-UDP data planes
+for iRule fixtures by adding `"live_data_plane": {"protocol": "tcp"}` or
+`{"protocol": "udp"}`/`{"protocol": "sip"}` to the scenario. UDP and SIP
+keep one persistent emulator session per client endpoint. UDP forwards
+`UDP::respond` datagrams back with lossless bytes; SIP parses one complete
+datagram and serializes `SIP::respond` responses. When the scenario includes the DNS profile, valid DNS queries
 also run through `DNS_REQUEST`/`DNS_RESPONSE`, and `DNS::return` produces a
 real response datagram.
 `TCP::respond` emissions are written back to the client. An explicit
@@ -65,8 +66,8 @@ results and use `/v1/live-observations/capture-plan` to export replayable
 HTTP/HTTP2/TCP/UDP/WebSocket inputs; run `scripts/live-observation-smoke.sh` for a
 quick HTTP evaluation, or `scripts/live-packet-observation-smoke.sh` for a
 real TCP byte-to-replay-plan check. Run
-`scripts/live-all-observation-smoke.sh` to exercise the HTTP, TCP, UDP, and
-DNS-over-UDP checkpoints in one sequential command.
+`scripts/live-all-observation-smoke.sh` to exercise the HTTP, TCP, UDP,
+SIP-over-UDP, and DNS-over-UDP checkpoints in one sequential command.
 For catalog-wide progress, run `./scripts/emulate-irule.sh --catalog-smoke
 --namespace HTTP --limit 16`; this executes safe zero-argument probes and
 reports which commands work, need arguments, or fail in the current emulator.

@@ -233,7 +233,10 @@ to reproduce all TMM scheduling, monitor, or BIG-IP networking internals.
 ## Real-client UDP data plane
 
 Set `live_data_plane.protocol` to `udp` to exercise a real UDP client against
-the generic `CLIENT_ACCEPTED`, `CLIENT_DATA`, and `SERVER_DATA` event path:
+the generic `CLIENT_ACCEPTED`, `CLIENT_DATA`, and `SERVER_DATA` event path.
+Set it to `sip` for a bounded SIP-over-UDP listener that parses one complete
+SIP datagram, runs the SIP lifecycle, and serializes `SIP::respond` back to the
+client:
 
 ```json
 {
@@ -267,6 +270,12 @@ balancer. DNS, RADIUS, DHCP, SIP, PCP, and other protocol-specific UDP
 semantics remain available through the packet/API and capture-driver paths.
 Live UDP observations can be exported through
 `/v1/live-observations/capture-plan` for external BIG-IP/vLab comparison.
+
+The checked-in [`live-sip-17.5.json`](../examples/scenarios/live-sip-17.5.json)
+fixture and [`live-sip-observation-smoke.sh`](../scripts/live-sip-observation-smoke.sh)
+exercise the SIP-over-UDP listener with a real `OPTIONS` datagram and a
+serialized `SIP::respond` result. SIP datagrams must contain exactly one
+complete message; the listener does not proxy SIP to an upstream peer.
 
 If the scenario also attaches the `DNS` profile, valid DNS-shaped datagrams
 are decoded by the normal DNS packet adapter. `DNS_REQUEST` can mutate the

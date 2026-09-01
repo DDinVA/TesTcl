@@ -32600,7 +32600,7 @@ def _build_live_observation_capture_plan(
 
     Live observations contain emulator output, so this function deliberately
     emits a plan with no reference output. HTTP observations become one request
-    scenario each. TCP, UDP, and WebSocket observations are grouped by live
+    scenario each. TCP, UDP, SIP, and WebSocket observations are grouped by live
     session so stream/datagram ordering survives the export. A BIG-IP or vLab
     collector must fill the matching records before the existing
     assembly/golden-vector boundary can be used.
@@ -32741,10 +32741,10 @@ def _build_live_observation_capture_plan(
             if isinstance(session_id, str) and session_id:
                 http2_stream_sessions.add(session_id)
             continue
-        if protocol not in {"tcp", "udp", "http2", "websocket"}:
+        if protocol not in {"tcp", "udp", "sip", "http2", "websocket"}:
             raise EmulatorInputError(
                 "live capture-plan export accepts HTTP transactions, HTTP/2 wire "
-                "packets, TCP/UDP packets, and WebSocket packets"
+                "packets, TCP/UDP/SIP packets, and WebSocket packets"
             )
         if protocol == "http2":
             if item.get("phase") != "wire":
@@ -32806,6 +32806,7 @@ def _build_live_observation_capture_plan(
                 "tos",
                 "datagram",
                 "flow_id",
+                "transport",
             }
             if protocol in {"tcp", "udp", "http2"}:
                 allowed_packet_fields.add("payload_hex")
@@ -32847,6 +32848,7 @@ def _build_live_observation_capture_plan(
                     "tos",
                     "datagram",
                     "flow_id",
+                    "transport",
                     "type",
                     "method",
                     "uri",
@@ -35997,9 +35999,10 @@ def _normalise_live_data_plane_scenario(
         "websocket",
         "tcp",
         "udp",
+        "sip",
     }:
         raise EmulatorInputError(
-            "live_data_plane.protocol must be http, http2, websocket, tcp, or udp"
+            "live_data_plane.protocol must be http, http2, websocket, tcp, udp, or sip"
         )
     protocol = protocol.lower()
 
@@ -36029,7 +36032,7 @@ def _normalise_live_data_plane_scenario(
         raise EmulatorInputError(
             "live_data_plane.tls is only valid for the HTTP data plane or WebSocket data plane"
         )
-    if protocol in {"tcp", "udp"} and any(
+    if protocol in {"tcp", "udp", "sip"} and any(
         field in scenario for field in ("request", "requests", "packets")
     ):
         raise EmulatorInputError(
@@ -36056,9 +36059,9 @@ def _normalise_live_data_plane_scenario(
         )
     upstream_config = config.get("upstream")
     if upstream_config is not None:
-        if protocol == "udp":
+        if protocol in {"udp", "sip"}:
             raise EmulatorInputError(
-                "live_data_plane.upstream is not supported for the UDP data plane"
+                f"live_data_plane.upstream is not supported for the {protocol.upper()} data plane"
             )
         if not isinstance(upstream_config, dict):
             raise EmulatorInputError("live_data_plane.upstream must be an object")
@@ -38675,8 +38678,8 @@ def _live_udp_handler(
             listener = self._socket_endpoint(
                 socket_object.getsockname(), ("127.0.0.1", 0)
             )
-            return {
-                "protocol": "udp",
+            packet: dict[str, Any] = {
+                "protocol": config["protocol"],
                 "direction": "client_to_server",
                 "source": self._socket_endpoint(
                     self.client_address, ("127.0.0.1", 0)
@@ -38684,6 +38687,17 @@ def _live_udp_handler(
                 "destination": listener,
                 "payload_hex": payload.hex(),
             }
+            if config["protocol"] == "sip":
+                decoded = _decode_sip_message(payload, "client_to_server")
+                if decoded is None or decoded[1] != len(payload):
+                    raise EmulatorInputError(
+                        "live SIP datagram must contain exactly one complete message"
+                    )
+                packet["type"] = decoded[0]["type"]
+                packet["message"] = decoded[0]["message"]
+                packet["transport"] = "udp"
+                packet.pop("payload_hex")
+            return packet
 
         def _session(self) -> tuple[tuple[str, int], str]:
             server = self.server
@@ -38853,6 +38867,58 @@ def _live_udp_handler(
                 )
             self.request[1].sendto(payload, self.client_address)
 
+        def _send_sip_response(self, result: Any) -> None:
+            """Serialize a bounded SIP::respond result to the UDP peer."""
+            if not isinstance(result, dict):
+                return
+            trace = result.get("trace", [])
+            if not isinstance(trace, list) or not trace:
+                return
+            packet_result = trace[-1]
+            if not isinstance(packet_result, dict):
+                return
+            response = packet_result.get("response")
+            if response is None:
+                return
+            if not isinstance(response, dict):
+                raise EmulatorInputError("emulator returned invalid SIP response")
+            status = response.get("status")
+            phrase = response.get("phrase", "")
+            headers = response.get("headers", [])
+            if (
+                isinstance(status, bool)
+                or not isinstance(status, int)
+                or not 100 <= status <= 699
+                or not isinstance(phrase, str)
+                or not isinstance(headers, list)
+            ):
+                raise EmulatorInputError("emulator returned invalid SIP response fields")
+            if any(char in phrase for char in ("\x00", "\r", "\n")):
+                raise EmulatorInputError("emulator returned unsafe SIP response phrase")
+            lines = [f"SIP/2.0 {status} {phrase}"]
+            for item in headers:
+                if not isinstance(item, list) or len(item) != 2:
+                    raise EmulatorInputError("emulator returned invalid SIP response headers")
+                name, value = item
+                if not isinstance(name, str) or not isinstance(value, str):
+                    raise EmulatorInputError("emulator returned invalid SIP response headers")
+                if any(char in name or char in value for char in ("\x00", "\r", "\n")):
+                    raise EmulatorInputError("emulator returned unsafe SIP response headers")
+                if name.lower() == "content-length":
+                    if value.strip() != "0":
+                        raise EmulatorInputError(
+                            "live SIP::respond content-length must be zero"
+                        )
+                    continue
+                lines.append(f"{name}: {value}")
+            # SIP::respond has no body argument, so always emit a canonical
+            # zero-length framing header even if the rule supplied one.
+            lines.append("Content-Length: 0")
+            wire = ("\r\n".join(lines) + "\r\n\r\n").encode("utf-8")
+            if len(wire) > config["max_read_bytes"]:
+                raise EmulatorResourceError("SIP response exceeds the configured byte limit")
+            self.request[1].sendto(wire, self.client_address)
+
         def handle(self) -> None:  # noqa: D401 - socketserver API
             payload, _socket_object = self.request
             if not isinstance(payload, bytes):
@@ -38887,13 +38953,16 @@ def _live_udp_handler(
                 if observations is not None:
                     observations.append(
                         session_id=session_id,
-                        protocol="udp",
+                        protocol=config["protocol"],
                         phase="datagram",
                         direction="client_to_server",
                         result=result,
                     )
                 self._send_emissions(result)
-                self._send_dns_response(result)
+                if config["protocol"] == "sip":
+                    self._send_sip_response(result)
+                else:
+                    self._send_dns_response(result)
                 trace = result.get("trace", []) if isinstance(result, dict) else []
                 if (
                     isinstance(trace, list)
@@ -38979,7 +39048,7 @@ def _data_plane_server(
                     "read_timeout", LIVE_RAW_READ_TIMEOUT_SECONDS
                 ),
             )
-        elif config["protocol"] == "udp":
+        elif config["protocol"] in {"udp", "sip"}:
             server = _LiveUDPServer(
                 (host, port),
                 _live_udp_handler(scenario, config, manager, observations),
@@ -39769,7 +39838,7 @@ def serve(
 
 
 def serve_data_plane(root: Path, host: str, port: int, scenario: Any) -> None:
-    """Run only the optional real-client HTTP or raw TCP data plane."""
+    """Run only the optional real-client HTTP, TCP, UDP, or SIP data plane."""
     server, manager = _data_plane_server(root, host, port, scenario)
     scheme = getattr(server, "_testcl_protocol", "http")
     print(

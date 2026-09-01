@@ -24993,6 +24993,80 @@ when CLIENT_DATA {
             server.server_close()
             manager.close_all()
 
+    def test_live_sip_udp_data_plane_returns_irule_response(self) -> None:
+        scenario = {
+            "profiles": ["SIP"],
+            "irule": """
+when SIP_REQUEST {
+    if {[SIP::method] eq "OPTIONS"} {
+        SIP::respond 200 OK
+    }
+}
+""",
+            "live_data_plane": {
+                "protocol": "sip",
+                "read_timeout": 0.2,
+            },
+        }
+        observations = self.adapter._LiveObservationStore()
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario, observations
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(2)
+        endpoint = ("127.0.0.1", self.adapter._data_plane_bound_port(server))
+        request = (
+            b"OPTIONS sip:service.example.com SIP/2.0\r\n"
+            b"Via: SIP/2.0/UDP client.example.com;branch=z9\r\n"
+            b"From: <sip:alice@example.com>;tag=1\r\n"
+            b"To: <sip:service.example.com>\r\n"
+            b"Call-ID: live-options\r\n"
+            b"CSeq: 1 OPTIONS\r\n"
+            b"Content-Length: 0\r\n\r\n"
+        )
+        try:
+            client.sendto(request, endpoint)
+            response, _ = client.recvfrom(4096)
+            self.assertTrue(response.startswith(b"SIP/2.0 200 OK\r\n"))
+            self.assertTrue(response.endswith(b"Content-Length: 0\r\n\r\n"))
+            snapshot = observations.snapshot(10)
+            self.assertEqual(snapshot["count"], 1)
+            self.assertEqual(snapshot["observations"][0]["protocol"], "sip")
+            self.assertEqual(snapshot["observations"][0]["phase"], "datagram")
+            plan = self.adapter._build_live_observation_capture_plan(
+                Path(self.tcl_lsp_root), {"scenario": scenario}, observations
+            )
+            replay_packet = plan["observations"][0]["input"]["packets"][0]
+            self.assertEqual(replay_packet["protocol"], "sip")
+            self.assertEqual(replay_packet["transport"], "udp")
+            self.assertEqual(replay_packet["type"], "request")
+        finally:
+            client.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+
+    def test_live_sip_data_plane_rejects_udp_only_options(self) -> None:
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "SIP data plane"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "profiles": ["SIP"],
+                    "irule": "",
+                    "live_data_plane": {
+                        "protocol": "sip",
+                        "upstream": {"host": "127.0.0.1", "port": 5060},
+                    },
+                },
+            )
+
     def test_udp_packet_payload_hex_is_lossless(self) -> None:
         result = self.adapter.run_scenario(
             {
