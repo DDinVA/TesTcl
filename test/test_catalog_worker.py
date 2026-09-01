@@ -57,6 +57,28 @@ def test_worker_consumes_chunk_and_emits_local_results_and_external_plan(tmp_pat
         assert "scenario" not in row["variants"][0]["capture_input"]
 
 
+def test_worker_keeps_command_ids_stable_and_can_skip_excluded_commands(
+    tmp_path: Path,
+) -> None:
+    chunk_path = _export_chunk(tmp_path)
+    chunk = worker._read_chunk(chunk_path)
+    report = worker._build_report(
+        chunk,
+        tcl_lsp_root=TCL_LSP_ROOT,
+        variants=1,
+        mode="plan",
+        exclude_commands={"HTTP::class"},
+    )
+
+    skipped = next(row for row in report["commands"] if row["command"] == "HTTP::class")
+    assert skipped["id"] == "catalog:HTTP::class"
+    assert skipped["generation_status"] == "skipped-collector-safety"
+    assert all(
+        observation["id"] != "catalog:HTTP::class:variant:1"
+        for observation in report["capture_plan"]["observations"]
+    )
+
+
 def test_worker_rejects_variant_plan_over_collector_bound(tmp_path: Path) -> None:
     chunk_path = _export_chunk(tmp_path, size=33, namespace=None)
     chunk = worker._read_chunk(chunk_path)

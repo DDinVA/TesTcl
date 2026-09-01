@@ -493,6 +493,11 @@ jobs:
               --output /tmp/testcl-catalog-worker-report.json >/tmp/testcl-catalog-worker.json
             grep -F '"generated_command_count": 3' /tmp/testcl-catalog-worker.json
             grep -F '"capture_observation_count": 3' /tmp/testcl-catalog-worker.json
+            python /opt/testcl/tools/catalog-capture-batch.py \
+              --catalog-dir /tmp/testcl-catalog-worker \
+              --output-dir /tmp/testcl-catalog-capture-batch \
+              --variants 1 --capture-id ci-exported >/tmp/testcl-catalog-batch.json
+            grep -F '"observation_count": 32' /tmp/testcl-catalog-batch.json
           '
 
           docker run --detach --name "$raw_container_name" \

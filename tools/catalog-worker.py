@@ -175,6 +175,7 @@ def _build_report(
     tcl_lsp_root: str | None,
     variants: int,
     mode: str,
+    exclude_commands: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     if mode not in {"local", "plan", "both"}:
         raise CatalogWorkerError("mode must be local, plan, or both")
@@ -182,7 +183,9 @@ def _build_report(
         raise CatalogWorkerError(f"variants must be between 1 and {MAX_VARIANTS}")
     commands = chunk["commands"]
     target_commands = [
-        item for item in commands if item.get("target_status") == "available-in-tmos-17.5"
+        item for item in commands
+        if item.get("target_status") == "available-in-tmos-17.5"
+        and item.get("name") not in exclude_commands
     ]
     if len(target_commands) * variants > MAX_PLAN_OBSERVATIONS:
         raise CatalogWorkerError(
@@ -200,7 +203,9 @@ def _build_report(
     for catalog in commands:
         name = catalog["name"]
         row: dict[str, Any] = {
-            "id": f"catalog:{chunk['chunk']['offset']}:{name}",
+            # IDs are command-stable so changing export chunk size does not
+            # invalidate resumable capture state or previously imported vectors.
+            "id": f"catalog:{name}",
             "command": name,
             "namespace": catalog.get("namespace"),
             "runtime_status": catalog.get("runtime_status"),
@@ -210,6 +215,11 @@ def _build_report(
             "generation_status": "skipped-not-available-in-tmos-17.5",
             "variants": [],
         }
+        if name in exclude_commands:
+            row["generation_status"] = "skipped-collector-safety"
+            generation_status_counts[row["generation_status"]] = generation_status_counts.get(row["generation_status"], 0) + 1
+            rows.append(row)
+            continue
         if catalog.get("target_status") != "available-in-tmos-17.5":
             generation_status_counts[row["generation_status"]] = generation_status_counts.get(row["generation_status"], 0) + 1
             rows.append(row)
@@ -353,6 +363,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tcl-lsp-root")
     parser.add_argument("--variants", type=int, default=1)
     parser.add_argument("--mode", choices=("local", "plan", "both"), default="both")
+    parser.add_argument(
+        "--exclude-command",
+        action="append",
+        default=[],
+        help="skip a command from external plan generation (repeatable)",
+    )
     parser.add_argument("--output", help="new report path; stdout is used when omitted")
     args = parser.parse_args(argv)
     try:
@@ -362,6 +378,7 @@ def main(argv: list[str] | None = None) -> int:
             tcl_lsp_root=args.tcl_lsp_root,
             variants=args.variants,
             mode=args.mode,
+            exclude_commands=frozenset(args.exclude_command),
         )
         encoded = json.dumps(report, ensure_ascii=False, allow_nan=False, indent=2).encode("utf-8") + b"\n"
         if len(encoded) > MAX_OUTPUT_BYTES:

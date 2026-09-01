@@ -3777,6 +3777,23 @@ per-command generation status, local execution results, capture inputs, and
 the reference-free `capture_plan`; it never treats local results as TMOS
 evidence.
 
+For a complete exported bundle, use the catalog batch builder. It verifies the
+manifest and every chunk hash, preserves command-stable observation IDs, and
+writes a resumable `manifest.json` plus collector plans compatible with
+`tmos17-capture-runner.py`:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/catalog-capture-batch-17.5.sh \
+  /tmp/testcl-catalog /tmp/testcl-capture-batch --variants 1
+
+./scripts/checkpoint-17.5.sh  # optional local regression checkpoint
+```
+
+The batch builder records collector-blocked commands separately and includes
+the protocol-driver stimulus schedule. It does not contact a device; pass the
+resulting batch to the existing preflight/execute runner only after selecting
+an authorized TMOS 17.5 BIG-IP or vLab target.
+
 To turn one campaign chunk into an assembly-ready plan, use the capture-plan
 template mode:
 

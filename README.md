@@ -95,6 +95,12 @@ To consume one of those chunks immediately, run
 probes, reports emulator outcomes, and emits an external BIG-IP/vLab capture
 plan from the same chunk. Local outcomes are not independent TMOS evidence;
 the plan becomes evidence only after an authorized collector returns records.
+To turn every exported chunk into a resumable collector batch, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/catalog-capture-batch-17.5.sh
+/tmp/testcl-catalog /tmp/testcl-capture-batch --variants 1`. This verifies
+the catalog manifest and every chunk hash before generating runner-compatible
+plans; change `--variants` to 2 through 8 only when the exported chunk size
+keeps each plan at or below 256 observations.
 To see semantic test-input coverage across all checked-in packs, run
 `./scripts/emulate-irule.sh --behavior-coverage`.
 For one repeatable checkpoint covering the local 17.5 contracts and all eight
