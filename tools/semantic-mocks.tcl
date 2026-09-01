@@ -5832,9 +5832,61 @@ namespace eval ::itest::semantic {
         return $::state::sip::route_status
     }
 
+    proc _sip_header_elements {header_value} {
+        # Route headers may contain multiple comma-separated URI elements.
+        # Do not split commas inside angle-bracketed URIs or quoted params.
+        set result {}
+        set current ""
+        set angle_depth 0
+        set quoted 0
+        set escaped 0
+        foreach character [split $header_value ""] {
+            if {$escaped} {
+                append current $character
+                set escaped 0
+                continue
+            }
+            if {$quoted && $character eq "\\"} {
+                append current $character
+                set escaped 1
+                continue
+            }
+            if {$character eq "\""} {
+                set quoted [expr {!$quoted}]
+                append current $character
+                continue
+            }
+            if {!$quoted && $character eq "<"} {
+                incr angle_depth
+            } elseif {!$quoted && $character eq ">" && $angle_depth > 0} {
+                incr angle_depth -1
+            }
+            if {!$quoted && $angle_depth == 0 && $character eq ","} {
+                lappend result [string trim $current]
+                set current ""
+            } else {
+                append current $character
+            }
+        }
+        if {$current ne "" || [llength $result] > 0} {
+            lappend result [string trim $current]
+        }
+        return $result
+    }
+
     proc _sip_list_header_command {field header args} {
         _sip_require_event {SIP_REQUEST SIP_REQUEST_DONE SIP_REQUEST_SEND SIP_RESPONSE SIP_RESPONSE_DONE SIP_RESPONSE_SEND} SIP::$field
         if {[llength $args] > 1} { error "SIP::$field accepts zero or one index" }
+        if {[llength $args] == 1 && [lindex $args 0] eq "top"} {
+            foreach {name value} $::state::sip::headers {
+                if {[_sip_header_matches $name $header]} {
+                    set elements [_sip_header_elements $value]
+                    if {[llength $elements] > 0} { return [lindex $elements 0] }
+                    return ""
+                }
+            }
+            return ""
+        }
         set index [expr {[llength $args] == 1 ? [lindex $args 0] : 0}]
         if {![string is integer -strict $index] || $index < 0} { error "SIP::$field index must be non-negative" }
         return [_sip_header_at $header $index]

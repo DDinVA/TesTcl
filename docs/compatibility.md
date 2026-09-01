@@ -434,6 +434,11 @@ entries and is neither durable nor shared with external emulator processes; the
 BIG-IP Message Routing Framework route table and production TMM scheduler
 remain outside the model.
 
+`SIP::route` and `SIP::record-route` support both numeric header-line lookup
+and the TMOS `top` selector. `top` returns the first comma-separated route
+element while respecting angle-bracketed URIs and quoted parameters; this is
+header parsing only and does not create a Message Routing Framework route.
+
 The legacy connection controls `DEMANGLE::enable`, `DEMANGLE::disable`,
 `ISESSION::deduplication`, `PLUGIN::enable`, and `PLUGIN::disable` are modeled
 as bounded connection state under `semantic.feature_controls`. The emulator

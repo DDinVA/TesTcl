@@ -17032,6 +17032,98 @@ when SIP_REQUEST {
         self.assertEqual(result["trace"][2]["persistence"]["hit"], False)
         self.assertEqual(result["trace"][2]["persistence"]["route_target_after"], "member-c")
 
+    def test_sip_route_and_record_route_support_top_elements(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["SIP"],
+                "irule": """
+when SIP_REQUEST {
+    log local0. "route-top=[SIP::route top] route-line=[SIP::route 0] record-top=[SIP::record-route top]"
+}
+""",
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "direction": "client_to_server",
+                        "type": "request",
+                        "method": "INVITE",
+                        "uri": "sip:bob@example.com",
+                        "headers": [
+                            ["Route", "<sip:first.example.com;lr>, <sip:second.example.com;lr>"],
+                            ["Route", "<sip:third.example.com;lr>"],
+                            ["Record-Route", "<sip:record-first.example.com;lr>, <sip:record-second.example.com;lr>"],
+                        ],
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        request_event = next(
+            event
+            for event in result["trace"][0]["events"]
+            if event["event"] == "SIP_REQUEST"
+        )
+        logs = request_event["logs"]
+        self.assertTrue(
+            any(
+                "route-top=<sip:first.example.com;lr>" in log
+                and "route-line=<sip:first.example.com;lr>, <sip:second.example.com;lr>" in log
+                and "record-top=<sip:record-first.example.com;lr>" in log
+                for log in logs
+            )
+        )
+
+    def test_sip_route_top_handles_quoted_and_angle_bracket_commas(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["SIP"],
+                "irule": 'when SIP_REQUEST { log local0. "[SIP::route top]" }',
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "direction": "client_to_server",
+                        "type": "request",
+                        "method": "INVITE",
+                        "uri": "sip:bob@example.com",
+                        "headers": {
+                            "Route": '<sip:first.example.com;lr;note="a,b">, <sip:second.example.com;lr>'
+                        },
+                    }
+                ],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertTrue(
+            any(
+                '<sip:first.example.com;lr;note="a,b">' in log
+                for log in next(
+                    event
+                    for event in result["trace"][0]["events"]
+                    if event["event"] == "SIP_REQUEST"
+                )["logs"]
+            )
+        )
+
+    def test_sip_route_top_requires_the_supported_event_and_arity(self) -> None:
+        with self.assertRaisesRegex(self.adapter.EmulatorInputError, "SIP::route accepts"):
+            self.adapter.run_scenario(
+                {
+                    "profiles": ["SIP"],
+                    "irule": "when SIP_REQUEST { SIP::route top extra }",
+                    "packets": [
+                        {
+                            "protocol": "sip",
+                            "direction": "client_to_server",
+                            "type": "request",
+                            "method": "INVITE",
+                            "uri": "sip:bob@example.com",
+                            "headers": {"Route": "<sip:first.example.com;lr>"},
+                        }
+                    ],
+                },
+                tcl_lsp_root=self.tcl_lsp_root,
+            )
+
     def test_sip_sdp_payload_is_parsed_mutated_and_reencoded(self) -> None:
         body = (
             "v=0\r\n"
