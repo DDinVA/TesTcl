@@ -27,6 +27,7 @@ COPY tools/tmos17-capture-assemble.py /opt/testcl/tools/tmos17-capture-assemble.
 COPY tools/tmos17-capture-split.py /opt/testcl/tools/tmos17-capture-split.py
 COPY tools/tmos17-collector.py /opt/testcl/tools/tmos17-collector.py
 COPY tools/tmos17-protocol-driver.py /opt/testcl/tools/tmos17-protocol-driver.py
+COPY tools/udp-fixture.py /opt/testcl/tools/udp-fixture.py
 COPY tools/evaluate-local.py /opt/testcl/tools/evaluate-local.py
 COPY tools/semantic-mocks.tcl /opt/testcl/tools/semantic-mocks.tcl
 COPY tools/http2_wire.py /opt/testcl/tools/http2_wire.py
@@ -40,6 +41,7 @@ COPY examples/scenarios/live-dns-17.5.json /opt/testcl/examples/scenarios/live-d
 COPY examples/scenarios/live-tcp-17.5.json /opt/testcl/examples/scenarios/live-tcp-17.5.json
 COPY examples/scenarios/live-tcp-pool-17.5.json /opt/testcl/examples/scenarios/live-tcp-pool-17.5.json
 COPY examples/scenarios/live-udp-17.5.json /opt/testcl/examples/scenarios/live-udp-17.5.json
+COPY examples/scenarios/live-udp-upstream-17.5.json /opt/testcl/examples/scenarios/live-udp-upstream-17.5.json
 COPY examples/scenarios/live-sip-17.5.json /opt/testcl/examples/scenarios/live-sip-17.5.json
 COPY examples/scenarios/live-sip-tcp-17.5.json /opt/testcl/examples/scenarios/live-sip-tcp-17.5.json
 COPY examples/scenarios/live-websocket-17.5.json /opt/testcl/examples/scenarios/live-websocket-17.5.json
@@ -57,7 +59,7 @@ ENV TCL_LSP_ROOT=/opt/tcl-lsp \
     PYTHONUNBUFFERED=1
 
 WORKDIR /work
-EXPOSE 8080 18080 18082 18083
+EXPOSE 8080 18080 18082/tcp 18082/udp 18083
 HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=5 \
     CMD python -c "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2); response.read(); response.close(); raise SystemExit(0 if response.status == 200 else 1)"
 ENTRYPOINT ["python", "/opt/testcl/tools/irule-emulator.py"]

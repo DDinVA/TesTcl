@@ -277,6 +277,12 @@ and other protocol-specific UDP semantics remain available through the
 packet/API and capture-driver paths; SIP upstream proxying remains unsupported.
 Live UDP observations can be exported through
 `/v1/live-observations/capture-plan` for external BIG-IP/vLab comparison.
+For a fully local two-container evaluation with a real UDP backend, run
+[`live-udp-upstream-compose-smoke.sh`](../scripts/live-udp-upstream-compose-smoke.sh).
+It starts the optional `udp` Compose profile, uses
+[`live-udp-upstream-17.5.json`](../examples/scenarios/live-udp-upstream-17.5.json),
+and verifies the `CLIENT_DATA` mutation, pool-mapped backend exchange,
+`SERVER_DATA` mutation, and exported observation phases.
 
 The checked-in [`live-sip-17.5.json`](../examples/scenarios/live-sip-17.5.json)
 fixture and [`live-sip-observation-smoke.sh`](../scripts/live-sip-observation-smoke.sh)

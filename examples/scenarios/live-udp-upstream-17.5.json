@@ -1,0 +1,21 @@
+{
+  "profiles": ["UDP"],
+  "pools": {
+    "app_pool": ["udp-backend:5353"]
+  },
+  "irule": "when CLIENT_DATA { UDP::payload replace 0 5 query; pool app_pool }\nwhen SERVER_DATA { UDP::payload replace 0 7 reply: }",
+  "live_data_plane": {
+    "protocol": "udp",
+    "read_timeout": 1.0,
+    "max_read_bytes": 2097152,
+    "upstream": {
+      "pool": "app_pool",
+      "targets": {
+        "udp-backend:5353": {
+          "host": "udp-backend",
+          "port": 5353
+        }
+      }
+    }
+  }
+}

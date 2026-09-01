@@ -580,3 +580,8 @@ jobs:
             docker logs "$sip_container_name"
             exit "$sip_status"
           fi
+
+      - name: Smoke test the Compose UDP upstream workbench
+        run: |
+          uv venv --python 3.13 .venv
+          ./scripts/live-udp-upstream-compose-smoke.sh

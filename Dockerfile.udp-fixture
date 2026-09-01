@@ -1,0 +1,11 @@
+# Tiny Python 3.13 UDP backend used by the optional Compose workbench profile.
+
+FROM python:3.13-slim-bookworm
+
+COPY tools/udp-fixture.py /opt/testcl/tools/udp-fixture.py
+
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 5353/udp
+ENTRYPOINT ["python", "/opt/testcl/tools/udp-fixture.py"]
+CMD ["--host", "0.0.0.0", "--port", "5353", "--prefix", "origin:"]

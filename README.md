@@ -72,6 +72,10 @@ real TCP byte-to-replay-plan check. Run
 `scripts/live-all-observation-smoke.sh` to exercise the HTTP, TCP, UDP,
 SIP-over-UDP, and DNS-over-UDP checkpoints in one sequential command.
 The SIP-over-TCP checkpoint is included as well.
+For the containerized real-backend UDP checkpoint, run
+`scripts/live-udp-upstream-compose-smoke.sh`; it starts the optional Compose
+`udp` profile, sends a datagram through the pool-mapped upstream, and verifies
+the exported `datagram` and `upstream_data` observations.
 For catalog-wide progress, run `./scripts/emulate-irule.sh --catalog-smoke
 --namespace HTTP --limit 16`; this executes safe zero-argument probes and
 reports which commands work, need arguments, or fail in the current emulator.
