@@ -83,6 +83,11 @@ pool-mapped upstream, and checks the exported live observation phases.
 For catalog-wide progress, run `./scripts/emulate-irule.sh --catalog-smoke
 --namespace HTTP --limit 16`; this executes safe zero-argument probes and
 reports which commands work, need arguments, or fail in the current emulator.
+To materialize the complete catalog for downstream workers, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/export-catalog-17.5.sh /tmp/testcl-catalog
+--chunk-size 250`. This creates an immutable bundle containing hashed command
+chunks plus separate event and profile files; the exporter refuses to overwrite
+an existing directory.
 To see semantic test-input coverage across all checked-in packs, run
 `./scripts/emulate-irule.sh --behavior-coverage`.
 For one repeatable checkpoint covering the local 17.5 contracts and all eight

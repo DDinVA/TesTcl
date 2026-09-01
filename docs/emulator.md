@@ -45,6 +45,22 @@ and any events reported by the upstream framework. It also includes a
 when a recognized command is backed by a generated stub, has no runtime
 handler, or is gated by the attached profiles.
 
+### Export catalog chunks
+
+For workers that should consume the full registry incrementally, export an
+on-disk bundle rather than carrying the complete JSON response in one message:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/export-catalog-17.5.sh \
+  /tmp/testcl-catalog --chunk-size 250
+```
+
+The bundle contains `manifest.json`, hashed `chunks/chunk-*.json` command files,
+and separate `events.json` and `profiles.json` files. Each command chunk is
+independently readable and includes the registry source and filter metadata.
+The exporter writes to a private staging directory and refuses to overwrite an
+existing output directory.
+
 ## Real-client HTTP data plane
 
 For an end-to-end smoke test, run the optional data plane against a scenario
