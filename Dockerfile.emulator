@@ -21,6 +21,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* /opt/tcl-lsp/.git
 
 COPY tools/irule-emulator.py /opt/testcl/tools/irule-emulator.py
+COPY tools/tmos17-capture-batch.py /opt/testcl/tools/tmos17-capture-batch.py
 COPY tools/tmos17-collector.py /opt/testcl/tools/tmos17-collector.py
 COPY tools/tmos17-protocol-driver.py /opt/testcl/tools/tmos17-protocol-driver.py
 COPY tools/semantic-mocks.tcl /opt/testcl/tools/semantic-mocks.tcl

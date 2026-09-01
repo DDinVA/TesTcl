@@ -979,6 +979,42 @@ The `--variants 8` option places all bounded registry-derived argument forms
 in the capture plan; reduce either `--limit` or `--variants` when the resulting
 plan would exceed the 256-observation capture limit. The default is one primary
 argument form per command.
+
+To materialize the entire selected catalog as collector-ready files, use the
+batch builder. It chooses the largest safe chunk automatically, validates every
+plan through the external collector contract, and writes a manifest describing
+which observations can use the built-in HTTP/RULE_INIT driver versus which
+require `--trigger-command`:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp uv run --python 3.13 \
+  python tools/tmos17-capture-batch.py \
+  --output-dir /tmp/tmos-17.5-capture-batch \
+  --variants 1
+```
+
+For richer argument coverage, `--variants 8` automatically reduces the
+command chunk size so every plan remains within the 256-observation collector
+limit:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp uv run --python 3.13 \
+  python tools/tmos17-capture-batch.py \
+  --output-dir /tmp/tmos-17.5-capture-batch-v8 \
+  --namespace HTTP \
+  --variants 8
+```
+
+Each `plan-*.json` is independently usable with
+`tools/tmos17-collector.py`; `manifest.json` is the resumable index. Commands
+blocked by the collector safety policy (for example, Tcl evaluation or process
+commands that also have F5 documentation) are retained in
+`blocked-catalog.json` instead of being injected into a device rule. The
+manifest counts those entries separately so the selected catalog remains
+auditable. The tool uses a staging directory and refuses to overwrite an
+existing output directory. Building and validating plans never connects to or
+mutates a device.
+
 Candidates are chunked over the uncovered-command queue, with a maximum of 64
 commands per request. The argument hypotheses are intentionally reviewable:
 they start from the pinned tcl-lsp synopsis metadata and use bounded TMOS-safe

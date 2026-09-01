@@ -2735,6 +2735,7 @@ def _build_capture_campaign(
     namespace: str | None = None,
     runtime_status: str | None = None,
     target_status: str | None = "available-in-tmos-17.5",
+    exclude_commands: set[str] | frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Build chunked external-reference work units from the 17.5 catalog."""
     if offset < 0:
@@ -2748,11 +2749,13 @@ def _build_capture_campaign(
         runtime_status=runtime_status,
         target_status=target_status,
     )
+    excluded = exclude_commands or set()
     candidate_commands = [
         command
         for chunk in catalog["chunks"]
         for command in chunk["commands"]
         if command["catalog_kind"] == "f5-irule"
+        and command["name"] not in excluded
     ]
     runtime_status_counts = {status: 0 for status in sorted(RUNTIME_STATUS_VALUES)}
     target_status_counts = {status: 0 for status in sorted(TARGET_STATUS_VALUES)}
@@ -4414,6 +4417,7 @@ def _build_capture_plan_template(
     tmos_build: str = "17.5",
     capture_id: str | None = None,
     variants: int = 1,
+    exclude_commands: set[str] | frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Emit an assembly-ready plan template for one runnable catalog chunk."""
     if not 1 <= limit <= CAPTURE_MAX_RECORDS:
@@ -4439,6 +4443,7 @@ def _build_capture_plan_template(
         namespace=namespace,
         runtime_status=runtime_status,
         target_status="available-in-tmos-17.5",
+        exclude_commands=exclude_commands,
     )
     event_inventory = _probe_event_inventory(root)
     campaign_data = campaign["campaign"]
