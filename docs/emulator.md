@@ -3756,6 +3756,27 @@ pretend that a generated probe is valid for every command.
 The same view is available from `GET /v1/capture-campaign` and the
 `irule_capture_campaign` MCP tool.
 
+### Consume an exported catalog chunk
+
+The immutable bundle produced by `scripts/export-catalog-17.5.sh` can be
+processed independently of the HTTP API. The catalog worker reads one
+`chunks/chunk-*.json` file, regenerates target-valid event/profile shells and
+bounded registry-derived argument variants, and can run those probes locally:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/catalog-worker-17.5.sh \
+  /tmp/testcl-catalog/chunks/chunk-0000.json \
+  --mode both --variants 1 --output /tmp/testcl-chunk-0000.json
+```
+
+Use `--mode local` for emulator evaluation only or `--mode plan` to generate
+an assembly-ready external capture plan without local execution. A plan is
+capped at 256 observations, so use smaller exported chunks when requesting
+multiple variants (`--variants 1` through `--variants 8`). The report carries
+per-command generation status, local execution results, capture inputs, and
+the reference-free `capture_plan`; it never treats local results as TMOS
+evidence.
+
 To turn one campaign chunk into an assembly-ready plan, use the capture-plan
 template mode:
 

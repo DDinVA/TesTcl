@@ -88,6 +88,13 @@ To materialize the complete catalog for downstream workers, run
 --chunk-size 250`. This creates an immutable bundle containing hashed command
 chunks plus separate event and profile files; the exporter refuses to overwrite
 an existing directory.
+To consume one of those chunks immediately, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/catalog-worker-17.5.sh
+/tmp/testcl-catalog/chunks/chunk-0000.json --mode both --variants 1
+--output /tmp/testcl-chunk-0000.json`. The worker executes bounded local
+probes, reports emulator outcomes, and emits an external BIG-IP/vLab capture
+plan from the same chunk. Local outcomes are not independent TMOS evidence;
+the plan becomes evidence only after an authorized collector returns records.
 To see semantic test-input coverage across all checked-in packs, run
 `./scripts/emulate-irule.sh --behavior-coverage`.
 For one repeatable checkpoint covering the local 17.5 contracts and all eight
