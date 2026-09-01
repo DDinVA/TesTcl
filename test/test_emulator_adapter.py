@@ -4762,6 +4762,7 @@ when HTTP_RESPONSE_RELEASE {
             "datagram-controls-17.5.json": 2,
             "pem-controls-17.5.json": 1,
             "tap-controls-17.5.json": 1,
+            "istats-controls-17.5.json": 1,
             "x509-controls-17.5.json": 1,
             "diameter-controls-17.5.json": 3,
             "tcp-controls-17.5.json": 2,
