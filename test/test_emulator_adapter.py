@@ -4786,6 +4786,7 @@ when HTTP_RESPONSE_RELEASE {
             "mr-17.5.json": 23,
             "http-edge-17.5.json": 23,
             "mqtt-17.5.json": 29,
+            "nsh-controls-17.5.json": 1,
             "stateful-17.5.json": 2,
             "ssl-tls-17.5.json": 16,
             "ssl-controls-17.5.json": 2,
