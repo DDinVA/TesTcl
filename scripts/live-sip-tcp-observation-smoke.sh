@@ -70,7 +70,15 @@ with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=2) as cli
     midpoint = 37
     client.sendall(request[:midpoint])
     client.sendall(request[midpoint:])
-    response = client.recv(4096)
+    response_buffer = bytearray()
+    while b"\r\n\r\n" not in response_buffer:
+        chunk = client.recv(4096)
+        if not chunk:
+            break
+        response_buffer.extend(chunk)
+        if len(response_buffer) > 1 << 20:
+            raise SystemExit("SIP response exceeded the smoke-test limit")
+    response = bytes(response_buffer)
     if not response.startswith(b"SIP/2.0 200 OK\r\n"):
         raise SystemExit(f"unexpected SIP response: {response!r}")
     print(response.decode("utf-8"))

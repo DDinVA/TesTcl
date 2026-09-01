@@ -25087,16 +25087,28 @@ when SIP_REQUEST {
         try:
             client.sendall(message[:37])
             client.sendall(message[37:])
-            response = client.recv(4096)
+            response_buffer = bytearray()
+            while b"\r\n\r\n" not in response_buffer:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                response_buffer.extend(chunk)
+                self.assertLessEqual(len(response_buffer), 1 << 20)
+            response = bytes(response_buffer)
             self.assertTrue(response.startswith(b"SIP/2.0 200 OK\r\n"))
             self.assertTrue(response.endswith(b"Content-Length: 0\r\n\r\n"))
             coalesced_request = message.replace(
                 b"live-tcp-options", b"live-tcp-coalesced"
             )
             client.sendall(coalesced_request + coalesced_request)
-            coalesced_response = b""
-            while coalesced_response.count(b"SIP/2.0 200 OK\r\n") < 2:
-                coalesced_response += client.recv(4096)
+            coalesced_response_buffer = bytearray()
+            while coalesced_response_buffer.count(b"SIP/2.0 200 OK\r\n") < 2:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                coalesced_response_buffer.extend(chunk)
+                self.assertLessEqual(len(coalesced_response_buffer), 1 << 20)
+            coalesced_response = bytes(coalesced_response_buffer)
             self.assertEqual(
                 coalesced_response.count(b"SIP/2.0 200 OK\r\n"), 2
             )

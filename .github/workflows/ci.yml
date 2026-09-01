@@ -71,7 +71,8 @@ jobs:
         run: |
           container_name="testcl-irule-emulator-ci-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-$$"
           raw_container_name="${container_name}-raw"
-          trap 'docker rm --force "$container_name" "$raw_container_name" >/dev/null 2>&1 || true' EXIT
+          sip_container_name="${container_name}-sip"
+          trap 'docker rm --force "$container_name" "$raw_container_name" "$sip_container_name" >/dev/null 2>&1 || true' EXIT
           docker run --detach --name "$container_name" \
             --publish 18080:8080 --publish 18081:18080 \
             testcl-irule-emulator:ci \
@@ -519,4 +520,61 @@ jobs:
           if [ "$raw_status" -ne 0 ]; then
             docker logs "$raw_container_name"
             exit "$raw_status"
+          fi
+
+          docker run --detach --name "$sip_container_name" \
+            --publish 18083:18083 \
+            testcl-irule-emulator:ci \
+            --data-plane --host 0.0.0.0 --port 18083 \
+            --scenario /opt/testcl/examples/scenarios/live-sip-tcp-17.5.json
+          set +e
+          uv run --python 3.13 python - <<'PY'
+          import socket
+          import time
+
+          request = (
+              b"OPTIONS sip:service.example.com SIP/2.0\r\n"
+              b"Via: SIP/2.0/TCP client.example.com;branch=z9\r\n"
+              b"From: <sip:alice@example.com>;tag=1\r\n"
+              b"To: <sip:service.example.com>\r\n"
+              b"Call-ID: ci-sip-tcp\r\n"
+              b"CSeq: 1 OPTIONS\r\n"
+              b"Content-Length: 0\r\n\r\n"
+          )
+          expected = b"SIP/2.0 200 OK\r\n"
+          deadline = time.monotonic() + 30
+          last_error = RuntimeError("no connection attempt completed")
+          while time.monotonic() < deadline:
+              try:
+                  with socket.create_connection(("127.0.0.1", 18083), timeout=2) as client:
+                      client.settimeout(2)
+                      midpoint = 37
+                      client.sendall(request[:midpoint])
+                      client.sendall(request[midpoint:])
+                      received_buffer = bytearray()
+                      while b"\r\n\r\n" not in received_buffer:
+                          chunk = client.recv(4096)
+                          if not chunk:
+                              break
+                          received_buffer.extend(chunk)
+                          if len(received_buffer) > 1 << 20:
+                              raise RuntimeError("SIP response exceeded the smoke-test limit")
+                      received = bytes(received_buffer)
+                  if received.startswith(expected) and received.endswith(
+                      b"Content-Length: 0\r\n\r\n"
+                  ):
+                      print(received.decode("utf-8"))
+                      break
+                  last_error = RuntimeError(f"response mismatch: {received!r}")
+              except OSError as exc:
+                  last_error = exc
+              time.sleep(0.5)
+          else:
+              raise SystemExit(f"SIP/TCP smoke failed: {last_error!r}")
+          PY
+          sip_status=$?
+          set -e
+          if [ "$sip_status" -ne 0 ]; then
+            docker logs "$sip_container_name"
+            exit "$sip_status"
           fi
