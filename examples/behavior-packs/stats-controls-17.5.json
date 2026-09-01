@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "stats-controls-17.5",
+  "cases": [
+    {
+      "id": "persistent-counters-and-bounds",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST {\n  STATS::set app floor 10\n  STATS::setmin app floor 5\n  STATS::set app peak 1\n  STATS::setmax app peak 9\n  STATS::incr app requests 2\n  log local0. \"floor=[STATS::get app floor] peak=[STATS::get app peak] requests=[STATS::get app requests]\"\n}",
+        "requests": [
+          {"uri": "/one"},
+          {"uri": "/two"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "stats"], "equals": {"app|floor": "5", "app|peak": "9", "app|requests": "2"}},
+          {"path": ["results", 1, "semantic", "stats"], "equals": {"app|floor": "5", "app|peak": "9", "app|requests": "4"}}
+        ]
+      }
+    }
+  ]
+}
