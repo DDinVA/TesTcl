@@ -230,6 +230,44 @@ live scheduler is intentionally limited to configured target maps, one
 round-robin cursor per pool, and temporary failure cooldowns; it does not claim
 to reproduce all TMM scheduling, monitor, or BIG-IP networking internals.
 
+## Real-client UDP data plane
+
+Set `live_data_plane.protocol` to `udp` to exercise a real UDP client against
+the generic `CLIENT_ACCEPTED`, `CLIENT_DATA`, and `SERVER_DATA` event path:
+
+```json
+{
+  "profiles": ["UDP"],
+  "irule": "when CLIENT_DATA { if {[UDP::payload] contains drop} { UDP::drop } else { UDP::respond [UDP::payload] } }",
+  "live_data_plane": {
+    "protocol": "udp",
+    "read_timeout": 1.0,
+    "max_read_bytes": 2097152
+  }
+}
+```
+
+Run the checked-in fixture with a normal UDP client:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --data-plane --host 127.0.0.1 --port 18082 \
+  --scenario examples/scenarios/live-udp-17.5.json
+printf 'hello from udp' | nc -u -w 1 127.0.0.1 18082
+```
+
+The listener keeps one bounded persistent emulator session per client
+address/port, so Tcl state survives across datagrams from the same client.
+`UDP::respond` emissions are returned to that endpoint, including binary
+payloads; incoming datagrams are submitted as lossless `payload_hex` packets.
+Datagrams larger than the configured limit are rejected, and idle/evicted
+client sessions are closed rather than allowed to grow without bound. This is
+a local UDP event adapter, not a BIG-IP TMM, DNS server, or upstream UDP load
+balancer. DNS, RADIUS, DHCP, SIP, PCP, and other protocol-specific UDP
+semantics remain available through the packet/API and capture-driver paths.
+Live UDP observations can be exported through
+`/v1/live-observations/capture-plan` for external BIG-IP/vLab comparison.
+
 The API and data plane can run together by starting the normal API with
 `--serve --data-plane-scenario PATH`; the API remains on `--host/--port`, while
 the data plane defaults to `127.0.0.1:18080` and can be changed with

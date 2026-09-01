@@ -1,0 +1,9 @@
+{
+  "profiles": ["UDP"],
+  "irule": "when CLIENT_ACCEPTED { set ::udp_seen 0 }\nwhen CLIENT_DATA { incr ::udp_seen; if {[UDP::payload] contains drop} { UDP::drop } else { UDP::respond \"$::udp_seen:[UDP::payload]\" } }",
+  "live_data_plane": {
+    "protocol": "udp",
+    "read_timeout": 1.0,
+    "max_read_bytes": 2097152
+  }
+}

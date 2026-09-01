@@ -26,8 +26,11 @@ catalog through the same local API.
 For real-client HTTP smoke tests, use `--data-plane` with a scenario file, or
 combine `--serve --data-plane-scenario PATH`; the container exposes the API on
 8080 and the optional data plane on 18080.
-The same listener can expose a bounded raw TCP data plane for iRule TCP
-fixtures by adding `"live_data_plane": {"protocol": "tcp"}` to the scenario.
+The same listener can expose bounded raw TCP or UDP data planes for iRule
+fixtures by adding `"live_data_plane": {"protocol": "tcp"}` or
+`{"protocol": "udp"}` to the scenario. UDP keeps one persistent emulator
+session per client endpoint and forwards `UDP::respond` datagrams back with
+lossless bytes.
 `TCP::respond` emissions are written back to the client. An explicit
 `live_data_plane.upstream` target can opt into a bounded, bidirectional TCP or
 HTTP bridge for testing a real backend peer; it is not a kernel TCP stack, TLS
@@ -57,7 +60,7 @@ member selection.
 In combined `--serve --data-plane-scenario` mode, query
 `/v1/live-observations` for a bounded in-memory stream of real-client emulator
 results and use `/v1/live-observations/capture-plan` to export replayable
-HTTP/HTTP2/TCP/WebSocket inputs; run `scripts/live-observation-smoke.sh` for a
+HTTP/HTTP2/TCP/UDP/WebSocket inputs; run `scripts/live-observation-smoke.sh` for a
 quick HTTP evaluation, or `scripts/live-packet-observation-smoke.sh` for a
 real TCP byte-to-replay-plan check.
 For catalog-wide progress, run `./scripts/emulate-irule.sh --catalog-smoke

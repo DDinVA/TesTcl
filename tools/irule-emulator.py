@@ -67,6 +67,7 @@ LIVE_RAW_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 LIVE_RAW_READ_SIZE = 64 * 1024
 LIVE_RAW_READ_TIMEOUT_SECONDS = 1.0
 LIVE_HTTP2_MAX_STREAMS = 128
+LIVE_UDP_MAX_CLIENT_SESSIONS = 128
 LIVE_OBSERVATION_MAX_RECORDS = 128
 LIVE_OBSERVATION_MAX_BYTES = 8 * 1024 * 1024
 LIVE_OBSERVATION_MAX_RECORD_BYTES = 2 * 1024 * 1024
@@ -14637,7 +14638,9 @@ PACKET_PROTOCOL_FIELDS = {
     "tcp": {
         "payload_hex",
     },
-    "udp": set(),
+    "udp": {
+        "payload_hex",
+    },
     "pcp": {"pcp"},
     "sctp": {
         "payload_hex",
@@ -21721,7 +21724,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
             raise EmulatorInputError(
                 f"unsupported packet {index} field(s): {', '.join(unknown)}"
             )
-        if protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", "socks", "l7check", "fix", "mqtt", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and "payload" in packet and "payload_hex" in packet:
+        if protocol in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ftp", "icap", "tds", "socks", "l7check", "fix", "mqtt", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and "payload" in packet and "payload_hex" in packet:
             raise EmulatorInputError(
                 f"packet {index} {protocol.upper()} packets must use payload or payload_hex, not both"
             )
@@ -21959,7 +21962,7 @@ def _normalise_packets(raw: Any) -> list[dict[str, Any]]:
                     else:
                         options[canonical_id] = _packet_scalar(option_value, "options")
                 normalised[field] = options
-            elif protocol in {"tcp", "sctp", "dhcpv4", "dhcpv6", "ike", "ftp", "icap", "tds", "socks", "l7check", "fix", "mqtt", "websocket", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
+            elif protocol in {"tcp", "udp", "sctp", "dhcpv4", "dhcpv6", "ike", "ftp", "icap", "tds", "socks", "l7check", "fix", "mqtt", "websocket", *STARTTLS_PROTOCOLS, "ntlm", "protocol_inspection", "classification", "category"} and field == "payload_hex":
                 value = _require_string(packet[field], f"packet {index} payload_hex")
                 if len(value) % 2:
                     raise EmulatorInputError(
@@ -30887,6 +30890,11 @@ class EmulatorSession:
                     entry["held"] = True
                 if accepted_udp.get("responded") in {"1", "true"} and not entry.get("dropped"):
                     response = accepted_udp.get("response", "")
+                    response_hex = str(
+                        session.eval_tcl(
+                            "binary encode hex $::state::udp::response"
+                        )
+                    )
                     entry["responded"] = True
                     entry["response"] = response
                     accepted_event.setdefault("emissions", []).append(
@@ -30894,7 +30902,8 @@ class EmulatorSession:
                             "protocol": "udp",
                             "direction": "server_to_client",
                             "payload": response,
-                            "byte_length": len(response.encode("utf-8")),
+                            "payload_hex": response_hex,
+                            "byte_length": len(bytes.fromhex(response_hex)),
                         }
                     )
                 if entry.get("dropped"):
@@ -30916,6 +30925,11 @@ class EmulatorSession:
                     entry["released"] = True
                 if udp_state.get("responded") in {"1", "true"} and not entry.get("dropped"):
                     response = udp_state.get("response", "")
+                    response_hex = str(
+                        session.eval_tcl(
+                            "binary encode hex $::state::udp::response"
+                        )
+                    )
                     entry["responded"] = True
                     entry["response"] = response
                     event_result.setdefault("emissions", []).append(
@@ -30927,7 +30941,8 @@ class EmulatorSession:
                                 else "client_to_server"
                             ),
                             "payload": response,
-                            "byte_length": len(response.encode("utf-8")),
+                            "payload_hex": response_hex,
+                            "byte_length": len(bytes.fromhex(response_hex)),
                         }
                     )
                 if "payload" in udp_state:
@@ -32089,9 +32104,9 @@ def _build_live_observation_capture_plan(
 
     Live observations contain emulator output, so this function deliberately
     emits a plan with no reference output. HTTP observations become one request
-    scenario each. TCP and WebSocket observations are grouped by live session
-    so connection lifecycle and frame ordering survive the export. A BIG-IP or
-    vLab collector must fill the matching records before the existing
+    scenario each. TCP, UDP, and WebSocket observations are grouped by live
+    session so stream/datagram ordering survives the export. A BIG-IP or vLab
+    collector must fill the matching records before the existing
     assembly/golden-vector boundary can be used.
     """
     if not isinstance(request, dict):
@@ -32230,10 +32245,10 @@ def _build_live_observation_capture_plan(
             if isinstance(session_id, str) and session_id:
                 http2_stream_sessions.add(session_id)
             continue
-        if protocol not in {"tcp", "http2", "websocket"}:
+        if protocol not in {"tcp", "udp", "http2", "websocket"}:
             raise EmulatorInputError(
                 "live capture-plan export accepts HTTP transactions, HTTP/2 wire "
-                "packets, TCP packets, and WebSocket packets"
+                "packets, TCP/UDP packets, and WebSocket packets"
             )
         if protocol == "http2":
             if item.get("phase") != "wire":
@@ -32285,7 +32300,7 @@ def _build_live_observation_capture_plan(
                 "datagram",
                 "flow_id",
             }
-            if protocol in {"tcp", "http2"}:
+            if protocol in {"tcp", "udp", "http2"}:
                 allowed_packet_fields.add("payload_hex")
             else:
                 allowed_packet_fields.update(
@@ -35451,7 +35466,7 @@ def _normalise_live_upstream_tls(raw: Any) -> dict[str, Any]:
 def _normalise_live_data_plane_scenario(
     raw: Any,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Normalize the HTTP or raw-TCP real-client data-plane contract."""
+    """Normalize the HTTP, raw-TCP, or raw-UDP real-client data-plane contract."""
     if not isinstance(raw, dict):
         raise EmulatorInputError("data-plane scenario must be a JSON object")
     config = raw.get("live_data_plane")
@@ -35469,9 +35484,15 @@ def _normalise_live_data_plane_scenario(
             "unsupported live_data_plane field(s): " + ", ".join(unknown)
         )
     protocol = config.get("protocol", "http")
-    if not isinstance(protocol, str) or protocol.lower() not in {"http", "http2", "websocket", "tcp"}:
+    if not isinstance(protocol, str) or protocol.lower() not in {
+        "http",
+        "http2",
+        "websocket",
+        "tcp",
+        "udp",
+    }:
         raise EmulatorInputError(
-            "live_data_plane.protocol must be http, http2, websocket, or tcp"
+            "live_data_plane.protocol must be http, http2, websocket, tcp, or udp"
         )
     protocol = protocol.lower()
 
@@ -35501,11 +35522,11 @@ def _normalise_live_data_plane_scenario(
         raise EmulatorInputError(
             "live_data_plane.tls is only valid for the HTTP data plane or WebSocket data plane"
         )
-    if protocol == "tcp" and any(
+    if protocol in {"tcp", "udp"} and any(
         field in scenario for field in ("request", "requests", "packets")
     ):
         raise EmulatorInputError(
-            "raw TCP data-plane scenario cannot contain request, requests, or packets"
+            f"raw {protocol.upper()} data-plane scenario cannot contain request, requests, or packets"
         )
     timeout = config.get("read_timeout", LIVE_RAW_READ_TIMEOUT_SECONDS)
     if (
@@ -35528,6 +35549,10 @@ def _normalise_live_data_plane_scenario(
         )
     upstream_config = config.get("upstream")
     if upstream_config is not None:
+        if protocol == "udp":
+            raise EmulatorInputError(
+                "live_data_plane.upstream is not supported for the UDP data plane"
+            )
         if not isinstance(upstream_config, dict):
             raise EmulatorInputError("live_data_plane.upstream must be an object")
         unknown_upstream = sorted(
@@ -38102,6 +38127,242 @@ class _LiveTCPServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
 
+class _LiveUDPServer(socketserver.ThreadingUDPServer):
+    """UDP listener with safe rapid restart behavior for local test runs."""
+
+    allow_reuse_address = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        request_handler: type[socketserver.BaseRequestHandler],
+        *,
+        max_datagram_bytes: int,
+    ) -> None:
+        self._testcl_udp_receive_size = max_datagram_bytes + 1
+        super().__init__(server_address, request_handler)
+
+    def get_request(self) -> tuple[tuple[bytes, socket.socket], Any]:
+        """Receive one full bounded datagram so oversize input is detectable."""
+        data, client_address = self.socket.recvfrom(self._testcl_udp_receive_size)
+        return (data, self.socket), client_address
+
+
+def _live_udp_handler(
+    scenario: dict[str, Any],
+    config: dict[str, Any],
+    manager: "SessionManager",
+    observations: "_LiveObservationStore | None" = None,
+) -> type[socketserver.BaseRequestHandler]:
+    """Build a bounded raw UDP adapter over persistent per-client sessions."""
+
+    class LiveUDPHandler(socketserver.BaseRequestHandler):
+        @staticmethod
+        def _socket_endpoint(value: Any, fallback: tuple[str, int]) -> dict[str, Any]:
+            if not isinstance(value, tuple) or len(value) < 2:
+                return {"address": fallback[0], "port": fallback[1]}
+            return {"address": str(value[0]), "port": int(value[1])}
+
+        def _packet(self, payload: bytes) -> dict[str, Any]:
+            socket_object = self.request[1]
+            listener = self._socket_endpoint(
+                socket_object.getsockname(), ("127.0.0.1", 0)
+            )
+            return {
+                "protocol": "udp",
+                "direction": "client_to_server",
+                "source": self._socket_endpoint(
+                    self.client_address, ("127.0.0.1", 0)
+                ),
+                "destination": listener,
+                "payload_hex": payload.hex(),
+            }
+
+        def _session(self) -> tuple[tuple[str, int], str]:
+            server = self.server
+            key = (
+                str(self.client_address[0]),
+                int(self.client_address[1]),
+            )
+            with server._testcl_udp_session_lock:
+                record = server._testcl_udp_sessions.get(key)
+                if record is None:
+                    if len(server._testcl_udp_sessions) >= LIVE_UDP_MAX_CLIENT_SESSIONS:
+                        idle = [
+                            (session_key, item)
+                            for session_key, item in server._testcl_udp_sessions.items()
+                            if item["active"] == 0
+                        ]
+                        if not idle:
+                            raise EmulatorResourceError(
+                                "maximum active UDP client session count reached"
+                            )
+                        evicted_key, evicted_record = min(
+                            idle, key=lambda item: item[1]["last_used"]
+                        )
+                        del server._testcl_udp_sessions[evicted_key]
+                        try:
+                            manager.close(evicted_record["session_id"])
+                        except EmulatorNotFoundError:
+                            pass
+                    session_id = manager.create(scenario)
+                    record = {
+                        "session_id": session_id,
+                        "last_used": time.monotonic(),
+                        "active": 0,
+                        "retire": False,
+                    }
+                    server._testcl_udp_sessions[key] = record
+                record["active"] += 1
+                record["last_used"] = time.monotonic()
+                session_id = record["session_id"]
+            return key, session_id
+
+        def _release_session(
+            self, key: tuple[str, int], session_id: str
+        ) -> None:
+            close_id: str | None = None
+            server = self.server
+            with server._testcl_udp_session_lock:
+                record = server._testcl_udp_sessions.get(key)
+                if record is None or record["session_id"] != session_id:
+                    return
+                record["active"] -= 1
+                record["last_used"] = time.monotonic()
+                if record["active"] == 0 and record["retire"]:
+                    del server._testcl_udp_sessions[key]
+                    close_id = session_id
+            if close_id is not None:
+                try:
+                    manager.close(close_id)
+                except EmulatorNotFoundError:
+                    pass
+
+        def _retire_session(
+            self, key: tuple[str, int], session_id: str
+        ) -> None:
+            close_id: str | None = None
+            server = self.server
+            with server._testcl_udp_session_lock:
+                record = server._testcl_udp_sessions.get(key)
+                if record is None or record["session_id"] != session_id:
+                    return
+                record["retire"] = True
+                if record["active"] == 0:
+                    del server._testcl_udp_sessions[key]
+                    close_id = session_id
+            if close_id is not None:
+                try:
+                    manager.close(close_id)
+                except EmulatorNotFoundError:
+                    pass
+
+        def _send_emissions(self, result: Any) -> None:
+            if not isinstance(result, dict):
+                raise EmulatorInputError("emulator returned an invalid UDP result")
+            emissions = result.get("emitted", [])
+            if not isinstance(emissions, list):
+                raise EmulatorInputError("emulator returned invalid UDP emissions")
+            response_bytes = 0
+            socket_object = self.request[1]
+            for emission in emissions:
+                if not isinstance(emission, dict):
+                    raise EmulatorInputError("emulator returned an invalid UDP emission")
+                if emission.get("protocol") != "udp":
+                    continue
+                if emission.get("direction") != "server_to_client":
+                    continue
+                payload_hex = emission.get("payload_hex")
+                if payload_hex is not None:
+                    if not isinstance(payload_hex, str) or len(payload_hex) % 2:
+                        raise EmulatorInputError(
+                            "emulator returned invalid UDP payload hex"
+                        )
+                    try:
+                        payload = bytes.fromhex(payload_hex)
+                    except ValueError as exc:
+                        raise EmulatorInputError(
+                            "emulator returned invalid UDP payload hex"
+                        ) from exc
+                else:
+                    payload_value = emission.get("payload")
+                    if not isinstance(payload_value, str):
+                        raise EmulatorInputError(
+                            "emulator returned a non-text UDP payload"
+                        )
+                    payload = payload_value.encode("utf-8")
+                response_bytes += len(payload)
+                if response_bytes > config["max_read_bytes"]:
+                    raise EmulatorResourceError(
+                        "UDP emitted data exceeds the configured byte limit"
+                    )
+                socket_object.sendto(payload, self.client_address)
+
+        def handle(self) -> None:  # noqa: D401 - socketserver API
+            payload, _socket_object = self.request
+            if not isinstance(payload, bytes):
+                return
+            if len(payload) > config["max_read_bytes"]:
+                print(
+                    "testcl live UDP datagram exceeds the configured byte limit",
+                    file=sys.stderr,
+                )
+                return
+            key: tuple[str, int] | None = None
+            session_id: str | None = None
+            try:
+                key, session_id = self._session()
+                try:
+                    result = manager.execute(
+                        session_id,
+                        lambda session: session.run_packet_trace([self._packet(payload)]),
+                    )
+                except EmulatorNotFoundError:
+                    # SessionManager may reap a map entry after its idle
+                    # timeout before the UDP registry has observed it. Retire
+                    # that stale mapping and retry this datagram once so an
+                    # idle client does not lose its first packet after wakeup.
+                    self._retire_session(key, session_id)
+                    self._release_session(key, session_id)
+                    key, session_id = self._session()
+                    result = manager.execute(
+                        session_id,
+                        lambda session: session.run_packet_trace([self._packet(payload)]),
+                    )
+                if observations is not None:
+                    observations.append(
+                        session_id=session_id,
+                        protocol="udp",
+                        phase="datagram",
+                        direction="client_to_server",
+                        result=result,
+                    )
+                self._send_emissions(result)
+                trace = result.get("trace", []) if isinstance(result, dict) else []
+                if (
+                    isinstance(trace, list)
+                    and trace
+                    and isinstance(trace[0], dict)
+                    and trace[0].get("dropped")
+                ):
+                    self._retire_session(key, session_id)
+            except (
+                EmulatorInputError,
+                EmulatorNotFoundError,
+                EmulatorResourceError,
+                OSError,
+                UnicodeError,
+            ) as exc:
+                print(f"testcl live UDP datagram rejected: {exc}", file=sys.stderr)
+                if key is not None and session_id is not None:
+                    self._retire_session(key, session_id)
+            finally:
+                if key is not None and session_id is not None:
+                    self._release_session(key, session_id)
+
+    return LiveUDPHandler
+
+
 def _data_plane_server(
     root: Path,
     host: str,
@@ -38162,6 +38423,14 @@ def _data_plane_server(
                     "read_timeout", LIVE_RAW_READ_TIMEOUT_SECONDS
                 ),
             )
+        elif config["protocol"] == "udp":
+            server = _LiveUDPServer(
+                (host, port),
+                _live_udp_handler(scenario, config, manager, observations),
+                max_datagram_bytes=config["max_read_bytes"],
+            )
+            server._testcl_udp_session_lock = threading.RLock()
+            server._testcl_udp_sessions = {}
         else:
             server = _LiveTCPServer(
                 (host, port),

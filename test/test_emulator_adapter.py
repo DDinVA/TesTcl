@@ -24658,6 +24658,99 @@ when CLIENT_DATA {
             server.server_close()
             manager.close_all()
 
+    def test_live_udp_data_plane_persists_client_state_and_forwards_bytes(self) -> None:
+        scenario = {
+            "profiles": ["UDP"],
+            "irule": """
+when CLIENT_ACCEPTED { set ::udp_seen 0 }
+when CLIENT_DATA {
+    incr ::udp_seen
+    if {[UDP::payload] contains drop} {
+        UDP::drop
+    } else {
+        UDP::respond "$::udp_seen:[UDP::payload]"
+    }
+}
+""",
+            "live_data_plane": {"protocol": "udp", "read_timeout": 0.2},
+        }
+        observations = self.adapter._LiveObservationStore()
+        server, manager = self.adapter._data_plane_server(
+            Path(self.tcl_lsp_root), "127.0.0.1", 0, scenario, observations
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(2)
+        endpoint = ("127.0.0.1", self.adapter._data_plane_bound_port(server))
+        try:
+            client.sendto(b"one", endpoint)
+            self.assertEqual(client.recvfrom(64)[0], b"1:one")
+            client.sendto(b"two", endpoint)
+            self.assertEqual(client.recvfrom(64)[0], b"2:two")
+            client.sendto(b"drop", endpoint)
+            with self.assertRaises(socket.timeout):
+                client.recvfrom(64)
+            snapshot = observations.snapshot(10)
+            self.assertEqual(snapshot["count"], 3)
+            self.assertTrue(all(item["protocol"] == "udp" for item in snapshot["observations"]))
+            self.assertTrue(
+                all(item["phase"] == "datagram" for item in snapshot["observations"])
+            )
+            plan = self.adapter._build_live_observation_capture_plan(
+                Path(self.tcl_lsp_root), {"scenario": scenario}, observations
+            )
+            self.assertEqual(len(plan["observations"]), 1)
+            self.assertEqual(plan["observations"][0]["input"]["packets"][0]["protocol"], "udp")
+            self.assertEqual(len(plan["observations"][0]["input"]["packets"]), 3)
+        finally:
+            client.close()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            manager.close_all()
+
+    def test_udp_packet_payload_hex_is_lossless(self) -> None:
+        result = self.adapter.run_scenario(
+            {
+                "profiles": ["UDP"],
+                "irule": "when CLIENT_DATA { UDP::respond [UDP::payload] }",
+                "packets": [{"protocol": "udp", "payload_hex": "00ff10"}],
+            },
+            tcl_lsp_root=self.tcl_lsp_root,
+        )
+        self.assertEqual(result["emitted"][0]["payload_hex"], "00ff10")
+
+    def test_live_udp_data_plane_rejects_stream_and_upstream_options(self) -> None:
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "cannot contain request, requests, or packets"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "irule": "",
+                    "packets": [{"protocol": "udp", "payload": "x"}],
+                    "live_data_plane": {"protocol": "udp"},
+                },
+            )
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "upstream is not supported"
+        ):
+            self.adapter._data_plane_server(
+                Path(self.tcl_lsp_root),
+                "127.0.0.1",
+                0,
+                {
+                    "irule": "",
+                    "live_data_plane": {
+                        "protocol": "udp",
+                        "upstream": {"host": "127.0.0.1", "port": 19000},
+                    },
+                },
+            )
+
     def test_http_api_exposes_runtime_registration_probe(self) -> None:
         server = self.adapter.ThreadingHTTPServer(
             ("127.0.0.1", 0), self.adapter._http_handler(Path(self.tcl_lsp_root))
