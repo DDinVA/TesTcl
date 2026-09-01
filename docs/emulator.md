@@ -3453,9 +3453,13 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 
 The generated plan contains one `command_probe` observation per runnable
 catalog command, a target-valid event/profile shell, and a status comparison.
-Its empty `args` array is intentional: command arguments and fixture values
-are command-specific and must be selected by the collector or operator from
-the catalog synopsis. HTTP/1.1, WebSocket-over-HTTP/1.1, DNS, MQTT, SIP, PCP,
+By default its empty `args` array preserves the conservative legacy template:
+command arguments and fixture values must be selected by the collector or
+operator from the catalog synopsis. Set `--variants 2` through `--variants 8`
+to add bounded, registry-derived argument hypotheses to each command (the
+plan remains capped at 256 observations). These hypotheses are useful starter
+inputs, not a claim that every generated form is valid for every device build.
+HTTP/1.1, WebSocket-over-HTTP/1.1, DNS, MQTT, SIP, PCP,
 and RADIUS event templates also include a small
 starter `request` fixture for the bundled protocol driver; replace its
 destination and values for the target environment. Replace the placeholder
@@ -3465,8 +3469,9 @@ matching records.
 
 The HTTP equivalent is `GET /v1/capture-plan-template`; it accepts the same
 pagination and filtering parameters as the campaign endpoint plus
-`source`, `collector`, `tmos_build`, `capture_id`, and `name`. The MCP
-equivalent is `irule_capture_plan_template`.
+`source`, `collector`, `tmos_build`, `capture_id`, `name`, and `variants`. The
+MCP equivalent is `irule_capture_plan_template` and accepts the same
+`variants` bound.
 
 ### Optional BIG-IP observation collector
 

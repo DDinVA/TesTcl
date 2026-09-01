@@ -3941,6 +3941,19 @@ when HTTP_RESPONSE_RELEASE {
                 ["execution", "status"],
             )
 
+        variant_plan = self.adapter._build_capture_plan_template(
+            root, 0, 1, namespace="TCP", variants=2
+        )
+        self.assertEqual(variant_plan["provenance"]["variants"], 2)
+        self.assertEqual(
+            [observation["id"] for observation in variant_plan["observations"]],
+            ["command_probe:TCP::abc", "command_probe:TCP::abc:variant:2"],
+        )
+        self.assertEqual(
+            [observation["input"]["args"] for observation in variant_plan["observations"]],
+            [["enable"], ["disable"]],
+        )
+
         with self.assertRaises(self.adapter.EmulatorInputError):
             self.adapter._build_capture_plan_template(
                 root, 0, 1, target_status="introduced-after-tmos-17.5"
@@ -3949,6 +3962,10 @@ when HTTP_RESPONSE_RELEASE {
             self.adapter.EmulatorInputError, "limit must be between 1 and 256"
         ):
             self.adapter._build_capture_plan_template(root, 0, 257)
+        with self.assertRaisesRegex(
+            self.adapter.EmulatorInputError, "more than 256 observations"
+        ):
+            self.adapter._build_capture_plan_template(root, 0, 33, variants=8)
 
         campaign_total = self.adapter._build_capture_campaign(root, 0, 1)[
             "campaign"
@@ -25403,6 +25420,21 @@ when CLIENT_DATA {
             )
             self.assertEqual(len(plan_payload["observations"]), 2)
 
+            variant_template = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 19,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "irule_capture_plan_template",
+                        "arguments": {"namespace": "TCP", "limit": 1, "variants": 2},
+                    },
+                }
+            )
+            variant_payload = variant_template["result"]["structuredContent"]
+            self.assertEqual(variant_payload["provenance"]["variants"], 2)
+            self.assertEqual(len(variant_payload["observations"]), 2)
+
             probed = server.handle_message(
                 {
                     "jsonrpc": "2.0",
@@ -26131,6 +26163,16 @@ when CLIENT_DATA {
             )
             self.assertTrue(
                 plan_template["observations"][0]["input"]["profiles"]
+            )
+
+            status, variant_template = request_json(
+                "/v1/capture-plan-template?namespace=TCP&limit=1&variants=2"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(variant_template["provenance"]["variants"], 2)
+            self.assertEqual(
+                [item["input"]["args"] for item in variant_template["observations"]],
+                [["enable"], ["disable"]],
             )
 
             status, created = request_json("/v1/sessions", "POST", config)

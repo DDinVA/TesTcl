@@ -4413,12 +4413,20 @@ def _build_capture_plan_template(
     collector: str = "external-collector",
     tmos_build: str = "17.5",
     capture_id: str | None = None,
+    variants: int = 1,
 ) -> dict[str, Any]:
     """Emit an assembly-ready plan template for one runnable catalog chunk."""
     if not 1 <= limit <= CAPTURE_MAX_RECORDS:
         raise EmulatorInputError(
             "capture plan template limit must be between 1 and "
             f"{CAPTURE_MAX_RECORDS}"
+        )
+    if isinstance(variants, bool) or not isinstance(variants, int):
+        raise EmulatorInputError("capture plan template variants must be an integer")
+    if not 1 <= variants <= BEHAVIOR_CANDIDATE_MAX_VARIANTS:
+        raise EmulatorInputError(
+            "capture plan template variants must be between 1 and "
+            f"{BEHAVIOR_CANDIDATE_MAX_VARIANTS}"
         )
     if target_status not in (None, "available-in-tmos-17.5"):
         raise EmulatorInputError(
@@ -4438,32 +4446,60 @@ def _build_capture_plan_template(
         raise EmulatorInputError(
             "capture plan template offset is past the available TMOS 17.5 commands"
         )
+    if campaign_data["chunk"]["count"] * variants > CAPTURE_MAX_RECORDS:
+        raise EmulatorInputError(
+            "capture plan template would contain more than "
+            f"{CAPTURE_MAX_RECORDS} observations; reduce limit or variants"
+        )
+    registry, _ = _runtime_status_map(root)
     observations: list[dict[str, Any]] = []
     for case in campaign_data["cases"]:
         template = _command_probe_template(root, case["name"], event_inventory)
         protocol_request = _protocol_request_template(template["event"])
-        probe_input = {
+        probe_input: dict[str, Any] = {
             "command": case["name"],
-            "args": template["args"],
+            "args": list(template["args"]),
             "event": template["event"],
             "profiles": template["profiles"],
         }
         if protocol_request is not None:
             probe_input["request"] = protocol_request
-        observations.append(
-            {
-                "id": case["id"],
-                "operation": "command_probe",
-                "input": probe_input,
-                "comparisons": [
-                    {
-                        "label": "command status",
-                        "actual_path": ["execution", "status"],
-                        "reference_path": ["status"],
-                    }
-                ],
-            }
-        )
+        if variants == 1:
+            argument_candidates = [
+                {
+                    "args": list(template["args"]),
+                    "source": "capture-plan-empty-argument-default",
+                }
+            ]
+        else:
+            spec = _f5_catalog_spec(registry, case["name"])
+            if spec is None:  # pragma: no cover - catalog/campaign consistency guard
+                raise EmulatorInputError(
+                    f"catalog command has no specification: {case['name']}"
+                )
+            argument_candidates = _command_argument_candidates(case["name"], spec)
+        for variant_index, argument_candidate in enumerate(
+            argument_candidates[:variants]
+        ):
+            variant_input = dict(probe_input)
+            variant_input["args"] = list(argument_candidate["args"])
+            observation_id = case["id"] if variant_index == 0 else (
+                f"{case['id']}:variant:{variant_index + 1}"
+            )
+            observations.append(
+                {
+                    "id": observation_id,
+                    "operation": "command_probe",
+                    "input": _capture_plan_probe_input(variant_input),
+                    "comparisons": [
+                        {
+                            "label": "command status",
+                            "actual_path": ["execution", "status"],
+                            "reference_path": ["status"],
+                        }
+                    ],
+                }
+            )
 
     plan = {
         "schema_version": 1,
@@ -4474,7 +4510,8 @@ def _build_capture_plan_template(
             "collector": collector,
             "tmos_build": tmos_build,
             "capture_id": capture_id or f"campaign-{offset:06d}-{limit:06d}",
-            "generator": "tmos-17.5-capture-plan-template-v1",
+            "generator": "tmos-17.5-capture-plan-template-v2",
+            "variants": variants,
         },
         "observations": observations,
     }
@@ -32026,7 +32063,12 @@ class McpProtocolServer:
                 "inputSchema": _mcp_object_schema(
                     {
                         "offset": {"type": "integer", "minimum": 0, "default": 0},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100},
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": CAPTURE_MAX_RECORDS,
+                            "default": 100,
+                        },
                         "namespace": {"type": "string", "minLength": 1},
                         "runtime_status": {
                             "type": "string",
@@ -32082,7 +32124,7 @@ class McpProtocolServer:
             {
                 "name": "irule_capture_plan_template",
                 "title": "Build a TMOS 17.5 capture plan",
-                "description": "Return an assembly-ready capture-plan template for one runnable catalog chunk, with deterministic event/profile shells and no fabricated reference output.",
+                "description": "Return an assembly-ready capture-plan template for one runnable catalog chunk, with deterministic event/profile shells, optional registry-derived argument variants, and no fabricated reference output.",
                 "inputSchema": _mcp_object_schema(
                     {
                         "offset": {"type": "integer", "minimum": 0, "default": 0},
@@ -32102,6 +32144,12 @@ class McpProtocolServer:
                         "collector": {"type": "string", "minLength": 1},
                         "tmos_build": {"type": "string", "pattern": "^17\\.5(?:\\..*)?$"},
                         "capture_id": {"type": "string", "minLength": 1},
+                        "variants": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": BEHAVIOR_CANDIDATE_MAX_VARIANTS,
+                            "default": 1,
+                        },
                     }
                 ),
             },
@@ -32531,7 +32579,7 @@ class McpProtocolServer:
                 - {
                     "offset", "limit", "namespace", "runtime_status",
                     "target_status", "name", "source", "collector",
-                    "tmos_build", "capture_id",
+                    "tmos_build", "capture_id", "variants",
                 }
             )
             if unknown:
@@ -32550,10 +32598,14 @@ class McpProtocolServer:
                 field: args[field]
                 for field in (
                     "namespace", "runtime_status", "target_status", "name",
-                    "source", "collector", "tmos_build", "capture_id",
+                    "source", "collector", "tmos_build", "capture_id", "variants",
                 )
                 if field in args
             }
+            variants = args.get("variants", 1)
+            if isinstance(variants, bool) or not isinstance(variants, int):
+                raise McpProtocolError(-32602, "capture plan variants must be an integer")
+            options["variants"] = variants
             return self._tool_success(
                 _build_capture_plan_template(
                     self._root, offset, limit, **options
@@ -37740,10 +37792,12 @@ def _http_handler(
                         field: query[field][0]
                         for field in (
                             "namespace", "runtime_status", "target_status", "name",
-                            "source", "collector", "tmos_build", "capture_id",
+                            "source", "collector", "tmos_build", "capture_id", "variants",
                         )
                         if field in query
                     }
+                    if "variants" in options:
+                        options["variants"] = int(options["variants"])
                     payload = _build_capture_plan_template(
                         root, offset, limit, **options
                     )
@@ -38733,6 +38787,7 @@ def main(argv: list[str] | None = None) -> int:
                 collector=args.capture_collector,
                 tmos_build=args.tmos_build,
                 capture_id=args.capture_id,
+                variants=args.variants,
             )
         elif args.capabilities:
             response = _build_capabilities(
