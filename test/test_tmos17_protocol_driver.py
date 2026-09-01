@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import socket
 import struct
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -70,6 +72,35 @@ def test_http_driver_builds_structured_request_and_body() -> None:
     assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 8080)
     assert payload.startswith(b"GET /health HTTP/1.1\r\nHost: vip.test\r\n")
     assert timeout == 10.0
+
+
+def test_udp_driver_can_capture_one_bounded_response() -> None:
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind(("127.0.0.1", 0))
+    received: list[bytes] = []
+
+    def respond() -> None:
+        payload, address = server.recvfrom(1024)
+        received.append(payload)
+        server.sendto(b"\x00\xff", address)
+
+    thread = threading.Thread(target=respond)
+    thread.start()
+    try:
+        endpoint = driver.Endpoint("udp", "127.0.0.1", server.getsockname()[1])
+        response = driver.send_payload(
+            endpoint, b"probe", 2.0, capture_response=True
+        )
+    finally:
+        thread.join(timeout=2)
+        server.close()
+    assert received == [b"probe"]
+    assert response == {
+        "endpoint": {"scheme": "udp", "host": "127.0.0.1", "port": endpoint.port},
+        "payload_base64": "AP8=",
+        "bytes": 2,
+        "truncated": False,
+    }
 
 
 def test_payload_mode_reports_specialized_builder_selection() -> None:

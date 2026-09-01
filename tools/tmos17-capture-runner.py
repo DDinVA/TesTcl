@@ -331,6 +331,8 @@ def _collector_command(args: argparse.Namespace, entry: PlanEntry) -> list[str]:
         "--trigger-timeout",
         str(args.trigger_timeout),
     ]
+    if args.capture_wire:
+        command.append("--capture-wire")
     if args.allow_partial:
         command.append("--allow-partial")
     if args.trigger_command:
@@ -612,6 +614,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--traffic-url")
     parser.add_argument("--trigger-command")
     parser.add_argument("--trigger-timeout", type=float, default=60.0)
+    parser.add_argument(
+        "--capture-wire",
+        action="store_true",
+        help="ask the protocol driver to retain bounded server responses",
+    )
     parser.add_argument("--log-lines", type=int, default=500)
     parser.add_argument("--log-timeout", type=float, default=5.0)
     parser.add_argument("--settle-seconds", type=float, default=0.2)

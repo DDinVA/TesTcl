@@ -47,6 +47,8 @@ MAX_LOG_LINES = 5000
 MAX_PROFILES = 64
 MAX_PROFILE_BYTES = 256
 MAX_HOST_BYTES = 256
+MAX_TRIGGER_OUTPUT_BYTES = 4 * 1024 * 1024
+MAX_TRIGGER_RESPONSE_BYTES = 2 * 1024 * 1024
 SUPPORTED_EVENTS = frozenset({"HTTP_REQUEST", "RULE_INIT"})
 DANGEROUS_TCL_COMMANDS = frozenset(
     {
@@ -348,6 +350,75 @@ def parse_capture_line(line: str, expected_id: str) -> dict[str, Any] | None:
     return result
 
 
+def parse_trigger_output(raw: bytes) -> dict[str, Any] | None:
+    """Validate the optional wire response emitted by a protocol driver."""
+    if not raw:
+        return None
+    if not isinstance(raw, (bytes, bytearray)):
+        raise CollectorError("protocol driver output must be bytes")
+    raw = bytes(raw)
+    if len(raw) > MAX_TRIGGER_OUTPUT_BYTES:
+        raise CollectorError("protocol driver output exceeds the 4 MiB limit")
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant {value!r}")
+    try:
+        value = json.loads(raw.decode("utf-8"), parse_constant=reject_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise CollectorError("protocol driver output is not valid UTF-8 JSON") from exc
+    if not isinstance(value, dict) or set(value) != {"status", "response"}:
+        raise CollectorError("protocol driver output must contain status and response")
+    if value.get("status") != "ok" or not isinstance(value.get("response"), dict):
+        raise CollectorError("protocol driver output must contain a successful response")
+    response = value["response"]
+    if set(response) != {"endpoint", "payload_base64", "bytes", "truncated"}:
+        raise CollectorError(
+            "protocol driver response must contain endpoint, payload_base64, bytes, and truncated"
+        )
+    endpoint = response["endpoint"]
+    if not isinstance(endpoint, dict) or set(endpoint) != {"scheme", "host", "port"}:
+        raise CollectorError("protocol driver response endpoint is invalid")
+    scheme = endpoint["scheme"]
+    host = endpoint["host"]
+    port = endpoint["port"]
+    try:
+        host_bytes = host.encode("utf-8") if isinstance(host, str) else b""
+    except UnicodeEncodeError as exc:
+        raise CollectorError("protocol driver response endpoint is invalid") from exc
+    if (
+        not isinstance(scheme, str)
+        or scheme not in {"tcp", "udp", "h2c", "h2s"}
+        or not isinstance(host, str)
+        or not host
+        or "\x00" in host
+        or len(host_bytes) > MAX_HOST_BYTES
+        or isinstance(port, bool)
+        or not isinstance(port, int)
+        or not 1 <= port <= 65535
+    ):
+        raise CollectorError("protocol driver response endpoint is invalid")
+    encoded = response["payload_base64"]
+    if not isinstance(encoded, str):
+        raise CollectorError("protocol driver response payload_base64 must be a string")
+    try:
+        payload = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise CollectorError("protocol driver response payload_base64 is invalid") from exc
+    if len(payload) > MAX_TRIGGER_RESPONSE_BYTES:
+        raise CollectorError("protocol driver response exceeds the 2 MiB limit")
+    byte_count = response["bytes"]
+    if isinstance(byte_count, bool) or not isinstance(byte_count, int) or byte_count != len(payload):
+        raise CollectorError("protocol driver response bytes does not match payload_base64")
+    truncated = response["truncated"]
+    if not isinstance(truncated, bool):
+        raise CollectorError("protocol driver response truncated must be a boolean")
+    return {
+        "endpoint": {"scheme": scheme, "host": host, "port": port},
+        "payload_base64": encoded,
+        "bytes": byte_count,
+        "truncated": truncated,
+    }
+
+
 class BigIPRestClient:
     """Small standard-library iControl REST client with explicit TLS policy."""
 
@@ -519,6 +590,7 @@ class PlanCollector:
         *,
         trigger_command: str | None = None,
         trigger_timeout: float = 60.0,
+        capture_wire: bool = False,
         log_lines: int = 500,
         log_timeout: float = 5.0,
         settle_seconds: float = 0.2,
@@ -533,6 +605,8 @@ class PlanCollector:
             raise CollectorError("trigger-timeout must be greater than 0 and at most 300 seconds")
         if trigger_command is not None and not trigger_command.strip():
             raise CollectorError("trigger-command must be a non-empty executable path")
+        if not isinstance(capture_wire, bool):
+            raise CollectorError("capture-wire must be a boolean")
         self.client = client
         self.run_id = uuid.uuid4().hex[:12]
         self.virtual_path, self.rule_ref_prefix = _virtual_path(virtual)
@@ -543,6 +617,7 @@ class PlanCollector:
         self.settle_seconds = settle_seconds
         self.trigger_command = trigger_command
         self.trigger_timeout = trigger_timeout
+        self.capture_wire = capture_wire
 
     def _bash(self, command: str) -> str:
         result = self.client.post(
@@ -608,7 +683,7 @@ class PlanCollector:
         except (URLError, OSError) as exc:
             raise CollectorError(f"traffic request failed: {exc}") from exc
 
-    def _run_trigger(self, case: dict[str, Any]) -> None:
+    def _run_trigger(self, case: dict[str, Any]) -> dict[str, Any] | None:
         if self.trigger_command is None:
             raise CollectorError(
                 f"event {case['input']['event']} requires --trigger-command"
@@ -625,6 +700,8 @@ class PlanCollector:
         }
         if "request" in case["input"]:
             trigger_input["request"] = case["input"]["request"]
+        if self.capture_wire:
+            trigger_input["capture_response"] = True
         trigger_env = os.environ.copy()
         trigger_env.pop("BIGIP_USERNAME", None)
         trigger_env.pop("BIGIP_PASSWORD", None)
@@ -634,7 +711,7 @@ class PlanCollector:
                 input=json.dumps(
                     trigger_input, ensure_ascii=False, allow_nan=False
                 ).encode("utf-8"),
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.PIPE if self.capture_wire else subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=self.trigger_timeout,
                 check=False,
@@ -655,6 +732,9 @@ class PlanCollector:
             raise CollectorError(
                 f"trigger command failed with exit code {completed.returncode}"
             )
+        if not self.capture_wire:
+            return None
+        return parse_trigger_output(getattr(completed, "stdout", b"") or b"")
 
     def _find_log_result(self, case_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + self.log_timeout
@@ -696,6 +776,7 @@ class PlanCollector:
         original_rules: list[Any] | None = None
         created = False
         attached = False
+        wire_response: dict[str, Any] | None = None
         try:
             virtual = self.client.get(self.virtual_path)
             rules = virtual.get("rules", []) if isinstance(virtual, dict) else []
@@ -718,14 +799,16 @@ class PlanCollector:
                 if not isinstance(request_data, dict):
                     raise CollectorError("HTTP command probe request must be an object")
                 if isinstance(request_data.get("http2"), dict):
-                    self._run_trigger(case)
+                    wire_response = self._run_trigger(case)
                 else:
                     self._send_http(request_data)
             elif case["input"]["event"] != "RULE_INIT":
-                self._run_trigger(case)
+                wire_response = self._run_trigger(case)
             if self.settle_seconds:
                 time.sleep(self.settle_seconds)
             output = self._find_log_result(log_id)
+            if wire_response is not None:
+                output["wire"] = wire_response
             output["event_trace"] = [self._event_observation(case, output)]
             return {"id": case["id"], "output": output}
         finally:
@@ -809,6 +892,11 @@ def main(argv: list[str] | None = None) -> int:
         default=60.0,
         help="maximum seconds allowed for one protocol-driver invocation",
     )
+    parser.add_argument(
+        "--capture-wire",
+        action="store_true",
+        help="ask the protocol driver to retain a bounded server response in each record",
+    )
     parser.add_argument("--insecure", action="store_true", help="disable BIG-IP TLS certificate verification")
     parser.add_argument("--log-lines", type=int, default=500, help="number of /var/log/ltm lines to inspect")
     parser.add_argument("--log-timeout", type=float, default=5.0, help="seconds to wait for a structured log result")
@@ -881,6 +969,7 @@ def main(argv: list[str] | None = None) -> int:
             args.traffic_url,
             trigger_command=args.trigger_command,
             trigger_timeout=args.trigger_timeout,
+            capture_wire=args.capture_wire,
             log_lines=args.log_lines,
             log_timeout=args.log_timeout,
             settle_seconds=args.settle_seconds,

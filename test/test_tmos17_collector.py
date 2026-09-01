@@ -101,6 +101,31 @@ def test_parse_capture_line_decodes_observed_value_and_error() -> None:
     assert collector.parse_capture_line(line, "other") is None
 
 
+def test_parse_trigger_output_normalises_bounded_wire_response() -> None:
+    payload = base64.b64encode(b"\x00\xff").decode("ascii")
+    raw = json.dumps(
+        {
+            "status": "ok",
+            "response": {
+                "endpoint": {"scheme": "udp", "host": "127.0.0.1", "port": 5353},
+                "payload_base64": payload,
+                "bytes": 2,
+                "truncated": False,
+            },
+        }
+    ).encode("utf-8")
+    assert collector.parse_trigger_output(raw) == {
+        "endpoint": {"scheme": "udp", "host": "127.0.0.1", "port": 5353},
+        "payload_base64": payload,
+        "bytes": 2,
+        "truncated": False,
+    }
+    with pytest.raises(collector.CollectorError, match="does not match"):
+        collector.parse_trigger_output(
+            raw.replace(b'"bytes": 2', b'"bytes": 3')
+        )
+
+
 def test_extract_tmos_version_accepts_common_sys_version_shape() -> None:
     assert collector._extract_tmos_version(
         {
@@ -356,6 +381,39 @@ def test_protocol_driver_receives_json_without_shell_execution() -> None:
         "virtual": "/Common/test-vs",
         "request": {"payload": "fixture"},
     }
+
+
+def test_protocol_driver_wire_capture_is_opt_in_and_bounded() -> None:
+    fake = _FakeRest()
+    plan_case = collector.validate_plan(_plan("MQTT_CLIENT_DATA"))["observations"][0]
+    runner = collector.PlanCollector(
+        fake,
+        "/Common/test-vs",
+        "udp://127.0.0.1:5353",
+        trigger_command="/opt/drivers/mqtt-driver",
+        capture_wire=True,
+        settle_seconds=0,
+    )
+    output = {
+        "status": "ok",
+        "response": {
+            "endpoint": {"scheme": "udp", "host": "127.0.0.1", "port": 5353},
+            "payload_base64": "AP8=",
+            "bytes": 2,
+            "truncated": False,
+        },
+    }
+    with patch.object(
+        collector.subprocess,
+        "run",
+        return_value=SimpleNamespace(returncode=0, stdout=json.dumps(output).encode()),
+    ) as run:
+        result = runner._run_trigger(plan_case)
+    assert result == output["response"]
+    _, kwargs = run.call_args
+    assert kwargs["stdout"] is subprocess.PIPE
+    trigger_input = json.loads(kwargs["input"].decode("utf-8"))
+    assert trigger_input["capture_response"] is True
 
 
 def test_protocol_driver_drives_unsupported_event_and_returns_observation() -> None:

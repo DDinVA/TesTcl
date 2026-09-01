@@ -22,6 +22,7 @@ import socket
 import ssl
 import struct
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -34,6 +35,8 @@ except ImportError:  # pragma: no cover - dependency is installed by uv/containe
 
 MAX_INPUT_BYTES = 512 * 1024
 MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_RESPONSE_WAIT = 5.0
 MAX_TEXT_BYTES = 256 * 1024
 MAX_HTTP_HEADERS = 128
 MAX_HTTP_LINE_BYTES = 8 * 1024
@@ -2114,7 +2117,65 @@ def build_payload(trigger: dict[str, Any]) -> tuple[Endpoint, bytes, float]:
     )
 
 
-def send_payload(endpoint: Endpoint, payload: bytes, timeout: float) -> None:
+def _receive_udp(sock: socket.socket, timeout: float) -> tuple[bytes, bool]:
+    """Receive at most one bounded datagram, preserving oversize detection."""
+    sock.settimeout(min(timeout, MAX_RESPONSE_WAIT))
+    try:
+        payload, _address = sock.recvfrom(MAX_RESPONSE_BYTES + 1)
+    except TimeoutError:
+        return b"", False
+    if len(payload) > MAX_RESPONSE_BYTES:
+        return payload[:MAX_RESPONSE_BYTES], True
+    return payload, False
+
+
+def _receive_stream(sock: socket.socket, timeout: float) -> tuple[bytes, bool]:
+    """Drain a bounded stream until EOF or a short response deadline."""
+    deadline = time.monotonic() + min(timeout, MAX_RESPONSE_WAIT)
+    response = bytearray()
+    truncated = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        capacity = MAX_RESPONSE_BYTES - len(response)
+        sock.settimeout(min(remaining, 0.5))
+        try:
+            chunk = sock.recv(min(65536, capacity + 1))
+        except TimeoutError:
+            break
+        if not chunk:
+            break
+        if len(chunk) > capacity:
+            response.extend(chunk[:capacity])
+            truncated = True
+            break
+        response.extend(chunk)
+    return bytes(response), truncated
+
+
+def _response_record(
+    endpoint: Endpoint, payload: bytes, truncated: bool
+) -> dict[str, Any]:
+    return {
+        "endpoint": {
+            "scheme": endpoint.scheme,
+            "host": endpoint.host,
+            "port": endpoint.port,
+        },
+        "payload_base64": base64.b64encode(payload).decode("ascii"),
+        "bytes": len(payload),
+        "truncated": truncated,
+    }
+
+
+def send_payload(
+    endpoint: Endpoint,
+    payload: bytes,
+    timeout: float,
+    *,
+    capture_response: bool = False,
+) -> dict[str, Any] | None:
     if len(payload) > MAX_PAYLOAD_BYTES:
         raise DriverError("payload exceeds the 2 MiB limit")
     try:
@@ -2128,6 +2189,9 @@ def send_payload(endpoint: Endpoint, payload: bytes, timeout: float) -> None:
             with socket.socket(family, socktype, proto) as sock:
                 sock.settimeout(timeout)
                 sock.sendto(payload, sockaddr)
+                if capture_response:
+                    response, truncated = _receive_udp(sock, timeout)
+                    return _response_record(endpoint, response, truncated)
         elif endpoint.scheme in {"h2c", "h2s"}:
             with socket.create_connection(
                 (endpoint.host, endpoint.port), timeout=timeout
@@ -2142,6 +2206,9 @@ def send_payload(endpoint: Endpoint, payload: bytes, timeout: float) -> None:
                         if sock.selected_alpn_protocol() != "h2":
                             raise DriverError("HTTP/2 TLS endpoint did not negotiate ALPN h2")
                         sock.sendall(payload)
+                        if capture_response:
+                            response, truncated = _receive_stream(sock, timeout)
+                            return _response_record(endpoint, response, truncated)
                         sock.settimeout(min(timeout, 1.0))
                         try:
                             sock.recv(4096)
@@ -2149,6 +2216,9 @@ def send_payload(endpoint: Endpoint, payload: bytes, timeout: float) -> None:
                             pass
                 else:
                     raw_sock.sendall(payload)
+                    if capture_response:
+                        response, truncated = _receive_stream(raw_sock, timeout)
+                        return _response_record(endpoint, response, truncated)
                     raw_sock.settimeout(min(timeout, 1.0))
                     try:
                         raw_sock.recv(4096)
@@ -2157,8 +2227,12 @@ def send_payload(endpoint: Endpoint, payload: bytes, timeout: float) -> None:
         else:
             with socket.create_connection((endpoint.host, endpoint.port), timeout=timeout) as sock:
                 sock.sendall(payload)
+                if capture_response:
+                    response, truncated = _receive_stream(sock, timeout)
+                    return _response_record(endpoint, response, truncated)
     except OSError as exc:
         raise DriverError(f"protocol stimulus failed for {endpoint.host}:{endpoint.port}: {exc}") from exc
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2177,7 +2251,21 @@ def main(argv: list[str] | None = None) -> int:
     try:
         trigger = read_request()
         endpoint, payload, timeout = build_payload(trigger)
-        send_payload(endpoint, payload, timeout)
+        capture_response = trigger.get("capture_response", False)
+        if not isinstance(capture_response, bool):
+            raise DriverError("capture_response must be a boolean")
+        response = send_payload(
+            endpoint, payload, timeout, capture_response=capture_response
+        )
+        if response is not None:
+            print(
+                json.dumps(
+                    {"status": "ok", "response": response},
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+            )
         return 0
     except DriverError as exc:
         print(f"tmos17-protocol-driver: {exc}", file=sys.stderr)

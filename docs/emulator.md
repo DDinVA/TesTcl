@@ -3759,12 +3759,13 @@ BIGIP_USERNAME=admin BIGIP_PASSWORD='…' \
   --virtual /Common/irule-test-vs \
   --traffic-url http://198.18.0.1:18080 \
   --trigger-command /opt/drivers/mqtt-driver \
+  --capture-wire \
   > records.ndjson
 ```
 
 The collector invokes the driver once per non-`HTTP_REQUEST`/non-`RULE_INIT`
 case with no shell. It writes one UTF-8 JSON object to the driver's stdin and
-requires exit status zero; stdout and stderr are discarded. The object contains
+requires exit status zero. The object contains
 `profile`, `case`, `event`, `command`, `args`, `profiles`, `traffic_url`, and
 the selected `virtual`; it also includes the plan's optional `request` object
 when one is present. The driver is
@@ -3774,6 +3775,16 @@ observation polling, and cleanup. Driver execution is bounded by
 `--trigger-timeout` (1–300 seconds, default 60). A driver may be a compiled
 binary, shell-free wrapper, or another executable; if it needs arguments,
 provide a purpose-built wrapper executable rather than a shell command line.
+
+By default the collector discards driver output. With `--capture-wire`, it
+adds `capture_response: true` to the driver input and expects one bounded JSON
+response on stdout. The bundled driver returns the server-side bytes as
+`response.payload_base64`, with endpoint, byte count, and truncation metadata;
+the collector validates that envelope and stores it under the external
+observation's `output.wire`. This makes a real TMOS response available to the
+differential-vector comparison without trusting unbounded or malformed driver
+output. A driver that cannot capture a response may still be used without this
+flag, but its record will contain event/log evidence only.
 
 Without a driver, plans containing events outside the built-in HTTP/RULE_INIT
 subset are rejected before any device mutation. `--allow-partial` may instead
@@ -3834,7 +3845,10 @@ the request fixture is intentionally limited to transaction fields so the
 capture plan remains portable between BIG-IP/vLab targets.
 
 The driver validates and transmits the fixture but does not implement a full
-HTTP/2 client or wait for a complete response. A DNS case can use:
+HTTP/2 client. When `--capture-wire` is enabled, it waits up to five seconds
+for a bounded response (or until the peer closes the stream); a quiet UDP
+endpoint yields an empty response rather than a fabricated one. A DNS case can
+use:
 
 For `RTSP_REQUEST_DATA`, the collector adds a short `RTSP_REQUEST` primer that
 requests collection before invoking the target data event. The driver sends
@@ -3866,8 +3880,9 @@ RTSP server response.
 
 For generic protocol events, provide `request.destination` as `udp://` or
 `tcp://` and either `payload_base64` or a UTF-8 `payload`. The driver does not
-wait for or synthesize a response; it only produces the stimulus needed to
-reach the virtual and returns non-zero when validation or transmission fails.
+synthesize a response; with `--capture-wire` it records whatever bounded bytes
+the target returns, and without it only produces the stimulus needed to reach
+the virtual. It returns non-zero when validation or transmission fails.
 For FTP control traffic, use `event: "CLIENT_DATA"` with
 `request.ftp.command`, or `event: "SERVER_DATA"` with
 `request.ftp.response_code` and `request.ftp.text`/`lines`; the default
