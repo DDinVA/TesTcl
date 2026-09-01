@@ -4091,13 +4091,7 @@ def _build_behavior_vector_candidates(
                         "id": observation_id,
                         "operation": "command_probe",
                         "input": capture_input,
-                        "comparisons": [
-                            {
-                                "label": "command status",
-                                "actual_path": ["execution", "status"],
-                                "reference_path": ["status"],
-                            }
-                        ],
+                        "comparisons": _capture_plan_command_comparisons(),
                     }
                 )
             row["capture_variant_count"] = len(capture_variant_ids)
@@ -4432,6 +4426,32 @@ def _capture_plan_request_template(
     return None
 
 
+def _capture_plan_command_comparisons() -> list[dict[str, Any]]:
+    """Compare stable command-result fields from an external collector."""
+    return [
+        {
+            "label": "command status",
+            "actual_path": ["execution", "status"],
+            "reference_path": ["status"],
+        },
+        {
+            "label": "Tcl return code",
+            "actual_path": ["execution", "tcl_return_code"],
+            "reference_path": ["tcl_return_code"],
+        },
+        {
+            "label": "result bytes",
+            "actual_path": ["execution", "value_bytes"],
+            "reference_path": ["value_bytes"],
+        },
+        {
+            "label": "result base64",
+            "actual_path": ["execution", "value_base64"],
+            "reference_path": ["value_base64"],
+        },
+    ]
+
+
 def _build_capture_plan_template(
     root: Path,
     offset: int,
@@ -4527,13 +4547,7 @@ def _build_capture_plan_template(
                     "id": observation_id,
                     "operation": "command_probe",
                     "input": _capture_plan_probe_input(variant_input),
-                    "comparisons": [
-                        {
-                            "label": "command status",
-                            "actual_path": ["execution", "status"],
-                            "reference_path": ["status"],
-                        }
-                    ],
+                    "comparisons": _capture_plan_command_comparisons(),
                 }
             )
 

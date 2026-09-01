@@ -3553,7 +3553,8 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
 ```
 
 The generated plan contains one `command_probe` observation per runnable
-catalog command, a target-valid event/profile shell, and a status comparison.
+catalog command, a target-valid event/profile shell, and stable status,
+return-code, byte-length, and base64-result comparisons.
 By default its empty `args` array preserves the conservative legacy template:
 command arguments and fixture values must be selected by the collector or
 operator from the catalog synopsis. Set `--variants 2` through `--variants 8`

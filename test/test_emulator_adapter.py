@@ -3937,6 +3937,10 @@ when HTTP_RESPONSE_RELEASE {
             self.assertTrue(observation["input"]["event"])
             self.assertTrue(observation["input"]["profiles"])
             self.assertEqual(
+                [comparison["label"] for comparison in observation["comparisons"]],
+                ["command status", "Tcl return code", "result bytes", "result base64"],
+            )
+            self.assertEqual(
                 observation["comparisons"][0]["actual_path"],
                 ["execution", "status"],
             )
@@ -4038,7 +4042,15 @@ when HTTP_RESPONSE_RELEASE {
         )
         assembled_protocol = self.adapter.run_capture_assemble(
             protocol_plan,
-            [{"id": protocol_plan["observations"][0]["id"], "output": {"status": "ok"}}],
+            [{
+                "id": protocol_plan["observations"][0]["id"],
+                "output": {
+                    "status": "ok",
+                    "tcl_return_code": 0,
+                    "value_base64": "",
+                    "value_bytes": 0,
+                },
+            }],
             tcl_lsp_root=self.tcl_lsp_root,
         )
         self.assertEqual(assembled_protocol["status"], "ok")

@@ -68,7 +68,18 @@ def _write_batch(
         plan_path = directory / f"plan-{index:04d}.json"
         plan_path.write_text(json.dumps(_plan(*ids)), encoding="utf-8")
         plans.append({"file": plan_path.name, "command_count": len(ids)})
-        records.extend({"id": case_id, "output": {"status": "ok"}} for case_id in ids)
+        records.extend(
+            {
+                "id": case_id,
+                "output": {
+                    "status": "ok",
+                    "tcl_return_code": 0,
+                    "value_base64": "",
+                    "value_bytes": 0,
+                },
+            }
+            for case_id in ids
+        )
     manifest_path = directory / "manifest.json"
     manifest_path.write_text(
         json.dumps(
@@ -122,7 +133,10 @@ def test_batch_assembly_rejects_incomplete_records_before_writing(
     tmp_path: Path,
 ) -> None:
     manifest, records = _write_batch(tmp_path, (("case-0", "case-1"),))
-    records.write_text('{"id":"case-0","output":{"status":"ok"}}\n', encoding="utf-8")
+    records.write_text(
+        '{"id":"case-0","output":{"status":"ok","tcl_return_code":0,"value_base64":"","value_bytes":0}}\n',
+        encoding="utf-8",
+    )
     output = tmp_path / "assembled"
 
     with pytest.raises(assemble.AssembleError, match="missing records"):
@@ -144,7 +158,10 @@ def test_batch_assembly_refuses_existing_output_directory(tmp_path: Path) -> Non
 
 def test_batch_assembly_preserves_failed_differential_report(tmp_path: Path) -> None:
     manifest, records = _write_batch(tmp_path)
-    records.write_text('{"id":"case-0","output":{"status":"error"}}\n', encoding="utf-8")
+    records.write_text(
+        '{"id":"case-0","output":{"status":"error","tcl_return_code":1,"value_base64":null,"value_bytes":0}}\n',
+        encoding="utf-8",
+    )
     output = tmp_path / "assembled"
 
     result = assemble.assemble_batch(

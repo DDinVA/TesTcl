@@ -93,6 +93,8 @@ def test_parse_capture_line_decodes_observed_value_and_error() -> None:
     assert collector.parse_capture_line(line, "case-0") == {
         "status": "ok",
         "tcl_return_code": 0,
+        "value_base64": value,
+        "value_bytes": len("observed value"),
         "value": "observed value",
         "error": "no error",
     }

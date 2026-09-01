@@ -322,16 +322,23 @@ def parse_capture_line(line: str, expected_id: str) -> dict[str, Any] | None:
         error_bytes = base64.b64decode(match.group("error"), validate=True)
     except (ValueError, binascii.Error) as exc:
         raise CollectorError(f"capture log contains invalid base64 for {expected_id!r}") from exc
+    status = match.group("status")
     result: dict[str, Any] = {
-        "status": match.group("status"),
+        "status": status,
         "tcl_return_code": int(match.group("rc")),
+        # Base64 and byte length are stable for both UTF-8 and binary Tcl
+        # results. Failed catches intentionally expose the same null/zero
+        # shape as the local command-probe execution result.
+        "value_base64": (
+            base64.b64encode(value_bytes).decode("ascii") if status == "ok" else None
+        ),
+        "value_bytes": len(value_bytes) if status == "ok" else 0,
     }
-    if value_bytes:
+    if status == "ok" and value_bytes:
         try:
             result["value"] = value_bytes.decode("utf-8")
         except UnicodeDecodeError:
-            result["value_base64"] = base64.b64encode(value_bytes).decode("ascii")
-            result["value_bytes"] = len(value_bytes)
+            pass
     if error_bytes:
         try:
             result["error"] = error_bytes.decode("utf-8")
