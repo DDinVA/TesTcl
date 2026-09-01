@@ -97,6 +97,20 @@ jobs:
             exit 1
           fi
           grep -F 'TesTcl · TMOS 17.5 iRule workbench' /tmp/testcl-workbench.html
+          grep -F 'Evaluate local chunk' /tmp/testcl-workbench.html
+          curl --fail --silent --show-error \
+            'http://127.0.0.1:18080/v1/capabilities?namespace=HTTP&target_status=available-in-tmos-17.5&limit=2' \
+            >/tmp/testcl-capability-chunk.json
+          jq -n --slurpfile chunk /tmp/testcl-capability-chunk.json \
+            '{chunk: $chunk[0], mode: "both", variants: 1}' \
+            >/tmp/testcl-catalog-evaluation-request.json
+          curl --fail --silent --show-error -X POST \
+            -H 'Content-Type: application/json' \
+            --data-binary @/tmp/testcl-catalog-evaluation-request.json \
+            http://127.0.0.1:18080/v1/catalog-chunk-evaluate \
+            >/tmp/testcl-catalog-evaluation.json
+          grep -F '"status":"ok"' /tmp/testcl-catalog-evaluation.json
+          grep -F '"target_command_count":2' /tmp/testcl-catalog-evaluation.json
           for attempt in $(seq 1 30); do
             if curl --fail --silent --show-error http://127.0.0.1:18081/health >/tmp/testcl-data-plane.txt; then
               break
