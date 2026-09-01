@@ -3798,9 +3798,43 @@ observation polling, and cleanup. Driver execution is bounded by
 binary, shell-free wrapper, or another executable; if it needs arguments,
 provide a purpose-built wrapper executable rather than a shell command line.
 
-By default the collector discards driver output. With `--capture-wire`, it
-adds `capture_response: true` to the driver input and expects one bounded JSON
-response on stdout. The bundled driver returns the server-side bytes as
+Live-observation capture plans can also contain `operation: "scenario"`
+records. These are multi-packet or transaction-level captures: the collector
+installs the plan's inline `irule` exactly as supplied, attaches it temporarily
+to the selected virtual, and invokes the driver with the complete scenario
+under `scenario`. Scenario execution is intentionally a second explicit
+acknowledgement because it installs arbitrary caller-supplied iRule source:
+pass both `--allow-device-write` and `--allow-scenario-rule`. The scenario
+driver owns the real protocol lifecycle and must return the device-observed
+output in this envelope:
+
+```json
+{"status":"ok","output":{"packets_processed":1,"wire_outputs":[]}}
+```
+
+The collector preserves that `output` as the external record and still
+restores the virtual and deletes the temporary rule on success or failure. It
+does not synthesize event logs or emulator output for a scenario. The bundled
+`tmos17-protocol-driver.py` is a command-probe driver; use a purpose-built
+scenario driver for a live transaction or packet sequence. A minimal live
+scenario run therefore looks like:
+
+```sh
+BIGIP_USERNAME=admin BIGIP_PASSWORD='…' \
+  ./scripts/collect-tmos17.sh \
+  --plan live-capture-plan.json \
+  --execute --allow-device-write --allow-scenario-rule \
+  --bigip-url https://bigip.example \
+  --virtual /Common/irule-test-vs \
+  --traffic-url https://198.18.0.10:443 \
+  --trigger-command /opt/drivers/scenario-driver \
+  --capture-wire \
+  > records.ndjson
+```
+
+For command-probe drivers, output is discarded by default. With
+`--capture-wire`, the collector adds `capture_response: true` to the driver
+input and expects one bounded JSON response on stdout. The bundled driver returns the server-side bytes as
 `response.payload_base64`, with endpoint, byte count, and truncation metadata;
 the collector validates that envelope and stores it under the external
 observation's `output.wire`. This makes a real TMOS response available to the

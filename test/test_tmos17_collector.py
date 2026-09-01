@@ -55,6 +55,41 @@ def _plan(*events: str) -> dict:
     }
 
 
+def _scenario_plan() -> dict:
+    return {
+        "schema_version": 1,
+        "profile": "tmos-17.5",
+        "name": "scenario-collector-test",
+        "source": "bigip-test",
+        "provenance": {"collector": "test", "tmos_build": "17.5.4"},
+        "observations": [
+            {
+                "id": "scenario-0",
+                "operation": "scenario",
+                "input": {
+                    "profiles": ["TCP", "MQTT"],
+                    "irule": "when MQTT_CLIENT_INGRESS { log local0. test }",
+                    "packets": [
+                        {
+                            "protocol": "mqtt",
+                            "type": "CONNECT",
+                            "direction": "client_to_server",
+                            "client_id": "device-1",
+                        }
+                    ],
+                },
+                "comparisons": [
+                    {
+                        "label": "packets processed",
+                        "actual_path": ["packets_processed"],
+                        "reference_path": ["packets_processed"],
+                    }
+                ],
+            }
+        ],
+    }
+
+
 def test_validate_plan_rejects_unknown_input_fields() -> None:
     plan = _plan("HTTP_REQUEST")
     plan["observations"][0]["input"]["scenario"] = {}
@@ -67,6 +102,34 @@ def test_validate_plan_rejects_device_shell_command() -> None:
     plan["observations"][0]["input"]["command"] = "exec"
     with pytest.raises(collector.CollectorError, match="safety policy"):
         collector.validate_plan(plan)
+
+
+def test_validate_plan_accepts_inline_scenario_for_external_driver() -> None:
+    validated = collector.validate_plan(_scenario_plan())
+    case = validated["observations"][0]
+    assert case["operation"] == "scenario"
+    assert case["event_supported"] is False
+    assert case["input"]["packets"][0]["type"] == "CONNECT"
+
+
+def test_parse_scenario_trigger_output_requires_successful_bounded_envelope() -> None:
+    raw = json.dumps(
+        {"status": "ok", "output": {"packets_processed": 1, "wire_outputs": []}}
+    ).encode("utf-8")
+    assert collector.parse_scenario_trigger_output(raw) == {
+        "packets_processed": 1,
+        "wire_outputs": [],
+    }
+    with pytest.raises(collector.CollectorError, match="successful observation"):
+        collector.parse_scenario_trigger_output(
+            b'{"status":"error","output":{}}'
+        )
+    with pytest.raises(collector.CollectorError, match="valid UTF-8 JSON"):
+        collector.parse_scenario_trigger_output(b"not-json")
+    with pytest.raises(collector.CollectorError, match="4 MiB"):
+        collector.parse_scenario_trigger_output(
+            b'{"status":"ok","output":{"x":"' + b"a" * (4 * 1024 * 1024) + b'"}}'
+        )
 
 
 def test_render_probe_irule_quotes_command_arguments_without_substitution() -> None:
@@ -335,6 +398,79 @@ def test_collect_refuses_unsupported_event_before_device_mutation() -> None:
     with pytest.raises(collector.CollectorError, match="cannot drive"):
         runner.collect(_plan("MQTT_CLIENT_DATA"))
     assert fake.calls == []
+
+
+def test_collect_scenario_requires_driver_and_explicit_rule_ack_before_mutation() -> None:
+    no_driver = collector.PlanCollector(
+        _FakeRest(),
+        "/Common/test-vs",
+        "http://127.0.0.1:8080/",
+        allow_scenario_rule=True,
+        settle_seconds=0,
+    )
+    with pytest.raises(collector.CollectorError, match="cannot drive"):
+        no_driver.collect(_scenario_plan())
+
+    fake = _FakeRest()
+    no_ack = collector.PlanCollector(
+        fake,
+        "/Common/test-vs",
+        "http://127.0.0.1:8080/",
+        trigger_command="/opt/drivers/scenario-driver",
+        settle_seconds=0,
+    )
+    with pytest.raises(collector.CollectorError, match="allow-scenario-rule"):
+        no_ack.collect(_scenario_plan())
+    assert fake.calls == []
+
+
+def test_collect_scenario_installs_supplied_rule_and_preserves_driver_observation() -> None:
+    fake = _FakeRest()
+    plan_case = collector.validate_plan(_scenario_plan())["observations"][0]
+    runner = collector.PlanCollector(
+        fake,
+        "/Tenant/test-vs",
+        "udp://127.0.0.1:5353",
+        trigger_command="/opt/drivers/scenario-driver",
+        capture_wire=True,
+        allow_scenario_rule=True,
+        settle_seconds=0,
+    )
+    observed = {"packets_processed": 1, "wire_outputs": [{"payload_hex": "20020005"}]}
+    envelope = json.dumps({"status": "ok", "output": observed}).encode("utf-8")
+    with patch.dict(
+        collector.os.environ,
+        {"BIGIP_USERNAME": "secret-user", "BIGIP_PASSWORD": "secret-pass"},
+        clear=False,
+    ), patch.object(
+        collector.subprocess,
+        "run",
+        return_value=SimpleNamespace(returncode=0, stdout=envelope),
+    ) as run:
+        result = runner.collect_case(plan_case)
+
+    assert result == {"id": "scenario-0", "output": observed}
+    posted_rule = fake.calls[1][2]
+    assert isinstance(posted_rule, dict)
+    assert posted_rule["apiAnonymous"] == plan_case["input"]["irule"]
+    assert [method for method, _, _ in fake.calls] == [
+        "GET", "POST", "PATCH", "PATCH", "DELETE"
+    ]
+    _, kwargs = run.call_args
+    assert kwargs["shell"] is False
+    assert kwargs["stdout"] is subprocess.PIPE
+    assert "BIGIP_USERNAME" not in kwargs["env"]
+    assert "BIGIP_PASSWORD" not in kwargs["env"]
+    trigger_input = json.loads(kwargs["input"].decode("utf-8"))
+    assert trigger_input == {
+        "profile": "tmos-17.5",
+        "case": "scenario-0",
+        "operation": "scenario",
+        "scenario": plan_case["input"],
+        "traffic_url": "udp://127.0.0.1:5353",
+        "virtual": "/Tenant/test-vs",
+        "capture_wire": True,
+    }
 
 
 def test_protocol_driver_receives_json_without_shell_execution() -> None:

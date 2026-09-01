@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Collect bounded TMOS 17.5 command observations from an existing BIG-IP VIP.
+"""Collect bounded TMOS 17.5 observations from an existing BIG-IP VIP.
 
 The emulator deliberately does not connect to a BIG-IP.  This companion tool
 is the opt-in external boundary: it reads an assembly-ready command-probe
-plan, installs one short-lived diagnostic iRule at a time on a caller-selected
-virtual server, drives HTTP traffic for events it can actually trigger, reads
-the resulting structured log line through iControl REST, and emits only
-device-observed NDJSON records.
+plan, installs one short-lived diagnostic or supplied scenario iRule at a time
+on a caller-selected virtual server, drives traffic through a caller-provided
+protocol/scenario driver, reads the resulting device observation, and emits
+only device-observed NDJSON records.
 
 It is dry-run by default.  Device mutation requires both ``--execute`` and
 ``--allow-device-write``.  Credentials are read from BIGIP_USERNAME and
@@ -49,6 +49,7 @@ MAX_PROFILE_BYTES = 256
 MAX_HOST_BYTES = 256
 MAX_TRIGGER_OUTPUT_BYTES = 4 * 1024 * 1024
 MAX_TRIGGER_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_SCENARIO_IRULE_BYTES = 512 * 1024
 SUPPORTED_EVENTS = frozenset({"HTTP_REQUEST", "RULE_INIT"})
 DANGEROUS_TCL_COMMANDS = frozenset(
     {
@@ -166,6 +167,49 @@ def _validate_scalar_arg(value: Any, index: int) -> str:
     return result
 
 
+def _validate_scenario_input(value: Any, case_id: str) -> dict[str, Any]:
+    """Validate the externally driven scenario envelope without executing it."""
+    if not isinstance(value, dict):
+        raise CollectorError(f"observation {case_id!r} scenario input must be an object")
+    if "irule_file" in value or "irules" in value:
+        raise CollectorError(
+            f"observation {case_id!r} scenario must contain one inline irule"
+        )
+    irule = value.get("irule")
+    if not isinstance(irule, str) or not irule.strip() or "\x00" in irule:
+        raise CollectorError(
+            f"observation {case_id!r} scenario irule must be a non-empty string"
+        )
+    try:
+        irule_bytes = irule.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise CollectorError(
+            f"observation {case_id!r} scenario irule must be valid UTF-8"
+        ) from exc
+    if len(irule_bytes) > MAX_SCENARIO_IRULE_BYTES:
+        raise CollectorError(
+            f"observation {case_id!r} scenario irule exceeds the 512 KiB limit"
+        )
+    for field in ("requests", "packets"):
+        if field in value and (
+            not isinstance(value[field], list)
+            or len(value[field]) > MAX_CASES
+        ):
+            raise CollectorError(
+                f"observation {case_id!r} scenario {field} must contain at most {MAX_CASES} items"
+            )
+    if "requests" in value and "packets" in value:
+        raise CollectorError(
+            f"observation {case_id!r} scenario cannot contain both requests and packets"
+        )
+    for field in ("live_data_plane", "live_origin"):
+        if field in value:
+            raise CollectorError(
+                f"observation {case_id!r} scenario cannot contain {field}"
+            )
+    return dict(value)
+
+
 def validate_plan(plan: Any) -> dict[str, Any]:
     """Validate the collector-facing subset without importing the emulator."""
     if not isinstance(plan, dict):
@@ -198,9 +242,26 @@ def validate_plan(plan: Any) -> dict[str, Any]:
         if case_id in seen:
             raise CollectorError(f"capture plan contains duplicate id {case_id!r}")
         seen.add(case_id)
-        if observation["operation"] != "command_probe":
+        operation = observation["operation"]
+        comparisons = observation["comparisons"]
+        if not isinstance(comparisons, list) or not comparisons:
+            raise CollectorError(f"observation {case_id!r} comparisons must be non-empty")
+        if operation == "scenario":
+            normalised.append(
+                {
+                    "id": case_id,
+                    "operation": "scenario",
+                    "input": _validate_scenario_input(observation["input"], case_id),
+                    "comparisons": list(comparisons),
+                    # Scenarios need an external driver to deploy/drive the
+                    # supplied rule and return the observed output.
+                    "event_supported": False,
+                }
+            )
+            continue
+        if operation != "command_probe":
             raise CollectorError(
-                f"observation {case_id!r} is not a command_probe operation"
+                f"observation {case_id!r} operation must be scenario or command_probe"
             )
         request = observation["input"]
         if not isinstance(request, dict):
@@ -248,9 +309,6 @@ def validate_plan(plan: Any) -> dict[str, Any]:
             )
         if "request" in request and not isinstance(request["request"], dict):
             raise CollectorError(f"observation {case_id!r} request must be an object")
-        comparisons = observation["comparisons"]
-        if not isinstance(comparisons, list) or not comparisons:
-            raise CollectorError(f"observation {case_id!r} comparisons must be non-empty")
         request_fixture = request.get("request")
         http2_request = (
             event == "HTTP_REQUEST"
@@ -417,6 +475,36 @@ def parse_trigger_output(raw: bytes) -> dict[str, Any] | None:
         "bytes": byte_count,
         "truncated": truncated,
     }
+
+
+def parse_scenario_trigger_output(raw: bytes) -> dict[str, Any]:
+    """Validate the complete observation returned by a scenario driver.
+
+    Scenario drivers own the protocol lifecycle and may return any finite,
+    JSON-compatible observation shape that the emulator's capture assembler
+    accepts.  The envelope stays deliberately small and explicit so a driver
+    cannot silently report a failed or fabricated collection as success.
+    """
+    if not isinstance(raw, (bytes, bytearray)):
+        raise CollectorError("scenario driver output must be bytes")
+    raw = bytes(raw)
+    if not raw:
+        raise CollectorError("scenario driver must return a JSON observation")
+    if len(raw) > MAX_TRIGGER_OUTPUT_BYTES:
+        raise CollectorError("scenario driver output exceeds the 4 MiB limit")
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant {value!r}")
+
+    try:
+        value = json.loads(raw.decode("utf-8"), parse_constant=reject_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise CollectorError("scenario driver output is not valid UTF-8 JSON") from exc
+    if not isinstance(value, dict) or set(value) != {"status", "output"}:
+        raise CollectorError("scenario driver output must contain status and output")
+    if value.get("status") != "ok" or not isinstance(value.get("output"), dict):
+        raise CollectorError("scenario driver output must contain a successful observation")
+    return value["output"]
 
 
 class BigIPRestClient:
@@ -591,6 +679,7 @@ class PlanCollector:
         trigger_command: str | None = None,
         trigger_timeout: float = 60.0,
         capture_wire: bool = False,
+        allow_scenario_rule: bool = False,
         log_lines: int = 500,
         log_timeout: float = 5.0,
         settle_seconds: float = 0.2,
@@ -607,6 +696,8 @@ class PlanCollector:
             raise CollectorError("trigger-command must be a non-empty executable path")
         if not isinstance(capture_wire, bool):
             raise CollectorError("capture-wire must be a boolean")
+        if not isinstance(allow_scenario_rule, bool):
+            raise CollectorError("allow-scenario-rule must be a boolean")
         self.client = client
         self.run_id = uuid.uuid4().hex[:12]
         self.virtual_path, self.rule_ref_prefix = _virtual_path(virtual)
@@ -618,6 +709,7 @@ class PlanCollector:
         self.trigger_command = trigger_command
         self.trigger_timeout = trigger_timeout
         self.capture_wire = capture_wire
+        self.allow_scenario_rule = allow_scenario_rule
 
     def _bash(self, command: str) -> str:
         result = self.client.post(
@@ -736,6 +828,51 @@ class PlanCollector:
             return None
         return parse_trigger_output(getattr(completed, "stdout", b"") or b"")
 
+    def _run_scenario_trigger(self, case: dict[str, Any]) -> dict[str, Any]:
+        """Ask a purpose-built driver to execute one externally installed rule."""
+        if self.trigger_command is None:
+            raise CollectorError("scenario collection requires --trigger-command")
+        trigger_input = {
+            "profile": TMOS_PROFILE,
+            "case": case["id"],
+            "operation": "scenario",
+            "scenario": case["input"],
+            "traffic_url": self.traffic_url,
+            "virtual": self.rule_ref_prefix,
+            "capture_wire": self.capture_wire,
+        }
+        trigger_env = os.environ.copy()
+        trigger_env.pop("BIGIP_USERNAME", None)
+        trigger_env.pop("BIGIP_PASSWORD", None)
+        try:
+            completed = subprocess.run(
+                [self.trigger_command],
+                input=json.dumps(
+                    trigger_input, ensure_ascii=False, allow_nan=False
+                ).encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=self.trigger_timeout,
+                check=False,
+                shell=False,
+                env=trigger_env,
+            )
+        except FileNotFoundError as exc:
+            raise CollectorError(
+                f"trigger executable was not found: {self.trigger_command!r}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise CollectorError(
+                f"scenario trigger command timed out after {self.trigger_timeout:g} seconds"
+            ) from exc
+        except OSError as exc:
+            raise CollectorError(f"scenario trigger command could not start: {exc}") from exc
+        if completed.returncode != 0:
+            raise CollectorError(
+                f"scenario trigger command failed with exit code {completed.returncode}"
+            )
+        return parse_scenario_trigger_output(getattr(completed, "stdout", b"") or b"")
+
     def _find_log_result(self, case_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + self.log_timeout
         while True:
@@ -764,9 +901,14 @@ class PlanCollector:
         }
 
     def collect_case(self, case: dict[str, Any]) -> dict[str, Any]:
-        if not case["event_supported"] and self.trigger_command is None:
+        if case["operation"] == "scenario" and not self.allow_scenario_rule:
             raise CollectorError(
-                f"event {case['input']['event']} is not triggerable by this collector"
+                "scenario collection requires --allow-scenario-rule because it installs the supplied iRule"
+            )
+        if not case["event_supported"] and self.trigger_command is None:
+            label = case["input"].get("event", case["operation"])
+            raise CollectorError(
+                f"event {label} is not triggerable by this collector"
             )
         rule_name = f"testcl_capture_{uuid.uuid4().hex[:12]}"
         log_id = f"{case['id']}:{self.run_id}"
@@ -788,12 +930,19 @@ class PlanCollector:
                 {
                     "name": rule_name,
                     "partition": self.partition,
-                    "apiAnonymous": render_probe_irule(case, rule_name, log_id=log_id),
+                    "apiAnonymous": (
+                        case["input"]["irule"]
+                        if case["operation"] == "scenario"
+                        else render_probe_irule(case, rule_name, log_id=log_id)
+                    ),
                 },
             )
             created = True
             self.client.patch(self.virtual_path, {"rules": original_rules + [rule_ref]})
             attached = True
+            if case["operation"] == "scenario":
+                output = self._run_scenario_trigger(case)
+                return {"id": case["id"], "output": output}
             if case["input"]["event"] == "HTTP_REQUEST":
                 request_data = case["input"].get("request", {})
                 if not isinstance(request_data, dict):
@@ -831,7 +980,7 @@ class PlanCollector:
         unsupported = [
             {
                 "id": case["id"],
-                "event": case["input"]["event"],
+                "event": case["input"].get("event", case["operation"]),
             }
             for case in validated["observations"]
             if not case["event_supported"]
@@ -852,7 +1001,13 @@ class PlanCollector:
         for case in validated["observations"]:
             if case["id"] in unsupported_ids:
                 skipped.append(
-                    {"id": case["id"], "reason": f"unsupported event {case['input']['event']}"}
+                    {
+                        "id": case["id"],
+                        "reason": (
+                            f"unsupported event "
+                            f"{case['input'].get('event', case['operation'])}"
+                        ),
+                    }
                 )
                 continue
             records.append(self.collect_case(case))
@@ -866,7 +1021,7 @@ def _print_records(records: list[dict[str, Any]]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Collect TMOS 17.5 iRule observations from BIG-IP")
-    parser.add_argument("--plan", required=True, help="assembly-ready command-probe plan JSON path, or -")
+    parser.add_argument("--plan", required=True, help="assembly-ready command-probe or scenario plan JSON path, or -")
     parser.add_argument("--execute", action="store_true", help="perform external collection")
     parser.add_argument(
         "--preflight",
@@ -878,13 +1033,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="acknowledge temporary iRule/virtual-server mutation (required with --execute)",
     )
+    parser.add_argument(
+        "--allow-scenario-rule",
+        action="store_true",
+        help="allow installing an inline scenario iRule supplied by the capture plan",
+    )
     parser.add_argument("--allow-partial", action="store_true", help="skip events not triggerable by this collector")
     parser.add_argument("--bigip-url", help="BIG-IP management URL, e.g. https://bigip.example")
     parser.add_argument("--virtual", help="existing virtual server as /partition/name or ~partition~name")
     parser.add_argument("--traffic-url", help="HTTP URL that reaches the selected virtual server")
     parser.add_argument(
         "--trigger-command",
-        help="executable protocol driver for non-HTTP/RULE_INIT events; receives one JSON request on stdin",
+        help="executable protocol/scenario driver; receives one JSON request on stdin",
     )
     parser.add_argument(
         "--trigger-timeout",
@@ -914,7 +1074,10 @@ def main(argv: list[str] | None = None) -> int:
         plan = validate_plan(_read_json_file(args.plan))
         if not args.execute and not args.preflight:
             unsupported = [
-                {"id": case["id"], "event": case["input"]["event"]}
+                {
+                    "id": case["id"],
+                    "event": case["input"].get("event", case["operation"]),
+                }
                 for case in plan["observations"]
                 if not case["event_supported"]
             ]
@@ -970,6 +1133,7 @@ def main(argv: list[str] | None = None) -> int:
             trigger_command=args.trigger_command,
             trigger_timeout=args.trigger_timeout,
             capture_wire=args.capture_wire,
+            allow_scenario_rule=args.allow_scenario_rule,
             log_lines=args.log_lines,
             log_timeout=args.log_timeout,
             settle_seconds=args.settle_seconds,

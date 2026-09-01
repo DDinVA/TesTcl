@@ -83,6 +83,7 @@ def _execute_args(
     *,
     allow_partial: bool = False,
     capture_wire: bool = False,
+    allow_scenario_rule: bool = False,
 ) -> list[str]:
     args = [
         "--manifest",
@@ -106,6 +107,8 @@ def _execute_args(
         args.append("--allow-partial")
     if capture_wire:
         args.append("--capture-wire")
+    if allow_scenario_rule:
+        args.append("--allow-scenario-rule")
     return args
 
 
@@ -180,12 +183,19 @@ def test_runner_checkpoints_and_resumes_collected_plans(
         )
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
-    args = _execute_args(manifest, records, state, capture_wire=True)
+    args = _execute_args(
+        manifest, records, state, capture_wire=True, allow_scenario_rule=True
+    )
     assert runner.main(args) == 0
     assert runner.main(args) == 0
     assert len(calls) == 3
     assert sum("--execute" in command for command in calls) == 1
     assert all("--capture-wire" in command for command in calls if "--execute" in command)
+    assert all(
+        "--allow-scenario-rule" in command
+        for command in calls
+        if "--execute" in command
+    )
     saved_state = json.loads(state.read_text(encoding="utf-8"))
     assert saved_state["status"] == "complete"
     assert saved_state["preflight"]["tmos_version"] == "17.5.4"

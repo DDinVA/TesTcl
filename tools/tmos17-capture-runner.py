@@ -333,6 +333,8 @@ def _collector_command(args: argparse.Namespace, entry: PlanEntry) -> list[str]:
     ]
     if args.capture_wire:
         command.append("--capture-wire")
+    if getattr(args, "allow_scenario_rule", False):
+        command.append("--allow-scenario-rule")
     if args.allow_partial:
         command.append("--allow-partial")
     if args.trigger_command:
@@ -606,6 +608,11 @@ def main(argv: list[str] | None = None) -> int:
         help="run one read-only TMOS 17.5/device/virtual check for the batch",
     )
     parser.add_argument("--allow-device-write", action="store_true")
+    parser.add_argument(
+        "--allow-scenario-rule",
+        action="store_true",
+        help="allow the collector to install inline scenario iRules",
+    )
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--records", help="NDJSON output path; required with --execute")
     parser.add_argument("--state", help="checkpoint JSON path; defaults beside the manifest")
