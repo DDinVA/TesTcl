@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "connector-controls-17.5",
+  "cases": [
+    {
+      "id": "connector-profile-toggle-and-remap-state",
+      "scenario": {
+        "profiles": ["CONNECTOR"],
+        "irule": "when CONNECTOR_OPEN {\n  set profile [CONNECTOR::profile]\n  CONNECTOR::disable\n  CONNECTOR::remap client_addr 192.0.2.40\n  CONNECTOR::remap client_port 44000\n  CONNECTOR::remap server_addr 198.51.100.40\n  CONNECTOR::remap server_port 8443\n  CONNECTOR::enable\n  log local0. \"profile=$profile enabled=[set ::state::connector::enabled] client=[set ::state::connector::client_addr]:[set ::state::connector::client_port] server=[set ::state::connector::server_addr]:[set ::state::connector::server_port]\"\n}",
+        "packets": [
+          {
+            "protocol": "event",
+            "event": "CONNECTOR_OPEN",
+            "state": {
+              "connector": {
+                "profile": "/Common/connector_profile_1"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "connector", "profile"], "equals": "/Common/connector_profile_1"},
+          {"path": ["trace", 0, "events", 0, "state", "connector", "enabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "connector", "client_addr"], "equals": "192.0.2.40"},
+          {"path": ["trace", 0, "events", 0, "state", "connector", "client_port"], "equals": "44000"},
+          {"path": ["trace", 0, "events", 0, "state", "connector", "server_addr"], "equals": "198.51.100.40"},
+          {"path": ["trace", 0, "events", 0, "state", "connector", "server_port"], "equals": "8443"},
+          {"path": ["trace", 0, "events", 0, "state", "connector", "remaps"], "equals": "{client_addr 192.0.2.40} {client_port 44000} {server_addr 198.51.100.40} {server_port 8443}"}
+        ]
+      }
+    }
+  ]
+}
