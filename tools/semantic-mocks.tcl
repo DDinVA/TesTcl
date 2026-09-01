@@ -1767,6 +1767,83 @@ namespace eval ::itest::semantic {
         return [list count [llength $records] records $records accesses $session_accesses]
     }
 
+    # Lossless cross-interpreter bridge used by the Python adapter.  The
+    # public snapshot intentionally omits the creation timestamp and access
+    # history; the bridge preserves expiry while leaving history local to the
+    # connection that generated it.
+    proc session_bridge_snapshot {} {
+        variable session_records
+        _session_purge_expired
+        set records {}
+        foreach entry_key [lsort -ascii [dict keys $session_records]] {
+            set record [dict get $session_records $entry_key]
+            lappend records [list \
+                mode [dict get $record mode] \
+                key [dict get $record key] \
+                data [dict get $record data] \
+                timeout [dict get $record timeout] \
+                created [dict get $record created]]
+        }
+        return $records
+    }
+
+    proc session_bridge_restore {records} {
+        variable session_records
+        variable session_max_records
+        variable session_max_value_bytes
+        variable session_max_total_bytes
+        if {[llength $records] > $session_max_records} {
+            error "session bridge cannot restore more than $session_max_records records"
+        }
+        set restored [dict create]
+        set total_bytes 0
+        foreach raw_record $records {
+            if {[llength $raw_record] == 1} {
+                set candidate [lindex $raw_record 0]
+                if {[llength $candidate] == 10} {
+                    set raw_record $candidate
+                }
+            }
+            if {[llength $raw_record] != 10 ||
+                [lindex $raw_record 0] ne "mode" ||
+                [lindex $raw_record 2] ne "key" ||
+                [lindex $raw_record 4] ne "data" ||
+                [lindex $raw_record 6] ne "timeout" ||
+                [lindex $raw_record 8] ne "created"} {
+                error "invalid session bridge record"
+            }
+            lassign $raw_record mode mode_value key key_value data data_value \
+                timeout timeout_value created created_value
+            set mode_value [_session_mode $mode_value]
+            if {$key_value eq "" || [string first "\x00" $key_value] >= 0 ||
+                [::itest::byte_length $key_value] > 4096} {
+                error "invalid session bridge key"
+            }
+            if {[string first "\x00" $data_value] >= 0 ||
+                [::itest::byte_length $data_value] > $session_max_value_bytes} {
+                error "invalid session bridge data"
+            }
+            if {![string is integer -strict $timeout_value] || $timeout_value < 0 ||
+                $timeout_value > 2147483647 ||
+                ![string is integer -strict $created_value] || $created_value < 0 ||
+                $created_value > 9223372036854775807} {
+                error "invalid session bridge timeout or timestamp"
+            }
+            incr total_bytes [::itest::byte_length $data_value]
+            if {$total_bytes > $session_max_total_bytes} {
+                error "session bridge data exceeds its total size limit"
+            }
+            set entry_key [_session_entry_key $mode_value $key_value]
+            if {[dict exists $restored $entry_key]} {
+                error "duplicate session bridge record"
+            }
+            dict set restored $entry_key [list \
+                mode $mode_value key $key_value data $data_value \
+                timeout $timeout_value created $created_value]
+        }
+        set session_records $restored
+    }
+
     proc sharedvar_reset_connection {} {
         variable sharedvar_names
         foreach name $sharedvar_names {
@@ -21593,6 +21670,88 @@ namespace eval ::itest::semantic {
             }
         }
         return $result
+    }
+
+    # The Python adapter uses this lossless snapshot/restore pair to share
+    # table records between persistent flow contexts.  The normal public
+    # snapshot intentionally omits wall-clock bookkeeping; the bridge keeps
+    # it so restoring a record does not extend its lifetime or idle timeout.
+    proc table_bridge_snapshot {} {
+        set result [list]
+        foreach subtable [array names ::state::table::tables] {
+            set bucket $::state::table::tables($subtable)
+            foreach key [dict keys $bucket] {
+                lassign [_table_fetch $subtable $key 0] exists record
+                if {$exists} {
+                    lappend result [list \
+                        subtable $subtable \
+                        key $key \
+                        value [dict get $record value] \
+                        lifetime [dict get $record lifetime] \
+                        timeout [dict get $record timeout] \
+                        created [dict get $record created] \
+                        touched [dict get $record touched]]
+                }
+            }
+        }
+        return $result
+    }
+
+    proc table_bridge_restore {records} {
+        if {[llength $records] > 1024} {
+            error "table bridge cannot restore more than 1024 records"
+        }
+        array unset ::state::table::tables
+        foreach raw_record $records {
+            # The adapter quotes nested records for safe command transport;
+            # unwrap that one-element representation before validating pairs.
+            if {[llength $raw_record] == 1} {
+                set candidate [lindex $raw_record 0]
+                if {[llength $candidate] == 14} {
+                    set raw_record $candidate
+                }
+            }
+            if {[llength $raw_record] != 14 ||
+                [lindex $raw_record 0] ne "subtable" ||
+                [lindex $raw_record 2] ne "key" ||
+                [lindex $raw_record 4] ne "value" ||
+                [lindex $raw_record 6] ne "lifetime" ||
+                [lindex $raw_record 8] ne "timeout" ||
+                [lindex $raw_record 10] ne "created" ||
+                [lindex $raw_record 12] ne "touched"} {
+                error "invalid table bridge record"
+            }
+            lassign $raw_record subtable subtable_value key key_value \
+                value value_value lifetime lifetime_value timeout timeout_value \
+                created created_value touched touched_value
+            foreach item [list lifetime_value timeout_value created_value touched_value] {
+                set number [set $item]
+                set maximum 2147483647
+                if {$item in {created_value touched_value}} {
+                    set maximum 9223372036854775807
+                }
+                if {![string is integer -strict $number] || $number < 0 ||
+                    $number > $maximum} {
+                    error "invalid table bridge timestamp or duration"
+                }
+            }
+            if {[string bytelength $key_value] > 4096 ||
+                [string bytelength $value_value] > 1048576} {
+                error "table bridge record exceeds its size limit"
+            }
+            if {[info exists ::state::table::tables($subtable_value)]} {
+                set bucket $::state::table::tables($subtable_value)
+            } else {
+                set bucket [dict create]
+            }
+            dict set bucket $key_value [list \
+                value $value_value \
+                lifetime $lifetime_value \
+                timeout $timeout_value \
+                created $created_value \
+                touched $touched_value]
+            set ::state::table::tables($subtable_value) $bucket
+        }
     }
 
     proc _persist_key {kind key} {

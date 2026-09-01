@@ -13578,6 +13578,71 @@ when HTTP_REQUEST {
             {"session": "semantic-mock"},
         )
 
+    def test_session_table_is_shared_across_persistent_api_sessions(self) -> None:
+        manager = self.adapter.SessionManager(Path(self.tcl_lsp_root), idle_timeout=60)
+        scenario = {
+            "profiles": ["TCP", "HTTP"],
+            "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/write"} {
+        table set -subtable shared visits 1 60 60
+        session add uie user-key session-value 60
+    } elseif {[HTTP::uri] eq "/read"} {
+        HTTP::header insert X-Visits [table lookup -subtable shared visits]
+        HTTP::header insert X-Remaining [table timeout -remaining -subtable shared visits]
+        HTTP::header insert X-Session [session lookup uie user-key]
+    }
+}
+""",
+        }
+        writer_id = manager.create(scenario)
+        reader_id = manager.create(scenario)
+        try:
+            written = manager.execute(
+                writer_id,
+                lambda session: session.run_request({"uri": "/write"}),
+            )
+            read = manager.execute(
+                reader_id,
+                lambda session: session.run_request({"uri": "/read"}),
+            )
+        finally:
+            manager.close_all()
+
+        self.assertEqual(written["semantic"]["table"][0]["value"], "1")
+        self.assertEqual(read["request"]["headers"]["x-visits"], "1")
+        self.assertEqual(read["request"]["headers"]["x-session"], "session-value")
+        self.assertGreaterEqual(int(read["request"]["headers"]["x-remaining"]), 1)
+
+    def test_session_table_scope_does_not_cross_scenarios(self) -> None:
+        manager = self.adapter.SessionManager(Path(self.tcl_lsp_root), idle_timeout=60)
+        writer_id = manager.create(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": (
+                    'when HTTP_REQUEST { table set -subtable isolated key value 60 60 }'
+                ),
+            }
+        )
+        reader_id = manager.create(
+            {
+                "profiles": ["TCP", "HTTP"],
+                "irule": (
+                    'when HTTP_REQUEST { HTTP::header insert X-Leak '
+                    '[table lookup -subtable isolated key] }'
+                ),
+            }
+        )
+        try:
+            manager.execute(writer_id, lambda session: session.run_request({"uri": "/"}))
+            read = manager.execute(
+                reader_id, lambda session: session.run_request({"uri": "/"})
+            )
+        finally:
+            manager.close_all()
+
+        self.assertEqual(read["request"]["headers"]["x-leak"], "")
+
     def test_session_table_rejects_empty_keys_and_unsupported_modes(self) -> None:
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "session key must not be empty"):
             self.adapter.run_scenario(

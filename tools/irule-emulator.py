@@ -14588,6 +14588,11 @@ SIP_PERSISTENCE_MAX_ENTRIES = 1024
 SIP_PERSISTENCE_MAX_KEY_BYTES = 4096
 SIP_PERSISTENCE_MAX_ROUTE_TARGET_BYTES = 4096
 SIP_PERSISTENCE_MAX_TIMEOUT = 7 * 24 * 60 * 60
+SESSION_TABLE_MAX_ENTRIES = 1024
+SESSION_TABLE_MAX_KEY_BYTES = 4096
+SESSION_TABLE_MAX_VALUE_BYTES = 1048576
+SESSION_TABLE_MAX_DURATION = 2147483647
+SESSION_TABLE_MAX_TIMESTAMP = 9223372036854775807
 MAX_IP_FRAGMENT_SETS = 128
 TCP_SEQUENCE_MODULUS = 2**32
 TCP_SEQUENCE_HALF_RANGE = 2**31
@@ -23744,6 +23749,186 @@ def _prepare_http_class_request_state(session: Any, kwargs: dict[str, Any]) -> N
     )
 
 
+class _SessionTableStore:
+    """Share bounded ``session``/``table`` records across flow contexts.
+
+    BIG-IP table records are not connection-local.  The Tcl semantic overlay
+    keeps the authoritative record representation, while this process-local
+    store provides an atomic handoff between the separate Tcl interpreters
+    used for persistent flows.  It deliberately does not persist to disk or
+    claim cross-process/TMM replication.
+    """
+
+    _TABLE_FIELDS = (
+        "subtable", "key", "value", "lifetime", "timeout", "created", "touched"
+    )
+    _SESSION_FIELDS = ("mode", "key", "data", "timeout", "created")
+
+    def __init__(self, *, max_entries: int = SESSION_TABLE_MAX_ENTRIES) -> None:
+        if max_entries < 1 or max_entries > SESSION_TABLE_MAX_ENTRIES:
+            raise ValueError(
+                f"session table store size must be between 1 and {SESSION_TABLE_MAX_ENTRIES}"
+            )
+        self._max_entries = max_entries
+        self._table_records: dict[tuple[str, str], dict[str, Any]] = {}
+        self._session_records: dict[tuple[str, str], dict[str, Any]] = {}
+        self._lock = threading.RLock()
+
+    @property
+    def lock(self) -> threading.RLock:
+        """Return the lock held across one Tcl operation and its sync."""
+        return self._lock
+
+    @classmethod
+    def _parse_table_snapshot(
+        cls, raw: Any
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        records: dict[tuple[str, str], dict[str, Any]] = {}
+        for raw_record in _split_tcl_list(str(raw)):
+            parts = _split_tcl_list(raw_record)
+            if len(parts) != len(cls._TABLE_FIELDS) * 2 or parts[::2] != list(cls._TABLE_FIELDS):
+                raise EmulatorInputError("invalid shared session table record")
+            values = dict(zip(parts[::2], parts[1::2]))
+            subtable = values["subtable"]
+            key = values["key"]
+            value = values["value"]
+            if (
+                "\x00" in subtable
+                or "\x00" in key
+                or "\x00" in value
+                or not key
+            ):
+                raise EmulatorInputError(
+                    "shared session table subtable/key/value must be valid and key non-empty"
+                )
+            if len(subtable.encode("utf-8")) > SESSION_TABLE_MAX_KEY_BYTES:
+                raise EmulatorInputError("shared session table subtable exceeds its size limit")
+            if len(key.encode("utf-8")) > SESSION_TABLE_MAX_KEY_BYTES:
+                raise EmulatorInputError("shared session table key exceeds its size limit")
+            if len(value.encode("utf-8")) > SESSION_TABLE_MAX_VALUE_BYTES:
+                raise EmulatorInputError("shared session table value exceeds its size limit")
+            numeric: dict[str, int] = {}
+            for field in ("lifetime", "timeout", "created", "touched"):
+                try:
+                    number = int(values[field], 10)
+                except (TypeError, ValueError) as exc:
+                    raise EmulatorInputError(
+                        "shared session table duration or timestamp is invalid"
+                    ) from exc
+                maximum = (
+                    SESSION_TABLE_MAX_DURATION
+                    if field in {"lifetime", "timeout"}
+                    else SESSION_TABLE_MAX_TIMESTAMP
+                )
+                if not 0 <= number <= maximum:
+                    raise EmulatorInputError(
+                        "shared session table duration or timestamp is out of range"
+                    )
+                numeric[field] = number
+            identity = (subtable, key)
+            if identity in records:
+                raise EmulatorInputError("duplicate shared session table record")
+            records[identity] = {
+                "subtable": subtable,
+                "key": key,
+                "value": value,
+                **numeric,
+            }
+        if len(records) > SESSION_TABLE_MAX_ENTRIES:
+            raise EmulatorInputError(
+                f"shared session table exceeds {SESSION_TABLE_MAX_ENTRIES} records"
+            )
+        return records
+
+    @classmethod
+    def _parse_session_snapshot(
+        cls, raw: Any
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        records: dict[tuple[str, str], dict[str, Any]] = {}
+        modes = {"simple", "source_addr", "sticky", "dest_addr", "ssl", "uie", "hash", "sip"}
+        for raw_record in _split_tcl_list(str(raw)):
+            parts = _split_tcl_list(raw_record)
+            if len(parts) != len(cls._SESSION_FIELDS) * 2 or parts[::2] != list(cls._SESSION_FIELDS):
+                raise EmulatorInputError("invalid shared legacy session record")
+            values = dict(zip(parts[::2], parts[1::2]))
+            mode = values["mode"]
+            key = values["key"]
+            data = values["data"]
+            if mode not in modes or not key or "\x00" in key or "\x00" in data:
+                raise EmulatorInputError("invalid shared legacy session record")
+            if len(key.encode("utf-8")) > SESSION_TABLE_MAX_KEY_BYTES:
+                raise EmulatorInputError("shared legacy session key exceeds its size limit")
+            if len(data.encode("utf-8")) > SESSION_TABLE_MAX_VALUE_BYTES:
+                raise EmulatorInputError("shared legacy session data exceeds its size limit")
+            numeric: dict[str, int] = {}
+            for field in ("timeout", "created"):
+                try:
+                    number = int(values[field], 10)
+                except (TypeError, ValueError) as exc:
+                    raise EmulatorInputError(
+                        "shared legacy session timeout or timestamp is invalid"
+                    ) from exc
+                maximum = (
+                    SESSION_TABLE_MAX_DURATION
+                    if field == "timeout"
+                    else SESSION_TABLE_MAX_TIMESTAMP
+                )
+                if not 0 <= number <= maximum:
+                    raise EmulatorInputError(
+                        "shared legacy session timeout or timestamp is out of range"
+                    )
+                numeric[field] = number
+            identity = (mode, key)
+            if identity in records:
+                raise EmulatorInputError("duplicate shared legacy session record")
+            records[identity] = {
+                "mode": mode,
+                "key": key,
+                "data": data,
+                **numeric,
+            }
+        if len(records) > SESSION_TABLE_MAX_ENTRIES:
+            raise EmulatorInputError(
+                f"shared legacy session table exceeds {SESSION_TABLE_MAX_ENTRIES} records"
+            )
+        return records
+
+    @staticmethod
+    def _bridge_rows(
+        records: dict[tuple[str, str], dict[str, Any]], fields: tuple[str, ...]
+    ) -> list[str]:
+        rows: list[str] = []
+        for record in records.values():
+            values: list[str] = []
+            for field in fields:
+                value = record[field]
+                values.extend((field, value if isinstance(value, str) else str(value)))
+            rows.append(_tcl_list(values))
+        return rows
+
+    def restore(self, session: Any) -> None:
+        """Replace one Tcl interpreter's table with the shared records."""
+        table_rows = self._bridge_rows(self._table_records, self._TABLE_FIELDS)
+        session_rows = self._bridge_rows(self._session_records, self._SESSION_FIELDS)
+        session.eval_tcl(
+            "::itest::semantic::table_bridge_restore " + _tcl_list(table_rows)
+        )
+        session.eval_tcl(
+            "::itest::semantic::session_bridge_restore " + _tcl_list(session_rows)
+        )
+
+    def capture(self, session: Any) -> None:
+        """Commit one Tcl interpreter's table state to the shared store."""
+        table_records = self._parse_table_snapshot(
+            session.eval_tcl("::itest::semantic::table_bridge_snapshot")
+        )
+        session_records = self._parse_session_snapshot(
+            session.eval_tcl("::itest::semantic::session_bridge_snapshot")
+        )
+        self._table_records = table_records
+        self._session_records = session_records
+
+
 class _SIPPersistenceStore:
     """Bounded, deterministic SIP persistence records shared by flow contexts.
 
@@ -23894,6 +24079,7 @@ class EmulatorSession:
         allow_packets: bool = False,
         backend: str = "inprocess",
         sip_persistence_store: _SIPPersistenceStore | None = None,
+        session_table_store: _SessionTableStore | None = None,
     ) -> None:
         (
             source,
@@ -23939,6 +24125,7 @@ class EmulatorSession:
             if sip_persistence_store is not None
             else _SIPPersistenceStore()
         )
+        self._session_table_store = session_table_store
         self._source = source
         self._prepared_source, self._event_controls = _prepare_irule_source(root, source)
         self._profiles = profiles
@@ -24621,7 +24808,21 @@ class EmulatorSession:
                         break
                     function, completed, result = task
                     try:
-                        result["value"] = function(session)
+                        if self._session_table_store is None:
+                            result["value"] = function(session)
+                        else:
+                            # Hold the shared lock for the complete operation;
+                            # syncing only before and after would allow two
+                            # Tcl interpreters to overwrite each other's table
+                            # updates.
+                            with self._session_table_store.lock:
+                                self._session_table_store.restore(session)
+                                try:
+                                    result["value"] = function(session)
+                                finally:
+                                    # Table writes before an iRule error are
+                                    # still writes in the modeled store.
+                                    self._session_table_store.capture(session)
                     except BaseException as exc:  # propagate Tcl errors to the caller
                         result["error"] = exc
                     finally:
@@ -31826,6 +32027,7 @@ def _run_isolated_packet_trace(
     backend: str,
     persistent_sessions: dict[tuple[str, ...], EmulatorSession] | None = None,
     sip_persistence_store: _SIPPersistenceStore | None = None,
+    session_table_store: _SessionTableStore | None = None,
     finalize_http: bool = True,
 ) -> dict[str, Any]:
     """Replay multiple packet flows in bounded, independent Tcl contexts."""
@@ -31872,6 +32074,7 @@ def _run_isolated_packet_trace(
                 allow_packets=False,
                 backend=backend,
                 sip_persistence_store=sip_persistence_store,
+                session_table_store=session_table_store,
             )
             if persistent_sessions is not None:
                 persistent_sessions[flow_key] = child
@@ -31989,10 +32192,18 @@ def _run_isolated_packet_trace(
 class _PersistentEmulatorSession:
     """Keep packet-flow Tcl contexts alive behind a persistent API session."""
 
-    def __init__(self, root: Path, scenario: dict[str, Any], backend: str) -> None:
+    def __init__(
+        self,
+        root: Path,
+        scenario: dict[str, Any],
+        backend: str,
+        *,
+        session_table_store: _SessionTableStore | None = None,
+    ) -> None:
         self._root = root
         self._scenario = dict(scenario)
         self._backend = backend
+        self._session_table_store = session_table_store
         self._sip_persistence_store = _SIPPersistenceStore()
         self._base = EmulatorSession(
             root,
@@ -32001,6 +32212,7 @@ class _PersistentEmulatorSession:
             allow_requests=True,
             backend=backend,
             sip_persistence_store=self._sip_persistence_store,
+            session_table_store=self._session_table_store,
         )
         self._base_flow_key: tuple[str, ...] | None = None
         self._flow_sessions: dict[tuple[str, ...], EmulatorSession] = {}
@@ -32049,6 +32261,7 @@ class _PersistentEmulatorSession:
             allow_packets=False,
             backend=self._backend,
             sip_persistence_store=self._sip_persistence_store,
+            session_table_store=self._session_table_store,
         )
 
     def _select_flow_session(
@@ -32317,6 +32530,7 @@ class _PersistentEmulatorSession:
                     allow_packets=False,
                     backend=self._backend,
                     sip_persistence_store=self._sip_persistence_store,
+                    session_table_store=self._session_table_store,
                 )
                 self._flow_sessions[flow_key] = session
             try:
@@ -32367,10 +32581,13 @@ class EmulatorResourceError(RuntimeError):
 
 
 class _SessionRecord:
-    def __init__(self, session: Any, last_used: float) -> None:
+    def __init__(
+        self, session: Any, last_used: float, table_store_key: str
+    ) -> None:
         self.session = session
         self.last_used = last_used
         self.active_operations = 0
+        self.table_store_key = table_store_key
 
 
 class SessionManager:
@@ -32394,6 +32611,29 @@ class SessionManager:
         self._idle_timeout = idle_timeout
         self._sessions: dict[str, _SessionRecord] = {}
         self._lock = threading.RLock()
+        self._session_table_stores: dict[str, _SessionTableStore] = {}
+
+    @staticmethod
+    def _table_store_key(scenario: dict[str, Any]) -> str:
+        try:
+            encoded = json.dumps(
+                scenario,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise EmulatorInputError(
+                "scenario cannot be used as a shared table scope"
+            ) from exc
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _drop_unused_table_stores_locked(self) -> None:
+        active_keys = {record.table_store_key for record in self._sessions.values()}
+        for key in list(self._session_table_stores):
+            if key not in active_keys:
+                del self._session_table_stores[key]
 
     def _reap(self) -> None:
         expired: list[Any] = []
@@ -32403,6 +32643,7 @@ class SessionManager:
                 if record.active_operations == 0 and now - record.last_used > self._idle_timeout:
                     del self._sessions[session_id]
                     expired.append(record.session)
+            self._drop_unused_table_stores_locked()
         for session in expired:
             session.close()
 
@@ -32411,13 +32652,32 @@ class SessionManager:
         with self._lock:
             if len(self._sessions) >= self._max_sessions:
                 raise EmulatorResourceError("maximum emulator session count reached")
-            session = _PersistentEmulatorSession(
-                self._root, scenario, self._backend
+            if not isinstance(scenario, dict):
+                raise EmulatorInputError("scenario must be a JSON object")
+            table_store_key = self._table_store_key(scenario)
+            table_store = self._session_table_stores.setdefault(
+                table_store_key, _SessionTableStore()
             )
+            try:
+                session = _PersistentEmulatorSession(
+                    self._root,
+                    scenario,
+                    self._backend,
+                    session_table_store=table_store,
+                )
+            except BaseException:
+                if not any(
+                    record.table_store_key == table_store_key
+                    for record in self._sessions.values()
+                ):
+                    self._session_table_stores.pop(table_store_key, None)
+                raise
             session_id = "ses_" + secrets.token_urlsafe(18)
             while session_id in self._sessions:
                 session_id = "ses_" + secrets.token_urlsafe(18)
-            self._sessions[session_id] = _SessionRecord(session, time.monotonic())
+            self._sessions[session_id] = _SessionRecord(
+                session, time.monotonic(), table_store_key
+            )
             return session_id
 
     def execute(self, session_id: str, function: Any) -> Any:
@@ -32449,6 +32709,7 @@ class SessionManager:
     def close(self, session_id: str) -> None:
         with self._lock:
             entry = self._sessions.pop(session_id, None)
+            self._drop_unused_table_stores_locked()
         if entry is None:
             raise EmulatorNotFoundError(f"unknown or expired session {session_id}")
         entry.session.close()
@@ -32457,6 +32718,7 @@ class SessionManager:
         with self._lock:
             sessions = [record.session for record in self._sessions.values()]
             self._sessions.clear()
+            self._session_table_stores.clear()
         for session in sessions:
             session.close()
 

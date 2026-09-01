@@ -53,13 +53,15 @@ support text or base64 content and the documented `get`, `listall`,
 64 MiB in total; the adapter records recent accesses and never reads the host
 filesystem.
 The TMOS 17.5 [`session`](https://clouddocs.f5.com/api/irules/session.html)
-command uses a separate global key/value table within each emulator session.
+command uses a separate global key/value table within the emulator process.
 Its add/lookup/delete operations cover all documented persistence modes,
 normalize legacy association qualifiers, apply the 180-second default timeout,
 and refresh the timeout on lookup. Records survive connection resets and are
 bounded to 1,024 entries, 1 MiB per value, and 16 MiB of total value data.
-This is session-table behavior for iRule control-flow testing; it is not a
-shared BIG-IP persistence database or a cross-process store.
+Persistent API/data-plane sessions created from the same canonical scenario
+share these records inside one emulator process, while different scenarios
+remain isolated. Records are still ephemeral and are not a shared BIG-IP
+persistence database or a cross-process store.
 The TMOS 17.5 [`priority`](https://clouddocs.f5.com/api/irules/priority.html)
 directive is applied to subsequent `when` blocks, while per-event priorities
 override the current outer value. Handlers execute in ascending priority and

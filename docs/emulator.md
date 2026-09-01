@@ -1569,16 +1569,17 @@ key listing, delete-all, and lifetime/timeout expiry. Positive persistence
 timeouts expire records using the emulator clock, while timeout `0` means no
 expiry.
 The [TMOS 17.5 `session` command](https://clouddocs.f5.com/api/irules/session.html)
-is modeled separately as a global key/value table for the lifetime of one
-emulator session. `session add`, `session lookup`, and `session delete` support
+is modeled separately as a global key/value table. `session add`, `session lookup`, and `session delete` support
 the documented `simple`, `source_addr`, `sticky`, `dest_addr`, `ssl`, `uie`,
 `hash`, and `sip` modes. The legacy `any virtual`, `service`, and `pool`
 qualifiers are accepted and normalized to their first key element, matching
 BIG-IP 10+ behavior. Adds default to a 180-second timeout; lookups touch a
 record and restart its timeout, while timeout `0` disables expiry. The table
 is bounded to 1,024 records, 1 MiB per value, and 16 MiB total value data.
-Session records survive emulated connection teardown but are isolated from
-other emulator sessions and do not select a pool member.
+Session records survive emulated connection teardown and are shared by
+persistent API/data-plane sessions created from the same canonical scenario
+within one process. Different scenarios and processes remain isolated; these
+records do not select a pool member.
 The [TMOS 17.5 `sharedvar` command](https://clouddocs.f5.com/api/irules/sharedvar.html)
 binds a declared Tcl identifier to the current connection's shared-variable
 store. A later handler can call `sharedvar` for the same name and observe
