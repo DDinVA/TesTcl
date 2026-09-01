@@ -4765,6 +4765,7 @@ when HTTP_RESPONSE_RELEASE {
             "ssl-controls-17.5.json": 2,
             "lb-17.5.json": 5,
             "lb-controls-17.5.json": 5,
+            "lsn-controls-17.5.json": 1,
             "uri-17.5.json": 11,
             "stream-17.5.json": 8,
             "route-17.5.json": 10,
