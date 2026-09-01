@@ -353,7 +353,9 @@ SIP/SDP/SIPALG, load-balancing, URI, stream filtering, route metrics, TMM CMP
 topology, FLOWTABLE queries, classification lifecycle, profile introspection,
 Message Routing controls, HTTP edge controls, MQTT protocol controls, and stateful
 session/table contracts for
-the pinned 17.5 profile. The SIP pack exercises all 16 catalogued `SIP::`
+the pinned 17.5 profile. The integration pack exercises ILX extension calls,
+request-scoped PLUGIN toggles, and network-free OFFBOX request recording. The
+SIP pack exercises all 16 catalogued `SIP::`
 commands, nine SDP accessors, and three SIPALG controls across command probes
 and request/response packet lifecycles. The HTTP/2 pack exercises active
 transaction metadata, pseudo-header access/mutation, stream controls, and
@@ -884,6 +886,14 @@ and binary-safe ASN1 element encoding and decoding:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/crypto-data-controls-17.5.json
+```
+
+Run the integration controls behavior pack to verify external-boundary
+semantics without contacting a plugin or network service:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/integration-controls-17.5.json
 ```
 
 Run the utility controls behavior pack to verify bounded HSL sends, local REST

@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "integration-controls-17.5",
+  "cases": [
+    {
+      "id": "ilx-call-notify-connection-boundary",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST {\n  set handle [ILX::init telemetry plugin]\n  set echo [ILX::call $handle echo {hello world}]\n  set sum [ILX::call $handle -timeout 25 sum 2 3]\n  set queued [ILX::notify $handle event payload]\n  log local0. \"handle=$handle echo=$echo sum=$sum queued=$queued\"\n}",
+        "requests": [
+          {"uri": "/one"},
+          {"uri": "/two", "close_before": true}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "ilx", "handles"], "equals": [{"handle": "ilx:1", "plugin": "telemetry", "extension": "plugin"}]},
+          {"path": ["results", 0, "semantic", "ilx", "calls", 1, "timeout_ms"], "equals": 25},
+          {"path": ["results", 0, "semantic", "ilx", "calls", 1, "args"], "equals": ["2", "3"]},
+          {"path": ["results", 0, "semantic", "ilx", "notifies", 0, "args"], "equals": ["payload"]},
+          {"path": ["results", 1, "semantic", "ilx", "handles"], "equals": [{"handle": "ilx:1", "plugin": "telemetry", "extension": "plugin"}]}
+        ]
+      }
+    },
+    {
+      "id": "plugin-toggles-are-request-scoped",
+      "scenario": {
+        "profiles": ["HTTP", "FASTHTTP", "ACCESS"],
+        "irule": "when HTTP_REQUEST {\n  if {[HTTP::uri] eq {\u002ffirst}} {\n    PLUGIN::disable\n    PLUGIN::enable ASM\n    PLUGIN::disable WAM\n  }\n}",
+        "requests": [
+          {"uri": "/first"},
+          {"uri": "/second"},
+          {"uri": "/third", "close_before": true}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "feature_controls", "plugin_all_disabled"], "equals": true},
+          {"path": ["results", 0, "semantic", "feature_controls", "plugin_states"], "equals": {"ASM": true, "WAM": false}},
+          {"path": ["results", 1, "semantic", "feature_controls", "plugin_all_disabled"], "equals": true},
+          {"path": ["results", 2, "semantic", "feature_controls", "plugin_all_disabled"], "equals": false},
+          {"path": ["results", 2, "semantic", "feature_controls", "plugin_states"], "equals": {}}
+        ]
+      }
+    },
+    {
+      "id": "offbox-requests-are-recorded-without-network-io",
+      "scenario": {
+        "profiles": ["HTTP"],
+        "irule": "when HTTP_REQUEST {\n  OFFBOX::request /Common/offbox::ip_reputation 203.0.113.10 cache 203.0.113.10 blocking 250\n  OFFBOX::request /Common/offbox::health ping\n}",
+        "request": {"uri": "/reputation"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "offbox", "request_count"], "equals": 2},
+          {"path": ["results", 0, "semantic", "offbox", "last"], "equals": {"service": "/Common/offbox::health", "payload": "ping", "cache_key": "", "blocking": false, "timeout": 0}},
+          {"path": ["results", 0, "semantic", "offbox", "requests", 0], "equals": {"service": "/Common/offbox::ip_reputation", "payload": "203.0.113.10", "cache_key": "203.0.113.10", "blocking": true, "timeout": 250, "result": "not-executed"}}
+        ]
+      }
+    }
+  ]
+}
