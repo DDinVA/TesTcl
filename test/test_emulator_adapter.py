@@ -13643,6 +13643,95 @@ when HTTP_REQUEST {
 
         self.assertEqual(read["request"]["headers"]["x-leak"], "")
 
+    def test_session_table_can_be_shared_by_explicitly_linked_managers(self) -> None:
+        registry = self.adapter._SessionTableRegistry()
+        writer_manager = self.adapter.SessionManager(
+            Path(self.tcl_lsp_root), idle_timeout=60, table_registry=registry
+        )
+        reader_manager = self.adapter.SessionManager(
+            Path(self.tcl_lsp_root), idle_timeout=60, table_registry=registry
+        )
+        scenario = {
+            "profiles": ["TCP", "HTTP"],
+            "irule": """
+when HTTP_REQUEST {
+    if {[HTTP::uri] eq "/write"} {
+        session add uie cross-manager manager-value 60
+    } else {
+        HTTP::header insert X-Cross-Manager [session lookup uie cross-manager]
+    }
+}
+""",
+        }
+        writer_id = writer_manager.create(scenario)
+        reader_id = reader_manager.create(scenario)
+        try:
+            writer_manager.execute(
+                writer_id, lambda session: session.run_request({"uri": "/write"})
+            )
+            read = reader_manager.execute(
+                reader_id, lambda session: session.run_request({"uri": "/read"})
+            )
+        finally:
+            writer_manager.close_all()
+            reader_manager.close_all()
+
+        self.assertEqual(
+            read["request"]["headers"]["x-cross-manager"], "manager-value"
+        )
+
+    def test_session_close_waits_for_inflight_operation(self) -> None:
+        manager = self.adapter.SessionManager(
+            Path(self.tcl_lsp_root), idle_timeout=60
+        )
+        session_id = manager.create(
+            {"profiles": ["TCP", "HTTP"], "irule": "when CLIENT_ACCEPTED { }"}
+        )
+        entered = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+        execution_results: list[str] = []
+        execution_errors: list[BaseException] = []
+
+        def operation(_session: object) -> str:
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("test operation was not released")
+            return "finished"
+
+        def execute_operation() -> None:
+            try:
+                execution_results.append(manager.execute(session_id, operation))
+            except BaseException as exc:  # pragma: no cover - failure is asserted below
+                execution_errors.append(exc)
+
+        def close_session() -> None:
+            manager.close(session_id)
+            closed.set()
+
+        execution_thread = threading.Thread(target=execute_operation, daemon=True)
+        close_thread = threading.Thread(target=close_session, daemon=True)
+        try:
+            execution_thread.start()
+            self.assertTrue(entered.wait(5))
+            close_thread.start()
+            self.assertFalse(closed.wait(0.2))
+
+            release.set()
+            execution_thread.join(5)
+            close_thread.join(5)
+            self.assertFalse(execution_thread.is_alive())
+            self.assertFalse(close_thread.is_alive())
+            self.assertEqual(execution_errors, [])
+            self.assertEqual(execution_results, ["finished"])
+            self.assertTrue(closed.is_set())
+        finally:
+            release.set()
+            execution_thread.join(5)
+            close_thread.join(5)
+            if session_id in manager._sessions:
+                manager.close_all()
+
     def test_session_table_rejects_empty_keys_and_unsupported_modes(self) -> None:
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "session key must not be empty"):
             self.adapter.run_scenario(

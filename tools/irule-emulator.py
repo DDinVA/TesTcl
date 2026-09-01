@@ -23779,14 +23779,16 @@ class _SessionTableStore:
         """Return the lock held across one Tcl operation and its sync."""
         return self._lock
 
-    @classmethod
     def _parse_table_snapshot(
-        cls, raw: Any
+        self, raw: Any
     ) -> dict[tuple[str, str], dict[str, Any]]:
         records: dict[tuple[str, str], dict[str, Any]] = {}
         for raw_record in _split_tcl_list(str(raw)):
             parts = _split_tcl_list(raw_record)
-            if len(parts) != len(cls._TABLE_FIELDS) * 2 or parts[::2] != list(cls._TABLE_FIELDS):
+            if (
+                len(parts) != len(self._TABLE_FIELDS) * 2
+                or parts[::2] != list(self._TABLE_FIELDS)
+            ):
                 raise EmulatorInputError("invalid shared session table record")
             values = dict(zip(parts[::2], parts[1::2]))
             subtable = values["subtable"]
@@ -23834,21 +23836,23 @@ class _SessionTableStore:
                 "value": value,
                 **numeric,
             }
-        if len(records) > SESSION_TABLE_MAX_ENTRIES:
+        if len(records) > self._max_entries:
             raise EmulatorInputError(
-                f"shared session table exceeds {SESSION_TABLE_MAX_ENTRIES} records"
+                f"shared session table exceeds {self._max_entries} records"
             )
         return records
 
-    @classmethod
     def _parse_session_snapshot(
-        cls, raw: Any
+        self, raw: Any
     ) -> dict[tuple[str, str], dict[str, Any]]:
         records: dict[tuple[str, str], dict[str, Any]] = {}
         modes = {"simple", "source_addr", "sticky", "dest_addr", "ssl", "uie", "hash", "sip"}
         for raw_record in _split_tcl_list(str(raw)):
             parts = _split_tcl_list(raw_record)
-            if len(parts) != len(cls._SESSION_FIELDS) * 2 or parts[::2] != list(cls._SESSION_FIELDS):
+            if (
+                len(parts) != len(self._SESSION_FIELDS) * 2
+                or parts[::2] != list(self._SESSION_FIELDS)
+            ):
                 raise EmulatorInputError("invalid shared legacy session record")
             values = dict(zip(parts[::2], parts[1::2]))
             mode = values["mode"]
@@ -23887,9 +23891,9 @@ class _SessionTableStore:
                 "data": data,
                 **numeric,
             }
-        if len(records) > SESSION_TABLE_MAX_ENTRIES:
+        if len(records) > self._max_entries:
             raise EmulatorInputError(
-                f"shared legacy session table exceeds {SESSION_TABLE_MAX_ENTRIES} records"
+                f"shared legacy session table exceeds {self._max_entries} records"
             )
         return records
 
@@ -32580,6 +32584,36 @@ class EmulatorResourceError(RuntimeError):
     """Raised when the service has reached its session capacity."""
 
 
+class _SessionTableRegistry:
+    """Own scenario-scoped stores shared by one or more session managers."""
+
+    def __init__(self) -> None:
+        self._stores: dict[str, _SessionTableStore] = {}
+        self._references: dict[str, int] = {}
+        self._lock = threading.RLock()
+
+    def acquire(self, key: str) -> _SessionTableStore:
+        with self._lock:
+            store = self._stores.get(key)
+            if store is None:
+                store = _SessionTableStore()
+                self._stores[key] = store
+                self._references[key] = 0
+            self._references[key] += 1
+            return store
+
+    def release(self, key: str) -> None:
+        with self._lock:
+            references = self._references.get(key)
+            if references is None:
+                return
+            if references <= 1:
+                self._references.pop(key, None)
+                self._stores.pop(key, None)
+            else:
+                self._references[key] = references - 1
+
+
 class _SessionRecord:
     def __init__(
         self, session: Any, last_used: float, table_store_key: str
@@ -32588,6 +32622,7 @@ class _SessionRecord:
         self.last_used = last_used
         self.active_operations = 0
         self.table_store_key = table_store_key
+        self.closing = False
 
 
 class SessionManager:
@@ -32600,6 +32635,7 @@ class SessionManager:
         max_sessions: int = DEFAULT_MAX_SESSIONS,
         idle_timeout: float = DEFAULT_SESSION_IDLE_SECONDS,
         backend: str = "inprocess",
+        table_registry: _SessionTableRegistry | None = None,
     ) -> None:
         if max_sessions < 1:
             raise ValueError("max_sessions must be positive")
@@ -32611,7 +32647,10 @@ class SessionManager:
         self._idle_timeout = idle_timeout
         self._sessions: dict[str, _SessionRecord] = {}
         self._lock = threading.RLock()
-        self._session_table_stores: dict[str, _SessionTableStore] = {}
+        self._operations_condition = threading.Condition(self._lock)
+        self._table_registry = (
+            table_registry if table_registry is not None else _SessionTableRegistry()
+        )
 
     @staticmethod
     def _table_store_key(scenario: dict[str, Any]) -> str:
@@ -32629,22 +32668,20 @@ class SessionManager:
             ) from exc
         return hashlib.sha256(encoded).hexdigest()
 
-    def _drop_unused_table_stores_locked(self) -> None:
-        active_keys = {record.table_store_key for record in self._sessions.values()}
-        for key in list(self._session_table_stores):
-            if key not in active_keys:
-                del self._session_table_stores[key]
-
     def _reap(self) -> None:
-        expired: list[Any] = []
+        expired: list[tuple[Any, str]] = []
         now = time.monotonic()
         with self._lock:
             for session_id, record in list(self._sessions.items()):
-                if record.active_operations == 0 and now - record.last_used > self._idle_timeout:
+                if (
+                    not record.closing
+                    and record.active_operations == 0
+                    and now - record.last_used > self._idle_timeout
+                ):
                     del self._sessions[session_id]
-                    expired.append(record.session)
-            self._drop_unused_table_stores_locked()
-        for session in expired:
+                    expired.append((record.session, record.table_store_key))
+        for session, table_store_key in expired:
+            self._table_registry.release(table_store_key)
             session.close()
 
     def create(self, scenario: dict[str, Any]) -> str:
@@ -32655,9 +32692,7 @@ class SessionManager:
             if not isinstance(scenario, dict):
                 raise EmulatorInputError("scenario must be a JSON object")
             table_store_key = self._table_store_key(scenario)
-            table_store = self._session_table_stores.setdefault(
-                table_store_key, _SessionTableStore()
-            )
+            table_store = self._table_registry.acquire(table_store_key)
             try:
                 session = _PersistentEmulatorSession(
                     self._root,
@@ -32666,11 +32701,7 @@ class SessionManager:
                     session_table_store=table_store,
                 )
             except BaseException:
-                if not any(
-                    record.table_store_key == table_store_key
-                    for record in self._sessions.values()
-                ):
-                    self._session_table_stores.pop(table_store_key, None)
+                self._table_registry.release(table_store_key)
                 raise
             session_id = "ses_" + secrets.token_urlsafe(18)
             while session_id in self._sessions:
@@ -32684,7 +32715,7 @@ class SessionManager:
         self._reap()
         with self._lock:
             record = self._sessions.get(session_id)
-            if record is None:
+            if record is None or record.closing:
                 raise EmulatorNotFoundError(f"unknown or expired session {session_id}")
             record.active_operations += 1
             record.last_used = time.monotonic()
@@ -32696,6 +32727,7 @@ class SessionManager:
                 if current is record:
                     current.active_operations -= 1
                     current.last_used = time.monotonic()
+                    self._operations_condition.notify_all()
 
     def metadata(self, session_id: str, flow_id: Any = None) -> dict[str, Any]:
         if flow_id is None:
@@ -32708,19 +32740,28 @@ class SessionManager:
 
     def close(self, session_id: str) -> None:
         with self._lock:
-            entry = self._sessions.pop(session_id, None)
-            self._drop_unused_table_stores_locked()
-        if entry is None:
-            raise EmulatorNotFoundError(f"unknown or expired session {session_id}")
+            entry = self._sessions.get(session_id)
+            if entry is None:
+                raise EmulatorNotFoundError(f"unknown or expired session {session_id}")
+            entry.closing = True
+            while entry.active_operations:
+                self._operations_condition.wait()
+            self._sessions.pop(session_id, None)
+        self._table_registry.release(entry.table_store_key)
         entry.session.close()
 
     def close_all(self) -> None:
         with self._lock:
-            sessions = [record.session for record in self._sessions.values()]
+            records = list(self._sessions.values())
+            for record in records:
+                record.closing = True
+            for record in records:
+                while record.active_operations:
+                    self._operations_condition.wait()
             self._sessions.clear()
-            self._session_table_stores.clear()
-        for session in sessions:
-            session.close()
+        for record in records:
+            self._table_registry.release(record.table_store_key)
+            record.session.close()
 
 
 class _LiveObservationStore:
@@ -39304,11 +39345,14 @@ def _data_plane_server(
     port: int,
     raw_scenario: Any,
     observations: "_LiveObservationStore | None" = None,
+    table_registry: "_SessionTableRegistry | None" = None,
 ) -> tuple[socketserver.BaseServer, "SessionManager"]:
     if not 0 <= port <= 65535:
         raise EmulatorInputError("data-plane port must be between 0 and 65535")
     scenario, config = _normalise_live_data_plane_scenario(raw_scenario)
-    manager = SessionManager(root, max_sessions=128)
+    manager = SessionManager(
+        root, max_sessions=128, table_registry=table_registry
+    )
     scheduler = None
     upstream = config.get("upstream")
     if isinstance(upstream, dict) and upstream.get("targets") is not None:
@@ -40098,7 +40142,8 @@ def serve(
 ) -> None:
     if not 1 <= port <= 65535:
         raise EmulatorInputError("port must be between 1 and 65535")
-    session_manager = SessionManager(root)
+    table_registry = _SessionTableRegistry()
+    session_manager = SessionManager(root, table_registry=table_registry)
     server: ThreadingHTTPServer | None = None
     data_plane_server: socketserver.BaseServer | None = None
     data_plane_manager: SessionManager | None = None
@@ -40116,6 +40161,7 @@ def serve(
                 data_plane_port,
                 data_plane_scenario,
                 live_observations,
+                table_registry,
             )
             data_plane_thread = threading.Thread(
                 target=data_plane_server.serve_forever,

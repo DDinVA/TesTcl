@@ -1577,9 +1577,10 @@ BIG-IP 10+ behavior. Adds default to a 180-second timeout; lookups touch a
 record and restart its timeout, while timeout `0` disables expiry. The table
 is bounded to 1,024 records, 1 MiB per value, and 16 MiB total value data.
 Session records survive emulated connection teardown and are shared by
-persistent sessions created by the same `SessionManager` from the same
-canonical scenario. Different scenarios and separately managed listeners
-remain isolated; these records do not select a pool member.
+persistent sessions created by the same `SessionManager`—or by managers that
+are explicitly linked in one combined service—from the same canonical
+scenario. Different scenarios and separately managed listeners remain
+isolated; these records do not select a pool member.
 The [TMOS 17.5 `sharedvar` command](https://clouddocs.f5.com/api/irules/sharedvar.html)
 binds a declared Tcl identifier to the current connection's shared-variable
 store. A later handler can call `sharedvar` for the same name and observe

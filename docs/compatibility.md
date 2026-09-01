@@ -58,10 +58,11 @@ Its add/lookup/delete operations cover all documented persistence modes,
 normalize legacy association qualifiers, apply the 180-second default timeout,
 and refresh the timeout on lookup. Records survive connection resets and are
 bounded to 1,024 entries, 1 MiB per value, and 16 MiB of total value data.
-Persistent sessions created by the same `SessionManager` from the same
-canonical scenario share these records, while different scenarios and
-separately managed listeners remain isolated. Records are still ephemeral and
-are not a shared BIG-IP persistence database or a cross-process store.
+Persistent sessions created by the same `SessionManager`—or by managers that
+are explicitly linked in one combined service—from the same canonical scenario
+share these records. Different scenarios and separately managed listeners
+remain isolated. Records are still ephemeral and are not a shared BIG-IP
+persistence database or a cross-process store.
 The TMOS 17.5 [`priority`](https://clouddocs.f5.com/api/irules/priority.html)
 directive is applied to subsequent `when` blocks, while per-event priorities
 override the current outer value. Handlers execute in ascending priority and
