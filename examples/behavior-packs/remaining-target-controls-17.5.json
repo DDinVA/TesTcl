@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "remaining-target-controls-17.5",
+  "cases": [
+    {
+      "id": "access2-policy-expression-procedure",
+      "probe": {
+        "command": "ACCESS2::access2_proc",
+        "event": "ACCESS2_POLICY_EXPRESSION_EVAL",
+        "profiles": ["ACCESS"],
+        "state": {"access2": {"proc": "::policy::evaluate_request"}}
+      },
+      "expect": {"status": "ok", "value": "::policy::evaluate_request"}
+    },
+    {
+      "id": "bigtcp-release-flow-enters-passthrough",
+      "scenario": {
+        "profiles": ["TCP"],
+        "irule": "when CLIENT_ACCEPTED {\n  if {[set ::state::connection::client_port] eq {1000}} { BIGTCP::release_flow }\n  log local0. \"released=[set ::state::bigtcp::released]\"\n}\nwhen CLIENT_DATA { log local0. {must-not-run} }",
+        "packets": [
+          {"protocol": "event", "event": "CLIENT_ACCEPTED", "state": {"connection": {"client_port": 1000}, "bigtcp": {}}},
+          {"protocol": "event", "event": "CLIENT_DATA", "state": {"connection": {"client_payload": "ignored"}, "bigtcp": {}}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "state", "bigtcp", "released"], "equals": "1"},
+          {"path": ["trace", 1, "events", 0, "fired"], "equals": false},
+          {"path": ["trace", 1, "events", 0, "reason"], "equals": "bigtcp_passthrough"}
+        ]
+      }
+    },
+    {
+      "id": "ntlm-disable-stops-later-processing",
+      "scenario": {
+        "profiles": ["TCP"],
+        "irule": "when CLIENT_ACCEPTED { NTLM::disable }",
+        "packets": [
+          {"protocol": "ntlm", "payload": "first"},
+          {"protocol": "ntlm", "payload": "second"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "disabled"], "equals": true},
+          {"path": ["trace", 0, "ignored"], "equals": "NTLM processing is disabled"},
+          {"path": ["trace", 1, "disabled"], "equals": true},
+          {"path": ["trace", 1, "ignored"], "equals": "NTLM processing is disabled"}
+        ]
+      }
+    }
+  ]
+}
