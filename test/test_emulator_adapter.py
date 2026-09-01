@@ -4780,6 +4780,7 @@ when HTTP_RESPONSE_RELEASE {
             "flowtable-17.5.json": 7,
             "flow-controls-17.5.json": 1,
             "classification-17.5.json": 10,
+            "html-controls-17.5.json": 1,
             "ip-controls-17.5.json": 2,
             "profile-17.5.json": 25,
             "psm-controls-17.5.json": 1,
@@ -4917,6 +4918,24 @@ when HTTP_RESPONSE_RELEASE {
         self.assertIn("add-behavior-vector", {command["next_action"] for command in report["commands"]})
         with self.assertRaisesRegex(self.adapter.EmulatorInputError, "duplicate pack name"):
             self.adapter._build_behavior_coverage(root, [packs[0], packs[0]])
+
+        expanded = [
+            {
+                "schema_version": 1,
+                "profile": "tmos-17.5",
+                "name": f"pack-{index}",
+                "cases": [
+                    {
+                        "id": "host",
+                        "probe": {"command": "HTTP::host", "event": "HTTP_REQUEST"},
+                        "expect": {"status": "ok"},
+                    }
+                ],
+            }
+            for index in range(65)
+        ]
+        expanded_report = self.adapter._build_behavior_coverage(root, expanded)
+        self.assertEqual(expanded_report["summary"]["behavior_pack_count"], 65)
 
     def test_behavior_analysis_separates_adjacent_one_line_when_handlers(self) -> None:
         root = self.adapter._find_tcl_lsp_root(self.tcl_lsp_root)

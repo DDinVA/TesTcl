@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "html-controls-17.5",
+  "cases": [
+    {
+      "id": "html-token-events-and-response-mutation",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "HTML"],
+        "irule": "when HTTP_RESPONSE { HTML::enable; log local0. \"encoded=[HTML::encode {<x>&\"'}]\" }\nwhen HTML_TAG_MATCHED { if {[HTML::tag name] eq \"html\"} { HTML::disable; HTML::enable }; if {[HTML::tag name] eq \"title\"} { HTML::tag prepend {<!--title-start-->}; HTML::tag append {<!--title-end-->} }; if {[string trimleft [HTML::tag name] /] eq \"p\"} { HTML::tag remove }; if {[HTML::tag name] eq \"br\"} { HTML::tag append {<!--br-marker-->} } }\nwhen HTML_COMMENT_MATCHED { if {[HTML::comment] eq {<!--remove-->}} { HTML::comment remove } }",
+        "request": {
+          "host": "html.example.com",
+          "response_body": "<html><title>Hi</title><!--remove--><p>x</p><br/></html>",
+          "response_headers": {"Content-Length": "52"}
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "body"], "equals": "<html><!--title-start--><title><!--title-end-->Hi</title>x<br/><!--br-marker--></html>"},
+          {"path": ["results", 0, "response", "headers", "content-length"], "equals": "86"},
+          {"path": ["results", 0, "semantic", "html", "token_count"], "equals": 8},
+          {"path": ["results", 0, "semantic", "html", "mutated"], "equals": true}
+        ]
+      }
+    }
+  ]
+}
