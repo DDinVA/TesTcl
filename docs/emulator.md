@@ -488,8 +488,9 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 894 of 989 target F5 commands (90.39%). This is test-input
-coverage, not a semantic-fidelity score.
+current report covers 989 of 989 target F5 commands (100%). This is test-input
+coverage, not a semantic-fidelity score; commands may still require deeper
+semantic vectors and independent TMOS 17.5 differential observations.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
 

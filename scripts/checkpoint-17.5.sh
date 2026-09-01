@@ -6,9 +6,11 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 python_bin="$repo_root/.venv/bin/python"
 tcl_lsp_root=${TCL_LSP_ROOT:-}
 report_file=$(mktemp -t testcl-17.5-checkpoint.XXXXXX)
+coverage_file=$(mktemp -t testcl-17.5-coverage.XXXXXX)
 
 cleanup() {
   rm -f "$report_file"
+  rm -f "$coverage_file"
 }
 trap cleanup EXIT
 
@@ -37,6 +39,35 @@ print(json.dumps({
     "status": report.get("status"),
     "profile": report.get("profile"),
     "summary": report.get("summary"),
+}, indent=2, sort_keys=True))
+PY
+
+echo
+echo "== TMOS 17.5 behavior-input coverage =="
+TCL_LSP_ROOT="$tcl_lsp_root" "$repo_root/scripts/emulate-irule.sh" \
+  --behavior-coverage >"$coverage_file"
+"$python_bin" - "$coverage_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+summary = report.get("summary", {})
+if report.get("status") != "ok":
+    raise SystemExit("behavior coverage report did not complete successfully")
+target = summary.get("target_f5_command_count")
+covered = summary.get("covered_command_count")
+if not isinstance(target, int) or not isinstance(covered, int) or covered != target:
+    raise SystemExit(
+        f"behavior-input coverage is incomplete: {covered!r}/{target!r} commands"
+    )
+print(json.dumps({
+    "target_f5_command_count": target,
+    "covered_command_count": covered,
+    "coverage_percent": summary.get("coverage_percent"),
+    "behavior_pack_count": summary.get("behavior_pack_count"),
+    "case_count": summary.get("case_count"),
+    "runtime_status_counts": summary.get("runtime_status_counts"),
 }, indent=2, sort_keys=True))
 PY
 
