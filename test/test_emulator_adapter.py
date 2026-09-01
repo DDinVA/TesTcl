@@ -4765,6 +4765,7 @@ when HTTP_RESPONSE_RELEASE {
             "istats-controls-17.5.json": 1,
             "link-controls-17.5.json": 1,
             "oneconnect-controls-17.5.json": 1,
+            "policy-controls-17.5.json": 1,
             "x509-controls-17.5.json": 1,
             "diameter-controls-17.5.json": 3,
             "tcp-controls-17.5.json": 2,

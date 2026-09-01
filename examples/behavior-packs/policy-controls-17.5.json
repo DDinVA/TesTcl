@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "policy-controls-17.5",
+  "cases": [
+    {
+      "id": "policy-introspection-and-match-state",
+      "scenario": {
+        "profiles": ["HTTP"],
+        "irule": "when HTTP_REQUEST {\n  set observed [list [POLICY::controls] [POLICY::controls compression] [POLICY::targets] [POLICY::targets log] [POLICY::names active] [POLICY::names matched] [POLICY::names unmatched] [POLICY::rules /Common/edge_policy] [POLICY::rules matched /Common/edge_policy]]\n  if {[llength $observed] == 9} { HTTP::respond 200 content policy-ok }\n}",
+        "packets": [
+          {
+            "protocol": "event",
+            "event": "HTTP_REQUEST",
+            "state": {
+              "policy": {
+                "controls": ["compression", "server-ssl"],
+                "targets": ["log", "http-uri"],
+                "active": ["/Common/edge_policy", "/Common/fallback"],
+                "matched": ["/Common/edge_policy"],
+                "unmatched": ["/Common/fallback"],
+                "rules": {
+                  "/Common/edge_policy": ["/Common/allow_api", "/Common/route_pool"]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "policy", "controls"], "equals": "\"compression\" \"server-ssl\""},
+          {"path": ["trace", 0, "events", 0, "state", "policy", "targets"], "equals": "\"log\" \"http-uri\""},
+          {"path": ["trace", 0, "events", 0, "state", "policy", "active"], "equals": "\"/Common/edge_policy\" \"/Common/fallback\""},
+          {"path": ["trace", 0, "events", 0, "state", "policy", "matched"], "equals": "\"/Common/edge_policy\""},
+          {"path": ["trace", 0, "events", 0, "state", "policy", "unmatched"], "equals": "\"/Common/fallback\""},
+          {"path": ["trace", 0, "events", 0, "state", "policy", "rules"], "equals": "\"/Common/edge_policy\" \"\\\"/Common/allow_api\\\" \\\"/Common/route_pool\\\"\""}
+        ]
+      }
+    }
+  ]
+}
