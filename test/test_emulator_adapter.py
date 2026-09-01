@@ -4039,7 +4039,14 @@ when HTTP_RESPONSE_RELEASE {
             self.assertTrue(observation["input"]["profiles"])
             self.assertEqual(
                 [comparison["label"] for comparison in observation["comparisons"]],
-                ["command status", "Tcl return code", "result bytes", "result base64"],
+                [
+                    "command status",
+                    "Tcl return code",
+                    "result bytes",
+                    "result base64",
+                    "event name",
+                    "event fired",
+                ],
             )
             self.assertEqual(
                 observation["comparisons"][0]["actual_path"],
@@ -4150,6 +4157,16 @@ when HTTP_RESPONSE_RELEASE {
                     "tcl_return_code": 0,
                     "value_base64": "",
                     "value_bytes": 0,
+                    "event_trace": [{
+                        "sequence": 0,
+                        "event": protocol_input["event"],
+                        "fired": True,
+                        "reason": "structured-log",
+                        "source": "bigip-log",
+                        "state_observed": False,
+                        "command_status": "ok",
+                        "tcl_return_code": 0,
+                    }],
                 },
             }],
             tcl_lsp_root=self.tcl_lsp_root,

@@ -610,6 +610,21 @@ class PlanCollector:
             time.sleep(min(0.2, max(0.01, deadline - time.monotonic())))
         raise CollectorError(f"no structured BIG-IP log result found for {case_id!r}")
 
+    @staticmethod
+    def _event_observation(case: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:
+        """Describe only what the structured log proves about event delivery."""
+        event_name = case["input"]["event"]
+        return {
+            "sequence": 0,
+            "event": event_name,
+            "fired": True,
+            "reason": "structured-log",
+            "source": "bigip-log",
+            "state_observed": False,
+            "command_status": output.get("status"),
+            "tcl_return_code": output.get("tcl_return_code"),
+        }
+
     def collect_case(self, case: dict[str, Any]) -> dict[str, Any]:
         if not case["event_supported"] and self.trigger_command is None:
             raise CollectorError(
@@ -653,6 +668,7 @@ class PlanCollector:
             if self.settle_seconds:
                 time.sleep(self.settle_seconds)
             output = self._find_log_result(log_id)
+            output["event_trace"] = [self._event_observation(case, output)]
             return {"id": case["id"], "output": output}
         finally:
             cleanup_error: Exception | None = None

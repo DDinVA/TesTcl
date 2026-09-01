@@ -4455,6 +4455,16 @@ def _capture_plan_command_comparisons() -> list[dict[str, Any]]:
             "actual_path": ["execution", "value_base64"],
             "reference_path": ["value_base64"],
         },
+        {
+            "label": "event name",
+            "actual_path": ["execution", "event", "event"],
+            "reference_path": ["event_trace", 0, "event"],
+        },
+        {
+            "label": "event fired",
+            "actual_path": ["execution", "event", "fired"],
+            "reference_path": ["event_trace", 0, "fired"],
+        },
     ]
 
 

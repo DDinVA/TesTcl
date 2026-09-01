@@ -140,7 +140,23 @@ def test_collect_case_restores_virtual_and_returns_only_observed_record() -> Non
         result = runner.collect_case(plan_case)
     assert result == {
         "id": "case-0",
-        "output": {"status": "ok", "tcl_return_code": 0, "value": "device"},
+        "output": {
+            "status": "ok",
+            "tcl_return_code": 0,
+            "value": "device",
+            "event_trace": [
+                {
+                    "sequence": 0,
+                    "event": "HTTP_REQUEST",
+                    "fired": True,
+                    "reason": "structured-log",
+                    "source": "bigip-log",
+                    "state_observed": False,
+                    "command_status": "ok",
+                    "tcl_return_code": 0,
+                }
+            ],
+        },
     }
     assert [method for method, _, _ in fake.calls] == [
         "GET", "POST", "PATCH", "PATCH", "DELETE"
@@ -308,6 +324,8 @@ def test_protocol_driver_drives_unsupported_event_and_returns_observation() -> N
     trigger.assert_called_once_with(plan_case)
     assert result["id"] == "case-0"
     assert result["output"]["value"] == "mqtt"
+    assert result["output"]["event_trace"][0]["event"] == "MQTT_CLIENT_DATA"
+    assert result["output"]["event_trace"][0]["state_observed"] is False
     assert [method for method, _, _ in fake.calls] == [
         "GET", "POST", "PATCH", "PATCH", "DELETE"
     ]
