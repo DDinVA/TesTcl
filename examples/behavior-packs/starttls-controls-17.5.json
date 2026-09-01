@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "starttls-controls-17.5",
+  "cases": [
+    {
+      "id": "protocol-enable-disable-controls",
+      "scenario": {
+        "profiles": ["TCP"],
+        "irule": "when CLIENT_ACCEPTED {\n  FTP::disable\n  FTP::enable\n  IMAP::disable\n  IMAP::enable\n  LDAP::disable\n  LDAP::enable\n  POP3::disable\n  POP3::enable\n  SMTPS::disable\n  SMTPS::enable\n}",
+        "packets": [
+          {
+            "protocol": "event",
+            "event": "CLIENT_ACCEPTED",
+            "state": {
+              "ftp": {},
+              "imap": {},
+              "ldap": {},
+              "pop3": {},
+              "smtps": {}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "ftp", "enabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "ftp", "disabled"], "equals": "0"},
+          {"path": ["trace", 0, "events", 0, "state", "imap", "enabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "ldap", "enabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "pop3", "enabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "smtps", "enabled"], "equals": "1"}
+        ]
+      }
+    }
+  ]
+}

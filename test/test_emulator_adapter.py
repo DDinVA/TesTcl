@@ -4771,6 +4771,7 @@ when HTTP_RESPONSE_RELEASE {
             "plugin-controls-17.5.json": 1,
             "avr-controls-17.5.json": 1,
             "utility-controls-17.5.json": 3,
+            "starttls-controls-17.5.json": 1,
             "x509-controls-17.5.json": 1,
             "diameter-controls-17.5.json": 3,
             "tcp-controls-17.5.json": 2,
