@@ -481,6 +481,20 @@ jobs:
           grep -F '"variant_count":0' /tmp/testcl-behavior-sweep.json
           grep -F '"executed_count":0' /tmp/testcl-behavior-sweep.json
 
+          docker run --rm --entrypoint sh testcl-irule-emulator:ci -c '
+            python /opt/testcl/tools/catalog-export.py \
+              --output-dir /tmp/testcl-catalog-worker \
+              --chunk-size 3 \
+              --namespace HTTP \
+              --target-status available-in-tmos-17.5 >/tmp/testcl-catalog-export.json
+            python /opt/testcl/tools/catalog-worker.py \
+              --chunk /tmp/testcl-catalog-worker/chunks/chunk-0000.json \
+              --mode both --variants 1 \
+              --output /tmp/testcl-catalog-worker-report.json >/tmp/testcl-catalog-worker.json
+            grep -F '"generated_command_count": 3' /tmp/testcl-catalog-worker.json
+            grep -F '"capture_observation_count": 3' /tmp/testcl-catalog-worker.json
+          '
+
           docker run --detach --name "$raw_container_name" \
             --publish 18082:18082 \
             testcl-irule-emulator:ci \
