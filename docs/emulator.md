@@ -1026,6 +1026,37 @@ TCL_LSP_ROOT=/path/to/tcl-lsp uv run --python 3.13 \
   python tools/tmos17-protocol-driver.py --capabilities
 ```
 
+To preflight or execute a whole batch, use the resumable runner. It is
+read-only by default and validates every plan again. It records one checkpoint
+per completed plan, so an interrupted external capture can resume without
+replaying completed plans:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp uv run --python 3.13 \
+  python tools/tmos17-capture-runner.py \
+  --manifest /tmp/tmos-17.5-capture-batch/manifest.json
+```
+
+Execution requires all three device coordinates plus both explicit mutation
+acknowledgements. Credentials remain in `BIGIP_USERNAME` and
+`BIGIP_PASSWORD`; the runner never places them in process arguments:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp uv run --python 3.13 \
+  python tools/tmos17-capture-runner.py \
+  --manifest /tmp/tmos-17.5-capture-batch/manifest.json \
+  --execute --allow-device-write \
+  --records /tmp/tmos-17.5-observations.ndjson \
+  --bigip-url https://bigip.example \
+  --virtual /Common/test-vs \
+  --traffic-url http://vip.example/health \
+  --trigger-command /path/to/tmos17-protocol-driver.py
+```
+
+The state file defaults beside the manifest as `capture-state.json`. A plan is
+marked `collected-partial` when `--allow-partial` skips unsupported events; it
+will be retried automatically if a later run supplies a trigger driver.
+
 Candidates are chunked over the uncovered-command queue, with a maximum of 64
 commands per request. The argument hypotheses are intentionally reviewable:
 they start from the pinned tcl-lsp synopsis metadata and use bounded TMOS-safe
