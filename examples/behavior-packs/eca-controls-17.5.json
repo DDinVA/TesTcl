@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "eca-controls-17.5",
+  "cases": [
+    {
+      "id": "external-content-authentication-controls",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "ECA"],
+        "irule": "when HTTP_REQUEST { ECA::enable; ECA::select select_ntlm:/Common/exch_ntlm_auth_config; log local0. configured }\nwhen ECA_REQUEST_ALLOWED { set ::allowed [list [ECA::username] [ECA::domainname] [ECA::client_machine_name] [ECA::status]]; log local0. \"allowed=$::allowed\" }\nwhen ECA_REQUEST_DENIED { set ::denied [list [ECA::username] [ECA::status]]; ECA::disable; log local0. \"denied=$::denied\" }",
+        "packets": [
+          {
+            "protocol": "event",
+            "event": "HTTP_REQUEST",
+            "state": {"eca": {}}
+          },
+          {
+            "protocol": "event",
+            "event": "ECA_REQUEST_ALLOWED",
+            "state": {
+              "eca": {
+                "username": "alice",
+                "domainname": "EXAMPLE",
+                "client_machine_name": "WKST-01",
+                "status": "NTLM_STATUS_OK"
+              }
+            }
+          },
+          {
+            "protocol": "event",
+            "event": "ECA_REQUEST_DENIED",
+            "state": {
+              "eca": {
+                "username": "mallory",
+                "status": "NTLM_STATUS_WRONG_PASSWORD"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "event"], "equals": "HTTP_REQUEST"},
+          {"path": ["trace", 0, "events", 0, "state", "eca", "enabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "eca", "selected"], "equals": "select_ntlm:/Common/exch_ntlm_auth_config"},
+          {"path": ["trace", 1, "events", 0, "event"], "equals": "ECA_REQUEST_ALLOWED"},
+          {"path": ["trace", 1, "events", 0, "state", "eca", "username"], "equals": "alice"},
+          {"path": ["trace", 1, "events", 0, "state", "eca", "domainname"], "equals": "EXAMPLE"},
+          {"path": ["trace", 1, "events", 0, "state", "eca", "client_machine_name"], "equals": "WKST-01"},
+          {"path": ["trace", 2, "events", 0, "event"], "equals": "ECA_REQUEST_DENIED"},
+          {"path": ["trace", 2, "events", 0, "state", "eca", "username"], "equals": "mallory"},
+          {"path": ["trace", 2, "events", 0, "state", "eca", "enabled"], "equals": "0"}
+        ]
+      }
+    }
+  ]
+}

@@ -99,7 +99,7 @@ jobs:
 
           docker run --rm testcl-irule-emulator:ci --behavior-coverage >/tmp/testcl-behavior-coverage.json
           grep -F '"target_f5_command_count":989' /tmp/testcl-behavior-coverage.json
-          grep -F '"covered_command_count":702' /tmp/testcl-behavior-coverage.json
+          grep -F '"covered_command_count":709' /tmp/testcl-behavior-coverage.json
           docker run --rm testcl-irule-emulator:ci \
             --behavior-pack /opt/testcl/examples/behavior-packs/aaa-17.5.json \
             >/tmp/testcl-aaa-pack.json
@@ -170,6 +170,11 @@ jobs:
             >/tmp/testcl-am-controls-pack.json
           grep -F '"status":"passed"' /tmp/testcl-am-controls-pack.json
           grep -F '"case_count":1' /tmp/testcl-am-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/eca-controls-17.5.json \
+            >/tmp/testcl-eca-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-eca-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-eca-controls-pack.json
           docker run --rm testcl-irule-emulator:ci \
             --behavior-pack /opt/testcl/examples/behavior-packs/auth-controls-17.5.json \
             >/tmp/testcl-auth-controls-pack.json
