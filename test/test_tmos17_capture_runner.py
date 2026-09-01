@@ -128,7 +128,7 @@ def test_runner_preflight_is_read_only_and_reports_device_metadata(
         return subprocess.CompletedProcess(
             command,
             0,
-            b'{"status":"preflight-ok","profile":"tmos-17.5","tmos_version":"17.5.4","device_mutation":false}\n',
+            b'{"status":"preflight-ok","profile":"tmos-17.5","tmos_version":"17.5.4","virtual_path":"/mgmt/tm/ltm/virtual/~Common~test-vs","virtual":"/Common/test-vs","device_mutation":false}\n',
             b"",
         )
 
@@ -162,6 +162,13 @@ def test_runner_checkpoints_and_resumes_collected_plans(
 
     def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
         calls.append(command)
+        if "--preflight" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                b'{"status":"preflight-ok","profile":"tmos-17.5","tmos_version":"17.5.4","virtual_path":"/mgmt/tm/ltm/virtual/~Common~test-vs","virtual":"/Common/test-vs","device_mutation":false}\n',
+                b"",
+            )
         return subprocess.CompletedProcess(
             command,
             0,
@@ -173,9 +180,11 @@ def test_runner_checkpoints_and_resumes_collected_plans(
     args = _execute_args(manifest, records, state)
     assert runner.main(args) == 0
     assert runner.main(args) == 0
-    assert len(calls) == 1
+    assert len(calls) == 3
+    assert sum("--execute" in command for command in calls) == 1
     saved_state = json.loads(state.read_text(encoding="utf-8"))
     assert saved_state["status"] == "complete"
+    assert saved_state["preflight"]["tmos_version"] == "17.5.4"
     assert saved_state["plans"]["plan-0000.json"]["status"] == "collected"
     assert records.read_text(encoding="utf-8") == (
         '{"id":"case-0","output":{"status":"ok"}}\n'
@@ -192,6 +201,13 @@ def test_runner_keeps_partial_plan_retryable_without_allow_partial(
 
     def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
         calls.append(command)
+        if "--preflight" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                b'{"status":"preflight-ok","profile":"tmos-17.5","tmos_version":"17.5.4","virtual_path":"/mgmt/tm/ltm/virtual/~Common~test-vs","virtual":"/Common/test-vs","device_mutation":false}\n',
+                b"",
+            )
         return subprocess.CompletedProcess(
             command,
             0,
@@ -205,10 +221,46 @@ def test_runner_keeps_partial_plan_retryable_without_allow_partial(
     saved_state = json.loads(state.read_text(encoding="utf-8"))
     assert saved_state["plans"]["plan-0000.json"]["status"] == "collected-partial"
     assert runner.main(partial_args) == 0
-    assert len(calls) == 1
+    assert len(calls) == 3
 
     assert runner.main(_execute_args(manifest, records, state)) == 1
-    assert len(calls) == 2
+    assert len(calls) == 5
+
+
+def test_runner_rejects_changed_device_identity_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _write_batch(tmp_path)
+    records = tmp_path / "records.ndjson"
+    state = tmp_path / "state.json"
+    versions = iter(("17.5.4", "17.5.5"))
+
+    def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
+        if "--preflight" in command:
+            version = next(versions)
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                (
+                    '{"status":"preflight-ok","profile":"tmos-17.5",'
+                    f'"tmos_version":"{version}",'
+                    '"virtual_path":"/mgmt/tm/ltm/virtual/~Common~test-vs",'
+                    '"virtual":"/Common/test-vs","device_mutation":false}\n'
+                ).encode("utf-8"),
+                b"",
+            )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            b'{"id":"case-0","output":{"status":"ok"}}\n',
+            b"",
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    args = _execute_args(manifest, records, state)
+    assert runner.main(args) == 0
+    assert runner.main(args) == 1
+    assert json.loads(state.read_text(encoding="utf-8"))["status"] == "complete"
 
 
 def test_runner_rejects_plan_changes_and_orphaned_records(
@@ -221,7 +273,14 @@ def test_runner_rejects_plan_changes_and_orphaned_records(
         runner.subprocess,
         "run",
         lambda command, **kwargs: subprocess.CompletedProcess(
-            command, 0, b'{"id":"case-0","output":{}}\n', b""
+            command,
+            0,
+            (
+                b'{"status":"preflight-ok","profile":"tmos-17.5","tmos_version":"17.5.4","virtual_path":"/mgmt/tm/ltm/virtual/~Common~test-vs","virtual":"/Common/test-vs","device_mutation":false}\n'
+                if "--preflight" in command
+                else b'{"id":"case-0","output":{}}\n'
+            ),
+            b"",
         ),
     )
     args = _execute_args(manifest, records, state)

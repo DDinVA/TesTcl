@@ -390,9 +390,22 @@ def _run_preflight(args: argparse.Namespace, entry: PlanEntry) -> dict[str, Any]
         or result.get("status") != "preflight-ok"
         or result.get("profile") != TMOS_PROFILE
         or result.get("device_mutation") is not False
+        or not isinstance(result.get("tmos_version"), str)
+        or not result["tmos_version"].startswith("17.5")
+        or not isinstance(result.get("virtual_path"), str)
+        or not isinstance(result.get("virtual"), str)
     ):
         raise RunnerError("device preflight returned an invalid result")
     return result
+
+
+def _preflight_identity(result: dict[str, Any]) -> tuple[str, str, str]:
+    """Return the stable device identity used to bind a resumable capture."""
+    return (
+        result["tmos_version"],
+        result["virtual_path"],
+        result["virtual"],
+    )
 
 
 def _dry_run(manifest: dict[str, Any], entries: list[PlanEntry]) -> dict[str, Any]:
@@ -447,6 +460,18 @@ def _execute_batch(
 
     state_was_present = state_path.exists()
     state = _load_state(state_path, manifest_sha256, records_path)
+    preflight = _run_preflight(args, entries[0])
+    stored_preflight = state.get("preflight")
+    if stored_preflight is not None:
+        if not isinstance(stored_preflight, dict):
+            raise RunnerError("capture state preflight must be an object")
+        try:
+            stored_identity = _preflight_identity(stored_preflight)
+        except (KeyError, TypeError) as exc:
+            raise RunnerError("capture state preflight is missing device identity") from exc
+        if stored_identity != _preflight_identity(preflight):
+            raise RunnerError("device preflight identity changed since capture started")
+    state["preflight"] = preflight
     existing_ids = _record_ids(records_path)
     if not state_was_present and existing_ids:
         raise RunnerError("records file is non-empty but capture state is missing")
@@ -561,6 +586,7 @@ def _execute_batch(
         "record_count": len(existing_ids),
         "state": str(state_path),
         "records": str(records_path),
+        "preflight": state["preflight"],
         "device_mutation": True,
     }
 
