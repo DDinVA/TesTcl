@@ -21735,8 +21735,8 @@ namespace eval ::itest::semantic {
                     error "invalid table bridge timestamp or duration"
                 }
             }
-            if {[string bytelength $key_value] > 4096 ||
-                [string bytelength $value_value] > 1048576} {
+            if {[::itest::byte_length $key_value] > 4096 ||
+                [::itest::byte_length $value_value] > 1048576} {
                 error "table bridge record exceeds its size limit"
             }
             if {[info exists ::state::table::tables($subtable_value)]} {
