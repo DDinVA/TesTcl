@@ -271,6 +271,29 @@ The returned plan is intentionally not proof of TMOS behavior. It is the
 portable replay input that an external collector can pair with its observed
 output.
 
+### Promote a completed capture batch
+
+`tools/tmos17-capture-runner.py` stores collector output as resumable NDJSON.
+Once every plan has been collected, promote the complete batch into one
+golden-vector pack per plan:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp \
+uv run --python 3.13 python tools/tmos17-capture-assemble.py \
+  --manifest /tmp/tmos-17.5-batch/manifest.json \
+  --records /tmp/tmos-17.5-batch/records.ndjson \
+  --output-dir /tmp/tmos-17.5-packs \
+  --verify
+```
+
+The output directory is created atomically and must not already exist. Packs
+remain bounded to the same 256-vector limit as the capture plans. `--verify`
+replays each pack through the local emulator and writes a report under
+`reports/`; a failed comparison leaves the pack and report available for
+inspection while returning a failing status. This is the handoff from external
+TMOS/vLab observations to checked-in differential contracts. The tool performs
+no device I/O.
+
 ## Command workbench
 
 Use the command workbench to exercise one target-valid F5 command from the
