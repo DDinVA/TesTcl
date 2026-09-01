@@ -1198,6 +1198,11 @@ as a checked-in adapter contract (`live_device: false`); replace the reference
 outputs with independently captured TMOS 17.5 observations when a device or
 vLab collector is available.
 
+[`examples/golden-vectors/event-trace-17.5.json`](../examples/golden-vectors/event-trace-17.5.json)
+adds the same contract boundary for ordered event traces. It compares packet
+event order, the ledger count, and the explicit distinction between observed
+packet state and an HTTP lifecycle event synthesized from a transaction result.
+
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --golden-vectors examples/golden-vectors/http-streaming-17.5.json

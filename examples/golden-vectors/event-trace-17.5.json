@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "event-trace-17.5-contracts",
+  "source": "checked-in-event-trace-contract",
+  "provenance": {
+    "capture_type": "adapter-regression-contract",
+    "live_device": false,
+    "basis": "ordered-packet-event-ledger"
+  },
+  "vectors": [
+    {
+      "id": "http-event-order-and-observation",
+      "operation": "scenario",
+      "input": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST { HTTP::respond 200 content ok }",
+        "packets": [
+          {
+            "protocol": "http",
+            "flow_id": "trace-contract",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.1", "port": 5000},
+            "destination": {"address": "192.0.2.1", "port": 80},
+            "host": "example.test",
+            "uri": "/"
+          }
+        ]
+      },
+      "reference": {
+        "source": "checked-in-event-trace-contract",
+        "output": {
+          "event_trace": [
+            {"event": "RULE_INIT", "state_observed": true},
+            {"event": "CLIENT_ACCEPTED", "state_observed": true},
+            {"event": "HTTP_REQUEST", "state_observed": false, "fired": true}
+          ],
+          "event_trace_summary": {
+            "event_count": 3,
+            "returned_count": 3,
+            "truncated": false
+          }
+        }
+      },
+      "comparisons": [
+        {"label": "rule init ordering", "actual_path": ["event_trace", 0, "event"], "reference_path": ["event_trace", 0, "event"]},
+        {"label": "client accepted ordering", "actual_path": ["event_trace", 1, "event"], "reference_path": ["event_trace", 1, "event"]},
+        {"label": "http request ordering", "actual_path": ["event_trace", 2, "event"], "reference_path": ["event_trace", 2, "event"]},
+        {"label": "http request state observation", "actual_path": ["event_trace", 2, "state_observed"], "reference_path": ["event_trace", 2, "state_observed"]},
+        {"label": "event ledger count", "actual_path": ["event_trace_summary", "event_count"], "reference_path": ["event_trace_summary", "event_count"]}
+      ]
+    }
+  ]
+}
