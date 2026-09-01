@@ -309,6 +309,8 @@ EVENT_TRACE_MAX_VALUE_BYTES = 4096
 EVENT_TRACE_MAX_BYTES = 512 * 1024
 PACKET_EVENT_TRACE_MAX_EVENTS = 1024
 PACKET_EVENT_TRACE_MAX_BYTES = 1024 * 1024
+PACKET_WIRE_OUTPUT_MAX_EVENTS = 256
+PACKET_WIRE_OUTPUT_MAX_BYTES = 512 * 1024
 COMMAND_PROBE_MAX_ARGS = 64
 COMMAND_PROBE_MAX_ARG_BYTES = 16 * 1024
 COMMAND_PROBE_MAX_TOTAL_ARG_BYTES = 64 * 1024
@@ -28818,6 +28820,87 @@ class EmulatorSession:
             "truncated": truncated,
         }
 
+    @classmethod
+    def _build_packet_wire_outputs(
+        cls, packet_trace: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Expose deterministic protocol responses produced during packet replay."""
+        outputs: list[dict[str, Any]] = []
+        encoded_size = 0
+
+        def flag_is_true(value: Any) -> bool:
+            if value is True:
+                return True
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value == 1
+            return isinstance(value, str) and value.lower() in {"1", "true"}
+
+        def visit(event: Any, packet_entry: dict[str, Any]) -> None:
+            nonlocal encoded_size
+            if not isinstance(event, dict) or event.get("event") != "DNS_RESPONSE":
+                if isinstance(event, dict):
+                    notifications = event.get("notifications")
+                    if isinstance(notifications, list):
+                        for notification in notifications:
+                            visit(notification, packet_entry)
+                return
+            state = event.get("state")
+            dns_state = state.get("dns") if isinstance(state, dict) else None
+            if not isinstance(dns_state, dict):
+                return
+            packet_dropped = packet_entry.get("dropped")
+            dns_dropped = dns_state.get("dropped")
+            packet_responded = packet_entry.get("responded")
+            packet_was_dropped = flag_is_true(packet_dropped)
+            response_was_emitted = flag_is_true(packet_responded)
+            payload_hex = dns_state.get("message_hex")
+            if (
+                not response_was_emitted
+                or packet_was_dropped
+                or flag_is_true(dns_dropped)
+                or not isinstance(payload_hex, str)
+                or not payload_hex
+                or len(payload_hex) % 2
+            ):
+                return
+            try:
+                payload = bytes.fromhex(payload_hex)
+            except ValueError:
+                return
+            output = {
+                "protocol": "dns",
+                "direction": "server_to_client",
+                "packet_index": packet_entry.get("index", 0),
+                "event": "DNS_RESPONSE",
+                "payload_hex": payload.hex(),
+                "bytes": len(payload),
+            }
+            encoded_size += len(
+                json.dumps(output, ensure_ascii=False, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            )
+            if len(outputs) >= PACKET_WIRE_OUTPUT_MAX_EVENTS:
+                raise EmulatorResourceError(
+                    f"packet wire outputs exceed the {PACKET_WIRE_OUTPUT_MAX_EVENTS} event limit"
+                )
+            if encoded_size > PACKET_WIRE_OUTPUT_MAX_BYTES:
+                raise EmulatorResourceError(
+                    "packet wire outputs exceed the 512 KiB limit"
+                )
+            outputs.append(output)
+
+        for packet_entry in packet_trace:
+            if not isinstance(packet_entry, dict):
+                continue
+            if packet_entry.get("direction") != "client_to_server":
+                continue
+            events = packet_entry.get("events")
+            if isinstance(events, list):
+                for event in events:
+                    visit(event, packet_entry)
+        return outputs
+
     def _run_packet_trace_body_on_worker(
         self,
         session: Any,
@@ -31132,6 +31215,7 @@ class EmulatorSession:
                         }
                     )
         event_trace, event_trace_summary = self._build_packet_event_trace(trace)
+        wire_outputs = self._build_packet_wire_outputs(trace)
         return {
             "status": "ok",
             "schema_version": 1,
@@ -31141,6 +31225,7 @@ class EmulatorSession:
             "trace": trace,
             "event_trace": event_trace,
             "event_trace_summary": event_trace_summary,
+            "wire_outputs": wire_outputs,
             "emitted": emitted,
             "results": http_results,
         }
@@ -31475,6 +31560,7 @@ def _run_isolated_packet_trace(
     event_trace, event_trace_summary = EmulatorSession._build_packet_event_trace(
         merged_trace
     )
+    wire_outputs = EmulatorSession._build_packet_wire_outputs(merged_trace)
     return {
         "status": "ok",
         "schema_version": 1,
@@ -31487,6 +31573,7 @@ def _run_isolated_packet_trace(
         "trace": merged_trace,
         "event_trace": event_trace,
         "event_trace_summary": event_trace_summary,
+        "wire_outputs": wire_outputs,
         "emitted": [row[3] for row in emitted_rows],
         "results": [row[3] for row in result_rows],
         "registered_events": registered_events or [],

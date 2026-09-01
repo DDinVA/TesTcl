@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "dns-wire-17.5-local-contract",
+  "source": "local-wire-contract-not-device-evidence",
+  "provenance": {
+    "collector": "local-emulator",
+    "tmos_build": "17.5.0",
+    "capture_id": "dns-wire-local-001",
+    "live_device": false
+  },
+  "vectors": [
+    {
+      "id": "dns-response-wire",
+      "operation": "scenario",
+      "input": {
+        "profiles": ["UDP", "DNS"],
+        "irule": "when DNS_REQUEST { set rr [DNS::rr \"[DNS::question name]. 30 IN A 192.0.2.10\" ]; DNS::answer clear; DNS::answer insert $rr; DNS::header aa 1; DNS::return }",
+        "packets": [
+          {
+            "protocol": "dns",
+            "direction": "client_to_server",
+            "source": {"address": "192.0.2.10", "port": 53000},
+            "destination": {"address": "192.0.2.53", "port": 53},
+            "qname": "www.example.com",
+            "qtype": "A",
+            "qclass": "IN",
+            "id": 4660,
+            "rd": true
+          }
+        ]
+      },
+      "reference": {
+        "source": "local-wire-contract-not-device-evidence",
+        "output": {
+          "wire_outputs": [
+            {
+              "protocol": "dns",
+              "direction": "server_to_client",
+              "packet_index": 0,
+              "event": "DNS_RESPONSE",
+              "payload_hex": "12348500000100010000000003777777076578616d706c6503636f6d000001000103777777076578616d706c6503636f6d00000100010000001e0004c000020a",
+              "bytes": 64
+            }
+          ]
+        }
+      },
+      "comparisons": [
+        {
+          "label": "DNS response wire bytes",
+          "actual_path": ["wire_outputs", 0, "payload_hex"],
+          "reference_path": ["wire_outputs", 0, "payload_hex"]
+        },
+        {
+          "label": "DNS response length",
+          "actual_path": ["wire_outputs", 0, "bytes"],
+          "reference_path": ["wire_outputs", 0, "bytes"]
+        }
+      ]
+    }
+  ]
+}

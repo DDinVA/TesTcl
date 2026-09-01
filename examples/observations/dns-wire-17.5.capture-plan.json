@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "dns-wire-17.5-capture-plan",
+  "source": "illustrative-wire-contract-not-device-evidence",
+  "provenance": {
+    "collector": "illustrative-fixture",
+    "tmos_build": "17.5.4",
+    "capture_id": "dns-wire-example-001",
+    "live_device": false
+  },
+  "observations": [
+    {
+      "id": "dns-response-wire",
+      "operation": "command_probe",
+      "input": {
+        "command": "DNS::len",
+        "event": "DNS_REQUEST",
+        "profiles": ["UDP", "DNS"],
+        "request": {
+          "qname": "www.example.com",
+          "qtype": "A",
+          "recursion_desired": true
+        }
+      },
+      "comparisons": [
+        {
+          "label": "DNS question length",
+          "actual_path": ["execution", "value"],
+          "reference_path": ["execution", "value"]
+        },
+        {
+          "label": "wire response bytes",
+          "actual_path": ["wire", "payload_base64"],
+          "reference_path": ["wire", "payload_base64"]
+        }
+      ]
+    }
+  ]
+}

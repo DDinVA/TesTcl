@@ -4669,6 +4669,21 @@ when HTTP_RESPONSE_RELEASE {
         self.assertEqual(result["analysis"]["comparison_count"], 15)
         self.assertEqual(result["analysis"]["comparison_failed"], 0)
 
+    def test_dns_golden_vector_compares_serialized_wire_response(self) -> None:
+        pack = json.loads(
+            (ROOT / "examples" / "golden-vectors" / "dns-wire-17.5.json")
+            .read_text(encoding="utf-8")
+        )
+        result = self.adapter.run_golden_vectors(
+            pack, tcl_lsp_root=self.tcl_lsp_root
+        )
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["summary"], {"vector_count": 1, "passed": 1, "failed": 0})
+        self.assertEqual(
+            result["analysis"]["comparison_count"], 2
+        )
+        self.assertEqual(result["analysis"]["comparison_failed"], 0)
+
     def test_golden_vectors_replay_pcap_operation_and_validate_reference_paths(self) -> None:
         capture = _pcap_bytes([
             (5, 0, _ethernet_ipv4(_raw_ipv4_tcp_hex(

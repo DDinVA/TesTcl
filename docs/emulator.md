@@ -1253,6 +1253,20 @@ TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --golden-vectors examples/golden-vectors/http-17.5.json
 ```
 
+[`examples/golden-vectors/dns-wire-17.5.json`](../examples/golden-vectors/dns-wire-17.5.json)
+adds a byte-level DNS response contract. Packet replay exposes bounded
+`wire_outputs`, allowing a serialized response to be compared alongside event
+and state results:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --golden-vectors examples/golden-vectors/dns-wire-17.5.json
+```
+
+This is a local wire contract (`live_device: false`), not independent TMOS
+evidence. Replace its reference payload with a captured TMOS 17.5/vLab payload
+when one is available.
+
 The repository also includes
 [`examples/golden-vectors/http-streaming-17.5.json`](../examples/golden-vectors/http-streaming-17.5.json),
 which exercises split `Content-Length` bodies, chunked response bodies, and
