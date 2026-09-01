@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "mqtt-wire-17.5-local-contract",
+  "source": "local-wire-contract-not-device-evidence",
+  "provenance": {
+    "collector": "local-emulator",
+    "tmos_build": "17.5.0",
+    "capture_id": "mqtt-wire-local-001",
+    "live_device": false
+  },
+  "vectors": [
+    {
+      "id": "mqtt-emitted-frames",
+      "operation": "scenario",
+      "input": {
+        "profiles": ["MQTT"],
+        "irule": "when MQTT_CLIENT_INGRESS { MQTT::insert after type PINGREQ; MQTT::respond type CONNACK return_code 5 }",
+        "packets": [
+          {
+            "protocol": "mqtt",
+            "type": "CONNECT",
+            "direction": "client_to_server",
+            "client_id": "device-1",
+            "clean_session": true,
+            "keep_alive": 30
+          }
+        ]
+      },
+      "reference": {
+        "source": "local-wire-contract-not-device-evidence",
+        "output": {
+          "wire_outputs": [
+            {
+              "protocol": "mqtt",
+              "direction": "client_to_server",
+              "packet_index": 0,
+              "event": "MQTT_CLIENT_INGRESS",
+              "wire_kind": "framed",
+              "payload_hex": "c000",
+              "bytes": 2,
+              "kind": "insert"
+            },
+            {
+              "protocol": "mqtt",
+              "direction": "server_to_client",
+              "packet_index": 0,
+              "event": "MQTT_CLIENT_INGRESS",
+              "wire_kind": "framed",
+              "payload_hex": "20020005",
+              "bytes": 4,
+              "kind": "response"
+            }
+          ]
+        }
+      },
+      "comparisons": [
+        {
+          "label": "MQTT inserted frame",
+          "actual_path": ["wire_outputs", 0, "payload_hex"],
+          "reference_path": ["wire_outputs", 0, "payload_hex"]
+        },
+        {
+          "label": "MQTT inserted frame direction",
+          "actual_path": ["wire_outputs", 0, "direction"],
+          "reference_path": ["wire_outputs", 0, "direction"]
+        },
+        {
+          "label": "MQTT response frame",
+          "actual_path": ["wire_outputs", 1, "payload_hex"],
+          "reference_path": ["wire_outputs", 1, "payload_hex"]
+        },
+        {
+          "label": "MQTT response frame direction",
+          "actual_path": ["wire_outputs", 1, "direction"],
+          "reference_path": ["wire_outputs", 1, "direction"]
+        }
+      ]
+    }
+  ]
+}

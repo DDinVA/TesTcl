@@ -1271,6 +1271,10 @@ This is a local wire contract (`live_device: false`), not independent TMOS
 evidence. Replace its reference payload with a captured TMOS 17.5/vLab payload
 when one is available.
 
+[`examples/golden-vectors/mqtt-wire-17.5.json`](../examples/golden-vectors/mqtt-wire-17.5.json)
+provides the same contract for MQTT `insert` and `respond` frames, including
+their direction and encoded MQTT bytes.
+
 The repository also includes
 [`examples/golden-vectors/http-streaming-17.5.json`](../examples/golden-vectors/http-streaming-17.5.json),
 which exercises split `Content-Length` bodies, chunked response bodies, and
