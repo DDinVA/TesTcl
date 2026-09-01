@@ -74,15 +74,120 @@ def _event_counts(observations: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _stimulus_group_id(result: dict[str, Any]) -> str:
+    """Return a stable live-capture grouping key for one driver fixture.
+
+    Specialized protocol modes can share a driver invocation contract. Raw
+    fixtures cannot: the event name is the only reliable indication of which
+    iRule lifecycle hook must be stimulated. Keeping raw events separate also
+    prevents an operator from accidentally treating a mixed-event plan as one
+    protocol transaction.
+    """
+    mode = result["mode"]
+    if mode == "none":
+        return "control"
+    if mode in {"raw", "unknown"}:
+        return f"{mode}:{result['event']}"
+    return mode
+
+
+def _stimulus_group_template(group_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    mode = result["mode"]
+    event = result["event"]
+    return {
+        "id": group_id,
+        "mode": mode,
+        "events": [],
+        "observation_count": 0,
+        "plan_files": [],
+        "requires_trigger": False,
+        "direct_event_count": 0,
+        "driver_status_counts": {},
+        "endpoint_schemes": [],
+        "operator_guidance": (
+            "install the plan's temporary probe rule and use the collector's "
+            "direct HTTP/RULE_INIT path"
+            if event in {"HTTP_REQUEST", "RULE_INIT"}
+            else "install the plan's temporary probe rule and invoke the "
+            "matching tmos17-protocol-driver trigger"
+        ),
+    }
+
+
+def _record_stimulus_group(
+    groups: dict[str, dict[str, Any]],
+    result: dict[str, Any],
+    *,
+    plan_filename: str,
+) -> None:
+    group_id = _stimulus_group_id(result)
+    group = groups.setdefault(group_id, _stimulus_group_template(group_id, result))
+    event = result["event"]
+    if event not in group["events"]:
+        group["events"].append(event)
+    if plan_filename not in group["plan_files"]:
+        group["plan_files"].append(plan_filename)
+    group["observation_count"] += 1
+    if result.get("event_supported"):
+        group["direct_event_count"] += 1
+    elif event != "RULE_INIT":
+        group["requires_trigger"] = True
+    status = result["status"]
+    status_counts = group["driver_status_counts"]
+    status_counts[status] = status_counts.get(status, 0) + 1
+    scheme = result.get("endpoint_scheme")
+    if isinstance(scheme, str) and scheme not in group["endpoint_schemes"]:
+        group["endpoint_schemes"].append(scheme)
+
+
+def _finalise_stimulus_schedule(
+    groups: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    finalised: list[dict[str, Any]] = []
+    for group_id in sorted(groups):
+        group = dict(groups[group_id])
+        group["events"] = sorted(group["events"])
+        group["plan_files"] = sorted(group["plan_files"])
+        group["endpoint_schemes"] = sorted(group["endpoint_schemes"])
+        group["driver_status_counts"] = dict(sorted(group["driver_status_counts"].items()))
+        if group["mode"] == "none":
+            group["operator_guidance"] = (
+                "install the plan's temporary probe rule and observe the "
+                "RULE_INIT result during rule installation"
+            )
+        elif group["requires_trigger"] and group["direct_event_count"]:
+            group["operator_guidance"] = (
+                "use the collector's direct path for directly supported events "
+                "and invoke the matching tmos17-protocol-driver trigger for "
+                "the remaining events"
+            )
+        elif group["requires_trigger"]:
+            group["operator_guidance"] = (
+                "install the plan's temporary probe rule and invoke the "
+                "matching tmos17-protocol-driver trigger"
+            )
+        else:
+            group["operator_guidance"] = (
+                "install the plan's temporary probe rule and use the collector's "
+                "direct HTTP/RULE_INIT path"
+            )
+        finalised.append(group)
+    return finalised
+
+
 def _driver_preflight(observation: dict[str, Any]) -> dict[str, Any]:
     """Validate one generated driver fixture without opening a network socket."""
     event = observation["input"]["event"]
+    event_supported = observation.get("event_supported", False)
+    if not isinstance(event_supported, bool):
+        raise BatchError("collector event_supported must be a boolean")
     if event == "RULE_INIT":
         return {
             "id": observation["id"],
             "event": event,
             "mode": "none",
             "status": "not-required",
+            "event_supported": event_supported,
         }
     request = observation["input"].get("request", {})
     trigger = {
@@ -102,6 +207,7 @@ def _driver_preflight(observation: dict[str, Any]) -> dict[str, Any]:
             "mode": mode,
             "status": "fixture-error",
             "error": str(exc)[:2048],
+            "event_supported": event_supported,
         }
     return {
         "id": observation["id"],
@@ -110,6 +216,7 @@ def _driver_preflight(observation: dict[str, Any]) -> dict[str, Any]:
         "status": "raw-fallback" if mode == "raw" else "buildable",
         "endpoint_scheme": endpoint.scheme,
         "payload_bytes": len(payload),
+        "event_supported": event_supported,
     }
 
 
@@ -220,6 +327,7 @@ def build_batch(
     aggregate_driver_modes: dict[str, int] = {}
     aggregate_driver_statuses: dict[str, int] = {}
     aggregate_driver_failures: list[dict[str, Any]] = []
+    stimulus_groups: dict[str, dict[str, Any]] = {}
 
     while True:
         campaign = EMULATOR._build_capture_campaign(
@@ -279,6 +387,12 @@ def build_batch(
         for event, count in events.items():
             aggregate_events[event] = aggregate_events.get(event, 0) + count
         plan_filename = f"plan-{plan_index:04d}.json"
+        for result in driver_results:
+            _record_stimulus_group(
+                stimulus_groups,
+                result,
+                plan_filename=plan_filename,
+            )
         plan_info = {
             "file": plan_filename,
             "offset": offset,
@@ -340,6 +454,16 @@ def build_batch(
         },
         "blocked_catalog_file": "blocked-catalog.json",
         "protocol_driver": PROTOCOL_DRIVER.capability_report(),
+        "stimulus_schedule": {
+            "schema_version": 1,
+            "groups": _finalise_stimulus_schedule(stimulus_groups),
+            "interpretation": (
+                "Plans are lossless command chunks; use this schedule to run "
+                "protocol/event-compatible external stimuli. A live target "
+                "may require separate virtual servers or traffic URLs per "
+                "group, while observation IDs remain stable across captures."
+            ),
+        },
         "plans": [plan_info for _, _, plan_info in plan_payloads],
     }
 

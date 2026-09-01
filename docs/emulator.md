@@ -1042,6 +1042,21 @@ The manifest also includes the bundled protocol driver's capability report and
 fixture preflight. `buildable` means the driver can construct a specialized
 protocol stimulus without opening a socket; `raw-fallback` means it can send a
 bounded payload but cannot claim event-specific framing or lifecycle parity.
+It also includes `stimulus_schedule.groups`. Each group lists the protocol
+driver mode (or the raw event name), stable observation count, source plan
+files, endpoint schemes, and whether a trigger driver is required. A plan may
+contain several groups; use the schedule to select a compatible virtual server
+or traffic URL without changing observation IDs. `raw:<event>` groups are kept
+separate because a raw payload alone does not identify the iRule lifecycle hook
+that must fire. For example, inspect the schedule with:
+
+```sh
+jq '.stimulus_schedule' /tmp/tmos-17.5-capture-batch/manifest.json
+```
+
+The schedule is an execution aid, not a claim of TMOS parity: it describes the
+stimulus needed for differential capture, while the BIG-IP/vLab remains the
+reference implementation.
 Use the driver report directly with:
 
 ```sh

@@ -29,6 +29,7 @@ def test_driver_preflight_does_not_require_network_for_rule_init() -> None:
         "event": "RULE_INIT",
         "mode": "none",
         "status": "not-required",
+        "event_supported": False,
     }
 
 
@@ -42,6 +43,53 @@ def test_profile_driven_events_get_http_capture_fixtures() -> None:
     assert batch.EMULATOR._capture_plan_request_template(
         "CLIENT_ACCEPTED", ["TCP"]
     ) == {"payload": "testcl"}
+
+
+def test_stimulus_schedule_treats_rule_init_as_control_not_trigger() -> None:
+    groups: dict[str, dict[str, object]] = {}
+    batch._record_stimulus_group(
+        groups,
+        {
+            "id": "command_probe:init",
+            "event": "RULE_INIT",
+            "mode": "none",
+            "status": "not-required",
+            "event_supported": False,
+        },
+        plan_filename="plan-0000.json",
+    )
+    group = batch._finalise_stimulus_schedule(groups)[0]
+    assert group["id"] == "control"
+    assert group["requires_trigger"] is False
+    assert "RULE_INIT" in str(group["operator_guidance"])
+
+
+def test_stimulus_schedule_describes_mixed_direct_and_trigger_events() -> None:
+    groups: dict[str, dict[str, object]] = {}
+    for result in (
+        {
+            "id": "command_probe:http",
+            "event": "HTTP_REQUEST",
+            "mode": "http1",
+            "status": "buildable",
+            "event_supported": True,
+            "endpoint_scheme": "tcp",
+        },
+        {
+            "id": "command_probe:access",
+            "event": "ACCESS_POLICY_AGENT_EVENT",
+            "mode": "http1",
+            "status": "buildable",
+            "event_supported": False,
+            "endpoint_scheme": "tcp",
+        },
+    ):
+        batch._record_stimulus_group(groups, result, plan_filename="plan-0000.json")
+    group = batch._finalise_stimulus_schedule(groups)[0]
+    assert group["observation_count"] == 2
+    assert group["direct_event_count"] == 1
+    assert group["requires_trigger"] is True
+    assert "direct path" in str(group["operator_guidance"])
 
 
 def test_batch_materializes_complete_tmos_catalog_with_collector_preflight(tmp_path: Path) -> None:
@@ -63,6 +111,14 @@ def test_batch_materializes_complete_tmos_catalog_with_collector_preflight(tmp_p
     assert manifest["protocol_driver"]["driver"] == "tmos17-protocol-driver"
     assert manifest["summary"]["bundled_driver_preflight_status_counts"]["buildable"] > 0
     assert "raw" in manifest["summary"]["bundled_driver_mode_counts"]
+    schedule = manifest["stimulus_schedule"]
+    assert schedule["schema_version"] == 1
+    groups = {group["id"]: group for group in schedule["groups"]}
+    assert "http1" in groups
+    assert "raw:CLIENT_ACCEPTED" in groups
+    assert sum(group["observation_count"] for group in groups.values()) == 986
+    assert all(group["plan_files"] for group in groups.values())
+    assert all(group["driver_status_counts"] for group in groups.values())
 
     on_disk = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert on_disk == manifest
