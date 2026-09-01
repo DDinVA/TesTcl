@@ -106,8 +106,9 @@ def _read_chunk(path: Path) -> dict[str, Any]:
         if not isinstance(name, str) or not name or name in names:
             raise CatalogWorkerError(f"catalog command {index} has a missing or duplicate name")
         names.add(name)
-        if command.get("catalog_kind") != "f5-irule":
-            raise CatalogWorkerError(f"catalog command {name!r} is not an F5 iRule command")
+        catalog_kind = command.get("catalog_kind")
+        if not isinstance(catalog_kind, str) or not catalog_kind or "\x00" in catalog_kind:
+            raise CatalogWorkerError(f"catalog command {name!r} has an invalid catalog kind")
     return value
 
 
@@ -184,10 +185,13 @@ def _build_report(
     commands = chunk["commands"]
     target_commands = [
         item for item in commands
+        if item.get("catalog_kind") == "f5-irule"
         if item.get("target_status") == "available-in-tmos-17.5"
-        and item.get("name") not in exclude_commands
     ]
-    if len(target_commands) * variants > MAX_PLAN_OBSERVATIONS:
+    candidate_commands = [
+        item for item in target_commands if item.get("name") not in exclude_commands
+    ]
+    if len(candidate_commands) * variants > MAX_PLAN_OBSERVATIONS:
         raise CatalogWorkerError(
             f"chunk would create more than {MAX_PLAN_OBSERVATIONS} capture observations; "
             "use a smaller exported chunk or fewer variants"
@@ -210,17 +214,24 @@ def _build_report(
             "namespace": catalog.get("namespace"),
             "runtime_status": catalog.get("runtime_status"),
             "target_status": catalog.get("target_status"),
+            "catalog_kind": catalog.get("catalog_kind"),
             "pure": catalog.get("pure"),
             "unsafe": catalog.get("unsafe"),
             "generation_status": "skipped-not-available-in-tmos-17.5",
             "variants": [],
         }
-        if name in exclude_commands:
-            row["generation_status"] = "skipped-collector-safety"
+        if catalog.get("catalog_kind") != "f5-irule":
+            row["generation_status"] = "skipped-non-f5-catalog"
             generation_status_counts[row["generation_status"]] = generation_status_counts.get(row["generation_status"], 0) + 1
             rows.append(row)
             continue
         if catalog.get("target_status") != "available-in-tmos-17.5":
+            row["generation_status"] = "skipped-not-available-in-tmos-17.5"
+            generation_status_counts[row["generation_status"]] = generation_status_counts.get(row["generation_status"], 0) + 1
+            rows.append(row)
+            continue
+        if name in exclude_commands:
+            row["generation_status"] = "skipped-collector-safety"
             generation_status_counts[row["generation_status"]] = generation_status_counts.get(row["generation_status"], 0) + 1
             rows.append(row)
             continue
@@ -308,6 +319,9 @@ def _build_report(
         "summary": {
             "input_command_count": len(commands),
             "target_command_count": len(target_commands),
+            "non_f5_command_count": sum(
+                1 for item in commands if item.get("catalog_kind") != "f5-irule"
+            ),
             "generated_command_count": sum(1 for row in rows if row["generation_status"] == "ready"),
             "capture_observation_count": len(observations),
             "generation_status_counts": dict(sorted(generation_status_counts.items())),

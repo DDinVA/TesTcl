@@ -72,8 +72,11 @@ def _safe_catalog_file(base: Path, filename: Any) -> Path:
     if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
         raise CatalogBatchError(f"catalog manifest file is not a safe relative path: {filename!r}")
     candidate = base / relative
-    if any(parent.is_symlink() for parent in (base, *candidate.parents)) or candidate.is_symlink():
-        raise CatalogBatchError(f"catalog manifest file must not be a symlink: {filename!r}")
+    current = base
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise CatalogBatchError(f"catalog manifest file must not be a symlink: {filename!r}")
     path = candidate.resolve()
     if base.resolve() not in path.parents:
         raise CatalogBatchError(f"catalog manifest file escapes the bundle: {filename!r}")
@@ -205,7 +208,8 @@ def build_batch_from_catalog(
         for chunk_path, chunk, chunk_sha256 in chunks:
             for command in chunk["commands"]:
                 if (
-                    command.get("target_status") == "available-in-tmos-17.5"
+                    command.get("catalog_kind") == "f5-irule"
+                    and command.get("target_status") == "available-in-tmos-17.5"
                     and command["name"] in blocked_names
                 ):
                     blocked_cases.append(

@@ -95,3 +95,22 @@ def test_worker_rejects_duplicate_command_names(tmp_path: Path) -> None:
     chunk_path.write_text(json.dumps(chunk), encoding="utf-8")
     with pytest.raises(worker.CatalogWorkerError, match="duplicate name"):
         worker._read_chunk(chunk_path)
+
+
+def test_worker_consumes_non_f5_catalog_entries_as_non_runnable_rows(tmp_path: Path) -> None:
+    chunk_path = _export_chunk(tmp_path)
+    chunk = json.loads(chunk_path.read_text(encoding="utf-8"))
+    chunk["commands"][0]["catalog_kind"] = "tcl-core"
+    chunk_path.write_text(json.dumps(chunk), encoding="utf-8")
+
+    report = worker._build_report(
+        worker._read_chunk(chunk_path),
+        tcl_lsp_root=TCL_LSP_ROOT,
+        variants=1,
+        mode="plan",
+    )
+    assert report["summary"]["input_command_count"] == 2
+    assert report["summary"]["target_command_count"] == 1
+    assert report["summary"]["non_f5_command_count"] == 1
+    skipped = next(row for row in report["commands"] if row["catalog_kind"] == "tcl-core")
+    assert skipped["generation_status"] == "skipped-non-f5-catalog"
