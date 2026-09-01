@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "utility-controls-17.5",
+  "cases": [
+    {
+      "id": "hsl-open-and-send",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST {\n  set handle [HSL::open -proto TCP]\n  if {[HSL::send $handle [HTTP::path]] != 1} { error hsl-send-failed }\n}",
+        "requests": [
+          {"uri": "/first"},
+          {"uri": "/second"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "hsl_messages"], "equals": [{"handle": "hsl1", "message": "/first"}]},
+          {"path": ["results", 1, "semantic", "hsl_messages"], "equals": [{"handle": "hsl1", "message": "/first"}, {"handle": "hsl2", "message": "/second"}]}
+        ]
+      }
+    },
+    {
+      "id": "rest-send-local-record",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST { REST::send -method post /shared/rpm-tasks {operation-query} }",
+        "request": {"uri": "/send"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "rest"], "equals": {"request_count": 1, "last": {"method": "POST", "uri": "/shared/rpm-tasks", "body": "operation-query"}, "requests": [{"method": "POST", "uri": "/shared/rpm-tasks", "body": "operation-query"}]}}
+        ]
+      }
+    },
+    {
+      "id": "validate-bounded-protocol-signatures",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when CLIENT_ACCEPTED {\n  set payload [format \"GET /health HTTP/1.1%c%cHost: example.test%c%c\" 13 10 13 10]\n  if {[VALIDATE::protocol http $payload] != 1 || [VALIDATE::protocol mysql {not mysql}] != 0} { error validate-mismatch }\n}",
+        "request": {"uri": "/"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired"], "equals": ["CLIENT_ACCEPTED"]}
+        ]
+      }
+    }
+  ]
+}
