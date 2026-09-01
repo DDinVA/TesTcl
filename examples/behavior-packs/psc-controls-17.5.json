@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "psc-controls-17.5",
+  "cases": [
+    {
+      "id": "subscriber-identity-policy-address-and-attribute-controls",
+      "scenario": {
+        "profiles": ["PSC"],
+        "irule": "when CLIENT_ACCEPTED { PSC::subscriber_id 310150123456789; PSC::calling_id +15551212; PSC::imeisv 356789012345678; PSC::imsi 310150123456789; PSC::tower_id tower-a; PSC::user_name alice; PSC::aaa_reporting_interval 600; PSC::ip_address 192.0.2.10 2001:db8::10%10; PSC::ip_address add 192.0.2.11; PSC::policy /Common/data /Common/voice; PSC::policy add /Common/video; PSC::attr plan premium; PSC::attr region east; PSC::lease_time 192.0.2.10 3600; set ::observed [list [PSC::subscriber_id] [PSC::calling_id] [PSC::imeisv] [PSC::imsi] [PSC::tower_id] [PSC::user_name] [PSC::aaa_reporting_interval] [PSC::ip_address] [PSC::policy] [PSC::attr plan] [PSC::lease_time 192.0.2.10]]; log local0. \"observed=$::observed\" }",
+        "packets": [
+          {
+            "protocol": "event",
+            "event": "CLIENT_ACCEPTED",
+            "state": {"psc": {}}
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "event"], "equals": "CLIENT_ACCEPTED"},
+          {"path": ["trace", 0, "events", 0, "state", "psc", "aaa_reporting_interval"], "equals": "600"},
+          {"path": ["trace", 0, "events", 0, "state", "psc", "attrs"], "equals": "plan premium region east"},
+          {"path": ["trace", 0, "events", 0, "state", "psc", "calling_id"], "equals": "+15551212"},
+          {"path": ["trace", 0, "events", 0, "state", "psc", "imeisv"], "equals": "356789012345678"},
+          {"path": ["trace", 0, "events", 0, "state", "psc", "imsi"], "equals": "310150123456789"},
+          {"path": ["trace", 0, "events", 0, "state", "psc", "ip_addresses"], "equals": "192.0.2.10 2001:db8::10%10 192.0.2.11"},
+          {"path": ["trace", 0, "events", 0, "state", "psc", "lease_times"], "equals": "192.0.2.10 3600"},
+          {"path": ["trace", 0, "events", 0, "state", "psc", "policies"], "equals": "/Common/data /Common/voice /Common/video"},
+          {"path": ["trace", 0, "events", 0, "state", "psc", "subscriber_id"], "equals": "310150123456789"},
+          {"path": ["trace", 0, "events", 0, "state", "psc", "tower_id"], "equals": "tower-a"},
+          {"path": ["trace", 0, "events", 0, "state", "psc", "user_name"], "equals": "alice"}
+        ]
+      }
+    }
+  ]
+}
