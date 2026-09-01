@@ -64,7 +64,9 @@ In combined `--serve --data-plane-scenario` mode, query
 results and use `/v1/live-observations/capture-plan` to export replayable
 HTTP/HTTP2/TCP/UDP/WebSocket inputs; run `scripts/live-observation-smoke.sh` for a
 quick HTTP evaluation, or `scripts/live-packet-observation-smoke.sh` for a
-real TCP byte-to-replay-plan check.
+real TCP byte-to-replay-plan check. Run
+`scripts/live-all-observation-smoke.sh` to exercise the HTTP, TCP, UDP, and
+DNS-over-UDP checkpoints in one sequential command.
 For catalog-wide progress, run `./scripts/emulate-irule.sh --catalog-smoke
 --namespace HTTP --limit 16`; this executes safe zero-argument probes and
 reports which commands work, need arguments, or fail in the current emulator.
