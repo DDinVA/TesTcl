@@ -224,6 +224,13 @@ when HTTP_RESPONSE {
         <thead><tr><th>Command</th><th>Runtime</th><th>Target</th><th>Summary</th></tr></thead>
         <tbody></tbody>
       </table>
+      <div class="catalog-controls" style="margin-top:.9rem">
+        <label>Evaluation namespace (optional)<input id="catalog-eval-namespace" value="HTTP" placeholder="HTTP"></label>
+        <label>Evaluation commands<input id="catalog-eval-limit" type="number" min="1" max="32" value="8"></label>
+        <button id="evaluate-catalog" class="primary">Evaluate local chunk</button>
+      </div>
+      <p id="catalog-eval-summary" class="hint">No catalog chunk evaluation run.</p>
+      <pre id="catalog-eval-output">Local results and the external capture plan will appear here.</pre>
     </section>
 
     <section class="panel wide">
@@ -414,6 +421,35 @@ when HTTP_RESPONSE {
         catalogCommands = data.chunks.flatMap((chunk) => chunk.commands);
         renderCatalog();
       }).catch((error) => output(`Error: ${error.message}`));
+    });
+    $("evaluate-catalog").addEventListener("click", () => {
+      Promise.resolve().then(async () => {
+        const params = new URLSearchParams({
+          offset: "0",
+          limit: $("catalog-eval-limit").value || "8",
+          target_status: "available-in-tmos-17.5",
+        });
+        const namespace = $("catalog-eval-namespace").value.trim();
+        if (namespace) params.set("namespace", namespace);
+        const chunk = await request(`/v1/capabilities?${params.toString()}`);
+        const data = await request("/v1/catalog-chunk-evaluate", {
+          method: "POST",
+          body: JSON.stringify({chunk, mode: "both", variants: 1}),
+        });
+        const summary = data.summary || {};
+        const local = summary.local_status_counts || {};
+        $("catalog-eval-summary").textContent =
+          `${summary.target_command_count ?? 0} target commands · ` +
+          `${summary.capture_observation_count ?? 0} capture observations · ` +
+          `local ${JSON.stringify(local)}`;
+        $("catalog-eval-summary").className = "hint status ok";
+        $("catalog-eval-output").textContent = JSON.stringify(data, null, 2);
+        output(data);
+      }).catch((error) => {
+        $("catalog-eval-summary").textContent = error.message;
+        $("catalog-eval-summary").className = "hint status error";
+        output(`Error: ${error.message}`);
+      });
     });
     const behaviorOptions = (includeVariants) => {
       const params = new URLSearchParams();

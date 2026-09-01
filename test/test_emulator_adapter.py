@@ -27337,6 +27337,8 @@ when DNS_REQUEST {
                 self.assertIn("Generate capture candidates", workbench)
                 self.assertIn("Run local sweep", workbench)
                 self.assertIn("/v1/behavior-sweep", workbench)
+                self.assertIn("Evaluate local chunk", workbench)
+                self.assertIn("/v1/catalog-chunk-evaluate", workbench)
 
             status, conformance = request_json("/v1/conformance")
             self.assertEqual(status, 200)
