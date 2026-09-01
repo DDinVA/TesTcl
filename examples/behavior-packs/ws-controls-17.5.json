@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "ws-controls-17.5",
+  "cases": [
+    {
+      "id": "websocket-upgrade-frame-and-payload-controls",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "WS"],
+        "irule": "when WS_REQUEST { WS::payload_processing disable; WS::payload_ivs /Common/mqtt_ivs; set ::ws_enabled [WS::enabled]; log local0. \"request=[WS::request key] enabled=$::ws_enabled\" }\nwhen WS_RESPONSE { WS::masking preserve; log local0. \"response=[WS::response key] valid=[WS::response valid]\" }\nwhen WS_CLIENT_FRAME { log local0. \"frame=[WS::frame type] eom=[WS::frame eom] masked=[WS::frame orig_masked]\"; WS::collect frame }\nwhen WS_CLIENT_DATA { binary scan [WS::payload 2] H* first; WS::payload replace 1 2 X; binary scan [WS::payload] H* replaced; log local0. \"data-length=[WS::payload length] first=$first replaced=$replaced\"; WS::release }\nwhen WS_CLIENT_FRAME_DONE { log local0. client-done }\nwhen WS_SERVER_FRAME { WS::collect frame 3 }\nwhen WS_SERVER_DATA { log local0. \"server-data=[WS::payload]\"; WS::release; WS::message drop }\nwhen WS_SERVER_FRAME_DONE { WS::disconnect 1000 normal }",
+        "packets": [
+          {
+            "protocol": "websocket",
+            "type": "request",
+            "direction": "client_to_server",
+            "method": "GET",
+            "uri": "/socket",
+            "host": "example.com",
+            "headers": {
+              "Upgrade": "websocket",
+              "Connection": "keep-alive, Upgrade",
+              "Sec-WebSocket-Key": "abc",
+              "Sec-WebSocket-Version": "13"
+            }
+          },
+          {
+            "protocol": "websocket",
+            "type": "response",
+            "direction": "server_to_client",
+            "response_headers": {
+              "Upgrade": "WebSocket",
+              "Connection": "Upgrade",
+              "Sec-WebSocket-Accept": "xyz"
+            }
+          },
+          {
+            "protocol": "websocket",
+            "type": "frame",
+            "direction": "client_to_server",
+            "frame_type": "text",
+            "fin": true,
+            "masked": true,
+            "mask": "01020304",
+            "payload": "Józ"
+          },
+          {
+            "protocol": "websocket",
+            "type": "frame",
+            "direction": "server_to_client",
+            "frame_type": "text",
+            "fin": true,
+            "masked": false,
+            "payload": "world"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "WS_REQUEST"},
+          {"path": ["trace", 0, "events", 2, "state", "websocket", "payload_processing"], "equals": "disable"},
+          {"path": ["trace", 0, "events", 2, "state", "websocket", "payload_ivs"], "equals": "/Common/mqtt_ivs"},
+          {"path": ["trace", 1, "events", 0, "event"], "equals": "WS_RESPONSE"},
+          {"path": ["trace", 2, "events", 0, "event"], "equals": "WS_CLIENT_FRAME"},
+          {"path": ["trace", 2, "events", 1, "event"], "equals": "WS_CLIENT_DATA"},
+          {"path": ["trace", 2, "events", 1, "state", "websocket", "payload_length"], "equals": "3"},
+          {"path": ["trace", 2, "payload"], "equals": "Józ"},
+          {"path": ["trace", 3, "events", 0, "event"], "equals": "WS_SERVER_FRAME"},
+          {"path": ["trace", 3, "events", 1, "event"], "equals": "WS_SERVER_DATA"},
+          {"path": ["trace", 3, "events", 1, "state", "websocket", "payload_length"], "equals": "5"},
+          {"path": ["trace", 3, "events", 2, "event"], "equals": "WS_SERVER_FRAME_DONE"},
+          {"path": ["trace", 3, "drop_reason"], "equals": "message"},
+          {"path": ["trace", 3, "events", 2, "emissions", 0, "close_code"], "equals": 1000},
+          {"path": ["trace", 3, "events", 2, "emissions", 0, "close_reason"], "equals": "normal"}
+        ]
+      }
+    }
+  ]
+}

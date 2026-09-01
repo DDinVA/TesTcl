@@ -4767,6 +4767,7 @@ when HTTP_RESPONSE_RELEASE {
             "lb-controls-17.5.json": 5,
             "lsn-controls-17.5.json": 1,
             "uri-17.5.json": 11,
+            "ws-controls-17.5.json": 1,
             "stream-17.5.json": 8,
             "route-17.5.json": 10,
             "tmm-17.5.json": 5,

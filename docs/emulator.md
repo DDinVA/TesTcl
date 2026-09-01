@@ -374,7 +374,7 @@ direct `probe` commands and commands discovered inside `scenario` iRules,
 along with pack/case/event provenance and an `add-behavior-vector` queue for
 available TMOS 17.5 F5 commands that are not covered. The denominator excludes
 Tcl support entries and post-17.5 commands. With the checked-in packs, the
-current report covers 677 of 989 target F5 commands (68.45%). This is test-input
+current report covers 685 of 989 target F5 commands (69.26%). This is test-input
 coverage, not a semantic-fidelity score.
 
 Run the HTTP/2 behavior pack directly to verify the local contract:
@@ -465,6 +465,14 @@ selection, disable controls, persistence mode, and mapping-entry state:
 ```sh
 TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
   --behavior-pack examples/behavior-packs/lsn-controls-17.5.json
+```
+
+Run the WebSocket controls behavior pack to verify upgrade metadata, payload
+processing, frame collection/release, message dropping, and close emission:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/emulate-irule.sh \
+  --behavior-pack examples/behavior-packs/ws-controls-17.5.json
 ```
 
 Run the AUTH controls behavior pack to verify authentication sessions,
