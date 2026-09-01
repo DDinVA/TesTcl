@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "crypto-data-controls-17.5",
+  "cases": [
+    {
+      "id": "acl-action-and-l7-evaluation",
+      "scenario": {
+        "profiles": ["FLOW"],
+        "irule": "when FLOW_INIT {\n  ACL::action drop\n}\nwhen CLIENT_ACCEPTED {\n  if {[ACL::eval -l7] != 1} { error acl-evaluation-mismatch }\n}",
+        "packets": [
+          {"protocol": "event", "event": "FLOW_INIT", "state": {"acl": {}}},
+          {"protocol": "event", "event": "CLIENT_ACCEPTED", "state": {"acl": {"action": "drop", "l7_present": 1}}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "acl", "action"], "equals": "drop"},
+          {"path": ["trace", 1, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 1, "events", 0, "state", "acl", "evaluated"], "equals": "1"},
+          {"path": ["trace", 1, "events", 0, "state", "acl", "l7_aborted"], "equals": "1"}
+        ]
+      }
+    },
+    {
+      "id": "aes-key-encrypt-decrypt-round-trip",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST {\n  set generated [AES::key 128]\n  set static_key {AES 128 00112233445566778899aabbccddeeff}\n  set ciphertext [AES::encrypt $static_key hello]\n  set plaintext [AES::decrypt $static_key $ciphertext]\n  if {[lindex $generated 1] ne \"128\" || $plaintext ne \"hello\"} { error aes-round-trip-mismatch }\n}",
+        "request": {"uri": "/crypto"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired"], "equals": ["HTTP_REQUEST"]}
+        ]
+      }
+    },
+    {
+      "id": "asn1-element-and-binary-codec-round-trip",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST {\n  set ::state::connection::client_payload [binary format H* 30080201020403686579]\n  set root [ASN1::element init BER]\n  set child [ASN1::element next $root]\n  set decoded [ASN1::decode $root \"(ia)\" number value]\n  set encoded [ASN1::encode DER \"?ia\" \"\" payload]\n  set optional [ASN1::decode $encoded \"?ia\" missing payload_value]\n  ASN1::encode replace $root 2 i 3\n  if {$decoded != 2 || $number != 2 || $value ne \"hey\" || $optional != 1 || [info exists missing] || $payload_value ne \"payload\" || [ASN1::element tag $child] != 2} { error asn1-round-trip-mismatch }\n}",
+        "request": {"uri": "/asn1"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired"], "equals": ["HTTP_REQUEST"]}
+        ]
+      }
+    }
+  ]
+}
