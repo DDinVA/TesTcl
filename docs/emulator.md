@@ -1258,6 +1258,18 @@ record, keeps each pack within the 256-vector limit, and writes one campaign
 manifest over the resulting packs. It performs no device I/O; `--verify`
 replays the assembled observations through the local emulator.
 
+An assembled campaign can be audited again later, including after it has been
+copied to another machine, with the read-only verifier:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp \
+  ./scripts/tmos17-capture-verify-campaign-17.5.sh \
+  --campaign-dir /tmp/tmos-17.5-campaign-packs
+```
+
+The verifier checks the campaign index, every nested pack SHA-256, and every
+local golden-vector replay. It does not contact a BIG-IP or change the pack.
+
 The container also carries the checked-in behavior packs and golden vectors,
 so a clean local regression can be run without installing a second Python:
 

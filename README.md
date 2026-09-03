@@ -112,6 +112,10 @@ After an authorized campaign completes, assemble its per-group records with
 --schedule /tmp/testcl-17.5-checkpoint/scheduled-batches/schedule.json
 --records-root /tmp/testcl-17.5-records --output-dir /tmp/testcl-17.5-packs
 --verify`. This creates an indexed set of bounded golden-vector packs.
+To re-verify an assembled campaign after copying or archiving it, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/tmos17-capture-verify-campaign-17.5.sh
+--campaign-dir /tmp/testcl-17.5-packs`. This checks the index and pack hashes,
+then replays every pack locally without contacting a device.
 To split that batch by stimulus family and generate all operator-ready runner
 commands, run
 `./scripts/tmos17-capture-campaign-17.5.sh --schedule

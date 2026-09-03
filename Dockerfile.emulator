@@ -25,6 +25,7 @@ COPY tools/tmos17-capture-batch.py /opt/testcl/tools/tmos17-capture-batch.py
 COPY tools/tmos17-capture-runner.py /opt/testcl/tools/tmos17-capture-runner.py
 COPY tools/tmos17-capture-assemble.py /opt/testcl/tools/tmos17-capture-assemble.py
 COPY tools/tmos17-capture-assemble-campaign.py /opt/testcl/tools/tmos17-capture-assemble-campaign.py
+COPY tools/tmos17-capture-verify-campaign.py /opt/testcl/tools/tmos17-capture-verify-campaign.py
 COPY tools/tmos17-capture-split.py /opt/testcl/tools/tmos17-capture-split.py
 COPY tools/tmos17-collector.py /opt/testcl/tools/tmos17-collector.py
 COPY tools/catalog-export.py /opt/testcl/tools/catalog-export.py
