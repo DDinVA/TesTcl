@@ -107,6 +107,11 @@ campaign plan, plus a semantic behavior-coverage report, run
 `TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/local-checkpoint-17.5.sh
 /tmp/testcl-17.5-checkpoint`. The output directory must be new; the command
 does not contact a device.
+After an authorized campaign completes, assemble its per-group records with
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/tmos17-capture-assemble-campaign-17.5.sh
+--schedule /tmp/testcl-17.5-checkpoint/scheduled-batches/schedule.json
+--records-root /tmp/testcl-17.5-records --output-dir /tmp/testcl-17.5-packs
+--verify`. This creates an indexed set of bounded golden-vector packs.
 To split that batch by stimulus family and generate all operator-ready runner
 commands, run
 `./scripts/tmos17-capture-campaign-17.5.sh --schedule

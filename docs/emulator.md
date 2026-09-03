@@ -1241,6 +1241,23 @@ count, capture accounting, and scheduled group count. The generated
 `scheduled-batches/schedule.json` can later be passed to the campaign planner
 with authorized BIG-IP/vLab endpoint details.
 
+After the external campaign completes, assemble the per-group records into an
+indexed set of bounded golden-vector packs:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp \
+  ./scripts/tmos17-capture-assemble-campaign-17.5.sh \
+  --schedule /tmp/tmos-17.5-scheduled-batches/schedule.json \
+  --records-root /tmp/tmos-17.5-records \
+  --output-dir /tmp/tmos-17.5-campaign-packs \
+  --verify
+```
+
+The assembler validates that every scheduled group and observation has a
+record, keeps each pack within the 256-vector limit, and writes one campaign
+manifest over the resulting packs. It performs no device I/O; `--verify`
+replays the assembled observations through the local emulator.
+
 The container also carries the checked-in behavior packs and golden vectors,
 so a clean local regression can be run without installing a second Python:
 
