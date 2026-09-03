@@ -619,5 +619,5 @@ jobs:
       - name: Smoke test the Compose UDP upstream workbench
         run: |
           uv venv --python 3.13 --allow-existing .venv
-          ./scripts/live-udp-upstream-compose-smoke.sh
+          TESTCL_UDP_CLIENT_IN_COMPOSE=1 ./scripts/live-udp-upstream-compose-smoke.sh
           ./scripts/live-http-upstream-compose-smoke.sh

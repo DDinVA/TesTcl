@@ -44,8 +44,14 @@ if [[ "$ready" != 1 ]]; then
 fi
 
 echo "UDP upstream response:"
+udp_client_host=127.0.0.1
+udp_client=("$python_bin" - "$data_port" "$udp_client_host")
+if [[ "${TESTCL_UDP_CLIENT_IN_COMPOSE:-0}" == "1" ]]; then
+  udp_client_host=emulator-udp
+  udp_client=("${compose[@]}" exec -T udp-backend python - "$data_port" "$udp_client_host")
+fi
 set +e
-"$python_bin" - "$data_port" <<'PY'
+"${udp_client[@]}" <<'PY'
 import socket
 import sys
 import time
@@ -56,7 +62,7 @@ while time.monotonic() < deadline:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
             client.settimeout(1)
-            client.sendto(b"hello", ("127.0.0.1", int(sys.argv[1])))
+            client.sendto(b"hello", (sys.argv[2], int(sys.argv[1])))
             response, _ = client.recvfrom(65535)
         if response == b"reply:query":
             print(response.decode("ascii"))
