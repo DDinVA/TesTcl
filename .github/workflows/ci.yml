@@ -75,52 +75,44 @@ jobs:
           raw_container_name="${container_name}-raw"
           sip_container_name="${container_name}-sip"
           trap 'docker rm --force "$container_name" "$raw_container_name" "$sip_container_name" >/dev/null 2>&1 || true' EXIT
+          retry_curl() {
+            local output_path="$1"
+            local attempt
+            shift
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent --show-error "$@" >"$output_path"; then
+                return 0
+              fi
+              if [ "$attempt" -lt 30 ]; then
+                sleep 1
+              fi
+            done
+            docker logs "$container_name"
+            return 1
+          }
           docker run --detach --name "$container_name" \
             --publish 18080:8080 --publish 18081:18080 \
             testcl-irule-emulator:ci \
             --serve --host 0.0.0.0 --port 8080 \
             --data-plane-scenario /opt/testcl/examples/scenarios/live-http-17.5.json \
             --data-plane-host 0.0.0.0 --data-plane-port 18080
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error http://127.0.0.1:18080/healthz >/tmp/testcl-healthz.json; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              docker logs "$container_name"
-              exit 1
-            fi
-            sleep 1
-          done
+          retry_curl /tmp/testcl-healthz.json http://127.0.0.1:18080/healthz
           grep -F 'tmos-17.5' /tmp/testcl-healthz.json
-          if ! curl --fail --silent --show-error http://127.0.0.1:18080/ >/tmp/testcl-workbench.html; then
-            docker logs "$container_name"
-            exit 1
-          fi
+          retry_curl /tmp/testcl-workbench.html http://127.0.0.1:18080/
           grep -F 'TesTcl · TMOS 17.5 iRule workbench' /tmp/testcl-workbench.html
           grep -F 'Evaluate local chunk' /tmp/testcl-workbench.html
-          curl --fail --silent --show-error \
-            'http://127.0.0.1:18080/v1/capabilities?namespace=HTTP&target_status=available-in-tmos-17.5&limit=2' \
-            >/tmp/testcl-capability-chunk.json
+          retry_curl /tmp/testcl-capability-chunk.json \
+            'http://127.0.0.1:18080/v1/capabilities?namespace=HTTP&target_status=available-in-tmos-17.5&limit=2'
           jq -n --slurpfile chunk /tmp/testcl-capability-chunk.json \
             '{chunk: $chunk[0], mode: "both", variants: 1}' \
             >/tmp/testcl-catalog-evaluation-request.json
-          curl --fail --silent --show-error -X POST \
+          retry_curl /tmp/testcl-catalog-evaluation.json -X POST \
             -H 'Content-Type: application/json' \
             --data-binary @/tmp/testcl-catalog-evaluation-request.json \
-            http://127.0.0.1:18080/v1/catalog-chunk-evaluate \
-            >/tmp/testcl-catalog-evaluation.json
+            http://127.0.0.1:18080/v1/catalog-chunk-evaluate
           grep -F '"status":"ok"' /tmp/testcl-catalog-evaluation.json
           grep -F '"target_command_count":2' /tmp/testcl-catalog-evaluation.json
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error http://127.0.0.1:18081/health >/tmp/testcl-data-plane.txt; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              docker logs "$container_name"
-              exit 1
-            fi
-            sleep 1
-          done
+          retry_curl /tmp/testcl-data-plane.txt http://127.0.0.1:18081/health
           grep -F 'hello from the modeled origin' /tmp/testcl-data-plane.txt
 
           docker run --rm testcl-irule-emulator:ci --behavior-coverage >/tmp/testcl-behavior-coverage.json
