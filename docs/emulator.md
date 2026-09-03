@@ -1228,7 +1228,7 @@ and `--capture-wire` retains bounded wire responses for differential vectors.
 For a single inspectable local checkpoint, use the repository wrapper below.
 It preserves all generated artifacts under a new output directory: the
 17.5 catalog bundle, per-chunk local reports, capture batch, protocol/event
-split schedule, and dry-run campaign plan. It uses only the repo's uv-managed
+split schedule, semantic behavior-coverage report, and dry-run campaign plan. It uses only the repo's uv-managed
 Python 3.13 environment and never contacts a device:
 
 ```sh

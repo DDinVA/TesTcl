@@ -103,7 +103,7 @@ plans; change `--variants` to 2 through 8 only when the exported chunk size
 keeps each plan at or below 256 observations.
 For a persistent, inspectable local checkpoint containing the catalog, every
 local chunk report, the capture batch, the split schedule, and the external
-campaign plan, run
+campaign plan, plus a semantic behavior-coverage report, run
 `TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/local-checkpoint-17.5.sh
 /tmp/testcl-17.5-checkpoint`. The output directory must be new; the command
 does not contact a device.

@@ -33,6 +33,7 @@ report_dir="$output_root/local-reports"
 batch_dir="$output_root/capture-batch"
 scheduled_dir="$output_root/scheduled-batches"
 campaign_report="$output_root/campaign-plan.json"
+coverage_report="$output_root/behavior-coverage.json"
 mkdir -p "$report_dir"
 
 echo "== Export TMOS 17.5 catalog =="
@@ -56,6 +57,11 @@ for chunk in "${chunks[@]}"; do
     --variants 1 \
     --output "$report_dir/$report_name"
 done
+
+echo "== Audit semantic behavior coverage =="
+TCL_LSP_ROOT="$TCL_LSP_ROOT" "$repo_root/scripts/emulate-irule.sh" \
+  --behavior-coverage \
+  > "$coverage_report"
 
 echo "== Build capture batch =="
 TCL_LSP_ROOT="$TCL_LSP_ROOT" "$repo_root/scripts/catalog-capture-batch-17.5.sh" \
@@ -83,6 +89,7 @@ root = Path(sys.argv[1])
 catalog = json.loads((root / "catalog" / "manifest.json").read_text(encoding="utf-8"))
 batch = json.loads((root / "capture-batch" / "manifest.json").read_text(encoding="utf-8"))
 campaign = json.loads((root / "campaign-plan.json").read_text(encoding="utf-8"))
+coverage = json.loads((root / "behavior-coverage.json").read_text(encoding="utf-8"))
 reports = sorted((root / "local-reports").glob("chunk-*.report.json"))
 if not reports:
     raise SystemExit("local evaluation produced no reports")
@@ -98,12 +105,19 @@ for report_path in reports:
 
 batch_summary = batch["summary"]
 campaign_summary = campaign["summary"]
+coverage_summary = coverage["summary"]
 if local_total != target_total:
     raise SystemExit("local reports do not cover their target command counts")
 if local_ok != target_total:
     raise SystemExit("one or more catalog commands failed local evaluation")
 if batch_summary["target_command_count"] != target_total:
     raise SystemExit("capture batch target count does not match local evaluation")
+if coverage_summary["target_f5_command_count"] != target_total:
+    raise SystemExit("behavior coverage target count does not match local evaluation")
+if coverage_summary["covered_command_count"] != target_total:
+    raise SystemExit("behavior coverage does not cover every target command")
+if coverage_summary["uncovered_command_count"] != 0:
+    raise SystemExit("behavior coverage reports uncovered target commands")
 if batch_summary["observation_count"] != batch_summary["capturable_command_count"]:
     raise SystemExit("capture batch observation count does not match capturable commands")
 if campaign_summary["observation_count"] != batch_summary["observation_count"]:
@@ -124,6 +138,7 @@ summary = {
         "ok_count": local_ok,
         "evaluated_count": local_total,
     },
+    "behavior_coverage": coverage_summary,
     "capture_batch": batch_summary,
     "campaign": campaign_summary,
     "interpretation": (
