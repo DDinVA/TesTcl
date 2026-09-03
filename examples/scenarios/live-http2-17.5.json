@@ -1,0 +1,19 @@
+{
+  "tmos_version": "17.5",
+  "profiles": ["TCP", "HTTP"],
+  "irule": "when HTTP_REQUEST { HTTP::header insert X-Rule-Path [HTTP::path] } when HTTP_RESPONSE { HTTP::header insert X-Emulator-Rule http2 }",
+  "live_origin": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "text/plain"
+    },
+    "body": "hello from the modeled HTTP/2 origin"
+  },
+  "live_data_plane": {
+    "protocol": "http2",
+    "tls": {
+      "certfile": "/run/secrets/testcl/server.pem",
+      "keyfile": "/run/secrets/testcl/server.key"
+    }
+  }
+}

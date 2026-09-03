@@ -1,0 +1,33 @@
+{
+  "tmos_version": "17.5",
+  "profiles": ["SIP"],
+  "irule": "when SIP_REQUEST { SIP::persist [SIP::call_id] }",
+  "packets": [
+    {
+      "protocol": "sip",
+      "flow_id": "call-1",
+      "direction": "client_to_server",
+      "source": {"address": "192.0.2.10", "port": 5060},
+      "destination": {"address": "198.51.100.10", "port": 5060},
+      "type": "request",
+      "method": "INVITE",
+      "uri": "sip:bob@example.com",
+      "route_target": "member-a",
+      "timestamp": 10,
+      "headers": {"Call-ID": "shared-call"}
+    },
+    {
+      "protocol": "sip",
+      "flow_id": "call-2",
+      "direction": "client_to_server",
+      "source": {"address": "192.0.2.11", "port": 5060},
+      "destination": {"address": "198.51.100.10", "port": 5060},
+      "type": "request",
+      "method": "BYE",
+      "uri": "sip:bob@example.com",
+      "route_target": "member-b",
+      "timestamp": 11,
+      "headers": {"Call-ID": "shared-call"}
+    }
+  ]
+}

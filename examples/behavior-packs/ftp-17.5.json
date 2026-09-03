@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "ftp-17.5",
+  "cases": [
+    {
+      "id": "ftps-mode-default",
+      "probe": {
+        "command": "FTP::ftps_mode",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP", "FTP"]
+      },
+      "expect": {"status": "ok", "value": "allow"}
+    },
+    {
+      "id": "active-mode-default",
+      "probe": {
+        "command": "FTP::allow_active_mode",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP", "FTP"]
+      },
+      "expect": {"status": "ok", "value": "disable"}
+    },
+    {
+      "id": "tls-session-reuse-default",
+      "probe": {
+        "command": "FTP::enforce_tls_session_reuse",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP", "FTP"]
+      },
+      "expect": {"status": "ok", "value": "disable"}
+    },
+    {
+      "id": "set-ftps-mode",
+      "probe": {
+        "command": "FTP::ftps_mode",
+        "args": ["require"],
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP", "FTP"]
+      },
+      "expect": {"status": "ok", "value": "require"}
+    },
+    {
+      "id": "enable-active-mode",
+      "probe": {
+        "command": "FTP::allow_active_mode",
+        "args": ["enable"],
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP", "FTP"]
+      },
+      "expect": {"status": "ok", "value": "enable"}
+    },
+    {
+      "id": "set-passive-port-range",
+      "probe": {
+        "command": "FTP::port",
+        "args": ["5000", "5999"],
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP", "FTP"]
+      },
+      "expect": {"status": "ok", "value": "", "tcl_return_code": 0}
+    },
+    {
+      "id": "raw-control-channel",
+      "scenario": {
+        "profiles": ["TCP", "FTP"],
+        "irule": "when CLIENT_DATA { log local0. \"ftp command=[FTP::ftps_mode]\" } when SERVER_DATA { log local0. \"ftp response=[FTP::ftps_mode]\" }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "source": {"address": "192.0.2.10", "port": 40000},
+            "destination": {"address": "198.51.100.20", "port": 21},
+            "payload": "USER alice\r\n"
+          },
+          {
+            "protocol": "tcp",
+            "direction": "server_to_client",
+            "source": {"address": "198.51.100.20", "port": 21},
+            "destination": {"address": "192.0.2.10", "port": 40000},
+            "payload": "220 ftp.example ready\r\n"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 1, "state", "ftp", "type"], "equals": "command"},
+          {"path": ["trace", 0, "events", 1, "state", "ftp", "command"], "equals": "USER"},
+          {"path": ["trace", 1, "events", 2, "state", "ftp", "type"], "equals": "response"},
+          {"path": ["trace", 1, "events", 2, "state", "ftp", "response_code"], "equals": "220"}
+        ]
+      }
+    }
+  ]
+}

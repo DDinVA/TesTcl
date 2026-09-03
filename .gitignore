@@ -3,3 +3,7 @@
 .project
 .idea
 *.iml
+.venv/
+.cache/
+__pycache__/
+*.pyc

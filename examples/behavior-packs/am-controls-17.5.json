@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "am-controls-17.5",
+  "cases": [
+    {
+      "id": "acceleration-metadata-and-disable-state",
+      "scenario": {
+        "profiles": ["HTTP"],
+        "irule": "when HTTP_REQUEST { set ::values [list [AM::age] [AM::application] [AM::cache] [AM::expires] [AM::media_playlist] [AM::policy_node]]; AM::disable; log local0. \"values=$::values disabled=[set ::state::am::disabled]\" }",
+        "packets": [
+          {
+            "protocol": "event",
+            "event": "HTTP_REQUEST",
+            "state": {
+              "am": {
+                "age": 37,
+                "application": "/Common/video-app",
+                "cache": "hit",
+                "expires": 3600,
+                "media_playlist": "playlist-1",
+                "policy_node": "node-7"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "event"], "equals": "HTTP_REQUEST"},
+          {"path": ["trace", 0, "events", 0, "state", "am", "age"], "equals": "37"},
+          {"path": ["trace", 0, "events", 0, "state", "am", "application"], "equals": "/Common/video-app"},
+          {"path": ["trace", 0, "events", 0, "state", "am", "cache"], "equals": "hit"},
+          {"path": ["trace", 0, "events", 0, "state", "am", "disabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "am", "expires"], "equals": "3600"},
+          {"path": ["trace", 0, "events", 0, "state", "am", "media_playlist"], "equals": "playlist-1"},
+          {"path": ["trace", 0, "events", 0, "state", "am", "policy_node"], "equals": "node-7"}
+        ]
+      }
+    }
+  ]
+}

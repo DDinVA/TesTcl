@@ -1,0 +1,253 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "http2-17.5",
+  "cases": [
+    {
+      "id": "active-transaction",
+      "probe": {
+        "command": "HTTP2::active",
+        "event": "MR_EGRESS",
+        "profiles": ["TCP", "HTTP", "MR"],
+        "state": {
+          "http2": {
+            "active": true,
+            "version": 2,
+            "stream_id": 3,
+            "enabled": true,
+            "pseudo_headers": {
+              ":authority": "h2.example.test",
+              ":method": "GET",
+              ":path": "/testcl/command",
+              ":scheme": "https"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "1",
+        "tcl_return_code": 0,
+        "event_fired": true
+      }
+    },
+    {
+      "id": "concurrency",
+      "probe": {
+        "command": "HTTP2::concurrency",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "state": {
+          "http2": {
+            "active": true,
+            "version": 2,
+            "concurrency": 2
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "2"
+      }
+    },
+    {
+      "id": "disable-client-discard",
+      "probe": {
+        "command": "HTTP2::disable",
+        "args": ["clientside", "discard"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "state": {
+          "http2": {
+            "active": true,
+            "version": 2,
+            "clientside_enabled": true,
+            "serverside_enabled": true
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "",
+        "tcl_return_code": 0
+      }
+    },
+    {
+      "id": "disconnect",
+      "probe": {
+        "command": "HTTP2::disconnect",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "state": {
+          "http2": {
+            "active": true,
+            "version": 2,
+            "stream_id": 3
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": ""
+      }
+    },
+    {
+      "id": "enable-serverside",
+      "probe": {
+        "command": "HTTP2::enable",
+        "args": ["serverside"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "state": {
+          "http2": {
+            "active": true,
+            "version": 2,
+            "clientside_enabled": true,
+            "serverside_enabled": false
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": ""
+      }
+    },
+    {
+      "id": "pseudo-header-getter",
+      "probe": {
+        "command": "HTTP2::header",
+        "args": [":authority"],
+        "event": "MR_EGRESS",
+        "profiles": ["TCP", "HTTP", "MR"],
+        "state": {
+          "http2": {
+            "active": true,
+            "version": 2,
+            "pseudo_headers": {
+              ":authority": "h2.example.test"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "h2.example.test"
+      }
+    },
+    {
+      "id": "pseudo-header-replace",
+      "probe": {
+        "command": "HTTP2::header",
+        "args": ["replace", ":path", "/rewritten"],
+        "event": "MR_EGRESS",
+        "profiles": ["TCP", "HTTP", "MR"],
+        "state": {
+          "http2": {
+            "active": true,
+            "version": 2,
+            "pseudo_headers": {
+              ":path": "/original"
+            }
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "",
+        "tcl_return_code": 0
+      }
+    },
+    {
+      "id": "push-promise",
+      "probe": {
+        "command": "HTTP2::push",
+        "args": [
+          "/static/app.js",
+          "-priority",
+          "16",
+          "-content",
+          "console.log('pushed');",
+          "-noserver",
+          "host",
+          "example.test",
+          "--",
+          ":status",
+          "200",
+          "content-type",
+          "application/javascript"
+        ],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "FASTHTTP", "HTTP"],
+        "state": {
+          "http2": {
+            "active": true,
+            "version": 2,
+            "stream_id": 1
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": ""
+      }
+    },
+    {
+      "id": "request-count",
+      "probe": {
+        "command": "HTTP2::requests",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "state": {
+          "http2": {
+            "active": true,
+            "version": 2,
+            "requests": 4
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "4"
+      }
+    },
+    {
+      "id": "stream-priority",
+      "probe": {
+        "command": "HTTP2::stream",
+        "args": ["priority", "42"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "state": {
+          "http2": {
+            "active": true,
+            "version": 2,
+            "stream_id": 3,
+            "stream_priority": 8
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "0"
+      }
+    },
+    {
+      "id": "version",
+      "probe": {
+        "command": "HTTP2::version",
+        "event": "MR_INGRESS",
+        "profiles": ["TCP", "HTTP", "MR"],
+        "state": {
+          "http2": {
+            "active": true,
+            "version": 2
+          }
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "value": "2"
+      }
+    }
+  ]
+}

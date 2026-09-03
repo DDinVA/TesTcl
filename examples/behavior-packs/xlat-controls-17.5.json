@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "xlat-controls-17.5",
+  "cases": [
+    {
+      "id": "source-translation-listener-and-reservation-controls",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when SA_PICKED { set ::source_addr [XLAT::src_addr]; set ::source_port [XLAT::src_port]; set ::source_ranges [XLAT::src_nat_valid_range]; log local0. \"source=$::source_addr:$::source_port ranges=$::source_ranges\" }\nwhen CLIENT_DATA { set ::listener [XLAT::listen -hairpin -single-connection 30 {\n proto TCP\n bind -ip 198.51.100.20 -port 4000\n server 10.0.0.2 80\n allow 10.0.0.2 0\n inherit-vs /Common/app_vs\n }]; log local0. \"listener=$::listener\" }\nwhen HTTP_REQUEST { set ::source_config [XLAT::src_config]; set ::listener_lifetime [XLAT::listen_lifetime $::listener]; set ::listener_updated [XLAT::listen_lifetime $::listener 45]; set ::reservation [XLAT::src_endpoint_reservation create -pool /Common/snat 10.0.0.2 50000 TCP 120]; set ::translation_address [lindex $::reservation 0]; set ::translation_port [lindex $::reservation 1]; set ::reservation_found [XLAT::src_endpoint_reservation get $::translation_address $::translation_port /Common/snat TCP]; set ::reservation_updated [XLAT::src_endpoint_reservation update_lifetime $::translation_address $::translation_port /Common/snat TCP 300]; log local0. \"config=$::source_config lifetime=$::listener_lifetime/$::listener_updated reservation=$::reservation found=$::reservation_found renewed=$::reservation_updated\" }",
+        "packets": [
+          {
+            "protocol": "event",
+            "event": "SA_PICKED",
+            "state": {
+              "xlat": {
+                "src_addr": "198.51.100.30",
+                "src_port": 41000,
+                "src_config": "SNAT /Common/snat",
+                "src_nat_valid_range": "{198.51.100.30 40000 45000}"
+              }
+            }
+          },
+          {
+            "protocol": "event",
+            "event": "CLIENT_DATA",
+            "state": {"xlat": {}}
+          },
+          {
+            "protocol": "event",
+            "event": "HTTP_REQUEST",
+            "state": {"xlat": {}}
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "event"], "equals": "SA_PICKED"},
+          {"path": ["trace", 0, "events", 0, "state", "xlat", "src_addr"], "equals": "198.51.100.30"},
+          {"path": ["trace", 0, "events", 0, "state", "xlat", "src_port"], "equals": "41000"},
+          {"path": ["trace", 0, "events", 0, "state", "xlat", "src_nat_valid_range"], "equals": "{198.51.100.30 40000 45000}"},
+          {"path": ["trace", 1, "events", 0, "event"], "equals": "CLIENT_DATA"},
+          {"path": ["trace", 1, "events", 0, "state", "xlat", "listeners"], "equals": "{handle 198.51.100.20%0,4000,10.0.0.2%0,0,10.0.0.2%0,80,0,6 lifetime 30 hairpin 1 inherit_main_rules 0 single_connection 1 translation_loose 0 local_address 198.51.100.20 local_port 4000 remote_address 10.0.0.2 remote_port 0 server_address 10.0.0.2 server_port 80 vlan 0 protocol 6}"},
+          {"path": ["trace", 2, "events", 0, "event"], "equals": "HTTP_REQUEST"},
+          {"path": ["trace", 2, "events", 0, "state", "xlat", "listeners"], "equals": "{handle 198.51.100.20%0,4000,10.0.0.2%0,0,10.0.0.2%0,80,0,6 lifetime 45 hairpin 1 inherit_main_rules 0 single_connection 1 translation_loose 0 local_address 198.51.100.20 local_port 4000 remote_address 10.0.0.2 remote_port 0 server_address 10.0.0.2 server_port 80 vlan 0 protocol 6}"},
+          {"path": ["trace", 2, "events", 0, "state", "xlat", "reservations"], "equals": "{client_addr 10.0.0.2 client_port 50000 translation_addr 198.51.100.30 translation_port 41000 pool /Common/snat protocol 6 lifetime 300 persisted 1 dslite_local {} dslite_remote {}}"}
+        ]
+      }
+    }
+  ]
+}

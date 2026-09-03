@@ -1,0 +1,20 @@
+{
+  "tmos_version": "17.5",
+  "irule": "when HTTP_REQUEST { if {[HTTP::payload] eq \"ping\"} { pool api_pool } else { HTTP::respond 403 content \"denied\" } }\nwhen HTTP_RESPONSE { HTTP::header replace X-Emulator yes }",
+  "pools": {
+    "api_pool": ["10.0.0.1:80"]
+  },
+  "requests": [
+    {
+      "host": "api.example.com",
+      "body": "ping",
+      "response_headers": {"Content-Type": "text/plain"},
+      "response_body": "pong"
+    },
+    {
+      "host": "blocked.example.com",
+      "body": "nope",
+      "new_connection": true
+    }
+  ]
+}

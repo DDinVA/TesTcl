@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "http-streaming-17.5-contracts",
+  "source": "checked-in-streaming-contract",
+  "provenance": {
+    "capture_type": "adapter-regression-contract",
+    "live_device": false,
+    "basis": "raw-http-staging-fixtures"
+  },
+  "vectors": [
+    {
+      "id": "content-length-request-staging",
+      "operation": "scenario",
+      "input": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST { HTTP::collect 6 } when HTTP_REQUEST_DATA { log local0. body=[HTTP::payload]; HTTP::release } when HTTP_RESPONSE { log local0. status=[HTTP::status] }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.1", "port": 51001},
+            "destination": {"address": "192.0.2.10", "port": 80},
+            "payload": "POST /upload HTTP/1.1\r\nHost: app.example\r\nContent-Length: 6\r\n\r\nabc"
+          },
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.1", "port": 51001},
+            "destination": {"address": "192.0.2.10", "port": 80},
+            "payload": "def"
+          },
+          {
+            "protocol": "tcp",
+            "direction": "server_to_client",
+            "source": {"address": "192.0.2.10", "port": 80},
+            "destination": {"address": "10.0.0.1", "port": 51001},
+            "payload": "HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nok"
+          }
+        ]
+      },
+      "reference": {
+        "source": "checked-in-streaming-contract",
+        "output": {
+          "status": "ok",
+          "results": [
+            {
+              "request": {"body": "abcdef"},
+              "response": {"status": 201, "body": "ok"},
+              "events_fired": [
+                "RULE_INIT",
+                "CLIENT_ACCEPTED",
+                "HTTP_REQUEST",
+                "HTTP_REQUEST_DATA",
+                "HTTP_REQUEST_RELEASE",
+                "HTTP_RESPONSE"
+              ]
+            }
+          ],
+          "trace": [
+            {"staged_body_received": 3},
+            {"staged_body_received": 6}
+          ]
+        }
+      },
+      "comparisons": [
+        {"label": "assembled request body", "actual_path": ["results", 0, "request", "body"], "reference_path": ["results", 0, "request", "body"]},
+        {"label": "response status", "actual_path": ["results", 0, "response", "status"], "reference_path": ["results", 0, "response", "status"]},
+        {"label": "response body", "actual_path": ["results", 0, "response", "body"], "reference_path": ["results", 0, "response", "body"]},
+        {"label": "request data lifecycle", "actual_path": ["results", 0, "events_fired"], "reference_path": ["results", 0, "events_fired"]},
+        {"label": "first staged segment", "actual_path": ["trace", 0, "staged_body_received"], "reference_path": ["trace", 0, "staged_body_received"]},
+        {"label": "completed staged body", "actual_path": ["trace", 1, "staged_body_received"], "reference_path": ["trace", 1, "staged_body_received"]}
+      ]
+    },
+    {
+      "id": "chunked-response-staging",
+      "operation": "scenario",
+      "input": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST { log local0. path=[HTTP::path] } when HTTP_RESPONSE { HTTP::collect 5; log local0. response-head=[HTTP::status] } when HTTP_RESPONSE_DATA { log local0. chunked-response=[HTTP::payload]; HTTP::release }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.1", "port": 51005},
+            "destination": {"address": "192.0.2.10", "port": 80},
+            "payload": "GET /chunked HTTP/1.1\r\nHost: app.example\r\n\r\n"
+          },
+          {
+            "protocol": "tcp",
+            "direction": "server_to_client",
+            "source": {"address": "192.0.2.10", "port": 80},
+            "destination": {"address": "10.0.0.1", "port": 51005},
+            "payload": "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel"
+          },
+          {
+            "protocol": "tcp",
+            "direction": "server_to_client",
+            "source": {"address": "192.0.2.10", "port": 80},
+            "destination": {"address": "10.0.0.1", "port": 51005},
+            "payload": "lo\r\n0\r\n\r\n"
+          }
+        ]
+      },
+      "reference": {
+        "source": "checked-in-streaming-contract",
+        "output": {
+          "status": "ok",
+          "results": [
+            {
+              "request": {"uri": "/chunked"},
+              "response": {"status": 200, "body": "hello"},
+              "events_fired": [
+                "RULE_INIT",
+                "CLIENT_ACCEPTED",
+                "HTTP_REQUEST",
+                "HTTP_RESPONSE",
+                "HTTP_RESPONSE_DATA",
+                "HTTP_RESPONSE_RELEASE"
+              ]
+            }
+          ],
+          "trace": [
+            {},
+            {"staged_response_body_received": 0},
+            {"staged_response_body_received": 5}
+          ]
+        }
+      },
+      "comparisons": [
+        {"label": "request URI", "actual_path": ["results", 0, "request", "uri"], "reference_path": ["results", 0, "request", "uri"]},
+        {"label": "chunked response body", "actual_path": ["results", 0, "response", "body"], "reference_path": ["results", 0, "response", "body"]},
+        {"label": "response data lifecycle", "actual_path": ["results", 0, "events_fired"], "reference_path": ["results", 0, "events_fired"]},
+        {"label": "first response segment", "actual_path": ["trace", 1, "staged_response_body_received"], "reference_path": ["trace", 1, "staged_response_body_received"]},
+        {"label": "completed response body", "actual_path": ["trace", 2, "staged_response_body_received"], "reference_path": ["trace", 2, "staged_response_body_received"]}
+      ]
+    },
+    {
+      "id": "pipelined-request-ordering",
+      "operation": "scenario",
+      "input": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST { HTTP::collect 3 } when HTTP_REQUEST_DATA { HTTP::release }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.1", "port": 51006},
+            "destination": {"address": "192.0.2.10", "port": 80},
+            "payload": "POST /first HTTP/1.1\r\nHost: app.example\r\nContent-Length: 3\r\n\r\nabcGET /second HTTP/1.1\r\nHost: app.example\r\n\r\n"
+          },
+          {
+            "protocol": "tcp",
+            "direction": "server_to_client",
+            "source": {"address": "192.0.2.10", "port": 80},
+            "destination": {"address": "10.0.0.1", "port": 51006},
+            "payload": "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+          },
+          {
+            "protocol": "tcp",
+            "direction": "server_to_client",
+            "source": {"address": "192.0.2.10", "port": 80},
+            "destination": {"address": "10.0.0.1", "port": 51006},
+            "payload": "HTTP/1.1 204 No Content\r\n\r\n"
+          }
+        ]
+      },
+      "reference": {
+        "source": "checked-in-streaming-contract",
+        "output": {
+          "status": "ok",
+          "results": [
+            {
+              "request": {"uri": "/first", "body": "abc"},
+              "response": {"status": 200}
+            },
+            {
+              "request": {"uri": "/second", "body": ""},
+              "response": {"status": 204}
+            }
+          ]
+        }
+      },
+      "comparisons": [
+        {"label": "first request URI", "actual_path": ["results", 0, "request", "uri"], "reference_path": ["results", 0, "request", "uri"]},
+        {"label": "first request body", "actual_path": ["results", 0, "request", "body"], "reference_path": ["results", 0, "request", "body"]},
+        {"label": "second request URI", "actual_path": ["results", 1, "request", "uri"], "reference_path": ["results", 1, "request", "uri"]},
+        {"label": "second response status", "actual_path": ["results", 1, "response", "status"], "reference_path": ["results", 1, "response", "status"]}
+      ]
+    }
+  ]
+}

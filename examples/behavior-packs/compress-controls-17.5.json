@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "compress-controls-17.5",
+  "cases": [
+    {
+      "id": "response-gzip-policy-and-connection-reset",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_RESPONSE { if {[HTTP::uri] eq \"/gzip\"} { COMPRESS::disable response; COMPRESS::gzip response level 9; COMPRESS::gzip response memory_level 9; COMPRESS::gzip response window_size 15; COMPRESS::buffer_size response 4096; COMPRESS::method response prefer gzip; COMPRESS::nodelay response; COMPRESS::enable response } }",
+        "requests": [
+          {
+            "uri": "/gzip",
+            "host": "compress.example.com",
+            "response_body": "payload that should be gzip encoded",
+            "response_headers": {"Content-Length": "36"}
+          },
+          {
+            "uri": "/plain",
+            "host": "compress.example.com",
+            "response_body": "keep alive remains plain",
+            "response_headers": {"Content-Length": "24"}
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "headers", "content-encoding"], "equals": "gzip"},
+          {"path": ["results", 0, "semantic", "compression", "compress_applied"], "equals": true},
+          {"path": ["results", 0, "semantic", "compression", "compress_applied_side"], "equals": "response"},
+          {"path": ["results", 0, "semantic", "compression", "compress_response_gzip_level"], "equals": 9},
+          {"path": ["results", 0, "semantic", "compression", "compress_response_buffer_size"], "equals": 4096},
+          {"path": ["results", 0, "semantic", "compression", "compress_response_nodelay"], "equals": true},
+          {"path": ["results", 1, "response", "body"], "equals": "keep alive remains plain"},
+          {"path": ["results", 1, "semantic", "compression", "compress_applied"], "equals": false}
+        ]
+      }
+    }
+  ]
+}

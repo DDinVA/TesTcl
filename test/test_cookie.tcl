@@ -19,6 +19,14 @@ it "should only contain one cookie" {
   run irules/cookie_irule.tcl cookie
 }
 
+it "should count multiple cookies" {
+  event HTTP_REQUEST
+  HTTP::cookie insert name "first" value "one"
+  HTTP::cookie insert name "second" value "two"
+  verify "There should be two cookies" 2 == {HTTP::cookie count}
+  run irules/cookie_irule.tcl cookie
+}
+
 it "should have a cookie with the name stored" {
   event HTTP_REQUEST
   HTTP::cookie insert "testcookie" "pos"

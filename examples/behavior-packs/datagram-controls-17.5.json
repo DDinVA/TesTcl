@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "datagram-controls-17.5",
+  "cases": [
+    {
+      "id": "ipv4-udp-datagram-accessors",
+      "scenario": {
+        "profiles": ["UDP", "DATAGRAM", "FLOW"],
+        "irule": "when FLOW_INIT {\n  set ::v4_datagram [list [DATAGRAM::ip tos] [DATAGRAM::ip ttl] [DATAGRAM::ip flags] [DATAGRAM::ip option] [DATAGRAM::ip option_count] [DATAGRAM::udp payload 3] [DATAGRAM::udp payload_length] [DATAGRAM::dns id] [DATAGRAM::dns qr] [DATAGRAM::dns opcode] [DATAGRAM::dns qdcount] [DATAGRAM::dns ancount] [DATAGRAM::dns nscount] [DATAGRAM::dns arcount] [DATAGRAM::l2 dest]]\n}\nwhen CLIENT_DATA {\n  if {[llength $::v4_datagram] == 15} { UDP::respond v4-ok }\n}",
+        "packets": [
+          {
+            "protocol": "udp",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.1", "port": 53000},
+            "destination": {"address": "192.0.2.53", "port": 53},
+            "tos": 8,
+            "ttl": 48,
+            "payload": "abcdef",
+            "datagram": {
+              "ip_flags": 1,
+              "ip_options": [[1, "foo"], [7]],
+              "l2_dest": "00:11:22:33:44:55",
+              "dns_id": 99,
+              "dns_qr": false,
+              "dns_opcode": "QUERY",
+              "dns_qdcount": 1,
+              "dns_ancount": 2,
+              "dns_nscount": 3,
+              "dns_arcount": 4
+            }
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "protocol"], "equals": "udp"},
+          {"path": ["trace", 0, "responded"], "equals": true},
+          {"path": ["trace", 0, "response"], "equals": "v4-ok"},
+          {"path": ["trace", 0, "events", 1, "state", "datagram", "ip_tos"], "equals": "8"},
+          {"path": ["trace", 0, "events", 1, "state", "datagram", "dns_id"], "equals": "99"},
+          {"path": ["trace", 0, "events", 1, "state", "datagram", "l2_dest"], "equals": "00:11:22:33:44:55"}
+        ]
+      }
+    },
+    {
+      "id": "ipv6-tcp-datagram-accessors",
+      "scenario": {
+        "profiles": ["TCP", "DATAGRAM", "FLOW"],
+        "irule": "when FLOW_INIT {\n  set ::v6_datagram [list [DATAGRAM::ip6 hop_limit] [DATAGRAM::ip6 option] [DATAGRAM::ip6 option_count] [DATAGRAM::tcp flags] [DATAGRAM::tcp window] [DATAGRAM::tcp payload] [DATAGRAM::tcp payload_length] [DATAGRAM::tcp option] [DATAGRAM::tcp option_count 2]]\n}\nwhen CLIENT_ACCEPTED { TCP::collect }\nwhen CLIENT_DATA {\n  if {[llength $::v6_datagram] == 9} { TCP::respond v6-ok }\n}",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "2001:db8::1", "port": 51000},
+            "destination": {"address": "2001:db8::53", "port": 443},
+            "flags": ["SYN"],
+            "datagram": {
+              "ip_version": 6,
+              "ip6_hop_limit": 31,
+              "ip6_options": [[1, "alpha"], [2, "beta"], [2, "gamma"]],
+              "tcp_flags": 18,
+              "tcp_window": 65535,
+              "tcp_options": [[2, "mss"], [3, "ws"], [2, "sack"]]
+            }
+          },
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "2001:db8::1", "port": 51000},
+            "destination": {"address": "2001:db8::53", "port": 443},
+            "flags": ["ACK", "PSH"],
+            "payload": "world"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "protocol"], "equals": "tcp"},
+          {"path": ["trace", 1, "events", 0, "emissions", 0, "direction"], "equals": "server_to_client"},
+          {"path": ["trace", 1, "events", 0, "emissions", 0, "payload"], "equals": "v6-ok"},
+          {"path": ["trace", 0, "events", 1, "state", "datagram", "ip6_hop_limit"], "equals": "31"},
+          {"path": ["trace", 0, "events", 1, "state", "datagram", "tcp_window"], "equals": "65535"}
+        ]
+      }
+    }
+  ]
+}

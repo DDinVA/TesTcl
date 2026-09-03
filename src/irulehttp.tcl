@@ -3,6 +3,14 @@ package require log
 
 package require base64
 
+namespace eval ::testcl {
+  # Keep byte-oriented HTTP lengths working on Tcl runtimes that do not
+  # provide the legacy `string bytelength` subcommand.
+  proc byte_length {value} {
+    return [string length [encoding convertto utf-8 $value]]
+  }
+}
+
 namespace eval ::testcl::HTTP {
   variable sent
   variable headers
@@ -158,8 +166,8 @@ proc ::testcl::HTTP::cookie {cmd args} {
         log::log debug "There is no Cookie header."
         return {}
       }
-      set cookies [lindex $headers(Cookie)]
-      set res [llength cookies]
+      set cookies $headers(Cookie)
+      set res [llength $cookies]
 
       log::log debug "number of all cookies: $res"
       return $res
@@ -251,7 +259,7 @@ proc ::testcl::HTTP::cookie {cmd args} {
       
       set newcookies {}
       if { $name eq "" } {
-        unset $headers(Cookie)
+        unset headers(Cookie)
         log::log debug "all cookies removed"
       } else {
         set arg [lindex $args 0]
@@ -512,7 +520,7 @@ proc ::testcl::HTTP::header {cmd args} {
         set-cookie2 1
         transfer-encoding 1
       }
-      foreach $n $args {
+      foreach n $args {
         set allowed_headers([string tolower $n]) 1
       }
       foreach $n [array names headers] {
@@ -913,7 +921,7 @@ proc ::testcl::HTTP::payload {args} {
       if { [llength $args] > 1 } {
         error "incorrect number of arguments for HTTP::payload length : [llength $args]"
       }
-      set len [string bytelength $payload]
+      set len [::testcl::byte_length $payload]
       log::log debug "HTTP::payload length returns: $len"
       return $len
     }
@@ -935,7 +943,7 @@ proc ::testcl::HTTP::payload {args} {
         log::log debug "HTTP::payload replace - offset: $offset, length: $len, first: $first, last: $last, replacements: $replacement"
       }
       log::log debug "HTTP::payload replace - after: $payload"
-      testcl::HTTP::header replace "Content-Length" [string bytelength $payload]
+      testcl::HTTP::header replace "Content-Length" [::testcl::byte_length $payload]
       log::log debug "HTTP::payload replace executed"
       return {}
     }
@@ -1220,7 +1228,7 @@ proc ::testcl::HTTP::respond {args} {
     if { $arg eq "content" } {
       if {[llength $args] > 1} {
         set content [lindex $args 1]
-        set content_length [string bytelength $content]
+        set content_length [::testcl::byte_length $content]
         log::log debug "content set - content length: content_length"
         #remove content param and value from args
         set args [lreplace $args [set args 0] 1]

@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "ip-controls-17.5",
+  "cases": [
+    {
+      "id": "packet-statistics-and-lookups",
+      "scenario": {
+        "profiles": ["TCP"],
+        "ip": {
+          "hops": 3,
+          "intelligence": {"10.0.0.5": ["Proxy", "Scanners"]},
+          "reputation": {"10.0.0.5": ["Scanners", "Cloud Provider Networks"]}
+        },
+        "irule": "when CLIENT_ACCEPTED {\n  TCP::collect\n  log local0. \"accepted hops=[IP::hops] stats=[IP::stats] reputation=[IP::reputation [IP::client_addr]] intelligence=[IP::intelligence [IP::client_addr]]\"\n  IP::idle_timeout 900\n}\nwhen CLIENT_DATA {\n  IP::ingress_drop_rate [IP::client_addr] 10 30\n  IP::ingress_rate_limit 20 100\n  log local0. \"data pkts=[IP::stats pkts in] bytes=[IP::stats bytes in] age=[IP::stats age] in=[IP::stats in] out=[IP::stats out]\"\n}\nwhen SERVER_CONNECTED {\n  log local0. \"server pkts=[IP::stats pkts out] bytes=[IP::stats bytes out]\"\n}",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.5", "port": 51000},
+            "destination": {"address": "192.0.2.10", "port": 443},
+            "flags": ["SYN"],
+            "hops": 4,
+            "timestamp": 10
+          },
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.5", "port": 51000},
+            "destination": {"address": "192.0.2.10", "port": 443},
+            "flags": ["ACK", "PSH"],
+            "payload": "hello",
+            "hops": 4,
+            "timestamp": 10.25
+          },
+          {
+            "protocol": "tcp",
+            "direction": "server_to_client",
+            "source": {"address": "192.0.2.10", "port": 443},
+            "destination": {"address": "10.0.0.5", "port": 51000},
+            "flags": ["ACK"],
+            "payload": "ok",
+            "timestamp": 10.5
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 1, "semantic", "ip", "hops"], "equals": 4},
+          {"path": ["trace", 0, "events", 1, "semantic", "ip", "intelligence", "10.0.0.5"], "equals": ["Proxy", "Scanners"]},
+          {"path": ["trace", 1, "events", 0, "semantic", "ip", "drop_rates", "10.0.0.5", "rate"], "equals": 10},
+          {"path": ["trace", 1, "events", 0, "semantic", "ip", "global_gray_list_rate"], "equals": 20},
+          {"path": ["trace", 1, "events", 0, "semantic", "ip", "global_rate"], "equals": 100},
+          {"path": ["trace", 2, "events", 1, "semantic", "ip", "pkts_out"], "equals": 1}
+        ]
+      }
+    },
+    {
+      "id": "address-and-header-introspection",
+      "scenario": {
+        "profiles": ["TCP"],
+        "irule": "when CLIENT_ACCEPTED {\n  set client [IP::client_addr]\n  set protocol [IP::protocol]\n  set tos [IP::tos]\n  set ttl [IP::ttl]\n  set version [IP::version]\n  log local0. \"client=$client protocol=$protocol tos=$tos ttl=$ttl version=$version local=[IP::local_addr clientside] remote=[IP::remote_addr clientside]\"\n}\nwhen CLIENT_DATA {\n  log local0. \"matches=[IP::addr [IP::client_addr] equals 10.0.0.5]\"\n}\nwhen SERVER_CONNECTED {\n  log local0. \"server=[IP::server_addr] local=[IP::local_addr serverside] remote=[IP::remote_addr serverside]\"\n}",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.5", "port": 51000},
+            "destination": {"address": "192.0.2.10", "port": 443},
+            "flags": ["SYN"],
+            "timestamp": 20
+          },
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.5", "port": 51000},
+            "destination": {"address": "192.0.2.10", "port": 443},
+            "flags": ["ACK", "PSH"],
+            "payload": "data",
+            "timestamp": 20.25
+          },
+          {
+            "protocol": "tcp",
+            "direction": "server_to_client",
+            "source": {"address": "192.0.2.10", "port": 443},
+            "destination": {"address": "10.0.0.5", "port": 51000},
+            "flags": ["ACK"],
+            "payload": "reply",
+            "timestamp": 20.5
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "protocol"], "equals": "tcp"},
+          {"path": ["trace", 1, "protocol"], "equals": "tcp"},
+          {"path": ["trace", 2, "protocol"], "equals": "tcp"}
+        ]
+      }
+    }
+  ]
+}

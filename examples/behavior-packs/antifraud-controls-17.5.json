@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "antifraud-controls-17.5",
+  "cases": [
+    {
+      "id": "complete-login-and-alert-surface",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "FASTHTTP", "ANTIFRAUD"],
+        "antifraud": {
+          "profile": "/Common/af-profile",
+          "login": true,
+          "alert": true,
+          "client_id": "client-1",
+          "device_id": "device-1",
+          "fingerprint": "fp-1",
+          "geo": "US",
+          "guid": "guid-1",
+          "username": "configured-user",
+          "license_id": "license-7",
+          "result": "failed",
+          "fields": {
+            "alert_additional_info": "additional-info",
+            "alert_bait_signatures": "bait-signatures",
+            "alert_component": "component",
+            "alert_defined_value": "defined-value",
+            "alert_details": "details",
+            "alert_device_id": "device-alert-1",
+            "alert_expected_value": "expected-value",
+            "alert_fingerprint": "alert-fingerprint",
+            "alert_forbidden_added_element": "forbidden-element",
+            "alert_guid": "alert-guid",
+            "alert_html": "<p>alert</p>",
+            "alert_http_referrer": "https://referrer.example.test/",
+            "alert_id": "alert-1",
+            "alert_min": "min-value",
+            "alert_origin": "origin",
+            "alert_resolved_value": "resolved-value",
+            "alert_score": "42",
+            "alert_transaction_data": "transaction-data",
+            "alert_transaction_id": "transaction-1",
+            "alert_type": "credential_stuffing",
+            "alert_username": "alice",
+            "alert_view_id": "view-1"
+          }
+        },
+        "irule": "when HTTP_REQUEST {\n    set ::client_id [ANTIFRAUD::client_id]\n    set ::device_id [ANTIFRAUD::device_id]\n    set ::result [ANTIFRAUD::result]\n    ANTIFRAUD::disable_app_layer_encryption\n    ANTIFRAUD::disable_auto_transactions\n    ANTIFRAUD::disable_injection\n    ANTIFRAUD::disable_malware\n    ANTIFRAUD::disable_phishing\n    ANTIFRAUD::enable_log Debug\n    ANTIFRAUD::disable\n    ANTIFRAUD::enable\n}\nwhen ANTIFRAUD_LOGIN {\n    set ::login_values [list [ANTIFRAUD::fingerprint] [ANTIFRAUD::geo] [ANTIFRAUD::guid] [ANTIFRAUD::username alias]]\n}\nwhen ANTIFRAUD_ALERT {\n    ANTIFRAUD::alert_score 99\n    set ::alert_values [list [ANTIFRAUD::alert_additional_info] [ANTIFRAUD::alert_bait_signatures] [ANTIFRAUD::alert_component] [ANTIFRAUD::alert_defined_value] [ANTIFRAUD::alert_details] [ANTIFRAUD::alert_device_id] [ANTIFRAUD::alert_expected_value] [ANTIFRAUD::alert_fingerprint] [ANTIFRAUD::alert_forbidden_added_element] [ANTIFRAUD::alert_guid] [ANTIFRAUD::alert_html] [ANTIFRAUD::alert_http_referrer] [ANTIFRAUD::alert_id] [ANTIFRAUD::alert_license_id] [ANTIFRAUD::alert_min] [ANTIFRAUD::alert_origin] [ANTIFRAUD::alert_resolved_value] [ANTIFRAUD::alert_score] [ANTIFRAUD::alert_transaction_data] [ANTIFRAUD::alert_transaction_id] [ANTIFRAUD::alert_type] [ANTIFRAUD::alert_username] [ANTIFRAUD::alert_view_id]]\n}",
+        "requests": [{"uri": "/login"}]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired", 0], "equals": "HTTP_REQUEST"},
+          {"path": ["results", 0, "events_fired", 1], "equals": "ANTIFRAUD_LOGIN"},
+          {"path": ["results", 0, "events_fired", 2], "equals": "ANTIFRAUD_ALERT"},
+          {"path": ["results", 0, "semantic", "antifraud", "enabled"], "equals": true},
+          {"path": ["results", 0, "semantic", "antifraud", "profile"], "equals": "/Common/af-profile"},
+          {"path": ["results", 0, "semantic", "antifraud", "client_id"], "equals": "client-1"},
+          {"path": ["results", 0, "semantic", "antifraud", "device_id"], "equals": "device-1"},
+          {"path": ["results", 0, "semantic", "antifraud", "result"], "equals": "failed"},
+          {"path": ["results", 0, "semantic", "antifraud", "username"], "equals": "alias"},
+          {"path": ["results", 0, "semantic", "antifraud", "log_level"], "equals": "Debug"},
+          {"path": ["results", 0, "semantic", "antifraud", "alert_disabled"], "equals": false},
+          {"path": ["results", 0, "semantic", "antifraud", "alert", "alert_type"], "equals": "credential_stuffing"},
+          {"path": ["results", 0, "semantic", "antifraud", "alert", "alert_score"], "equals": "99"},
+          {"path": ["results", 0, "semantic", "antifraud", "alert", "alert_transaction_id"], "equals": "transaction-1"},
+          {"path": ["results", 0, "semantic", "antifraud", "alert", "alert_html"], "equals": "<p>alert</p>"},
+          {"path": ["results", 0, "semantic", "antifraud", "alert_license_id"], "equals": "f89e256a"},
+          {"path": ["results", 0, "semantic", "antifraud", "disabled_features", "malware"], "equals": true},
+          {"path": ["results", 0, "semantic", "antifraud", "disabled_features", "phishing"], "equals": true}
+        ]
+      }
+    },
+    {
+      "id": "request-overrides-and-connection-reset",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "FASTHTTP", "ANTIFRAUD"],
+        "antifraud": {"login": false, "alert": false},
+        "irule": "when HTTP_REQUEST {\n    if {[HTTP::uri] eq \"/alert-off\"} {\n        ANTIFRAUD::disable_alert\n    }\n    if {[HTTP::uri] eq \"/disable\"} {\n        ANTIFRAUD::disable\n    }\n    if {[HTTP::uri] eq \"/features\"} {\n        ANTIFRAUD::disable_app_layer_encryption\n        ANTIFRAUD::disable_auto_transactions\n        ANTIFRAUD::disable_injection\n        ANTIFRAUD::disable_malware\n        ANTIFRAUD::disable_phishing\n        ANTIFRAUD::enable_log Debug\n    }\n}\nwhen ANTIFRAUD_LOGIN {\n    log local0. login\n}\nwhen ANTIFRAUD_ALERT {\n    log local0. alert\n}",
+        "requests": [
+          {"uri": "/alert-off", "antifraud": {"login": true, "alert": true}},
+          {"uri": "/normal", "antifraud": {"login": true, "alert": true}},
+          {"uri": "/features", "antifraud": {"login": true, "alert": true}},
+          {"uri": "/disable", "antifraud": {"login": true, "alert": true}},
+          {"uri": "/same-connection", "antifraud": {"login": true, "alert": true}},
+          {"uri": "/fresh", "new_connection": true, "antifraud": {"login": true, "alert": true}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "events_fired"], "equals": ["HTTP_REQUEST", "ANTIFRAUD_LOGIN"]},
+          {"path": ["results", 1, "events_fired"], "equals": ["HTTP_REQUEST", "ANTIFRAUD_LOGIN", "ANTIFRAUD_ALERT"]},
+          {"path": ["results", 2, "events_fired"], "equals": ["HTTP_REQUEST", "ANTIFRAUD_LOGIN", "ANTIFRAUD_ALERT"]},
+          {"path": ["results", 2, "semantic", "antifraud", "log_level"], "equals": "Debug"},
+          {"path": ["results", 2, "semantic", "antifraud", "disabled_features", "injection"], "equals": true},
+          {"path": ["results", 3, "events_fired"], "equals": ["HTTP_REQUEST"]},
+          {"path": ["results", 3, "semantic", "antifraud", "enabled"], "equals": false},
+          {"path": ["results", 4, "events_fired"], "equals": ["HTTP_REQUEST"]},
+          {"path": ["results", 5, "events_fired"], "equals": ["HTTP_REQUEST", "ANTIFRAUD_LOGIN", "ANTIFRAUD_ALERT"]},
+          {"path": ["results", 5, "semantic", "antifraud", "enabled"], "equals": true},
+          {"path": ["results", 5, "semantic", "antifraud", "disabled_features", "malware"], "equals": false}
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "lb-17.5",
+  "cases": [
+    {
+      "id": "pool-up-when-member-available",
+      "probe": {
+        "command": "LB::status",
+        "args": ["pool", "api_pool"],
+        "event": "LB_SELECTED",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {
+          "pools": {"api_pool": ["192.0.2.10:80", "192.0.2.11:80"]},
+          "backends": {
+            "192.0.2.10:80": {"state": "down"},
+            "192.0.2.11:80": {"state": "up"}
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "up"}
+    },
+    {
+      "id": "member-down",
+      "probe": {
+        "command": "LB::status",
+        "args": ["pool", "api_pool", "member", "192.0.2.10:80"],
+        "event": "LB_SELECTED",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {
+          "pools": {"api_pool": ["192.0.2.10:80", "192.0.2.11:80"]},
+          "backends": {
+            "192.0.2.10:80": {"state": "down"},
+            "192.0.2.11:80": {"state": "up"}
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "down"}
+    },
+    {
+      "id": "member-up",
+      "probe": {
+        "command": "LB::status",
+        "args": ["pool", "api_pool", "member", "192.0.2.11:80"],
+        "event": "LB_SELECTED",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {
+          "pools": {"api_pool": ["192.0.2.10:80", "192.0.2.11:80"]},
+          "backends": {
+            "192.0.2.10:80": {"state": "down"},
+            "192.0.2.11:80": {"state": "up"}
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "up"}
+    },
+    {
+      "id": "active-member-count",
+      "probe": {
+        "command": "active_members",
+        "args": ["api_pool"],
+        "event": "LB_SELECTED",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {
+          "pools": {"api_pool": ["192.0.2.10:80", "192.0.2.11:80"]},
+          "backends": {
+            "192.0.2.10:80": {"state": "down"},
+            "192.0.2.11:80": {"state": "up"}
+          }
+        }
+      },
+      "expect": {"status": "ok", "value": "1"}
+    },
+    {
+      "id": "unknown-status-selector-error",
+      "probe": {
+        "command": "LB::status",
+        "args": ["invalid", "api_pool"],
+        "event": "LB_SELECTED",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"pools": {"api_pool": ["192.0.2.10:80"]}}
+      },
+      "expect": {"status": "error", "tcl_return_code": 1, "error_contains": "supports pool"}
+    }
+  ]
+}

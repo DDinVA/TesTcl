@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "dhcpv6-controls-17.5",
+  "cases": [
+    {
+      "id": "client-fields-options-and-drop",
+      "scenario": {
+        "profiles": ["UDP"],
+        "irule": "when CLIENT_DATA { set ::fields [list [DHCPv6::hop_count] [DHCPv6::len] [DHCPv6::link_address] [DHCPv6::msg_type] [DHCPv6::peer_address] [DHCPv6::transaction_id]]; set ::option [DHCPv6::option 18]; DHCPv6::option delete 18; log local0. \"fields=$::fields option=$::option\"; DHCPv6::drop }",
+        "packets": [
+          {
+            "protocol": "dhcpv6",
+            "source": {"address": "fe80::1", "port": 546},
+            "destination": {"address": "ff02::1:2", "port": 547},
+            "msg_type": "SOLICIT",
+            "transaction_id": "010203",
+            "hop_count": 1,
+            "link_address": "2001:db8::1",
+            "peer_address": "fe80::1",
+            "options": {"18": "relay-id", "1": "client-id"},
+            "payload_hex": "01020304"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "CLIENT_DATA"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv6", "drop"], "equals": "1"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv6", "hop_count"], "equals": "1"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv6", "len"], "equals": "4"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv6", "link_address"], "equals": "2001:db8::1"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv6", "msg_type"], "equals": "SOLICIT"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv6", "options"], "equals": "1 client-id"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv6", "peer_address"], "equals": "fe80::1"},
+          {"path": ["trace", 0, "events", 2, "state", "dhcpv6", "transaction_id"], "equals": "010203"},
+          {"path": ["trace", 0, "dropped"], "equals": true}
+        ]
+      }
+    },
+    {
+      "id": "server-offer-rejection",
+      "scenario": {
+        "profiles": ["UDP"],
+        "irule": "when SERVER_DATA { log local0. \"offer=[DHCPv6::msg_type]/[DHCPv6::transaction_id]\"; DHCPv6::reject }",
+        "packets": [
+          {
+            "protocol": "dhcpv6",
+            "direction": "server_to_client",
+            "source": {"address": "2001:db8::1", "port": 547},
+            "destination": {"address": "fe80::1", "port": 546},
+            "msg_type": "REPLY",
+            "transaction_id": "0a0b0c",
+            "payload_hex": "070a0b0c"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 3, "event"], "equals": "SERVER_DATA"},
+          {"path": ["trace", 0, "events", 3, "state", "dhcpv6", "msg_type"], "equals": "REPLY"},
+          {"path": ["trace", 0, "events", 3, "state", "dhcpv6", "reject"], "equals": "1"},
+          {"path": ["trace", 0, "rejected"], "equals": true}
+        ]
+      }
+    }
+  ]
+}

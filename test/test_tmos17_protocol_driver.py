@@ -1,0 +1,1055 @@
+from __future__ import annotations
+
+import base64
+import importlib.util
+import json
+import socket
+import struct
+import sys
+import threading
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DRIVER_PATH = ROOT / "tools" / "tmos17-protocol-driver.py"
+SPEC = importlib.util.spec_from_file_location("tmos17_protocol_driver", DRIVER_PATH)
+assert SPEC is not None and SPEC.loader is not None
+driver = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = driver
+SPEC.loader.exec_module(driver)
+
+
+def test_dns_query_is_bounded_and_encodes_question() -> None:
+    payload = driver.build_dns_query({"qname": "example.com", "qtype": "AAAA"})
+    transaction_id, flags, qdcount, _, _, _ = struct.unpack(">HHHHHH", payload[:12])
+    assert transaction_id == 0x1705
+    assert flags == 0x0100
+    assert qdcount == 1
+    assert payload.endswith(b"\x07example\x03com\x00\x00\x1c\x00\x01")
+
+
+def test_mqtt_driver_builds_connect_then_publish() -> None:
+    payload = driver.build_mqtt_connect_publish(
+        {"client_id": "client-1", "topic": "f5/test", "payload": "ping"}
+    )
+    assert payload.startswith(b"\x10")
+    assert b"\x00\x04MQTT" in payload
+    assert b"\x00\x07f5/testping" in payload
+    encoded_payload = base64.b64encode(b"\x00mqtt").decode("ascii")
+    encoded = driver.build_mqtt_connect_publish(
+        {"topic": "f5/test", "payload_base64": encoded_payload}
+    )
+    assert encoded.endswith(b"\x00\x07f5/test\x00mqtt")
+
+
+def test_http_driver_builds_structured_request_and_body() -> None:
+    payload = driver.build_http_request(
+        {
+            "method": "POST",
+            "uri": "/api/test?mode=1",
+            "host": "example.test",
+            "headers": {"X-Request-ID": "abc"},
+            "body": "hello",
+        }
+    )
+    assert payload == (
+        b"POST /api/test?mode=1 HTTP/1.1\r\n"
+        b"Host: example.test\r\n"
+        b"X-Request-ID: abc\r\n"
+        b"Content-Length: 5\r\n"
+        b"Connection: close\r\n\r\nhello"
+    )
+    endpoint, payload, timeout = driver.build_payload(
+        {
+            "event": "HTTP_REQUEST",
+            "traffic_url": "tcp://192.0.2.20:8080",
+            "request": {"method": "GET", "uri": "/health", "host": "vip.test"},
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 8080)
+    assert payload.startswith(b"GET /health HTTP/1.1\r\nHost: vip.test\r\n")
+    assert timeout == 10.0
+
+
+def test_udp_driver_can_capture_one_bounded_response() -> None:
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind(("127.0.0.1", 0))
+    received: list[bytes] = []
+
+    def respond() -> None:
+        payload, address = server.recvfrom(1024)
+        received.append(payload)
+        server.sendto(b"\x00\xff", address)
+
+    thread = threading.Thread(target=respond)
+    thread.start()
+    try:
+        endpoint = driver.Endpoint("udp", "127.0.0.1", server.getsockname()[1])
+        response = driver.send_payload(
+            endpoint, b"probe", 2.0, capture_response=True
+        )
+    finally:
+        thread.join(timeout=2)
+        server.close()
+    assert received == [b"probe"]
+    assert response == {
+        "endpoint": {"scheme": "udp", "host": "127.0.0.1", "port": endpoint.port},
+        "payload_base64": "AP8=",
+        "bytes": 2,
+        "truncated": False,
+    }
+
+
+def test_payload_mode_reports_specialized_builder_selection() -> None:
+    assert driver.payload_mode(
+        {"event": "HTTP_REQUEST", "request": {"method": "GET"}}
+    ) == "http1"
+    assert driver.payload_mode(
+        {"event": "HTTP_REQUEST", "request": {"http2": {"active": True}}}
+    ) == "http2"
+    assert driver.payload_mode(
+        {"event": "DNS_REQUEST", "request": {}}
+    ) == "dns"
+    assert driver.payload_mode(
+        {"event": "CLIENT_DATA", "request": {"ldap": {}}}
+    ) == "ldap"
+    assert driver.payload_mode(
+        {"event": "CLIENT_ACCEPTED", "request": {}}
+    ) == "raw"
+    assert driver.payload_mode(
+        {
+            "event": "ACCESS_POLICY_AGENT_EVENT",
+            "profiles": ["TCP", "HTTP", "ACCESS"],
+            "request": {"method": "GET", "uri": "/policy", "host": "example.test"},
+        }
+    ) == "http1"
+
+
+def test_capability_report_is_machine_readable_and_mentions_raw_fallback() -> None:
+    report = driver.capability_report()
+    assert report["profile"] == "tmos-17.5"
+    modes = {item["mode"] for item in report["modes"]}
+    assert {"http1", "http2", "dns", "radius", "raw"} <= modes
+    raw = next(item for item in report["modes"] if item["mode"] == "raw")
+    assert "caller" in raw["stimulus"]
+
+
+def test_http_driver_rejects_header_injection_and_conflicting_body_sources() -> None:
+    with pytest.raises(driver.DriverError, match="line breaks"):
+        driver.build_http_request({"headers": {"X-Test": "ok\r\nInjected: yes"}})
+    with pytest.raises(driver.DriverError, match="repeated"):
+        driver.build_http_request({"headers": {"Host": "one", "host": "two"}})
+    with pytest.raises(driver.DriverError, match="body, payload, or payload_base64"):
+        driver.build_http_request(
+            {"body": "hello", "payload_base64": base64.b64encode(b"world").decode("ascii")}
+        )
+    with pytest.raises(driver.DriverError, match="ASCII"):
+        driver.build_http_request({"uri": "/café"})
+    with pytest.raises(driver.DriverError, match="header names"):
+        driver.build_http_request({"headers": {"X Bad": "value"}})
+    with pytest.raises(driver.DriverError, match="at most 128"):
+        driver.build_http_request(
+            {"headers": {f"X-{index}": "value" for index in range(128)}}
+        )
+
+
+def test_http2_driver_builds_h2c_request_with_hpack_and_metadata() -> None:
+    request = {
+        "method": "GET",
+        "uri": "/testcl/command",
+        "host": "h2.example.test",
+        "http2": {
+            "active": True,
+            "version": 2,
+            "stream_id": 3,
+            "pseudo_headers": {
+                ":authority": "h2.example.test",
+                ":method": "GET",
+                ":path": "/testcl/command",
+                ":scheme": "http",
+            },
+        },
+    }
+    payload = driver.build_http2_request(request)
+    assert payload.startswith(driver.HTTP2_CLIENT_PREFACE)
+    settings_offset = len(driver.HTTP2_CLIENT_PREFACE)
+    assert payload[settings_offset : settings_offset + 9] == b"\x00\x00\x00\x04\x00\x00\x00\x00\x00"
+    headers_offset = settings_offset + 9
+    assert payload[headers_offset + 3] == 0x1
+    assert payload[headers_offset + 4] == 0x5  # END_HEADERS | END_STREAM
+    assert int.from_bytes(payload[headers_offset + 5 : headers_offset + 9], "big") == 3
+    endpoint, encoded, timeout = driver.build_payload(
+        {
+            "event": "HTTP_REQUEST",
+            "traffic_url": "tcp://192.0.2.20:8080",
+            "request": request,
+        }
+    )
+    assert endpoint == driver.Endpoint("h2c", "192.0.2.20", 8080, "h2.example.test")
+    assert encoded == payload
+    assert timeout == 10.0
+
+
+def test_http2_driver_rejects_inactive_streams_and_forbidden_headers() -> None:
+    with pytest.raises(driver.DriverError, match="active"):
+        driver.build_http2_request({"http2": {"active": False}})
+    with pytest.raises(driver.DriverError, match="positive odd"):
+        driver.build_http2_request({"http2": {"active": True, "stream_id": 2}})
+    with pytest.raises(driver.DriverError, match="forbids"):
+        driver.build_http2_request(
+            {
+                "http2": {"active": True},
+                "headers": {"connection": "keep-alive"},
+            }
+        )
+    with pytest.raises(driver.DriverError, match="conflicts"):
+        driver.build_http2_request(
+            {
+                "method": "GET",
+                "uri": "/expected",
+                "http2": {"pseudo_headers": {":path": "/different"}},
+            }
+        )
+    with pytest.raises(driver.DriverError, match="valid scheme"):
+        driver.build_http2_request(
+            {"http2": {"pseudo_headers": {":scheme": "not a scheme"}}}
+        )
+
+
+def test_websocket_driver_builds_upgrade_and_masked_client_frame() -> None:
+    payload = driver.build_websocket_request(
+        {
+            "websocket": {
+                "uri": "/socket",
+                "host": "example.test",
+                "sec_websocket_key": "dGhlIHNhbXBsZSBub25jZQ==",
+                "frame_type": "text",
+                "payload": "hello",
+                "mask_hex": "01020304",
+            }
+        },
+        "WS_CLIENT_FRAME",
+    )
+    assert payload.startswith(
+        b"GET /socket HTTP/1.1\r\n"
+        b"Host: example.test\r\n"
+        b"Upgrade: websocket\r\n"
+        b"Connection: Upgrade\r\n"
+        b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        b"Sec-WebSocket-Version: 13\r\n\r\n"
+    )
+    assert payload.endswith(b"\x81\x85\x01\x02\x03\x04igohn")
+    endpoint, handshake, timeout = driver.build_payload(
+        {
+            "event": "WS_REQUEST",
+            "traffic_url": "tcp://192.0.2.20:8080",
+            "request": {"websocket": {"uri": "/socket"}},
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 8080)
+    assert handshake.endswith(b"Sec-WebSocket-Version: 13\r\n\r\n")
+    assert timeout == 10.0
+
+
+def test_websocket_driver_rejects_invalid_mask_and_control_frame() -> None:
+    with pytest.raises(driver.DriverError, match="mask_hex"):
+        driver.build_websocket_request(
+            {"websocket": {"mask_hex": "bad", "payload": "x"}},
+            "WS_CLIENT_FRAME",
+        )
+    with pytest.raises(driver.DriverError, match="control frames"):
+        driver.build_websocket_request(
+            {
+                "websocket": {
+                    "frame_type": "ping",
+                    "fin": False,
+                    "payload": "x",
+                }
+            },
+            "WS_CLIENT_FRAME",
+        )
+
+
+def test_rtsp_driver_builds_structured_request_and_payload() -> None:
+    payload = driver.build_rtsp_message(
+        {
+            "method": "DESCRIBE",
+            "uri": "rtsp://media.example/live",
+            "headers": {"CSeq": "7", "Accept": "application/sdp"},
+            "body": "ping",
+        },
+        "RTSP_REQUEST",
+    )
+    assert payload == (
+        b"DESCRIBE rtsp://media.example/live RTSP/1.0\r\n"
+        b"CSeq: 7\r\n"
+        b"Accept: application/sdp\r\n"
+        b"Content-Length: 4\r\n\r\nping"
+    )
+    endpoint, payload, timeout = driver.build_payload(
+        {
+            "event": "RTSP_REQUEST",
+            "traffic_url": "tcp://192.0.2.20:8554",
+            "request": {
+                "method": "OPTIONS",
+                "uri": "rtsp://media.example/live",
+                "headers": {"CSeq": "2"},
+            },
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 8554)
+    assert payload.startswith(b"OPTIONS rtsp://media.example/live RTSP/1.0\r\n")
+    assert timeout == 10.0
+
+
+def test_rtsp_driver_rejects_injection_and_ambiguous_sources() -> None:
+    with pytest.raises(driver.DriverError, match="line breaks"):
+        driver.build_rtsp_message(
+            {"headers": {"CSeq": "1\r\nInjected: yes"}}, "RTSP_REQUEST"
+        )
+    with pytest.raises(driver.DriverError, match="exactly one"):
+        driver.build_rtsp_message(
+            {"body": "body", "payload_base64": base64.b64encode(b"payload").decode()},
+            "RTSP_REQUEST",
+        )
+    with pytest.raises(driver.DriverError, match="ASCII bytes"):
+        driver.build_rtsp_message(
+            {"headers": {"X-Test": "café"}}, "RTSP_REQUEST"
+        )
+    with pytest.raises(driver.DriverError, match="supports RTSP_REQUEST"):
+        driver.build_rtsp_message({}, "RTSP_RESPONSE")
+
+
+def test_rtsp_driver_normalises_raw_message_line_endings() -> None:
+    payload = driver.build_rtsp_message(
+        {"message": "OPTIONS rtsp://media.example/live RTSP/1.0\nCSeq: 3\n\n"},
+        "RTSP_REQUEST",
+    )
+    assert payload == b"OPTIONS rtsp://media.example/live RTSP/1.0\r\nCSeq: 3\r\n\r\n"
+
+
+def test_icap_driver_builds_structured_and_raw_messages() -> None:
+    payload = driver.build_icap_message(
+        {
+            "icap": {
+                "method": "REQMOD",
+                "uri": "icap://icap.example.net/reqmod",
+                "headers": {"Host": "icap.example.net"},
+                "encapsulated": {
+                    "headers": "GET /inspect HTTP/1.1\r\nHost: origin.example\r\n\r\n",
+                    "body": "hello",
+                },
+            }
+        },
+        "ICAP_REQUEST",
+    )
+    assert payload.startswith(
+        b"REQMOD icap://icap.example.net/reqmod ICAP/1.0\r\n"
+        b"Host: icap.example.net\r\n"
+    )
+    assert b"Encapsulated: req-hdr=0, req-body=47\r\n" in payload
+    assert payload.endswith(b"5\r\nhello\r\n0\r\n\r\n")
+    headers_only = driver.build_icap_message(
+        {"icap": {"encapsulated": {"headers": "GET / HTTP/1.1\r\n\r\n"}}},
+        "ICAP_REQUEST",
+    )
+    assert b"Encapsulated: req-hdr=0, null-body=18\r\n" in headers_only
+    assert headers_only.endswith(b"GET / HTTP/1.1\r\n\r\n")
+    response = driver.build_icap_message(
+        {"icap": {"status": 204, "headers": {"ISTag": "v1"}}},
+        "ICAP_RESPONSE",
+    )
+    assert response == (
+        b"ICAP/1.0 204 OK\r\nISTag: v1\r\nEncapsulated: null-body=0\r\n\r\n"
+    )
+    raw = base64.b64encode(response).decode("ascii")
+    assert driver.build_icap_message(
+        {"icap": {"message_base64": raw}}, "ICAP_RESPONSE"
+    ) == response
+    endpoint, generated, timeout = driver.build_payload(
+        {
+            "event": "ICAP_REQUEST",
+            "traffic_url": "tcp://192.0.2.20:1344",
+            "request": {"icap": {"method": "OPTIONS"}},
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 1344)
+    assert generated.startswith(b"OPTIONS icap://example.test/reqmod ICAP/1.0\r\n")
+    assert timeout == 10.0
+
+
+def test_icap_driver_rejects_ambiguous_or_unsafe_fields() -> None:
+    with pytest.raises(driver.DriverError, match="mutually exclusive"):
+        driver.build_icap_message(
+            {"icap": {"message_hex": "00", "message_base64": "AA=="}},
+            "ICAP_REQUEST",
+        )
+    with pytest.raises(driver.DriverError, match="line breaks"):
+        driver.build_icap_message(
+            {"icap": {"headers": {"X-Test": "ok\r\nInjected: yes"}}},
+            "ICAP_REQUEST",
+        )
+    with pytest.raises(driver.DriverError, match="ASCII"):
+        driver.build_icap_message(
+            {"icap": {"uri": "icap://café.example/reqmod"}}, "ICAP_REQUEST"
+        )
+    with pytest.raises(driver.DriverError, match="cannot be combined"):
+        driver.build_icap_message(
+            {"icap": {"message_hex": "494341502f", "status": 200}},
+            "ICAP_RESPONSE",
+        )
+    with pytest.raises(driver.DriverError, match="generated"):
+        driver.build_icap_message(
+            {"icap": {"headers": {"Encapsulated": "null-body=0"}}},
+            "ICAP_REQUEST",
+        )
+    with pytest.raises(driver.DriverError, match="Latin-1"):
+        driver.build_icap_message(
+            {
+                "icap": {
+                    "encapsulated": {"headers": "X-Origin: €\r\n"},
+                }
+            },
+            "ICAP_REQUEST",
+        )
+
+
+def test_tds_driver_builds_sql_batch_and_accepts_raw_packets() -> None:
+    payload = driver.build_tds_message(
+        {"tds": {"sqltext": "select 1"}}, "TDS_REQUEST"
+    )
+    assert payload[:8] == b"\x01\x01\x00\x18\x00\x00\x01\x00"
+    assert payload[8:] == "select 1".encode("utf-16-le")
+    response = driver.build_tds_message({"tds": {}}, "TDS_RESPONSE")
+    assert response == b"\x04\x01\x00\x08\x00\x00\x01\x00"
+    raw = base64.b64encode(payload).decode("ascii")
+    assert driver.build_tds_message(
+        {"tds": {"message_base64": raw}}, "TDS_REQUEST"
+    ) == payload
+    endpoint, generated, timeout = driver.build_payload(
+        {
+            "event": "TDS_REQUEST",
+            "traffic_url": "tcp://192.0.2.20:1433",
+            "request": {"tds": {"sqltext": "select 1"}},
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 1433)
+    assert generated == payload
+    assert timeout == 10.0
+
+
+def test_tds_driver_rejects_ambiguous_or_wrong_direction() -> None:
+    with pytest.raises(driver.DriverError, match="mutually exclusive"):
+        driver.build_tds_message(
+            {"tds": {"message_hex": "00", "message_base64": "AA=="}},
+            "TDS_REQUEST",
+        )
+    with pytest.raises(driver.DriverError, match="server response"):
+        driver.build_tds_message({"tds": {"type": 4}}, "TDS_REQUEST")
+    assert driver.build_tds_message(
+        {"tds": {"type": 9, "payload_base64": "AQ=="}}, "TDS_REQUEST"
+    )[0] == 9
+    with pytest.raises(driver.DriverError, match="sqltext and payload_base64"):
+        driver.build_tds_message(
+            {"tds": {"sqltext": "select 1", "payload_base64": "AQ=="}},
+            "TDS_REQUEST",
+        )
+    with pytest.raises(driver.DriverError, match="end of a generated message"):
+        driver.build_tds_message(
+            {"tds": {"status": 0, "sqltext": "select 1"}}, "TDS_REQUEST"
+        )
+
+
+def test_fix_driver_builds_framed_tags_and_accepts_raw_bytes() -> None:
+    payload = driver.build_fix_message(
+        {
+            "fix": {
+                "begin_string": "FIX.4.4",
+                "tags": {
+                    "35": "D",
+                    "49": "CLIENT",
+                    "56": "TARGET",
+                    "11": "ORDER-1",
+                    "55": "AAPL",
+                },
+            }
+        },
+        "CLIENT_DATA",
+    )
+    assert payload == (
+        b"8=FIX.4.4\x019=44\x0135=D\x0149=CLIENT\x0156=TARGET\x0111=ORDER-1\x0155=AAPL\x0110=004\x01"
+    )
+    raw = base64.b64encode(payload).decode("ascii")
+    assert driver.build_fix_message(
+        {"fix": {"message_base64": raw}}, "SERVER_DATA"
+    ) == payload
+    endpoint, generated, timeout = driver.build_payload(
+        {
+            "event": "FIX_MESSAGE",
+            "traffic_url": "tcp://192.0.2.20:9876",
+            "request": {
+                "fix": {"tags": {"35": "0", "49": "CLIENT", "56": "TARGET"}}
+            },
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 9876)
+    assert generated.startswith(b"8=FIX.4.4\x019=")
+    assert timeout == 10.0
+
+
+def test_fix_driver_rejects_ambiguous_or_unsafe_fields() -> None:
+    with pytest.raises(driver.DriverError, match="mutually exclusive"):
+        driver.build_fix_message(
+            {"fix": {"message_hex": "00", "message_base64": "AA=="}},
+            "CLIENT_DATA",
+        )
+    with pytest.raises(driver.DriverError, match="message type"):
+        driver.build_fix_message(
+            {"fix": {"tags": {"49": "CLIENT", "56": "TARGET"}}},
+            "CLIENT_DATA",
+        )
+    with pytest.raises(driver.DriverError, match="SOH"):
+        driver.build_fix_message(
+            {"fix": {"tags": {"35": "D", "58": "bad\x01value"}}},
+            "CLIENT_DATA",
+        )
+    with pytest.raises(driver.DriverError, match="reserved"):
+        driver.build_fix_message(
+            {"fix": {"tags": {"8": "FIX.4.4", "35": "D"}}},
+            "CLIENT_DATA",
+        )
+
+
+def test_ftp_driver_builds_command_response_and_multiline_reply() -> None:
+    command = driver.build_ftp_message(
+        {"ftp": {"command": "USER alice"}}, "CLIENT_DATA"
+    )
+    assert command == b"USER alice\r\n"
+    response = driver.build_ftp_message(
+        {"ftp": {"response_code": 220, "lines": ["welcome", "ready"]}},
+        "SERVER_DATA",
+    )
+    assert response == b"220-welcome\r\n220 ready\r\n"
+    assert driver.build_ftp_message(
+        {"ftp": {"response_code": 220, "lines": ["welcome"]}},
+        "SERVER_DATA",
+    ) == b"220 welcome\r\n"
+    endpoint, payload, timeout = driver.build_payload(
+        {
+            "event": "CLIENT_DATA",
+            "traffic_url": "tcp://192.0.2.20:2121",
+            "request": {"ftp": {"command": "NOOP"}},
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 2121)
+    assert payload == b"NOOP\r\n"
+    assert timeout == 10.0
+
+
+def test_ftp_driver_rejects_wrong_direction_and_line_injection() -> None:
+    with pytest.raises(driver.DriverError, match="SERVER_DATA requires"):
+        driver.build_ftp_message(
+            {"ftp": {"command": "USER alice"}}, "SERVER_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="line breaks"):
+        driver.build_ftp_message(
+            {"ftp": {"command": "USER alice\r\nNOOP"}}, "CLIENT_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="response_code"):
+        driver.build_ftp_message(
+            {"ftp": {"response_code": 99, "text": "bad"}}, "SERVER_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="must not be blank"):
+        driver.build_ftp_message({"ftp": {"command": " "}}, "CLIENT_DATA")
+    with pytest.raises(driver.DriverError, match="cannot include response"):
+        driver.build_ftp_message(
+            {"ftp": {"command": "NOOP", "text": "ignored"}}, "CLIENT_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="valid UTF-8"):
+        driver.build_ftp_message(
+            {"ftp": {"response_code": 550, "text": "bad\ud800"}}, "SERVER_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="line exceeding"):
+        driver.build_ftp_message(
+            {"ftp": {"message": "X" * 65537}}, "CLIENT_DATA"
+        )
+
+
+def test_ldap_driver_builds_bind_search_and_response_messages() -> None:
+    bind = driver.build_ldap_message(
+        {"ldap": {"operation": "bindRequest", "message_id": 7, "dn": "cn=alice", "password": "secret"}},
+        "CLIENT_DATA",
+    )
+    assert bind == bytes.fromhex("301a020107a0150201030408636e3d616c6963658006736563726574")
+    search = driver.build_ldap_message(
+        {"ldap": {"operation": "searchRequest", "message_id": 8, "dn": "dc=example,dc=test", "scope": 2}},
+        "CLIENT_DATA",
+    )
+    assert search == bytes.fromhex("3037020108a332041264633d6578616d706c652c64633d746573740a01020a0100020100020100010100870b6f626a656374436c6173733000")
+    response = driver.build_ldap_message(
+        {"ldap": {"operation": "bindResponse", "message_id": 7, "result_code": 49, "diagnostic": "invalid credentials"}},
+        "SERVER_DATA",
+    )
+    assert response == bytes.fromhex("301f020107a11a0a013104000413696e76616c69642063726564656e7469616c73")
+    endpoint, payload, timeout = driver.build_payload(
+        {
+            "event": "CLIENT_DATA",
+            "traffic_url": "tcp://192.0.2.20:1389",
+            "request": {"ldap": {"operation": "unbindRequest", "message_id": 9}},
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 1389)
+    assert payload == bytes.fromhex("30050201094200")
+    assert timeout == 10.0
+
+
+def test_ldap_driver_rejects_invalid_direction_and_raw_message() -> None:
+    with pytest.raises(driver.DriverError, match="operation must be one of"):
+        driver.build_ldap_message(
+            {"ldap": {"operation": "bindRequest"}}, "SERVER_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="protocol operation is truncated"):
+        driver.build_ldap_message(
+            {"ldap": {"message_hex": "3003020101"}}, "CLIENT_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="cannot be combined"):
+        driver.build_ldap_message(
+            {"ldap": {"message_hex": "3003020101", "message_id": 1}}, "CLIENT_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="at most 2147483647"):
+        driver.build_ldap_message(
+            {"ldap": {"message_hex": "300702050080000000"}}, "CLIENT_DATA"
+        )
+    with pytest.raises(driver.DriverError, match="invalid protocol operation direction"):
+        driver.build_ldap_message(
+            {"ldap": {"message_hex": "301f020107a11a0a013104000413696e76616c69642063726564656e7469616c73"}},
+            "CLIENT_DATA",
+        )
+
+
+def test_starttls_driver_builds_imap_and_pop3_control_lines() -> None:
+    imap = driver.build_starttls_message(
+        {"starttls": {"protocol": "imap", "command": "A001 STARTTLS"}},
+        "CLIENT_DATA",
+    )
+    assert imap == b"A001 STARTTLS\r\n"
+    pop3 = driver.build_starttls_message(
+        {"starttls": {"protocol": "pop3", "message": "+OK Begin TLS"}},
+        "SERVER_DATA",
+    )
+    assert pop3 == b"+OK Begin TLS\r\n"
+    endpoint, payload, timeout = driver.build_payload(
+        {
+            "event": "CLIENT_DATA",
+            "traffic_url": "tcp://192.0.2.20:1110",
+            "request": {
+                "starttls": {"protocol": "pop3", "command": "STLS"}
+            },
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "192.0.2.20", 1110)
+    assert payload == b"STLS\r\n"
+    assert timeout == 10.0
+
+
+def test_starttls_driver_rejects_wrong_direction_and_invalid_command() -> None:
+    with pytest.raises(driver.DriverError, match="SERVER_DATA requires"):
+        driver.build_starttls_message(
+            {"starttls": {"protocol": "imap", "command": "A001 NOOP"}},
+            "SERVER_DATA",
+        )
+    with pytest.raises(driver.DriverError, match="not recognized"):
+        driver.build_starttls_message(
+            {"starttls": {"protocol": "pop3", "command": "BOGUS"}},
+            "CLIENT_DATA",
+        )
+
+
+def test_sip_driver_rejects_header_injection_and_adds_content_length() -> None:
+    payload = driver.build_sip_message(
+        {"method": "OPTIONS", "uri": "sip:test@example.com", "body": "hello"},
+        "SIP_REQUEST",
+    )
+    assert payload.endswith(b"Content-Length: 5\r\n\r\nhello")
+    with pytest.raises(driver.DriverError, match="line breaks"):
+        driver.build_sip_message(
+            {"headers": {"X-Test": "ok\r\nInjected: yes"}}, "SIP_REQUEST"
+        )
+    with pytest.raises(driver.DriverError, match="line breaks"):
+        driver.build_sip_message({"uri": "sip:ok\nInjected"}, "SIP_REQUEST")
+
+
+def test_sip_driver_supports_declared_tcp_transport() -> None:
+    endpoint, payload, timeout = driver.build_payload(
+        {
+            "event": "SIP_REQUEST",
+            "request": {
+                "transport": "tcp",
+                "destination": "tcp://127.0.0.1:5060",
+                "method": "OPTIONS",
+                "uri": "sip:test@example.com",
+            },
+        }
+    )
+    assert endpoint == driver.Endpoint("tcp", "127.0.0.1", 5060)
+    assert payload.startswith(b"OPTIONS sip:test@example.com SIP/2.0\r\n")
+    assert timeout == driver.DEFAULT_TIMEOUT
+    with pytest.raises(driver.DriverError, match="transport must be tcp or udp"):
+        driver.build_payload(
+            {
+                "event": "SIP_REQUEST",
+                "request": {"transport": "sctp"},
+            }
+        )
+    with pytest.raises(driver.DriverError, match="does not match"):
+        driver.build_payload(
+            {
+                "event": "SIP_REQUEST",
+                "request": {
+                    "transport": "tcp",
+                    "destination": "udp://127.0.0.1:5060",
+                },
+            }
+        )
+
+
+def test_sip_packet_scenario_preserves_tcp_framing(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[driver.Endpoint, bytes]] = []
+
+    def fake_send(
+        endpoint: driver.Endpoint,
+        payload: bytes,
+        timeout: float,
+        *,
+        shutdown_write: bool = False,
+    ) -> dict[str, object]:
+        calls.append((endpoint, payload))
+        assert timeout == driver.DEFAULT_TIMEOUT
+        assert shutdown_write is False
+        return {
+            "endpoint": {
+                "scheme": endpoint.scheme,
+                "host": endpoint.host,
+                "port": endpoint.port,
+            },
+            "payload_base64": "",
+            "bytes": 0,
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(driver, "_scenario_send", fake_send)
+    output = driver.run_scenario_trigger(
+        {
+            "operation": "scenario",
+            "traffic_url": "tcp://127.0.0.1:5060",
+            "scenario": {
+                "irule": "when SIP_REQUEST { return }",
+                "packets": [
+                    {
+                        "protocol": "sip",
+                        "transport": "tcp",
+                        "payload": "first",
+                    },
+                    {
+                        "protocol": "sip",
+                        "transport": "tcp",
+                        "payload": "second",
+                    },
+                ],
+            },
+        }
+    )
+    assert calls == [(driver.Endpoint("tcp", "127.0.0.1", 5060), b"firstsecond")]
+    assert output["packets_processed"] == 2
+
+
+def test_sip_packet_scenario_rejects_mixed_transports() -> None:
+    with pytest.raises(driver.DriverError, match="one transport"):
+        driver.run_scenario_trigger(
+            {
+                "operation": "scenario",
+                "traffic_url": "tcp://127.0.0.1:5060",
+                "scenario": {
+                    "irule": "when SIP_REQUEST { return }",
+                    "packets": [
+                        {"protocol": "sip", "transport": "tcp", "payload": "one"},
+                        {"protocol": "sip", "transport": "udp", "payload": "two"},
+                    ],
+                },
+            }
+        )
+
+
+def test_pcp_driver_builds_map_request_and_options() -> None:
+    payload = driver.build_pcp_request(
+        {
+            "pcp": {
+                "opcode": "map",
+                "lifetime": 3600,
+                "protocol": "tcp",
+                "client_addr": "192.0.2.10",
+                "internal_port": 22,
+                "suggested_ext_port": 40000,
+                "suggested_ext_addr": "0.0.0.0",
+                "third_party": True,
+                "third_party_int_addr": "192.0.2.11",
+                "prefer_failure": True,
+            }
+        }
+    )
+    assert payload[:4] == b"\x02\x01\x00\x00"
+    assert len(payload) == 84
+    assert payload[24:36] == b"\x00" * 12
+    assert payload[36] == 6
+    assert payload[-24:-20] == b"\x01\x00\x00\x10"
+    assert payload[-20:-4] == b"\x00" * 10 + b"\xff\xff\xc0\x00\x02\x0b"
+    assert payload[-4:] == b"\x02\x00\x00\x00"
+
+
+def test_pcp_driver_rejects_invalid_nested_fields() -> None:
+    with pytest.raises(driver.DriverError, match="field names"):
+        driver.build_pcp_request({"pcp": {1: "invalid"}})
+    with pytest.raises(driver.DriverError, match="unsupported field"):
+        driver.build_pcp_request({"pcp": {"unknown": 1}})
+    with pytest.raises(driver.DriverError, match="third_party_int_addr"):
+        driver.build_pcp_request({"pcp": {"third_party_int_addr": "192.0.2.11"}})
+    with pytest.raises(driver.DriverError, match="third_party"):
+        driver.build_pcp_request({"pcp": {"third_party": 0}})
+
+
+def test_radius_driver_builds_auth_request_with_typed_attributes() -> None:
+    payload = driver.build_radius_request(
+        {
+            "radius": {
+                "code": "Access-Request",
+                "id": 3,
+                "authenticator_hex": "11" * 16,
+                "avps": [
+                    {"code": "User-Name", "data": "alice"},
+                    {"code": "NAS-IP-Address", "type": "ip4", "data": "192.0.2.20"},
+                ],
+            }
+        },
+        "RADIUS_AAA_AUTH_REQUEST",
+    )
+    assert payload[:4] == b"\x01\x03\x00\x21"
+    assert payload[4:20] == b"\x11" * 16
+    assert payload[20:] == b"\x01\x07alice\x04\x06\xc0\x00\x02\x14"
+
+
+def test_radius_driver_rejects_event_code_mismatch_and_bad_attributes() -> None:
+    with pytest.raises(driver.DriverError, match="requires Access-Request"):
+        driver.build_radius_request(
+            {"radius": {"code": 4}}, "RADIUS_AAA_AUTH_REQUEST"
+        )
+    with pytest.raises(driver.DriverError, match="exactly one data source"):
+        driver.build_radius_request(
+            {"radius": {"avps": [{"code": 1}]}}, "RADIUS_AAA_AUTH_REQUEST"
+        )
+    with pytest.raises(driver.DriverError, match="255-byte limit"):
+        driver.build_radius_request(
+            {
+                "radius": {
+                    "avps": [
+                        {
+                            "code": 26,
+                            "vendor_id": 10415,
+                            "vendor_type": 1,
+                            "data": "x" * 248,
+                        }
+                    ]
+                }
+            },
+            "RADIUS_AAA_AUTH_REQUEST",
+        )
+
+
+def test_dns_driver_requires_boolean_recursion_flag() -> None:
+    with pytest.raises(driver.DriverError, match="recursion_desired"):
+        driver.build_dns_query({"qname": "example.com", "recursion_desired": "yes"})
+
+
+def test_driver_rejects_unencodable_unicode() -> None:
+    with pytest.raises(driver.DriverError, match="Unicode"):
+        driver.build_dns_query({"qname": "bad\ud800.example"})
+
+
+def test_raw_driver_payload_uses_base64_and_explicit_destination() -> None:
+    endpoint, payload, timeout = driver.build_payload(
+        {
+            "event": "GENERIC_DATA",
+            "traffic_url": "http://unused.example/",
+            "request": {
+                "destination": "udp://192.0.2.10:9999",
+                "payload_base64": base64.b64encode(b"\x00raw").decode("ascii"),
+                "timeout": 3,
+            },
+        }
+    )
+    assert endpoint == driver.Endpoint("udp", "192.0.2.10", 9999)
+    assert payload == b"\x00raw"
+    assert timeout == 3.0
+
+
+def test_send_payload_uses_udp_without_waiting_for_response() -> None:
+    fake_socket = MagicMock()
+    fake_socket.__enter__.return_value = fake_socket
+    with patch.object(
+        driver.socket,
+        "getaddrinfo",
+        return_value=[(driver.socket.AF_INET, driver.socket.SOCK_DGRAM, 0, "", ("192.0.2.10", 53))],
+    ), patch.object(driver.socket, "socket", return_value=fake_socket) as socket_factory:
+        driver.send_payload(driver.Endpoint("udp", "192.0.2.10", 53), b"dns", 2.0)
+    socket_factory.assert_called_once()
+    fake_socket.settimeout.assert_called_once_with(2.0)
+    fake_socket.sendto.assert_called_once_with(b"dns", ("192.0.2.10", 53))
+
+
+def test_read_request_rejects_non_finite_json() -> None:
+    class _Stream:
+        def read(self, _: int) -> bytes:
+            return json.dumps({"value": float("nan")}).encode("utf-8")
+
+    with pytest.raises(driver.DriverError, match="non-finite"):
+        driver.read_request(_Stream())
+
+
+def test_scenario_driver_runs_http_request_sequence_and_returns_comparable_output() -> None:
+    response = driver._response_record(
+        driver.Endpoint("http", "127.0.0.1", 8080),
+        b"HTTP/1.1 201 Created\r\nX-Test: yes\r\nContent-Length: 2\r\n\r\nok",
+        False,
+    )
+    trigger = {
+        "operation": "scenario",
+        "traffic_url": "http://127.0.0.1:8080",
+        "capture_wire": True,
+        "scenario": {
+            "profiles": ["TCP", "HTTP"],
+            "irule": "when HTTP_REQUEST { HTTP::respond 201 content ok }",
+            "requests": [{"method": "GET", "uri": "/health", "host": "vip.test"}],
+        },
+    }
+    with patch.object(driver, "_scenario_send", return_value=response) as send:
+        output = driver.run_scenario_trigger(trigger)
+    assert output["requests_processed"] == 1
+    assert output["results"][0]["response"] == {
+        "status": 201,
+        "reason": "Created",
+        "headers": {
+            "x-test": "yes",
+            "content-length": "2",
+        },
+        "body": "ok",
+        "truncated": False,
+    }
+    assert output["results"][0]["wire"] == response
+    sent_endpoint, sent_payload, sent_timeout = send.call_args.args
+    assert sent_endpoint == driver.Endpoint("http", "127.0.0.1", 8080)
+    assert sent_payload.startswith(b"GET /health HTTP/1.1\r\n")
+    assert sent_timeout == 10.0
+
+
+def test_scenario_driver_can_drive_a_real_local_http_socket() -> None:
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    received: list[bytes] = []
+
+    def serve_once() -> None:
+        connection, _address = server.accept()
+        with connection:
+            received.append(connection.recv(65536))
+            connection.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nhealthy"
+            )
+            connection.shutdown(socket.SHUT_WR)
+
+    thread = threading.Thread(target=serve_once)
+    thread.start()
+    try:
+        output = driver.run_scenario_trigger(
+            {
+                "operation": "scenario",
+                "traffic_url": f"http://127.0.0.1:{server.getsockname()[1]}",
+                "scenario": {
+                    "irule": "when HTTP_REQUEST { HTTP::respond 200 content healthy }",
+                    "requests": [{"method": "GET", "uri": "/health", "host": "vip.test"}],
+                },
+            }
+        )
+    finally:
+        thread.join(timeout=2)
+        server.close()
+    assert not thread.is_alive()
+    assert received == [
+        b"GET /health HTTP/1.1\r\nHost: vip.test\r\nConnection: close\r\n\r\n"
+    ]
+    assert output["results"][0]["response"]["status"] == 200
+    assert output["results"][0]["response"]["body"] == "healthy"
+
+
+def test_scenario_driver_replays_only_client_packet_directions_and_preserves_udp_responses() -> None:
+    first = driver._response_record(
+        driver.Endpoint("udp", "127.0.0.1", 5353), b"\x01\x02", False
+    )
+    second = driver._response_record(
+        driver.Endpoint("udp", "127.0.0.1", 5353), b"\x03", False
+    )
+    trigger = {
+        "operation": "scenario",
+        "traffic_url": "udp://127.0.0.1:5353",
+        "capture_wire": True,
+        "scenario": {
+            "irule": "when DNS_REQUEST { DNS::return }",
+            "packets": [
+                {"protocol": "udp", "direction": "client_to_server", "payload_hex": "0102"},
+                {"protocol": "udp", "direction": "server_to_client", "payload_hex": "ffff"},
+                {"protocol": "udp", "direction": "client_to_server", "payload_hex": "0304"},
+            ],
+        },
+    }
+    with patch.object(driver, "_scenario_send", side_effect=[first, second]) as send:
+        output = driver.run_scenario_trigger(trigger)
+    assert send.call_count == 2
+    assert [call.args[1] for call in send.call_args_list] == [b"\x01\x02", b"\x03\x04"]
+    assert output["packets_processed"] == 3
+    assert len(output["responses"]) == 2
+    assert output["wire_outputs"] == [
+        {
+            "protocol": "udp",
+            "direction": "server_to_client",
+            "packet_index": 0,
+            "payload_hex": "0102",
+            "bytes": 2,
+        },
+        {
+            "protocol": "udp",
+            "direction": "server_to_client",
+            "packet_index": 2,
+            "payload_hex": "03",
+            "bytes": 1,
+        },
+    ]
+
+
+def test_scenario_driver_maps_http2_packet_transport_to_h2c() -> None:
+    response = driver._response_record(
+        driver.Endpoint("h2c", "127.0.0.1", 8080), b"\x00\x00\x00", False
+    )
+    trigger = {
+        "operation": "scenario",
+        "traffic_url": "http://127.0.0.1:8080",
+        "scenario": {
+            "irule": "when HTTP_REQUEST { log local0. h2 }",
+            "packets": [
+                {"protocol": "http2", "direction": "client_to_server", "payload_hex": "00"}
+            ],
+        },
+    }
+    with patch.object(driver, "_scenario_send", return_value=response) as send:
+        driver.run_scenario_trigger(trigger)
+    assert send.call_args.args[0] == driver.Endpoint("h2c", "127.0.0.1", 8080)

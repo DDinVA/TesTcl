@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "access-controls-17.5",
+  "cases": [
+    {
+      "id": "session-policy-and-perflow-state",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "ACCESS"],
+        "access": {
+          "acl_result": "Allow",
+          "acl_lookup": ["/Common/web", "/Common/admin"],
+          "acl_matched": ["/Common/web"],
+          "policy_result": "allow",
+          "policy_agent_id": "logon-agent",
+          "policy_uri": true,
+          "flow_id": "flow-seeded",
+          "session_data": {"session.user.name": "alice"},
+          "perflow": {"perflow.custom": "seed-custom"}
+        },
+        "irule": "when CLIENT_ACCEPTED { set ::access_sid [ACCESS::session create -flow -timeout 600 -lifetime 3600]; ACCESS::session modify -sid $::access_sid -timeout 900 -remaining 450; ACCESS::flowid flow-updated; ACCESS::enable }\nwhen HTTP_REQUEST { ACCESS::acl eval /Common/web; set acl_values [list [ACCESS::acl lookup] [ACCESS::acl matched] [ACCESS::acl result]]; ACCESS::perflow set perflow.custom changed-custom; ACCESS::perflow set perflow.scratchpad scratch-value; set data_before [ACCESS::session data get -sid $::access_sid session.user.name]; ACCESS::session data set -sid $::access_sid session.testcl updated; set data_after [ACCESS::session data get -sid $::access_sid session.testcl]; set exists [ACCESS::session exists -sid $::access_sid -state_allow]; set key [ACCESS::user getkey alice-hash]; set sid_from_key [ACCESS::user getsid $key]; set uuid_sid [ACCESS::uuid getsid $::access_sid]; ACCESS::policy evaluate -sid $::access_sid -profile /Common/access session.role admin; set policy [ACCESS::policy result -sid $::access_sid]; ACCESS::log notice \"access-policy\"; log local0. \"acl=$acl_values data=$data_before/$data_after exists=$exists key=$key sid=$sid_from_key uuid=$uuid_sid policy=$policy flow=[ACCESS::flowid] perflow=[ACCESS::perflow get perflow.custom]\"; ACCESS::disable; ACCESS::respond 202 content accepted }",
+        "request": {"method": "GET", "host": "access.example", "uri": "/protected", "close_after": true}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "status"], "equals": 202},
+          {"path": ["results", 0, "response", "body"], "equals": "accepted"},
+          {"path": ["results", 0, "semantic", "access", "acl_evaluated"], "equals": ["/Common/web"]},
+          {"path": ["results", 0, "semantic", "access", "policy_result"], "equals": "allow"},
+          {"path": ["results", 0, "semantic", "access", "flow_id"], "equals": "flow-updated"},
+          {"path": ["results", 0, "semantic", "access", "request_enabled"], "equals": false},
+          {"path": ["results", 0, "semantic", "access", "perflow", "perflow.custom"], "equals": "changed-custom"},
+          {"path": ["results", 0, "semantic", "access", "perflow", "perflow.scratchpad"], "equals": "scratch-value"},
+          {"path": ["results", 0, "semantic", "access", "sessions", 0, "timeout"], "equals": 900},
+          {"path": ["results", 0, "semantic", "access", "sessions", 0, "remaining"], "equals": 450},
+          {"path": ["results", 0, "semantic", "access", "sessions", 0, "data", "session.testcl"], "equals": "updated"},
+          {"path": ["results", 0, "events_fired"], "equals": ["CLIENT_ACCEPTED", "ACCESS_SESSION_STARTED", "HTTP_REQUEST", "ACCESS_POLICY_COMPLETED", "CLIENT_CLOSED"]}
+        ]
+      }
+    },
+    {
+      "id": "saml-restriction-and-access-response",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "ACCESS"],
+        "access": {
+          "acl_result": "Reject",
+          "acl_lookup": ["/Common/restricted"],
+          "acl_matched": ["/Common/restricted"],
+          "policy_result": "redirect",
+          "saml": {
+            "authn": "<AuthnRequest>fixture</AuthnRequest>",
+            "assertion": "<Assertion>fixture</Assertion>",
+            "slo_req": "<LogoutRequest>fixture</LogoutRequest>",
+            "slo_resp": "<LogoutResponse>fixture</LogoutResponse>"
+          }
+        },
+        "irule": "when ACCESS_SAML_AUTHN { set authn [ACCESS::saml authn]; ACCESS::saml authn \"${authn}|seen\" }\nwhen ACCESS_SAML_ASSERTION { set assertion [ACCESS::saml assertion]; ACCESS::saml assertion \"${assertion}|seen\" }\nwhen ACCESS_SAML_SLO_REQ { set req [ACCESS::saml slo_req]; ACCESS::saml slo_req \"${req}|seen\" }\nwhen ACCESS_SAML_SLO_RESP { set resp [ACCESS::saml slo_resp]; ACCESS::saml slo_resp \"${resp}|seen\" }\nwhen HTTP_REQUEST { set authn [ACCESS::saml authn]; ACCESS::saml authn \"${authn}|seen\"; set assertion [ACCESS::saml assertion]; ACCESS::saml assertion \"${assertion}|seen\"; set req [ACCESS::saml slo_req]; ACCESS::saml slo_req \"${req}|seen\"; set resp [ACCESS::saml slo_resp]; ACCESS::saml slo_resp \"${resp}|seen\"; ACCESS::restrict_irule_events enable; ACCESS::restrict_irule_events disable; ACCESS::enable; ACCESS::acl eval /Common/restricted; ACCESS::respond 451 content blocked; ACCESS::disable; log local0. \"saml=[ACCESS::saml assertion] acl=[ACCESS::acl result]\" }",
+        "request": {"method": "GET", "host": "access.example", "uri": "/sso", "close_after": true}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "status"], "equals": 451},
+          {"path": ["results", 0, "response", "body"], "equals": "blocked"},
+          {"path": ["results", 0, "semantic", "access", "acl_result"], "equals": "Reject"},
+          {"path": ["results", 0, "semantic", "access", "restrict_irule_events"], "equals": false},
+          {"path": ["results", 0, "semantic", "access", "saml", "authn"], "equals": "<AuthnRequest>fixture</AuthnRequest>|seen"},
+          {"path": ["results", 0, "semantic", "access", "saml", "assertion"], "equals": "<Assertion>fixture</Assertion>|seen"},
+          {"path": ["results", 0, "semantic", "access", "saml", "slo_req"], "equals": "<LogoutRequest>fixture</LogoutRequest>|seen"},
+          {"path": ["results", 0, "semantic", "access", "saml", "slo_resp"], "equals": "<LogoutResponse>fixture</LogoutResponse>|seen"}
+        ]
+      }
+    },
+    {
+      "id": "ephemeral-auth-oauth-and-session-removal",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "ACCESS"],
+        "access": {"acl_result": "Allow", "policy_result": "allow"},
+        "irule": "when CLIENT_ACCEPTED { set ::access_sid [ACCESS::session create -flow] }\nwhen HTTP_REQUEST { set password [ACCESS::ephemeral-auth create -user bob -auth_cfg default_radius -sid $::access_sid]; set verified [ACCESS::ephemeral-auth verify -user bob -password $password -protocol http]; set token [ACCESS::oauth sign -payload claims -key jwk]; set key [ACCESS::user getkey bob-hash]; set sid [ACCESS::user getsid $key]; ACCESS::session remove -sid $::access_sid; set exists [ACCESS::session exists -sid $::access_sid]; log local0. \"verified=$verified token=$token key=$key sid=$sid exists=$exists\"; HTTP::respond 200 content \"verified=$verified token=$token key=$key sid=$sid exists=$exists\" }",
+        "request": {"method": "GET", "host": "access.example", "uri": "/ephemeral"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "status"], "equals": 200},
+          {"path": ["results", 0, "response", "body"], "equals": "verified=sid-1 token=mock-jws-1 key=userkey-bob-hash sid=bob-hash exists=FALSE"},
+          {"path": ["results", 0, "semantic", "access", "session_count"], "equals": 0},
+          {"path": ["results", 0, "events_fired"], "equals": ["CLIENT_ACCEPTED", "ACCESS_SESSION_STARTED", "HTTP_REQUEST", "ACCESS_SESSION_CLOSED"]}
+        ]
+      }
+    }
+  ]
+}

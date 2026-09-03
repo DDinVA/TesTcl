@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "fix-17.5",
+  "cases": [
+    {
+      "id": "raw-control-channel",
+      "scenario": {
+        "profiles": ["TCP", "FIX"],
+        "irule": "when FIX_HEADER { log local0. \"header=[FIX::tag get 35]/[FIX::tag get 11]\" } when FIX_MESSAGE { log local0. \"message=[FIX::tag get 49]/[FIX::tag get 55]\" }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "192.0.2.10", "port": 51000},
+            "destination": {"address": "198.51.100.20", "port": 9876},
+            "payload_hex": "383d4649582e342e3401393d37350133353d440134393d434c49454e540135363d5441524745540133343d320135323d32303236303833312d31323a30303a30300131313d4f524445522d310135353d4141504c0135343d310131303d31383201"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "FIX_HEADER"},
+          {"path": ["trace", 0, "events", 3, "event"], "equals": "FIX_MESSAGE"},
+          {"path": ["trace", 0, "events", 3, "state", "fix", "tags"], "equals": "\"8\" \"FIX.4.4\" \"9\" \"75\" \"35\" \"D\" \"49\" \"CLIENT\" \"56\" \"TARGET\" \"34\" \"2\" \"52\" \"20260831-12:00:00\" \"11\" \"ORDER-1\" \"55\" \"AAPL\" \"54\" \"1\" \"10\" \"182\""}
+        ]
+      }
+    }
+  ]
+}

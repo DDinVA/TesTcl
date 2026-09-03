@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "legacy-controls-17.5",
+  "cases": [
+    {
+      "id": "feature-and-http-log-controls-reset-by-connection",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST {\n  if {[HTTP::uri] eq {\u002ffirst}} {\n    DEMANGLE::enable\n    DEMANGLE::disable\n    ISESSION::deduplication disable\n    HTTPLOG::enable\n  } else {\n    HTTPLOG::disable\n  }\n}",
+        "requests": [
+          {"uri": "/first", "host": "log.example.com", "body": "abc", "response_body": "hello"},
+          {"uri": "/second", "host": "log.example.com", "body": "xy", "response_body": "plain"},
+          {"uri": "/third", "host": "log.example.com", "close_before": true, "response_body": "fresh"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "feature_controls", "demangle_enabled"], "equals": false},
+          {"path": ["results", 0, "semantic", "feature_controls", "isession_deduplication_enabled"], "equals": false},
+          {"path": ["results", 0, "semantic", "http_log", "enabled"], "equals": true},
+          {"path": ["results", 0, "http_log", 0, "phase"], "equals": "request"},
+          {"path": ["results", 1, "semantic", "http_log", "enabled"], "equals": false},
+          {"path": ["results", 1, "http_log"], "equals": []},
+          {"path": ["results", 2, "semantic", "feature_controls", "demangle_enabled"], "equals": true},
+          {"path": ["results", 2, "semantic", "feature_controls", "isession_deduplication_enabled"], "equals": true}
+        ]
+      }
+    },
+    {
+      "id": "ivs-entry-result-event-control",
+      "scenario": {
+        "profiles": ["IVS_ENTRY"],
+        "irule": "when IVS_ENTRY_REQUEST { IVS_ENTRY::result modified; log local0. \"result=[IVS_ENTRY::result]\" }",
+        "packets": [
+          {"protocol": "event", "event": "IVS_ENTRY_REQUEST", "state": {}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "semantic", "feature_controls", "ivs_entry_result"], "equals": "modified"},
+          {"path": ["trace", 0, "events", 0, "semantic", "feature_controls", "ivs_entry_results"], "equals": [{"event": "IVS_ENTRY_REQUEST", "result": "modified"}]}
+        ]
+      }
+    },
+    {
+      "id": "line-and-diagnostic-observability",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST {\n  set original [LINE::get]\n  LINE::set {rewritten line}\n  DIAG::test\n  log local0. \"line=$original/[LINE::get]\"\n}",
+        "request": {"uri": "/diagnostics"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "diagnostics", "line", "accesses"], "equals": [{"operation": "get", "value": ""}, {"operation": "set", "value": "rewritten line"}, {"operation": "get", "value": "rewritten line"}]},
+          {"path": ["results", 0, "events_fired"], "equals": ["HTTP_REQUEST"]}
+        ]
+      }
+    },
+    {
+      "id": "message-routing-and-generic-message-state",
+      "scenario": {
+        "profiles": ["MR"],
+        "irule": "when MR_INGRESS {\n  GENERICMESSAGE::message data {rewritten}\n  GENERICMESSAGE::peer name peer-a\n  GENERICMESSAGE::route add config tcp_tc host 192.0.2.10:5060\n  log local0. \"proto=[MESSAGE::proto] type=[MESSAGE::type] kind=[MESSAGE::field value kind] payload=[GENERICMESSAGE::message]\"\n}",
+        "packets": [
+          {"protocol": "mr", "proto": "generic", "type": "request", "fields": {"kind": "ping", "src": "client-a"}, "payload": "hello"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "state", "message", "proto"], "equals": "generic"},
+          {"path": ["trace", 0, "events", 2, "state", "message", "type"], "equals": "request"},
+          {"path": ["trace", 0, "events", 2, "state", "mr", "payload"], "equals": "rewritten"},
+          {"path": ["trace", 0, "events", 2, "state", "mr", "peer"], "equals": "peer-a"},
+          {"path": ["trace", 0, "events", 2, "state", "mr", "route_status"], "equals": "routed"},
+          {"path": ["trace", 0, "events", 2, "state", "message", "fields"], "equals": "\"kind\" \"ping\" \"src\" \"client-a\""}
+        ]
+      }
+    },
+    {
+      "id": "name-and-resolv-deterministic-callback",
+      "scenario": {
+        "profiles": ["TCP", "NAME"],
+        "irule": "when CLIENT_ACCEPTED {\n  set inline [RESOLV::lookup @/Common/r1 -a www.example.com]\n  NAME::lookup @/Common/r1 www.example.com\n  log local0. \"inline=$inline\"\n}\nwhen NAME_RESOLVED { log local0. \"addresses=[NAME::response] first=[NAME::response address 0]\" }",
+        "resolvers": {
+          "/Common/r1": [
+            {"name": "www.example.com.", "type": "A", "class": "IN", "ttl": 120, "rdata": "192.0.2.20"},
+            {"name": "www.example.com.", "type": "A", "class": "IN", "ttl": 120, "rdata": "192.0.2.21"}
+          ]
+        },
+        "packets": [
+          {"protocol": "event", "event": "CLIENT_ACCEPTED", "state": {}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "events_fired"], "equals": ["CLIENT_ACCEPTED", "NAME_RESOLVED"]},
+          {"path": ["trace", 0, "events", 0, "decisions"], "equals": ["dns resolv_lookup {{/Common/r1 www.example.com A {192.0.2.20 192.0.2.21}}}", "dns name_lookup {{/Common/r1 www.example.com A {192.0.2.20 192.0.2.21}}}"]}
+        ]
+      }
+    },
+    {
+      "id": "dhcp-version-probe",
+      "probe": {
+        "command": "DHCP::version",
+        "event": "CLIENT_DATA",
+        "profiles": ["UDP"],
+        "state": {"dhcpv6": {"msg_type": "REPLY"}}
+      },
+      "expect": {"status": "ok", "value": "6"}
+    },
+    {
+      "id": "ha-dslite-and-bigproto-state",
+      "scenario": {
+        "profiles": ["TCP"],
+        "irule": "when CLIENT_ACCEPTED {\n  set remote [DSLITE::remote_addr]\n  BIGPROTO::enable_fix_reset false\n  log local0. \"ha=[HA::status active] remote=$remote reset=[set ::state::bigproto::enable_fix_reset]\"\n}",
+        "packets": [
+          {"protocol": "event", "event": "CLIENT_ACCEPTED", "state": {"connection": {"remote_addr": "192.0.2.55"}, "ha": {"status": "active"}, "bigproto": {}}}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "state", "connection", "remote_addr"], "equals": "192.0.2.55"},
+          {"path": ["trace", 0, "events", 0, "state", "bigproto", "enable_fix_reset"], "equals": "0"},
+          {"path": ["trace", 0, "events", 0, "state", "ha", "status"], "equals": "active"}
+        ]
+      }
+    },
+    {
+      "id": "decompress-response-toggle",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_RESPONSE {\n  DECOMPRESS::disable response\n  DECOMPRESS::enable response\n  HTTP::header replace Content-Encoding gzip\n  HTTP::respond 200 content [binary decode base64 {H4sIAN03lmoAA0tJTc5PSU1RKEotLsjPK04FAJJLPqIQAAAA}]\n}",
+        "request": {"uri": "/compressed"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "compression", "decompress_applied"], "equals": true},
+          {"path": ["results", 0, "semantic", "compression", "decompress_applied_side"], "equals": "response"}
+        ]
+      }
+    }
+  ]
+}

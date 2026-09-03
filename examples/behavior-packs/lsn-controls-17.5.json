@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "lsn-controls-17.5",
+  "cases": [
+    {
+      "id": "translation-policy-and-mapping-entry-controls",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when CLIENT_ACCEPTED { LSN::address 198.51.100.10; LSN::port 45000; LSN::pool /Common/lsn_pool; LSN::persistence address-port 60; LSN::inbound disable; LSN::disable; set ::persistence_created [LSN::persistence-entry create 10.0.0.1:50000 198.51.100.10:45000]; set ::inbound_created [LSN::inbound-entry create /Common/lsn_pool 120 10.0.0.1:50000 198.51.100.10:45000 tcp]; set ::persistence_found [LSN::persistence-entry get 10.0.0.1:50000]; set ::inbound_found [LSN::inbound-entry get 198.51.100.10:45000 TCP]; log local0. \"p=$::persistence_created/$::persistence_found i=$::inbound_created/$::inbound_found\" }",
+        "packets": [
+          {
+            "protocol": "event",
+            "event": "CLIENT_ACCEPTED",
+            "state": {"lsn": {}}
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "event"], "equals": "CLIENT_ACCEPTED"},
+          {"path": ["trace", 0, "events", 0, "state", "lsn", "address"], "equals": "198.51.100.10"},
+          {"path": ["trace", 0, "events", 0, "state", "lsn", "port"], "equals": "45000"},
+          {"path": ["trace", 0, "events", 0, "state", "lsn", "pool"], "equals": "/Common/lsn_pool"},
+          {"path": ["trace", 0, "events", 0, "state", "lsn", "disabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "lsn", "inbound_disabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "lsn", "persistence_mode"], "equals": "address-port"},
+          {"path": ["trace", 0, "events", 0, "state", "lsn", "persistence_timeout"], "equals": "60"},
+          {"path": ["trace", 0, "events", 0, "state", "lsn", "persistence_entries"], "equals": "{client 10.0.0.1:50000 translation 198.51.100.10:45000 pool {} timeout 60}"},
+          {"path": ["trace", 0, "events", 0, "state", "lsn", "inbound_entries"], "equals": "{pool /Common/lsn_pool timeout 120 client 10.0.0.1:50000 translation 198.51.100.10:45000 protocol TCP route_domain 0}"}
+        ]
+      }
+    }
+  ]
+}

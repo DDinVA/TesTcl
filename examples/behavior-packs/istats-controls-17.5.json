@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "istats-controls-17.5",
+  "cases": [
+    {
+      "id": "persistent-measures-and-removal",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST {\n  set count_key {app counter requests}\n  set status_key {app string status}\n  set gauge_key {app /service gauge active}\n  if {[HTTP::path] eq \"/remove\"} {\n    ISTATS::remove $count_key\n  } else {\n    ISTATS::incr $count_key 1\n    ISTATS::set $status_key ready\n    ISTATS::set $gauge_key 3\n    ISTATS::incr $gauge_key -1\n  }\n  log local0. \"count=[ISTATS::get $count_key] status=[ISTATS::get $status_key] gauge=[ISTATS::get $gauge_key]\"\n}",
+        "requests": [
+          {"uri": "/one"},
+          {"uri": "/two"},
+          {"uri": "/remove"}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "istats"], "equals": {"count": 3, "values": {"app counter requests": "1", "app string status": "ready", "app /service gauge active": "2"}}},
+          {"path": ["results", 1, "semantic", "istats", "values", "app counter requests"], "equals": "2"},
+          {"path": ["results", 2, "semantic", "istats"], "equals": {"count": 2, "values": {"app string status": "ready", "app /service gauge active": "2"}}}
+        ]
+      }
+    }
+  ]
+}

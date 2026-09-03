@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "ssl-tls-17.5",
+  "cases": [
+    {
+      "id": "cipher-name",
+      "probe": {
+        "command": "SSL::cipher",
+        "args": ["name"],
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"cipher_name": "ECDHE-RSA-AES256-GCM-SHA384"}}
+      },
+      "expect": {"status": "ok", "value": "ECDHE-RSA-AES256-GCM-SHA384"}
+    },
+    {
+      "id": "cipher-bits",
+      "probe": {
+        "command": "SSL::cipher",
+        "args": ["bits"],
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"cipher_bits": 256}}
+      },
+      "expect": {"status": "ok", "value": "256"}
+    },
+    {
+      "id": "cipher-version",
+      "probe": {
+        "command": "SSL::cipher",
+        "args": ["version"],
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"cipher_version": "TLSv1.3"}}
+      },
+      "expect": {"status": "ok", "value": "TLSv1.3"}
+    },
+    {
+      "id": "cipher-clientlist",
+      "probe": {
+        "command": "SSL::cipher",
+        "args": ["clientlist"],
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"cipher_clientlist": "TLS_AES_128_GCM_SHA256"}}
+      },
+      "expect": {"status": "ok", "value": "TLS_AES_128_GCM_SHA256"}
+    },
+    {
+      "id": "mode",
+      "probe": {
+        "command": "SSL::mode",
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"handshake_done": 1}}
+      },
+      "expect": {"status": "ok", "value": "1"}
+    },
+    {
+      "id": "alpn",
+      "probe": {
+        "command": "SSL::alpn",
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"alpn": "h2"}}
+      },
+      "expect": {"status": "ok", "value": "h2"}
+    },
+    {
+      "id": "sni-name",
+      "probe": {
+        "command": "SSL::sni",
+        "args": ["name"],
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"sni": "api.example.com"}}
+      },
+      "expect": {"status": "ok", "value": "api.example.com"}
+    },
+    {
+      "id": "sni-required",
+      "probe": {
+        "command": "SSL::sni",
+        "args": ["required"],
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"sni_required": 1}}
+      },
+      "expect": {"status": "ok", "value": "1"}
+    },
+    {
+      "id": "verify-result",
+      "probe": {
+        "command": "SSL::verify_result",
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"verify_result": "OK"}}
+      },
+      "expect": {"status": "ok", "value": "OK"}
+    },
+    {
+      "id": "session-id",
+      "probe": {
+        "command": "SSL::sessionid",
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"session_id": "abc123"}}
+      },
+      "expect": {"status": "ok", "value": "abc123", "value_bytes": 6}
+    },
+    {
+      "id": "maximum-record-size",
+      "probe": {
+        "command": "SSL::maximum_record_size",
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"maximum_record_size": 16384}}
+      },
+      "expect": {"status": "ok", "value": "16384"}
+    },
+    {
+      "id": "certificate-count",
+      "probe": {
+        "command": "SSL::cert",
+        "args": ["count"],
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"cert_count": 0}}
+      },
+      "expect": {"status": "ok", "value": "0"}
+    },
+    {
+      "id": "certificate-mode",
+      "probe": {
+        "command": "SSL::cert",
+        "args": ["mode"],
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"cert_mode": "ignore"}}
+      },
+      "expect": {"status": "ok", "value": "ignore"}
+    },
+    {
+      "id": "extension-count",
+      "probe": {
+        "command": "SSL::extensions",
+        "args": ["count"],
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"extensions": "server_name application_layer_protocol_negotiation"}}
+      },
+      "expect": {"status": "ok", "value": "2"}
+    },
+    {
+      "id": "secure-renegotiation",
+      "probe": {
+        "command": "SSL::secure_renegotiation",
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"],
+        "state": {"tls_client": {"secure_renegotiation": 1}}
+      },
+      "expect": {"status": "ok", "value": "1"}
+    },
+    {
+      "id": "cipher-argument-error",
+      "probe": {
+        "command": "SSL::cipher",
+        "event": "CLIENTSSL_HANDSHAKE",
+        "profiles": ["TCP", "CLIENTSSL"]
+      },
+      "expect": {"status": "error", "tcl_return_code": 1, "error_contains": "requires bits"}
+    }
+  ]
+}

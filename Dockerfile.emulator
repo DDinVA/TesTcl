@@ -1,0 +1,73 @@
+# Lightweight 17.5 iRule emulator image.
+#
+# The tcl-lsp checkout is an external AGPL-3.0-or-later dependency.  It is
+# pinned for reproducible builds and remains present in the image as source.
+
+FROM python:3.13-slim-bookworm
+
+ARG TCL_LSP_COMMIT=cad24955f16953c2443902efd83d9f7f95d9b648
+ARG UV_VERSION=0.12.6
+
+RUN python -m pip install --no-cache-dir --disable-pip-version-check "uv==${UV_VERSION}" \
+    && uv venv --python /usr/local/bin/python /opt/venv
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes ca-certificates git tcl tk \
+    && git clone https://github.com/bitwisecook/tcl-lsp.git /opt/tcl-lsp \
+    && git -C /opt/tcl-lsp checkout --detach "${TCL_LSP_COMMIT}" \
+    && apt-get purge --auto-remove --yes git git-man \
+    && rm -rf /var/lib/apt/lists/* /opt/tcl-lsp/.git
+
+COPY tools/irule-emulator.py /opt/testcl/tools/irule-emulator.py
+COPY tools/tmos17-capture-batch.py /opt/testcl/tools/tmos17-capture-batch.py
+COPY tools/tmos17-capture-runner.py /opt/testcl/tools/tmos17-capture-runner.py
+COPY tools/tmos17-capture-assemble.py /opt/testcl/tools/tmos17-capture-assemble.py
+COPY tools/tmos17-capture-assemble-campaign.py /opt/testcl/tools/tmos17-capture-assemble-campaign.py
+COPY tools/tmos17-capture-verify-campaign.py /opt/testcl/tools/tmos17-capture-verify-campaign.py
+COPY tools/tmos17-capture-split.py /opt/testcl/tools/tmos17-capture-split.py
+COPY tools/tmos17-collector.py /opt/testcl/tools/tmos17-collector.py
+COPY tools/catalog-export.py /opt/testcl/tools/catalog-export.py
+COPY tools/catalog-worker.py /opt/testcl/tools/catalog-worker.py
+COPY tools/catalog-capture-batch.py /opt/testcl/tools/catalog-capture-batch.py
+COPY tools/catalog-smoke-check.py /opt/testcl/tools/catalog-smoke-check.py
+COPY tools/tmos17-capture-campaign.py /opt/testcl/tools/tmos17-capture-campaign.py
+COPY tools/tmos17-protocol-driver.py /opt/testcl/tools/tmos17-protocol-driver.py
+COPY tools/udp-fixture.py /opt/testcl/tools/udp-fixture.py
+COPY tools/evaluate-local.py /opt/testcl/tools/evaluate-local.py
+COPY tools/semantic-mocks.tcl /opt/testcl/tools/semantic-mocks.tcl
+COPY scripts/tmos17-protocol-driver.sh /opt/testcl/scripts/tmos17-protocol-driver.sh
+COPY tools/http2_wire.py /opt/testcl/tools/http2_wire.py
+COPY web/emulator.html /opt/testcl/web/emulator.html
+COPY examples/behavior-packs /opt/testcl/examples/behavior-packs
+COPY examples/golden-vectors /opt/testcl/examples/golden-vectors
+COPY examples/scenarios/live-http-17.5.json /opt/testcl/examples/scenarios/live-http-17.5.json
+COPY examples/scenarios/live-http2-17.5.json /opt/testcl/examples/scenarios/live-http2-17.5.json
+COPY examples/scenarios/live-http-upstream-17.5.json /opt/testcl/examples/scenarios/live-http-upstream-17.5.json
+COPY examples/scenarios/live-http-upstream-compose-17.5.json /opt/testcl/examples/scenarios/live-http-upstream-compose-17.5.json
+COPY examples/scenarios/live-dns-17.5.json /opt/testcl/examples/scenarios/live-dns-17.5.json
+COPY examples/scenarios/live-tcp-17.5.json /opt/testcl/examples/scenarios/live-tcp-17.5.json
+COPY examples/scenarios/live-tcp-pool-17.5.json /opt/testcl/examples/scenarios/live-tcp-pool-17.5.json
+COPY examples/scenarios/live-udp-17.5.json /opt/testcl/examples/scenarios/live-udp-17.5.json
+COPY examples/scenarios/live-udp-upstream-17.5.json /opt/testcl/examples/scenarios/live-udp-upstream-17.5.json
+COPY examples/scenarios/live-sip-17.5.json /opt/testcl/examples/scenarios/live-sip-17.5.json
+COPY examples/scenarios/live-sip-tcp-17.5.json /opt/testcl/examples/scenarios/live-sip-tcp-17.5.json
+COPY examples/scenarios/live-websocket-17.5.json /opt/testcl/examples/scenarios/live-websocket-17.5.json
+COPY examples/scenarios/live-websocket-upstream-17.5.json /opt/testcl/examples/scenarios/live-websocket-upstream-17.5.json
+COPY requirements-emulator.txt /opt/testcl/requirements-emulator.txt
+COPY LICENSE /opt/testcl/LICENSE
+COPY THIRD_PARTY.md /opt/testcl/THIRD_PARTY.md
+
+RUN uv pip install --python /opt/venv/bin/python --requirement /opt/testcl/requirements-emulator.txt \
+    && rm -rf /root/.cache/uv /usr/local/bin/uv
+
+ENV TCL_LSP_ROOT=/opt/tcl-lsp \
+    TCL_LSP_COMMIT=${TCL_LSP_COMMIT} \
+    PATH=/opt/venv/bin:${PATH} \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /work
+EXPOSE 8080 18080 18082/tcp 18082/udp 18083 18084
+HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=5 \
+    CMD python -c "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2); response.read(); response.close(); raise SystemExit(0 if response.status == 200 else 1)"
+ENTRYPOINT ["python", "/opt/testcl/tools/irule-emulator.py"]
+CMD ["--serve", "--host", "0.0.0.0"]

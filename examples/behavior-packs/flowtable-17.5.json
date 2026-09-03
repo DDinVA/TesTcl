@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "flowtable-17.5",
+  "cases": [
+    {
+      "id": "global-count",
+      "probe": {
+        "command": "FLOWTABLE::count",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"flowtable": {"count": {"global": 42}}}
+      },
+      "expect": {"status": "ok", "value": "42"}
+    },
+    {
+      "id": "virtual-count-by-name",
+      "probe": {
+        "command": "FLOWTABLE::count",
+        "args": ["virtual", "/Common/app"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"flowtable": {"count": {"virtual": {"/Common/app": 7}}}}
+      },
+      "expect": {"status": "ok", "value": "7"}
+    },
+    {
+      "id": "virtual-count-default",
+      "probe": {
+        "command": "FLOWTABLE::count",
+        "args": ["virtual"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"flowtable": {"count": {"virtual": {"default": 8}}}}
+      },
+      "expect": {"status": "ok", "value": "8"}
+    },
+    {
+      "id": "route-domain-count",
+      "probe": {
+        "command": "FLOWTABLE::count",
+        "args": ["route_domain", "0"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"flowtable": {"count": {"route_domain": {"0": 9}}}}
+      },
+      "expect": {"status": "ok", "value": "9"}
+    },
+    {
+      "id": "virtual-limit-by-name",
+      "probe": {
+        "command": "FLOWTABLE::limit",
+        "args": ["virtual", "/Common/app"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"flowtable": {"limit": {"virtual": {"/Common/app": 100}}}}
+      },
+      "expect": {"status": "ok", "value": "100"}
+    },
+    {
+      "id": "route-domain-limit-default",
+      "probe": {
+        "command": "FLOWTABLE::limit",
+        "args": ["route_domain"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"flowtable": {"limit": {"route_domain": {"default": 1000}}}}
+      },
+      "expect": {"status": "ok", "value": "1000"}
+    },
+    {
+      "id": "absent-entry-is-zero",
+      "probe": {
+        "command": "FLOWTABLE::count",
+        "args": ["virtual", "/Common/missing"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "scenario": {"flowtable": {"count": {"virtual": {"/Common/app": 7}}}}
+      },
+      "expect": {"status": "ok", "value": "0"}
+    }
+  ]
+}

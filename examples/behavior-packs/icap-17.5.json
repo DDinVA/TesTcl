@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "icap-17.5",
+  "cases": [
+    {
+      "id": "raw-reqmod-encapsulated-body",
+      "scenario": {
+        "profiles": ["TCP", "ICAP"],
+        "irule": "when ICAP_REQUEST { log local0. \"method=[ICAP::method] uri=[ICAP::uri] host=[ICAP::header value Host]\" ICAP::header add X-Raw yes }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "192.0.2.10", "port": 51000},
+            "destination": {"address": "198.51.100.20", "port": 1344},
+            "payload_hex": "5245514d4f4420696361703a2f2f696361702e6578616d706c652e6e65742f7265716d6f6420494341502f312e300d0a486f73743a20696361702e6578616d706c652e6e65740d0a456e63617073756c617465643a207265712d6864723d302c207265712d626f64793d34370d0a0d0a474554202f696e737065637420485454502f312e310d0a486f73743a206f726967696e2e6578616d706c650d0a0d0a350d0a68656c6c6f0d0a300d0a0d0a"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "ICAP_REQUEST"},
+          {"path": ["trace", 0, "events", 2, "state", "icap", "method"], "equals": "REQMOD"},
+          {"path": ["trace", 0, "events", 2, "state", "icap", "uri"], "equals": "icap://icap.example.net/reqmod"}
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,140 @@
+services:
+  emulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.emulator
+      args:
+        TCL_LSP_COMMIT: ${TCL_LSP_COMMIT:-cad24955f16953c2443902efd83d9f7f95d9b648}
+    command:
+      - --serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --data-plane-scenario
+      - /opt/testcl/examples/scenarios/live-http-17.5.json
+      - --data-plane-host
+      - 0.0.0.0
+      - --data-plane-port
+      - "18080"
+    ports:
+      - "8080:8080"
+      - "18080:18080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          response = urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2);
+          response.read();
+          response.close();
+          raise SystemExit(0 if response.status == 200 else 1)
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+
+  udp-backend:
+    profiles: ["udp"]
+    build:
+      context: .
+      dockerfile: Dockerfile.udp-fixture
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5353"
+      - --prefix
+      - "origin:"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import socket;
+          client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM);
+          client.settimeout(1);
+          client.sendto(b'health', ('127.0.0.1', 5353));
+          response = client.recv(64);
+          client.close();
+          raise SystemExit(0 if response == b'origin:health' else 1)
+      interval: 2s
+      timeout: 3s
+      start_period: 2s
+      retries: 10
+
+  emulator-udp:
+    profiles: ["udp"]
+    build:
+      context: .
+      dockerfile: Dockerfile.emulator
+      args:
+        TCL_LSP_COMMIT: ${TCL_LSP_COMMIT:-cad24955f16953c2443902efd83d9f7f95d9b648}
+    command:
+      - --serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --data-plane-scenario
+      - /opt/testcl/examples/scenarios/live-udp-upstream-17.5.json
+      - --data-plane-host
+      - 0.0.0.0
+      - --data-plane-port
+      - "18082"
+    depends_on:
+      udp-backend:
+        condition: service_healthy
+    ports:
+      - "${TESTCL_UDP_API_PORT:-8081}:8080"
+      - "${TESTCL_UDP_DATA_PORT:-18082}:18082/udp"
+
+  http-backend:
+    profiles: ["http"]
+    build:
+      context: .
+      dockerfile: Dockerfile.http-fixture
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          response = urllib.request.urlopen('http://127.0.0.1:18090/healthz', timeout=2);
+          response.read();
+          response.close();
+          raise SystemExit(0 if response.status == 200 else 1)
+      interval: 2s
+      timeout: 3s
+      start_period: 2s
+      retries: 10
+
+  emulator-http:
+    profiles: ["http"]
+    build:
+      context: .
+      dockerfile: Dockerfile.emulator
+      args:
+        TCL_LSP_COMMIT: ${TCL_LSP_COMMIT:-cad24955f16953c2443902efd83d9f7f95d9b648}
+    command:
+      - --serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --data-plane-scenario
+      - /opt/testcl/examples/scenarios/live-http-upstream-compose-17.5.json
+      - --data-plane-host
+      - 0.0.0.0
+      - --data-plane-port
+      - "18084"
+    depends_on:
+      http-backend:
+        condition: service_healthy
+    ports:
+      - "${TESTCL_HTTP_API_PORT:-8082}:8080"
+      - "${TESTCL_HTTP_DATA_PORT:-18084}:18084"

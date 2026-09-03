@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "ldap-17.5",
+  "cases": [
+    {
+      "id": "activation-default",
+      "probe": {
+        "command": "LDAP::activation_mode",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP", "LDAP"]
+      },
+      "expect": {"status": "ok", "value": "none"}
+    },
+    {
+      "id": "raw-bind-request-and-response",
+      "scenario": {
+        "profiles": ["TCP", "LDAP"],
+        "irule": "when CLIENT_DATA { log local0. ldap-client } when SERVER_DATA { log local0. ldap-server }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "source": {"address": "192.0.2.10", "port": 40000},
+            "destination": {"address": "198.51.100.20", "port": 389},
+            "payload_hex": "301a020107a015020103"
+          },
+          {
+            "protocol": "tcp",
+            "source": {"address": "192.0.2.10", "port": 40000},
+            "destination": {"address": "198.51.100.20", "port": 389},
+            "payload_hex": "0408636e3d616c6963658006736563726574"
+          },
+          {
+            "protocol": "tcp",
+            "direction": "server_to_client",
+            "source": {"address": "198.51.100.20", "port": 389},
+            "destination": {"address": "192.0.2.10", "port": 40000},
+            "payload_hex": "301f020107a11a0a013104000413696e76616c69642063726564656e7469616c73"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 1, "events", 2, "state", "ldap", "operation"], "equals": "bindRequest"},
+          {"path": ["trace", 1, "events", 2, "state", "ldap", "message_id"], "equals": "7"},
+          {"path": ["trace", 2, "events", 2, "state", "ldap", "operation"], "equals": "bindResponse"},
+          {"path": ["trace", 2, "events", 2, "state", "ldap", "result_code"], "equals": "49"}
+        ]
+      }
+    }
+  ]
+}

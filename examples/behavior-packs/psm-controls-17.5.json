@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "psm-controls-17.5",
+  "cases": [
+    {
+      "id": "protocol-security-module-connection-controls",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST { if {[HTTP::uri] eq \"/disable\"} { PSM::FTP::disable; PSM::HTTP::disable; PSM::SMTP::disable } elseif {[HTTP::uri] eq \"/enable\"} { PSM::FTP::enable; PSM::HTTP::enable; PSM::SMTP::enable } }",
+        "requests": [
+          {"uri": "/disable"},
+          {"uri": "/enable"},
+          {"uri": "/fresh", "new_connection": true}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "psm", "FTP"], "equals": false},
+          {"path": ["results", 0, "semantic", "psm", "HTTP"], "equals": false},
+          {"path": ["results", 0, "semantic", "psm", "SMTP"], "equals": false},
+          {"path": ["results", 1, "semantic", "psm", "FTP"], "equals": true},
+          {"path": ["results", 1, "semantic", "psm", "HTTP"], "equals": true},
+          {"path": ["results", 1, "semantic", "psm", "SMTP"], "equals": true},
+          {"path": ["results", 2, "semantic", "psm", "FTP"], "equals": true},
+          {"path": ["results", 2, "semantic", "psm", "HTTP"], "equals": true},
+          {"path": ["results", 2, "semantic", "psm", "SMTP"], "equals": true}
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "adapt-controls-17.5",
+  "cases": [
+    {
+      "id": "dynamic-request-context-controls",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "REQUESTADAPT", "RESPONSEADAPT"],
+        "adapt": {
+          "request": {"result": "modified"},
+          "response": {"result": "noop"}
+        },
+        "irule": "when HTTP_REQUEST { set ::static_ctx [ADAPT::context_static request]; set ::request_ctx [ADAPT::context_create request_ctx]; ADAPT::select $::request_ctx /Common/request-ivs; ADAPT::enable $::request_ctx true; ADAPT::allow $::request_ctx http_v1.0 false; ADAPT::preview_size $::request_ctx 128; ADAPT::service_down_action $::request_ctx drop; ADAPT::timeout $::request_ctx 5000; log local0. \"static=[ADAPT::context_name $::static_ctx] request=[ADAPT::context_name $::request_ctx] enabled=[ADAPT::enable $::request_ctx] allow=[ADAPT::allow $::request_ctx http_v1.0] preview=[ADAPT::preview_size $::request_ctx] action=[ADAPT::service_down_action $::request_ctx] timeout=[ADAPT::timeout $::request_ctx]\" }\nwhen ADAPT_REQUEST_HEADERS { log local0. \"header-result=[ADAPT::result]\" }\nwhen ADAPT_REQUEST_RESULT { log local0. \"current=[ADAPT::context_name [ADAPT::context_current]] result=[ADAPT::result]\"; ADAPT::result bypass }",
+        "request": {"method": "GET", "host": "adapt.example", "uri": "/inspect"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "status"], "equals": 200},
+          {"path": ["results", 0, "semantic", "adapt", "current_handle"], "equals": "dynamic:request:1"},
+          {"path": ["results", 0, "semantic", "adapt", "contexts", 2, "name"], "equals": "request_ctx"},
+          {"path": ["results", 0, "semantic", "adapt", "contexts", 2, "enabled"], "equals": true},
+          {"path": ["results", 0, "semantic", "adapt", "contexts", 2, "allow_http_v1"], "equals": false},
+          {"path": ["results", 0, "semantic", "adapt", "contexts", 2, "preview_size"], "equals": 128},
+          {"path": ["results", 0, "semantic", "adapt", "contexts", 2, "result"], "equals": "bypass"},
+          {"path": ["results", 0, "semantic", "adapt", "contexts", 2, "select"], "equals": "/Common/request-ivs"},
+          {"path": ["results", 0, "semantic", "adapt", "contexts", 2, "service_down_action"], "equals": "drop"},
+          {"path": ["results", 0, "semantic", "adapt", "contexts", 2, "timeout"], "equals": 5000}
+        ]
+      }
+    },
+    {
+      "id": "result-and-context-cleanup",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "REQUESTADAPT"],
+        "adapt": {"request": {"result": "modified"}},
+        "irule": "when HTTP_REQUEST { set ::cleanup_ctx [ADAPT::context_create cleanup_ctx]; ADAPT::select $::cleanup_ctx /Common/cleanup-ivs }\nwhen ADAPT_REQUEST_RESULT { set ::current [ADAPT::context_current]; set ::current_name [ADAPT::context_name $::current]; set ::before [ADAPT::result]; ADAPT::result bypass; ADAPT::context_delete_all; log local0. \"current=$::current_name before=$::before remaining=[ADAPT::context_current]\" }",
+        "request": {"method": "GET", "host": "adapt.example", "uri": "/cleanup"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "status"], "equals": 200},
+          {"path": ["results", 0, "semantic", "adapt", "current_handle"], "equals": "static:request"},
+          {"path": ["results", 0, "semantic", "adapt", "current_side"], "equals": "request"},
+          {"path": ["results", 0, "semantic", "adapt", "contexts", 0, "handle"], "equals": "static:request"},
+          {"path": ["results", 0, "semantic", "adapt", "contexts", 1, "handle"], "equals": "static:response"}
+        ]
+      }
+    }
+  ]
+}

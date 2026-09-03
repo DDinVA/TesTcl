@@ -1,0 +1,11 @@
+{
+  "tmos_version": "17.5",
+  "profiles": ["SIP"],
+  "irule": "when SIP_REQUEST { if {[SIP::method] eq \"OPTIONS\"} { SIP::respond 200 OK } }",
+  "live_data_plane": {
+    "protocol": "sip",
+    "transport": "tcp",
+    "read_timeout": 1.0,
+    "max_read_bytes": 2097152
+  }
+}

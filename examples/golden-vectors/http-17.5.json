@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "http-17.5-reference-contracts",
+  "source": "checked-in-reference-contract",
+  "vectors": [
+    {
+      "id": "http-request-pool-selection",
+      "operation": "scenario",
+      "input": {
+        "profiles": ["TCP", "HTTP"],
+        "pools": {"api_pool": ["10.0.0.10:80"]},
+        "irule": "when HTTP_REQUEST { pool api_pool }",
+        "requests": [
+          {"host": "api.example.com", "uri": "/health"}
+        ]
+      },
+      "reference": {
+        "source": "tmos-17.5-reference-contract",
+        "output": {
+          "status": "ok",
+          "results": [
+            {
+              "request": {"uri": "/health"},
+              "pool": "api_pool"
+            }
+          ]
+        }
+      },
+      "comparisons": [
+        {
+          "label": "request URI",
+          "actual_path": ["results", 0, "request", "uri"],
+          "reference_path": ["results", 0, "request", "uri"]
+        },
+        {
+          "label": "selected pool",
+          "actual_path": ["results", 0, "pool"],
+          "reference_path": ["results", 0, "pool"]
+        }
+      ]
+    },
+    {
+      "id": "http-host-command-probe",
+      "operation": "command_probe",
+      "input": {
+        "command": "HTTP::host",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {
+          "host": "api.example.com",
+          "uri": "/health"
+        }
+      },
+      "reference": {
+        "source": "tmos-17.5-reference-contract",
+        "output": {
+          "execution": {
+            "status": "ok",
+            "value": "api.example.com",
+            "event": {"fired": true}
+          }
+        }
+      },
+      "comparisons": [
+        {
+          "label": "command status",
+          "actual_path": ["execution", "status"],
+          "reference_path": ["execution", "status"]
+        },
+        {
+          "label": "HTTP host",
+          "actual_path": ["execution", "value"],
+          "reference_path": ["execution", "value"]
+        },
+        {
+          "label": "event fired",
+          "actual_path": ["execution", "event", "fired"],
+          "reference_path": ["execution", "event", "fired"]
+        }
+      ]
+    },
+    {
+      "id": "http-interleaved-flow-isolation",
+      "operation": "scenario",
+      "input": {
+        "profiles": ["TCP", "HTTP"],
+        "pools": {
+          "a_pool": ["10.0.0.10:80"],
+          "b_pool": ["10.0.0.11:80"]
+        },
+        "irule": "when HTTP_REQUEST { if {[HTTP::host] eq \"a.example\"} { pool a_pool } else { pool b_pool } }",
+        "packets": [
+          {
+            "protocol": "http",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.1", "port": 50001},
+            "destination": {"address": "192.0.2.10", "port": 80},
+            "host": "a.example",
+            "uri": "/a"
+          },
+          {
+            "protocol": "http",
+            "direction": "client_to_server",
+            "source": {"address": "10.0.0.2", "port": 50002},
+            "destination": {"address": "192.0.2.10", "port": 80},
+            "host": "b.example",
+            "uri": "/b"
+          },
+          {
+            "protocol": "http",
+            "direction": "server_to_client",
+            "source": {"address": "192.0.2.10", "port": 80},
+            "destination": {"address": "10.0.0.1", "port": 50001},
+            "status": 200,
+            "response_body": "a-response"
+          },
+          {
+            "protocol": "http",
+            "direction": "server_to_client",
+            "source": {"address": "192.0.2.10", "port": 80},
+            "destination": {"address": "10.0.0.2", "port": 50002},
+            "status": 200,
+            "response_body": "b-response"
+          }
+        ]
+      },
+      "reference": {
+        "source": "tmos-17.5-reference-contract",
+        "output": {
+          "flow_mode": "isolated",
+          "flow_count": 2,
+          "flows": [{"packet_count": 2}],
+          "results": [{"pool": "a_pool"}, {"pool": "b_pool"}]
+        }
+      },
+      "comparisons": [
+        {
+          "label": "flow mode",
+          "actual_path": ["flow_mode"],
+          "reference_path": ["flow_mode"]
+        },
+        {
+          "label": "flow count",
+          "actual_path": ["flow_count"],
+          "reference_path": ["flow_count"]
+        },
+        {
+          "label": "first flow packet count",
+          "actual_path": ["flows", 0, "packet_count"],
+          "reference_path": ["flows", 0, "packet_count"]
+        },
+        {
+          "label": "first flow pool",
+          "actual_path": ["results", 0, "pool"],
+          "reference_path": ["results", 0, "pool"]
+        },
+        {
+          "label": "second flow pool",
+          "actual_path": ["results", 1, "pool"],
+          "reference_path": ["results", 1, "pool"]
+        }
+      ]
+    }
+  ]
+}

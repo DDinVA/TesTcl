@@ -1,0 +1,4 @@
+# HPACK decoder used by the bounded HTTP/2 wire adapter.
+cryptography==45.0.7
+hpack==4.1.0
+lsprotocol==2025.0.0

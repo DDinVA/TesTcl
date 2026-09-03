@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "plugin-controls-17.5",
+  "cases": [
+    {
+      "id": "wam-vdi-and-websso-request-controls",
+      "scenario": {
+        "profiles": ["HTTP", "FASTHTTP", "ACCESS"],
+        "irule": "when HTTP_REQUEST {\n  WAM::disable\n  VDI::disable\n  WEBSSO::disable\n  WEBSSO::select /Common/owa_sso\n  WEBSSO::enable\n  WAM::enable\n  VDI::enable\n  log local0. \"wam=[set ::state::wam::enabled] vdi=[set ::state::vdi::enabled] websso=[set ::state::websso::enabled]/[set ::state::websso::selected]\"\n}",
+        "packets": [
+          {
+            "protocol": "event",
+            "event": "HTTP_REQUEST",
+            "state": {
+              "wam": {},
+              "vdi": {},
+              "websso": {}
+            }
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "wam", "enabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "vdi", "enabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "websso", "enabled"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "websso", "selected"], "equals": "/Common/owa_sso"}
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "profile-17.5",
+  "cases": [
+    {"id": "profile-access", "probe": {"command": "PROFILE::access", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-antifraud", "probe": {"command": "PROFILE::antifraud", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-auth", "probe": {"command": "PROFILE::auth", "args": ["testcl", "testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-avr", "probe": {"command": "PROFILE::avr", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-clientssl-disabled", "probe": {"command": "PROFILE::clientssl", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "value": "0", "event_fired": true}},
+    {"id": "profile-diameter", "probe": {"command": "PROFILE::diameter", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-exchange", "probe": {"command": "PROFILE::exchange", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-exists-http", "probe": {"command": "PROFILE::exists", "args": ["HTTP"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "value": "1", "event_fired": true}},
+    {"id": "profile-fastl4-disabled", "probe": {"command": "PROFILE::fastL4", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "value": "0", "event_fired": true}},
+    {"id": "profile-fasthttp-disabled", "probe": {"command": "PROFILE::fasthttp", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "value": "0", "event_fired": true}},
+    {"id": "profile-ftp", "probe": {"command": "PROFILE::ftp", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-http-enabled", "probe": {"command": "PROFILE::http", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "value": "1", "event_fired": true}},
+    {"id": "profile-httpclass", "probe": {"command": "PROFILE::httpclass", "args": ["default"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-httpcompression", "probe": {"command": "PROFILE::httpcompression", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-list", "probe": {"command": "PROFILE::list", "args": ["auth"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-oneconnect", "probe": {"command": "PROFILE::oneconnect", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-persist", "probe": {"command": "PROFILE::persist", "args": ["instance", "testcl", "testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-serverssl-disabled", "probe": {"command": "PROFILE::serverssl", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "value": "0", "event_fired": true}},
+    {"id": "profile-stream", "probe": {"command": "PROFILE::stream", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-tcp-enabled", "probe": {"command": "PROFILE::tcp", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "value": "1", "event_fired": true}},
+    {"id": "profile-tftp", "probe": {"command": "PROFILE::tftp", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-udp-disabled", "probe": {"command": "PROFILE::udp", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "value": "0", "event_fired": true}},
+    {"id": "profile-vdi", "probe": {"command": "PROFILE::vdi", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-webacceleration", "probe": {"command": "PROFILE::webacceleration", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}},
+    {"id": "profile-xml", "probe": {"command": "PROFILE::xml", "args": ["testcl"], "event": "HTTP_REQUEST", "profiles": ["TCP", "HTTP"]}, "expect": {"status": "ok", "event_fired": true}}
+  ]
+}

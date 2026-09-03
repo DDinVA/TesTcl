@@ -1,0 +1,631 @@
+name: CI
+
+on:
+  push:
+    branches: [master, release, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testcl-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  TCL_LSP_COMMIT: cad24955f16953c2443902efd83d9f7f95d9b648
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out TesTcl
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.12.6
+          enable-cache: true
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Install Tcl/Tk runtime
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes tcl tk
+
+      - name: Check out pinned tcl-lsp
+        env:
+          TCL_LSP_ROOT: ${{ runner.temp }}/tcl-lsp
+        run: |
+          git clone --quiet https://github.com/bitwisecook/tcl-lsp.git "$TCL_LSP_ROOT"
+          git -C "$TCL_LSP_ROOT" checkout --quiet --detach "$TCL_LSP_COMMIT"
+
+      - name: Install Python dependencies
+        run: uv sync --python 3.13 --dev
+
+      - name: Run Python integration suite
+        env:
+          TCL_LSP_ROOT: ${{ runner.temp }}/tcl-lsp
+          PYTHONPATH: .
+        run: uv run --python 3.13 pytest -q
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out TesTcl
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.12.6
+          enable-cache: true
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Build the portable emulator image
+        run: |
+          docker compose config --quiet
+          docker build --build-arg TCL_LSP_COMMIT="$TCL_LSP_COMMIT" -f Dockerfile.emulator -t testcl-irule-emulator:ci .
+
+      - name: Smoke test the portable container harness
+        run: |
+          TESTCL_IMAGE=testcl-irule-emulator:ci ./scripts/container-smoke-17.5.sh --no-build
+
+      - name: Smoke test the portable emulator image
+        run: |
+          container_name="testcl-irule-emulator-ci-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-$$"
+          raw_container_name="${container_name}-raw"
+          sip_container_name="${container_name}-sip"
+          trap 'docker rm --force "$container_name" "$raw_container_name" "$sip_container_name" >/dev/null 2>&1 || true' EXIT
+          retry_curl() {
+            local output_path="$1"
+            local attempt
+            shift
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent --show-error "$@" >"$output_path"; then
+                return 0
+              fi
+              if [ "$attempt" -lt 30 ]; then
+                sleep 1
+              fi
+            done
+            docker logs "$container_name"
+            return 1
+          }
+          docker run --detach --name "$container_name" \
+            --publish 18080:8080 --publish 18081:18080 \
+            testcl-irule-emulator:ci \
+            --serve --host 0.0.0.0 --port 8080 \
+            --data-plane-scenario /opt/testcl/examples/scenarios/live-http-17.5.json \
+            --data-plane-host 0.0.0.0 --data-plane-port 18080
+          retry_curl /tmp/testcl-healthz.json http://127.0.0.1:18080/healthz
+          grep -F 'tmos-17.5' /tmp/testcl-healthz.json
+          retry_curl /tmp/testcl-workbench.html http://127.0.0.1:18080/
+          grep -F 'TesTcl · TMOS 17.5 iRule workbench' /tmp/testcl-workbench.html
+          grep -F 'Evaluate local chunk' /tmp/testcl-workbench.html
+          retry_curl /tmp/testcl-capability-chunk.json \
+            'http://127.0.0.1:18080/v1/capabilities?namespace=HTTP&target_status=available-in-tmos-17.5&limit=2'
+          jq -n --slurpfile chunk /tmp/testcl-capability-chunk.json \
+            '{chunk: $chunk[0], mode: "both", variants: 1}' \
+            >/tmp/testcl-catalog-evaluation-request.json
+          retry_curl /tmp/testcl-catalog-evaluation.json -X POST \
+            -H 'Content-Type: application/json' \
+            --data-binary @/tmp/testcl-catalog-evaluation-request.json \
+            http://127.0.0.1:18080/v1/catalog-chunk-evaluate
+          grep -F '"status":"ok"' /tmp/testcl-catalog-evaluation.json
+          grep -F '"target_command_count":2' /tmp/testcl-catalog-evaluation.json
+          retry_curl /tmp/testcl-data-plane.txt http://127.0.0.1:18081/health
+          grep -F 'hello from the modeled origin' /tmp/testcl-data-plane.txt
+
+          docker run --rm testcl-irule-emulator:ci --behavior-coverage >/tmp/testcl-behavior-coverage.json
+          grep -F '"target_f5_command_count":989' /tmp/testcl-behavior-coverage.json
+          grep -F '"covered_command_count":989' /tmp/testcl-behavior-coverage.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/aaa-17.5.json \
+            >/tmp/testcl-aaa-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-aaa-pack.json
+          grep -F '"case_count":3' /tmp/testcl-aaa-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/access-controls-17.5.json \
+            >/tmp/testcl-access-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-access-controls-pack.json
+          grep -F '"case_count":3' /tmp/testcl-access-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/adapt-controls-17.5.json \
+            >/tmp/testcl-adapt-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-adapt-controls-pack.json
+          grep -F '"case_count":2' /tmp/testcl-adapt-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/gtp-controls-17.5.json \
+            >/tmp/testcl-gtp-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-gtp-controls-pack.json
+          grep -F '"case_count":2' /tmp/testcl-gtp-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/sctp-controls-17.5.json \
+            >/tmp/testcl-sctp-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-sctp-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-sctp-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/ike-controls-17.5.json \
+            >/tmp/testcl-ike-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-ike-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-ike-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/psc-controls-17.5.json \
+            >/tmp/testcl-psc-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-psc-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-psc-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/dhcpv6-controls-17.5.json \
+            >/tmp/testcl-dhcpv6-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-dhcpv6-controls-pack.json
+          grep -F '"case_count":2' /tmp/testcl-dhcpv6-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/bwc-controls-17.5.json \
+            >/tmp/testcl-bwc-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-bwc-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-bwc-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/lsn-controls-17.5.json \
+            >/tmp/testcl-lsn-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-lsn-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-lsn-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/ws-controls-17.5.json \
+            >/tmp/testcl-ws-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-ws-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-ws-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/xlat-controls-17.5.json \
+            >/tmp/testcl-xlat-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-xlat-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-xlat-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/pcp-controls-17.5.json \
+            >/tmp/testcl-pcp-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-pcp-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-pcp-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/radius-controls-17.5.json \
+            >/tmp/testcl-radius-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-radius-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-radius-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/stats-controls-17.5.json \
+            >/tmp/testcl-stats-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-stats-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-stats-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/datagram-controls-17.5.json \
+            >/tmp/testcl-datagram-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-datagram-controls-pack.json
+          grep -F '"case_count":2' /tmp/testcl-datagram-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/pem-controls-17.5.json \
+            >/tmp/testcl-pem-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-pem-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-pem-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/tap-controls-17.5.json \
+            >/tmp/testcl-tap-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-tap-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-tap-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/istats-controls-17.5.json \
+            >/tmp/testcl-istats-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-istats-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-istats-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/link-controls-17.5.json \
+            >/tmp/testcl-link-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-link-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-link-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/oneconnect-controls-17.5.json \
+            >/tmp/testcl-oneconnect-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-oneconnect-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-oneconnect-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/policy-controls-17.5.json \
+            >/tmp/testcl-policy-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-policy-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-policy-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/rewrite-controls-17.5.json \
+            >/tmp/testcl-rewrite-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-rewrite-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-rewrite-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/connector-controls-17.5.json \
+            >/tmp/testcl-connector-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-connector-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-connector-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/plugin-controls-17.5.json \
+            >/tmp/testcl-plugin-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-plugin-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-plugin-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/avr-controls-17.5.json \
+            >/tmp/testcl-avr-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-avr-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-avr-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/utility-controls-17.5.json \
+            >/tmp/testcl-utility-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-utility-controls-pack.json
+          grep -F '"case_count":3' /tmp/testcl-utility-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/starttls-controls-17.5.json \
+            >/tmp/testcl-starttls-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-starttls-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-starttls-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/resolver-dnsmsg-controls-17.5.json \
+            >/tmp/testcl-resolver-dnsmsg-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-resolver-dnsmsg-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-resolver-dnsmsg-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/ipfix-controls-17.5.json \
+            >/tmp/testcl-ipfix-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-ipfix-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-ipfix-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/crypto-data-controls-17.5.json \
+            >/tmp/testcl-crypto-data-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-crypto-data-controls-pack.json
+          grep -F '"case_count":3' /tmp/testcl-crypto-data-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/integration-controls-17.5.json \
+            >/tmp/testcl-integration-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-integration-controls-pack.json
+          grep -F '"case_count":3' /tmp/testcl-integration-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/protocol-controls-17.5.json \
+            >/tmp/testcl-protocol-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-protocol-controls-pack.json
+          grep -F '"case_count":8' /tmp/testcl-protocol-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/legacy-controls-17.5.json \
+            >/tmp/testcl-legacy-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-legacy-controls-pack.json
+          grep -F '"case_count":8' /tmp/testcl-legacy-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/global-legacy-controls-17.5.json \
+            >/tmp/testcl-global-legacy-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-global-legacy-controls-pack.json
+          grep -F '"case_count":52' /tmp/testcl-global-legacy-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/stateful-global-controls-17.5.json \
+            >/tmp/testcl-stateful-global-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-stateful-global-controls-pack.json
+          grep -F '"case_count":18' /tmp/testcl-stateful-global-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/remaining-target-controls-17.5.json \
+            >/tmp/testcl-remaining-target-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-remaining-target-controls-pack.json
+          grep -F '"case_count":3' /tmp/testcl-remaining-target-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/am-controls-17.5.json \
+            >/tmp/testcl-am-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-am-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-am-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/eca-controls-17.5.json \
+            >/tmp/testcl-eca-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-eca-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-eca-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/dosl7-controls-17.5.json \
+            >/tmp/testcl-dosl7-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-dosl7-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-dosl7-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/flow-controls-17.5.json \
+            >/tmp/testcl-flow-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-flow-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-flow-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/crypto-controls-17.5.json \
+            >/tmp/testcl-crypto-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-crypto-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-crypto-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/nsh-controls-17.5.json \
+            >/tmp/testcl-nsh-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-nsh-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-nsh-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/psm-controls-17.5.json \
+            >/tmp/testcl-psm-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-psm-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-psm-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/compress-controls-17.5.json \
+            >/tmp/testcl-compress-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-compress-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-compress-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/html-controls-17.5.json \
+            >/tmp/testcl-html-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-html-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-html-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/auth-controls-17.5.json \
+            >/tmp/testcl-auth-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-auth-controls-pack.json
+          grep -F '"case_count":4' /tmp/testcl-auth-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/cache-controls-17.5.json \
+            >/tmp/testcl-cache-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-cache-controls-pack.json
+          grep -F '"case_count":3' /tmp/testcl-cache-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/x509-controls-17.5.json \
+            >/tmp/testcl-x509-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-x509-controls-pack.json
+          grep -F '"case_count":1' /tmp/testcl-x509-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/dhcpv4-controls-17.5.json \
+            >/tmp/testcl-dhcpv4-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-dhcpv4-controls-pack.json
+          grep -F '"case_count":2' /tmp/testcl-dhcpv4-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/category-17.5.json \
+            >/tmp/testcl-category-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-category-pack.json
+          grep -F '"case_count":6' /tmp/testcl-category-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/http2-17.5.json \
+            >/tmp/testcl-http2-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-http2-pack.json
+          grep -F '"case_count":11' /tmp/testcl-http2-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/route-17.5.json \
+            >/tmp/testcl-route-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-route-pack.json
+          grep -F '"case_count":10' /tmp/testcl-route-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/tmm-17.5.json \
+            >/tmp/testcl-tmm-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-tmm-pack.json
+          grep -F '"case_count":5' /tmp/testcl-tmm-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/flowtable-17.5.json \
+            >/tmp/testcl-flowtable-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-flowtable-pack.json
+          grep -F '"case_count":7' /tmp/testcl-flowtable-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/classification-17.5.json \
+            >/tmp/testcl-classification-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-classification-pack.json
+          grep -F '"case_count":10' /tmp/testcl-classification-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/profile-17.5.json \
+            >/tmp/testcl-profile-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-profile-pack.json
+          grep -F '"case_count":25' /tmp/testcl-profile-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/mr-17.5.json \
+            >/tmp/testcl-mr-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-mr-pack.json
+          grep -F '"case_count":23' /tmp/testcl-mr-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/http-edge-17.5.json \
+            >/tmp/testcl-http-edge-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-http-edge-pack.json
+          grep -F '"case_count":23' /tmp/testcl-http-edge-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/mqtt-17.5.json \
+            >/tmp/testcl-mqtt-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-mqtt-pack.json
+          grep -F '"case_count":29' /tmp/testcl-mqtt-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/tcp-controls-17.5.json \
+            >/tmp/testcl-tcp-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-tcp-controls-pack.json
+          grep -F '"case_count":2' /tmp/testcl-tcp-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/ssl-controls-17.5.json \
+            >/tmp/testcl-ssl-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-ssl-controls-pack.json
+          grep -F '"case_count":2' /tmp/testcl-ssl-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/antifraud-controls-17.5.json \
+            >/tmp/testcl-antifraud-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-antifraud-controls-pack.json
+          grep -F '"case_count":2' /tmp/testcl-antifraud-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/asm-controls-17.5.json \
+            >/tmp/testcl-asm-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-asm-controls-pack.json
+          grep -F '"case_count":2' /tmp/testcl-asm-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/botdefense-controls-17.5.json \
+            >/tmp/testcl-botdefense-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-botdefense-controls-pack.json
+          grep -F '"case_count":2' /tmp/testcl-botdefense-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/diameter-controls-17.5.json \
+            >/tmp/testcl-diameter-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-diameter-controls-pack.json
+          grep -F '"case_count":3' /tmp/testcl-diameter-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/ip-controls-17.5.json \
+            >/tmp/testcl-ip-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-ip-controls-pack.json
+          grep -F '"case_count":2' /tmp/testcl-ip-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/lb-controls-17.5.json \
+            >/tmp/testcl-lb-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-lb-controls-pack.json
+          grep -F '"case_count":5' /tmp/testcl-lb-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/tcp-introspection-17.5.json \
+            >/tmp/testcl-tcp-introspection-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-tcp-introspection-pack.json
+          grep -F '"case_count":15' /tmp/testcl-tcp-introspection-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/dns-controls-17.5.json \
+            >/tmp/testcl-dns-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-dns-controls-pack.json
+          grep -F '"case_count":21' /tmp/testcl-dns-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-pack /opt/testcl/examples/behavior-packs/ssl-lifecycle-controls-17.5.json \
+            >/tmp/testcl-ssl-lifecycle-controls-pack.json
+          grep -F '"status":"passed"' /tmp/testcl-ssl-lifecycle-controls-pack.json
+          grep -F '"case_count":3' /tmp/testcl-ssl-lifecycle-controls-pack.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-candidates --namespace HTTP --limit 1 \
+            >/tmp/testcl-behavior-candidates.json
+          # The checked-in 17.5 packs currently cover every target command, so
+          # a full-pack candidate request is intentionally an empty chunk.
+          grep -F '"candidate_command_count":0' /tmp/testcl-behavior-candidates.json
+          grep -F '"plan_observation_count":0' /tmp/testcl-behavior-candidates.json
+          docker run --rm testcl-irule-emulator:ci \
+            --behavior-sweep --namespace HTTP --offset 7 --limit 1 --variants 4 \
+            >/tmp/testcl-behavior-sweep.json
+          grep -F '"candidate_command_count":0' /tmp/testcl-behavior-sweep.json
+          grep -F '"variant_count":0' /tmp/testcl-behavior-sweep.json
+          grep -F '"executed_count":0' /tmp/testcl-behavior-sweep.json
+
+          docker run --rm --entrypoint sh testcl-irule-emulator:ci -c '
+            set -e
+            python /opt/testcl/tools/catalog-export.py \
+              --output-dir /tmp/testcl-catalog-worker \
+              --chunk-size 3 \
+              --namespace HTTP \
+              --target-status available-in-tmos-17.5 >/tmp/testcl-catalog-export.json
+            python /opt/testcl/tools/catalog-worker.py \
+              --chunk /tmp/testcl-catalog-worker/chunks/chunk-0000.json \
+              --mode both --variants 1 \
+              --output /tmp/testcl-catalog-worker-report.json >/tmp/testcl-catalog-worker.json
+            python /opt/testcl/tools/catalog-capture-batch.py \
+              --catalog-dir /tmp/testcl-catalog-worker \
+              --output-dir /tmp/testcl-catalog-capture-batch \
+              --variants 1 --capture-id ci-exported >/tmp/testcl-catalog-batch.json
+            python /opt/testcl/tools/catalog-smoke-check.py \
+              --catalog-manifest /tmp/testcl-catalog-worker/manifest.json \
+              --worker-report /tmp/testcl-catalog-worker.json \
+              --batch-report /tmp/testcl-catalog-batch.json
+          '
+
+          docker run --detach --name "$raw_container_name" \
+            --publish 18082:18082 \
+            testcl-irule-emulator:ci \
+            --data-plane --host 0.0.0.0 --port 18082 \
+            --scenario /opt/testcl/examples/scenarios/live-tcp-17.5.json
+          set +e
+          uv run --python 3.13 python - <<'PY'
+          import socket
+          import time
+
+          expected = b"container-tcp"
+          deadline = time.monotonic() + 30
+          last_error = RuntimeError("no connection attempt completed")
+          while time.monotonic() < deadline:
+              received = bytearray()
+              try:
+                  with socket.create_connection(("127.0.0.1", 18082), timeout=2) as client:
+                      client.settimeout(2)
+                      client.sendall(expected)
+                      while len(received) < len(expected):
+                          chunk = client.recv(len(expected) - len(received))
+                          if not chunk:
+                              break
+                          received.extend(chunk)
+                  if bytes(received) == expected:
+                      print(bytes(received).decode("ascii"))
+                      break
+                  last_error = RuntimeError(
+                      f"response mismatch: {bytes(received)!r}"
+                  )
+              except OSError as exc:
+                  last_error = exc
+              time.sleep(0.5)
+          else:
+              raise SystemExit(f"raw TCP smoke failed: {last_error!r}")
+          PY
+          raw_status=$?
+          set -e
+          if [ "$raw_status" -ne 0 ]; then
+            docker logs "$raw_container_name"
+            exit "$raw_status"
+          fi
+
+          docker run --detach --name "$sip_container_name" \
+            --publish 18083:18083 \
+            testcl-irule-emulator:ci \
+            --data-plane --host 0.0.0.0 --port 18083 \
+            --scenario /opt/testcl/examples/scenarios/live-sip-tcp-17.5.json
+          set +e
+          uv run --python 3.13 python - <<'PY'
+          import socket
+          import time
+
+          request = (
+              b"OPTIONS sip:service.example.com SIP/2.0\r\n"
+              b"Via: SIP/2.0/TCP client.example.com;branch=z9\r\n"
+              b"From: <sip:alice@example.com>;tag=1\r\n"
+              b"To: <sip:service.example.com>\r\n"
+              b"Call-ID: ci-sip-tcp\r\n"
+              b"CSeq: 1 OPTIONS\r\n"
+              b"Content-Length: 0\r\n\r\n"
+          )
+          expected = b"SIP/2.0 200 OK\r\n"
+          deadline = time.monotonic() + 30
+          last_error = RuntimeError("no connection attempt completed")
+          while time.monotonic() < deadline:
+              try:
+                  with socket.create_connection(("127.0.0.1", 18083), timeout=2) as client:
+                      client.settimeout(2)
+                      midpoint = 37
+                      client.sendall(request[:midpoint])
+                      client.sendall(request[midpoint:])
+                      received_buffer = bytearray()
+                      while b"\r\n\r\n" not in received_buffer:
+                          chunk = client.recv(4096)
+                          if not chunk:
+                              break
+                          received_buffer.extend(chunk)
+                          if len(received_buffer) > 1 << 20:
+                              raise RuntimeError("SIP response exceeded the smoke-test limit")
+                      received = bytes(received_buffer)
+                  if received.startswith(expected) and received.endswith(
+                      b"Content-Length: 0\r\n\r\n"
+                  ):
+                      print(received.decode("utf-8"))
+                      break
+                  last_error = RuntimeError(f"response mismatch: {received!r}")
+              except OSError as exc:
+                  last_error = exc
+              time.sleep(0.5)
+          else:
+              raise SystemExit(f"SIP/TCP smoke failed: {last_error!r}")
+          PY
+          sip_status=$?
+          set -e
+          if [ "$sip_status" -ne 0 ]; then
+            docker logs "$sip_container_name"
+            exit "$sip_status"
+          fi
+
+      # GitHub-hosted Docker UDP delivery is runner-sensitive. Keep this probe
+      # visible, but do not block the release on a datagram that never reaches
+      # the container; the same Compose path is a required local checkpoint.
+      - name: Advisory smoke test the Compose UDP upstream workbench
+        continue-on-error: true
+        run: |
+          uv venv --python 3.13 --allow-existing .venv
+          TESTCL_UDP_CLIENT_IN_COMPOSE=1 ./scripts/live-udp-upstream-compose-smoke.sh
+
+      - name: Smoke test the Compose HTTP upstream workbench
+        run: |
+          uv venv --python 3.13 --allow-existing .venv
+          ./scripts/live-http-upstream-compose-smoke.sh

@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "aaa-17.5",
+  "cases": [
+    {
+      "id": "auth-and-accounting-success",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "aaa": {"auth_result": "OK", "acct_result": "INPROGRESS"},
+        "irule": "when HTTP_REQUEST { set auth_id [AAA::auth_send /Common/aaa testcl testcl-secret]; set acct_id [AAA::acct_send /Common/aaa user-name testcl]; HTTP::respond 200 content \"auth=[AAA::auth_result $auth_id] acct=[AAA::acct_result $acct_id]\" }",
+        "request": {"uri": "/aaa"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "status"], "equals": 200},
+          {"path": ["results", 0, "response", "body"], "equals": "auth=OK acct=INPROGRESS"},
+          {"path": ["results", 0, "decisions", 0], "equals": "aaa auth_send {{aaa-1 /Common/aaa testcl 1}}"},
+          {"path": ["results", 0, "decisions", 1], "equals": "aaa acct_send {{aaa-2 /Common/aaa}}"}
+        ]
+      }
+    },
+    {
+      "id": "auth-and-accounting-failure-results",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "aaa": {"auth_result": "FAIL", "acct_result": "ERROR"},
+        "irule": "when HTTP_REQUEST { set auth_id [AAA::auth_send /Common/aaa testcl]; set acct_id [AAA::acct_send /Common/aaa user-name testcl]; HTTP::respond 200 content \"auth=[AAA::auth_result $auth_id] acct=[AAA::acct_result $acct_id]\" }",
+        "request": {"uri": "/aaa"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "body"], "equals": "auth=FAIL acct=ERROR"},
+          {"path": ["results", 0, "decisions", 0], "equals": "aaa auth_send {{aaa-1 /Common/aaa testcl 0}}"},
+          {"path": ["results", 0, "decisions", 1], "equals": "aaa acct_send {{aaa-2 /Common/aaa}}"}
+        ]
+      }
+    },
+    {
+      "id": "disabled-service-is-observable",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "aaa": {"enabled": false},
+        "irule": "when HTTP_REQUEST { if {[catch {AAA::auth_send /Common/aaa testcl testcl-secret} error]} { HTTP::respond 503 content \"error=$error\" } else { HTTP::respond 200 content ok } }",
+        "request": {"uri": "/aaa"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "status"], "equals": 503},
+          {"path": ["results", 0, "response", "body"], "equals": "error=AAA::auth_send is disabled"},
+          {"path": ["results", 0, "decisions", 0], "equals": "http respond {{503 content {error=AAA::auth_send is disabled}}}"}
+        ]
+      }
+    }
+  ]
+}

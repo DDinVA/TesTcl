@@ -1,0 +1,12 @@
+{
+  "tmos_version": "17.5",
+  "profiles": ["TCP", "HTTP"],
+  "irule": "when HTTP_REQUEST { if {[HTTP::path] eq \"/private\"} { HTTP::respond 403 content \"blocked\" } } when HTTP_RESPONSE { HTTP::header insert X-Emulator-Rule enabled }",
+  "live_origin": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "text/plain"
+    },
+    "body": "hello from the modeled origin"
+  }
+}

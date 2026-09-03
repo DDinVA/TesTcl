@@ -1,0 +1,17 @@
+{
+  "tmos_version": "17.5",
+  "profiles": ["TCP", "HTTP"],
+  "irules": [
+    "priority 100\nwhen HTTP_REQUEST {\n    if {[HTTP::path] starts_with \"/admin\"} {\n        HTTP::respond 403 content \"blocked\"\n    }\n}",
+    {
+      "irule": "when HTTP_REQUEST {\n    pool app_pool\n}"
+    }
+  ],
+  "pools": {
+    "app_pool": ["10.0.0.10:80", "10.0.0.11:80"]
+  },
+  "requests": [
+    {"method": "GET", "uri": "/", "host": "app.example"},
+    {"method": "GET", "uri": "/admin", "host": "app.example"}
+  ]
+}

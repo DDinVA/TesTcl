@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "tds-17.5",
+  "cases": [
+    {
+      "id": "raw-sql-batch",
+      "scenario": {
+        "profiles": ["TCP", "TDS"],
+        "irule": "when TDS_REQUEST { log local0. \"type=[TDS::msg type] length=[TDS::msg length] sql=[TDS::msg sqltext] request=[TDS::msg request_type]\" }",
+        "packets": [
+          {
+            "protocol": "tcp",
+            "direction": "client_to_server",
+            "source": {"address": "192.0.2.10", "port": 51000},
+            "destination": {"address": "198.51.100.20", "port": 1433},
+            "payload_hex": "0101001800000100730065006c0065006300740020003100"
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "event"], "equals": "TDS_REQUEST"},
+          {"path": ["trace", 0, "events", 0, "state", "tds", "sqltext"], "equals": "select 1"},
+          {"path": ["trace", 0, "events", 0, "state", "tds", "request_type"], "equals": "read"}
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "asm-controls-17.5",
+  "cases": [
+    {
+      "id": "request-policy-fields-and-actions",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "ASM", "FASTHTTP"],
+        "asm": {
+          "policy": "/Common/asm-policy",
+          "client_ip": "203.0.113.9",
+          "fingerprint": "fp-123",
+          "username": "alice",
+          "login_status": "logged_in",
+          "microservice": "*a/login.php",
+          "status": "Blocked",
+          "severity": "Error",
+          "support_id": "SUP-42",
+          "captcha_status": "correct",
+          "captcha_age": 35,
+          "payload": "configured-body",
+          "violations": [
+            {
+              "name": "VIOLATION_ILLEGAL_PARAMETER",
+              "attack_type": "Parameter Tampering",
+              "rating": "Error",
+              "details": {"param_data.param_name": "dGVzdA=="}
+            }
+          ],
+          "signatures": {
+            "ids": ["200000001"],
+            "names": ["Illegal parameter"],
+            "set_names": ["Default"],
+            "staged_ids": ["300000001"],
+            "staged_names": ["Staged"],
+            "staged_set_names": ["StagedSet"]
+          },
+          "threat_campaigns": {
+            "names": ["campaign-a"],
+            "staged_names": ["campaign-b"]
+          }
+        },
+        "irule": "when HTTP_REQUEST {\n  log local0. \"asm ip=[ASM::client_ip] fp=[ASM::fingerprint] user=[ASM::username]\"\n  log local0. \"auth=[ASM::is_authenticated] login=[ASM::login_status] micro=[ASM::microservice]\"\n  log local0. \"policy=[ASM::policy] status=[ASM::status] severity=[ASM::severity] support=[ASM::support_id]\"\n  log local0. \"captcha_status=[ASM::captcha_status] age=[ASM::captcha_age] count=[ASM::violation count]\"\n  log local0. \"names=[ASM::violation names] attacks=[ASM::violation attack_types] rating=[ASM::violation rating]\"\n  log local0. \"details=[ASM::violation details] signatures=[ASM::signature ids] campaigns=[ASM::threat_campaign names]\"\n  log local0. \"vdata=[ASM::violation_data] captcha=[ASM::captcha]\"\n  ASM::unblock\n  ASM::uncaptcha\n  ASM::conviction\n  ASM::deception\n  ASM::payload replace 0 3 BAD\n  ASM::raise CUSTOM_VIOLATION {field value}\n  log local0. \"after status=[ASM::status] count=[ASM::violation count] payload=[ASM::payload]\"\n}",
+        "request": {"uri": "/login", "body": "bad-body"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "asm", "client_ip"], "equals": "203.0.113.9"},
+          {"path": ["results", 0, "semantic", "asm", "policy"], "equals": "/Common/asm-policy"},
+          {"path": ["results", 0, "semantic", "asm", "status"], "equals": "Alarm"},
+          {"path": ["results", 0, "semantic", "asm", "captcha_status"], "equals": "correct"},
+          {"path": ["results", 0, "semantic", "asm", "captcha_age"], "equals": 35},
+          {"path": ["results", 0, "semantic", "asm", "payload"], "equals": "BAD-body"},
+          {"path": ["results", 0, "semantic", "asm", "uncaptcha"], "equals": true},
+          {"path": ["results", 0, "semantic", "asm", "unblocked"], "equals": true},
+          {"path": ["results", 0, "semantic", "asm", "conviction"], "equals": true},
+          {"path": ["results", 0, "semantic", "asm", "deception"], "equals": true},
+          {"path": ["results", 0, "semantic", "asm", "violations", 0, "name"], "equals": "VIOLATION_ILLEGAL_PARAMETER"},
+          {"path": ["results", 0, "semantic", "asm", "violations", 1, "name"], "equals": "CUSTOM_VIOLATION"},
+          {"path": ["results", 0, "semantic", "asm", "signatures", "ids"], "equals": ["200000001"]},
+          {"path": ["results", 0, "semantic", "asm", "threat_campaigns", "names"], "equals": ["campaign-a"]}
+        ]
+      }
+    },
+    {
+      "id": "request-controls-and-connection-reset",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "ASM", "FASTHTTP"],
+        "asm": {"policy": "/Common/default", "status": "Clear", "payload": "seed"},
+        "irule": "when HTTP_REQUEST {\n  if {[HTTP::uri] eq \"/disable\"} { ASM::disable }\n  if {[HTTP::uri] eq \"/enable\"} { ASM::enable /Common/override }\n  if {[HTTP::uri] eq \"/raise\"} { ASM::raise REQUEST_VIOLATION }\n  log local0. \"uri=[HTTP::uri] enabled=[ASM::status] policy=[ASM::policy] count=[ASM::violation count] payload=[ASM::payload]\"\n}",
+        "requests": [
+          {"uri": "/disable"},
+          {"uri": "/enable"},
+          {"uri": "/raise"},
+          {"uri": "/fresh", "new_connection": true},
+          {"uri": "/empty", "body": ""}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "asm", "enabled"], "equals": false},
+          {"path": ["results", 0, "semantic", "asm", "policy"], "equals": ""},
+          {"path": ["results", 1, "semantic", "asm", "enabled"], "equals": true},
+          {"path": ["results", 1, "semantic", "asm", "policy"], "equals": "/Common/override"},
+          {"path": ["results", 2, "semantic", "asm", "violations", 0, "name"], "equals": "REQUEST_VIOLATION"},
+          {"path": ["results", 3, "semantic", "asm", "policy"], "equals": "/Common/default"},
+          {"path": ["results", 3, "semantic", "asm", "violations"], "equals": []},
+          {"path": ["results", 3, "semantic", "asm", "payload"], "equals": "seed"},
+          {"path": ["results", 4, "semantic", "asm", "payload"], "equals": ""}
+        ]
+      }
+    }
+  ]
+}

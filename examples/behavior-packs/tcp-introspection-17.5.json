@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "tcp-introspection-17.5",
+  "cases": [
+    {
+      "id": "bandwidth",
+      "probe": {
+        "command": "TCP::bandwidth",
+        "event": "CLIENT_DATA",
+        "profiles": ["TCP"],
+        "state": {"connection": {"bandwidth": 250000}}
+      },
+      "expect": {"status": "ok", "value": "250000", "tcl_return_code": 0}
+    },
+    {
+      "id": "close",
+      "probe": {
+        "command": "TCP::close",
+        "event": "CLIENT_DATA",
+        "profiles": ["TCP"]
+      },
+      "expect": {"status": "ok", "value": "", "value_bytes": 0, "tcl_return_code": 0}
+    },
+    {
+      "id": "local-port",
+      "probe": {
+        "command": "TCP::local_port",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP"],
+        "state": {"connection": {"local_port": 8443}}
+      },
+      "expect": {"status": "ok", "value": "8443", "tcl_return_code": 0}
+    },
+    {
+      "id": "notify-request",
+      "probe": {
+        "command": "TCP::notify",
+        "args": ["request"],
+        "event": "CLIENT_DATA",
+        "profiles": ["TCP"]
+      },
+      "expect": {"status": "ok", "value": "", "event_fired": true, "tcl_return_code": 0}
+    },
+    {
+      "id": "offset",
+      "probe": {
+        "command": "TCP::offset",
+        "event": "CLIENT_DATA",
+        "profiles": ["TCP"],
+        "state": {"connection": {"client_payload": "hello"}}
+      },
+      "expect": {"status": "ok", "value": "5", "value_bytes": 1, "tcl_return_code": 0}
+    },
+    {
+      "id": "option-set",
+      "probe": {
+        "command": "TCP::option",
+        "args": ["set", "8", "sack", "all"],
+        "event": "CLIENT_DATA",
+        "profiles": ["TCP"]
+      },
+      "expect": {"status": "ok", "value": "0", "tcl_return_code": 0}
+    },
+    {
+      "id": "receive-window-size",
+      "probe": {
+        "command": "TCP::rcv_size",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP"],
+        "state": {"tcp": {"rcv_size": 131072}}
+      },
+      "expect": {"status": "ok", "value": "131072", "tcl_return_code": 0}
+    },
+    {
+      "id": "release-payload",
+      "probe": {
+        "command": "TCP::release",
+        "event": "CLIENT_DATA",
+        "profiles": ["TCP"],
+        "state": {"connection": {"client_payload": "hello"}}
+      },
+      "expect": {"status": "ok", "value": "5", "value_bytes": 1, "tcl_return_code": 0}
+    },
+    {
+      "id": "remote-port",
+      "probe": {
+        "command": "TCP::remote_port",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP"],
+        "state": {"connection": {"remote_port": 55123}}
+      },
+      "expect": {"status": "ok", "value": "55123", "tcl_return_code": 0}
+    },
+    {
+      "id": "respond",
+      "probe": {
+        "command": "TCP::respond",
+        "args": ["reply"],
+        "event": "CLIENT_DATA",
+        "profiles": ["TCP"]
+      },
+      "expect": {"status": "ok", "value": "", "value_bytes": 0, "tcl_return_code": 0}
+    },
+    {
+      "id": "retransmission-timeout",
+      "probe": {
+        "command": "TCP::rto",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP"],
+        "state": {"tcp": {"rto": 700}}
+      },
+      "expect": {"status": "ok", "value": "700", "tcl_return_code": 0}
+    },
+    {
+      "id": "rtt-variance",
+      "probe": {
+        "command": "TCP::rttvar",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP"],
+        "state": {"tcp": {"rttvar": 33}}
+      },
+      "expect": {"status": "ok", "value": "33", "tcl_return_code": 0}
+    },
+    {
+      "id": "server-port",
+      "probe": {
+        "command": "TCP::server_port",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP"],
+        "state": {"connection": {"server_port": 9443}}
+      },
+      "expect": {"status": "ok", "value": "9443", "tcl_return_code": 0}
+    },
+    {
+      "id": "congestion-window",
+      "probe": {
+        "command": "TCP::snd_cwnd",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP"],
+        "state": {"tcp": {"snd_cwnd": 29200}}
+      },
+      "expect": {"status": "ok", "value": "29200", "tcl_return_code": 0}
+    },
+    {
+      "id": "send-window",
+      "probe": {
+        "command": "TCP::snd_wnd",
+        "event": "CLIENT_ACCEPTED",
+        "profiles": ["TCP"],
+        "state": {"tcp": {"snd_wnd": 131072}}
+      },
+      "expect": {"status": "ok", "value": "131072", "tcl_return_code": 0}
+    }
+  ]
+}

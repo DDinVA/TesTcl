@@ -5,6 +5,8 @@
 are used when configuring [F5 BIG-IP](http://www.f5.com/products/big-ip/) devices.
 
 ## News
+- 3rd September 2026 - TesTcl 0.2.0rc1 preview: TMOS 17.5 emulator, catalog
+  export/evaluation, API/MCP access, and portable Python 3.13/container harness
 - 4th May 2020 - Version [1.0.14](https://github.com/landro/TesTcl/releases) released
 - 10th November 2018 - Version [1.0.13](https://github.com/landro/TesTcl/releases) released
 - 26th September 2018 - Version [1.0.12](https://github.com/landro/TesTcl/releases) released
@@ -13,6 +15,139 @@ are used when configuring [F5 BIG-IP](http://www.f5.com/products/big-ip/) device
 - 29th April 2016 - Version [1.0.9](https://github.com/landro/TesTcl/releases) released
 
 ## Getting started
+
+For a containerized behavioral emulator backed by the reusable iRule framework
+in `tcl-lsp`, see [docs/emulator.md](docs/emulator.md). The emulator is pinned
+to BIG-IP/TMOS 17.5 and is separate from the original Tcl unit-test API.
+Local emulator commands use the repo-local uv environment; initialize it with
+`uv sync --python 3.13`.
+For a single setup command that creates the uv environment and provisions the
+pinned Tcl-LSP checkout, run `./scripts/setup-17.5.sh`. After setup, the
+repo-local `.cache/tcl-lsp-17.5` checkout is discovered automatically; an
+explicit `TCL_LSP_ROOT` is only needed when using a different checkout.
+When the emulator is started with `--serve`, open `http://127.0.0.1:8080/` for
+the dependency-free browser workbench. It can create a session, run HTTP
+requests, inject events, replay packet arrays, and search the complete 17.5
+catalog through the same local API.
+For a one-command container evaluation that builds the pinned Python 3.13
+image and exercises the API, catalog evaluator, and live HTTP data plane, run
+`./scripts/container-smoke-17.5.sh`. Use `--no-build` to reuse an existing
+`TESTCL_IMAGE` tag.
+For real-client HTTP smoke tests, use `--data-plane` with a scenario file, or
+combine `--serve --data-plane-scenario PATH`; the container exposes the API on
+8080 and the optional data plane on 18080.
+The same listener can expose bounded raw TCP, UDP, or SIP-over-UDP data planes
+for iRule fixtures by adding `"live_data_plane": {"protocol": "tcp"}` or
+`{"protocol": "udp"}`/`{"protocol": "sip"}` to the scenario. UDP and SIP
+keep one persistent emulator session per client endpoint. UDP forwards
+`UDP::respond` datagrams back with lossless bytes; SIP parses one complete
+datagram and serializes `SIP::respond` responses. Set
+`live_data_plane.transport` to `tcp` with `protocol: "sip"` to use the same
+bounded SIP parser over a persistent TCP connection, including fragmented and
+coalesced messages. When the scenario includes the DNS profile, valid DNS queries
+also run through `DNS_REQUEST`/`DNS_RESPONSE`, and `DNS::return` produces a
+real response datagram.
+`TCP::respond` emissions are written back to the client. An explicit
+`live_data_plane.upstream` target can opt into a bounded, bidirectional TCP or
+HTTP bridge for testing a real backend peer; it is not a kernel TCP stack, TLS
+terminator, or database emulator. Protocol-specific TDS, FTP,
+LDAP, and similar wire parsers remain available through the packet/API drivers.
+The HTTP data plane can also terminate TLS 1.2+ with mounted `certfile` and
+`keyfile` material, and can use an explicitly configured HTTPS upstream. Set
+`live_data_plane.protocol` to `http2` to exercise a bounded TLS/ALPN `h2`
+listener against either the deterministic `live_origin` fixture or an
+explicitly configured TLS h2 upstream. HTTP/2 upstream failures run through
+`LB_FAILED` and mapped-member fallback; BIG-IP SSL profile semantics are not
+reproduced.
+See `examples/scenarios/live-http2-17.5.json` for a certificate-mounted
+HTTP/2 listener template.
+Pool-aware raw TCP scenarios can map pools member names to local backend targets
+through live_data_plane.upstream.targets; the iRule's pool command then
+determines which mapped peer is opened. Set pool_modes to round_robin to rotate
+members across real client connections; failed targets are skipped during their
+bounded failure cooldown.
+Set `live_data_plane.protocol` to `websocket` to run a real RFC 6455 upgrade and
+frame loop through the `WS_*` iRule events. The live WebSocket peer is a bounded
+deterministic local echo endpoint that supports payload mutation, frame/message
+drops, ping/pong, close, fragmentation ordering, and optional TLS termination.
+An explicit direct or pool-mapped `live_data_plane.upstream` can bridge a real
+WebSocket backend, including bidirectional iRule frame mutation and scheduler
+member selection.
+In combined `--serve --data-plane-scenario` mode, query
+`/v1/live-observations` for a bounded in-memory stream of real-client emulator
+results and use `/v1/live-observations/capture-plan` to export replayable
+HTTP/HTTP2/TCP/UDP/WebSocket inputs; run `scripts/live-observation-smoke.sh` for a
+quick HTTP evaluation, or `scripts/live-packet-observation-smoke.sh` for a
+real TCP byte-to-replay-plan check. Run
+`scripts/live-all-observation-smoke.sh` to exercise the HTTP, TCP, UDP,
+SIP-over-UDP, and DNS-over-UDP checkpoints in one sequential command.
+The SIP-over-TCP checkpoint is included as well.
+For the containerized real-backend UDP checkpoint, run
+`scripts/live-udp-upstream-compose-smoke.sh`; it starts the optional Compose
+`udp` profile, sends a datagram through the pool-mapped upstream, and verifies
+the exported `datagram` and `upstream_data` observations.
+For the containerized real-backend HTTP checkpoint, run
+`scripts/live-http-upstream-compose-smoke.sh`; it starts the optional Compose
+`http` profile, verifies request and response header mutations across the
+pool-mapped upstream, and checks the exported live observation phases.
+For catalog-wide progress, run `./scripts/emulate-irule.sh --catalog-smoke
+--namespace HTTP --limit 16`; this executes safe zero-argument probes and
+reports which commands work, need arguments, or fail in the current emulator.
+To materialize the complete catalog for downstream workers, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/export-catalog-17.5.sh /tmp/testcl-catalog
+--chunk-size 250`. This creates an immutable bundle containing hashed command
+chunks plus separate event and profile files; the exporter refuses to overwrite
+an existing directory.
+To consume one of those chunks immediately, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/catalog-worker-17.5.sh
+/tmp/testcl-catalog/chunks/chunk-0000.json --mode both --variants 1
+--output /tmp/testcl-chunk-0000.json`. The worker executes bounded local
+probes, reports emulator outcomes, and emits an external BIG-IP/vLab capture
+plan from the same chunk. Local outcomes are not independent TMOS evidence;
+the plan becomes evidence only after an authorized collector returns records.
+To turn every exported chunk into a resumable collector batch, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/catalog-capture-batch-17.5.sh
+/tmp/testcl-catalog /tmp/testcl-capture-batch --variants 1`. This verifies
+the catalog manifest and every chunk hash before generating runner-compatible
+plans; change `--variants` to 2 through 8 only when the exported chunk size
+keeps each plan at or below 256 observations.
+For a persistent, inspectable local checkpoint containing the catalog, every
+local chunk report, the capture batch, the split schedule, and the external
+campaign plan, plus a semantic behavior-coverage report, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/local-checkpoint-17.5.sh
+/tmp/testcl-17.5-checkpoint`. The output directory must be new; the command
+does not contact a device.
+After an authorized campaign completes, assemble its per-group records with
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/tmos17-capture-assemble-campaign-17.5.sh
+--schedule /tmp/testcl-17.5-checkpoint/scheduled-batches/schedule.json
+--records-root /tmp/testcl-17.5-records --output-dir /tmp/testcl-17.5-packs
+--verify`. This creates an indexed set of bounded golden-vector packs.
+To re-verify an assembled campaign after copying or archiving it, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/tmos17-capture-verify-campaign-17.5.sh
+--campaign-dir /tmp/testcl-17.5-packs`. This checks the index and pack hashes,
+then replays every pack locally without contacting a device.
+To split that batch by stimulus family and generate all operator-ready runner
+commands, run
+`./scripts/tmos17-capture-campaign-17.5.sh --schedule
+/tmp/testcl-scheduled-batches/schedule.json --http-traffic-url
+https://198.18.0.10:443 --tcp-traffic-url tcp://198.18.0.10:1024
+--udp-traffic-url udp://198.18.0.10:1024`. The campaign planner is dry-run by
+default; add `--preflight` for read-only device checks or
+`--execute --allow-device-write` to run resumable external capture groups.
+For one end-to-end local catalog checkpoint that exports, evaluates every
+chunk, and builds the external capture batch, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/catalog-evaluation-checkpoint-17.5.sh`.
+To see semantic test-input coverage across all checked-in packs, run
+`./scripts/emulate-irule.sh --behavior-coverage`.
+For one repeatable checkpoint covering the local 17.5 contracts and all eight
+real-client data-plane smoke tests, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/checkpoint-17.5.sh`.
+To generate the next executable reference-capture chunk, including up to eight
+registry-derived argument forms per command, run
+`./scripts/emulate-irule.sh --behavior-candidates --limit 16 --variants 8`.
+To execute that generated chunk locally and inspect dispatch/semantic outcomes,
+run `./scripts/emulate-irule.sh --behavior-sweep --namespace HTTP --limit 16`.
+Add `--variants 8` to exercise every bounded argument hypothesis per command.
 
 If you're familiar with unit testing and [mocking](http://en.wikipedia.org/wiki/Mock_object) in particular,
 using TesTcl should't be to hard. Check out the examples below:
@@ -74,6 +209,16 @@ it "should replace existing Vary http response headers with Accept-Encoding valu
 ```
 
 #### Installing JTcl including jtcl-irule extensions
+
+##### Running the bundled test suite
+
+From the TesTcl checkout, run:
+
+    ./tests.sh tclsh
+
+The runner configures `TCLLIBPATH` to the checkout automatically, so the
+package-based tests work without a separate environment setup. Use
+`./tests.sh jtcl` when testing the JTcl/iRule operator extension.
 
 ##### Install JTcl
 Download [JTcl](https://jtcl-project.github.io/jtcl/), unzip it and add it to your path.

@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "stream-17.5",
+  "cases": [
+    {
+      "id": "disable",
+      "probe": {
+        "command": "STREAM::disable",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "/testcl/command"}
+      },
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "enable",
+      "probe": {
+        "command": "STREAM::enable",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "/testcl/command"}
+      },
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "encoding",
+      "probe": {
+        "command": "STREAM::encoding",
+        "args": ["ascii"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "/testcl/command"}
+      },
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "expression",
+      "probe": {
+        "command": "STREAM::expression",
+        "args": ["testcl"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "/testcl/command"}
+      },
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "match-before-stream-match-event",
+      "probe": {
+        "command": "STREAM::match",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "/testcl/command"}
+      },
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "max-matchsize",
+      "probe": {
+        "command": "STREAM::max_matchsize",
+        "args": ["2048"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "FASTHTTP", "HTTP"],
+        "request": {"uri": "/testcl/command"}
+      },
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "replace-without-match-event",
+      "probe": {
+        "command": "STREAM::replace",
+        "args": ["redacted"],
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {"uri": "/testcl/command"}
+      },
+      "expect": {"status": "ok", "value": ""}
+    },
+    {
+      "id": "packet-match-and-replace",
+      "scenario": {
+        "profiles": ["TCP", "STREAM"],
+        "irule": "when CLIENT_ACCEPTED { STREAM::expression @secret@redacted@ } when STREAM_MATCHED { STREAM::replace redacted }",
+        "packets": [{"protocol": "tcp", "payload": "prefix secret suffix"}]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "stream_match"], "equals": "secret"},
+          {"path": ["trace", 0, "payload_after"], "equals": "prefix redacted suffix"},
+          {"path": ["trace", 0, "events", 2, "event"], "equals": "STREAM_MATCHED"},
+          {"path": ["trace", 0, "events", 2, "state", "stream", "replacement"], "equals": "redacted"}
+        ]
+      }
+    }
+  ]
+}

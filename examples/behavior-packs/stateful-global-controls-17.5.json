@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "stateful-global-controls-17.5",
+  "cases": [
+    {
+      "id": "sideband-connect-send-peek-recv-close",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "sideband": {
+          "10.0.0.10:80": {
+            "response": "HTTP/1.0 200 OK\r\nX-Test: yes\r\n\r\n"
+          }
+        },
+        "irule": "when HTTP_REQUEST { set conn [connect -protocol TCP -timeout 100 -idle 30 -status connect_status 10.0.0.10:80]; set sent [send -timeout 1000 -status send_status $conn \"GET / HTTP/1.0\\r\\n\\r\\n\"]; set peeked [recv -peek -status peek_status 5 $conn]; set line [recv -eol -status line_status $conn]; set remainder [recv -status recv_status $conn]; close $conn close_status; log local0. \"statuses=$connect_status/$send_status/$peek_status/$line_status/$recv_status/$close_status sent=$sent peek=[string length $peeked] line=[string length $line] remainder=[string length $remainder]\" }",
+        "request": {"uri": "/sideband"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "sideband", "next_id"], "equals": 1},
+          {"path": ["results", 0, "semantic", "sideband", "connections"], "equals": [{"handle": "sideband:1", "destination": "10.0.0.10:80", "protocol": 6, "status": "closed", "closed": true, "sent_bytes": 18, "received_bytes": 32, "buffered_bytes": 0}]}
+        ]
+      }
+    },
+    {
+      "id": "traffic-intent-order-and-shape",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST { clone pool clone_pool; listen {proto 6 timeout 30 bind vlan-a 192.0.2.50 8080 server 192.0.2.60 80 allow 10.0.0.2 8080}; relate_client {proto 6 clientflow a b c d e}; relate_server {proto 6 serverflow f g h i j}; use virtual /Common/other-vip }",
+        "request": {"uri": "/traffic"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "traffic", "intents"], "equals": [
+            {"ordinal": 1, "kind": "clone", "data": ["target_type", "pool", "target", "clone_pool"]},
+            {"ordinal": 2, "kind": "listen", "data": ["proto", "6", "timeout", "30", "bind", "vlan-a 192.0.2.50 8080", "server", "192.0.2.60 80", "allow", "10.0.0.2 8080"]},
+            {"ordinal": 3, "kind": "relate_client", "data": ["proto", "6", "clientflow", "a b c d e"]},
+            {"ordinal": 4, "kind": "relate_server", "data": ["proto", "6", "serverflow", "f g h i j"]},
+            {"ordinal": 5, "kind": "use", "data": ["virtual", "/Common/other-vip"]}
+          ]}
+        ]
+      }
+    },
+    {
+      "id": "datagroup-class-and-string-helpers",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "datagroups": {
+          "/Common/hosts": {"type": "string", "records": {"api.example": "pool-a", "www.example": "pool-b"}}
+        },
+        "irule": "when HTTP_REQUEST { set a [class lookup api.example /Common/hosts]; set b [findclass api.example /Common/hosts]; set c [matchclass api.example equals /Common/hosts]; set d [class type /Common/hosts]; set e [class size /Common/hosts]; set f [class names /Common/hosts]; set g [getfield one/two/three / 2]; set h [findstr abcXYZdef XYZ 0 3]; HTTP::respond 200 content \"$a|$b|$c|$d|$e|$f|$g|$h\" }",
+        "request": {"uri": "/class"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "body"], "equals": "pool-a|api.example pool-a|1|string|2|api.example www.example|two|XYZ"}
+        ]
+      }
+    },
+    {
+      "id": "urlcat-fixture-queries",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "urlcat": {"default": ["Unknown"], "queries": {"https://example.com/a": ["News", "Sports"]}, "blind_queries": {"example.com/a": ["Business"]}},
+        "irule": "when HTTP_REQUEST { set a [urlcatquery https://example.com/a]; set b [urlcatblindquery example.com/a]; HTTP::respond 200 content \"$a|$b\" }",
+        "request": {"uri": "/urlcat"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "body"], "equals": "News Sports|Business"},
+          {"path": ["results", 0, "semantic", "urlcat", "accesses"], "equals": [{"kind": "queries", "input": "https://example.com/a"}, {"kind": "blind_queries", "input": "example.com/a"}]}
+        ]
+      }
+    },
+    {
+      "id": "proc-call-and-priority-metadata",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "priority 100\ntiming off\nproc helper {} { return helper-ok }\nwhen HTTP_REQUEST { set result [call helper]; HTTP::respond 200 content $result }",
+        "request": {"uri": "/proc"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "response", "body"], "equals": "helper-ok"},
+          {"path": ["event_controls", 0, "priority"], "equals": 100},
+          {"path": ["event_controls", 0, "timing"], "equals": "off"}
+        ]
+      }
+    },
+    {
+      "id": "virtual-snatpool-node-and-translation-controls",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST { virtual /Common/app-vip; snatpool /Common/snat-pool; rateclass /Common/bronze; translate address disable; translate port disable; translate service disable; vlan_id; node 192.0.2.40 8080 }",
+        "request": {"uri": "/controls"}
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "node"], "equals": "192.0.2.40"},
+          {"path": ["results", 0, "semantic", "legacy", "rateclass"], "equals": "/Common/bronze"},
+          {"path": ["results", 0, "semantic", "legacy", "translate_address_enabled"], "equals": false},
+          {"path": ["results", 0, "semantic", "legacy", "translate_port_enabled"], "equals": false},
+          {"path": ["results", 0, "semantic", "legacy", "translate_service_enabled"], "equals": false}
+        ]
+      }
+    },
+    {"id":"ip-addr-comparison","probe":{"command":"ip_addr","args":["192.0.2.1","equals","192.0.2.1"],"event":"HTTP_REQUEST","profiles":["TCP","HTTP"]},"expect":{"status":"ok","value":"1","value_bytes":1}},
+    {"id":"findstr-helper","probe":{"command":"findstr","args":["abcXYZdef","XYZ","0","3"],"event":"HTTP_REQUEST","profiles":["TCP","HTTP"]},"expect":{"status":"ok","value":"XYZ","value_bytes":3}},
+    {"id":"getfield-helper","probe":{"command":"getfield","args":["one/two/three","/","2"],"event":"HTTP_REQUEST","profiles":["TCP","HTTP"]},"expect":{"status":"ok","value":"two","value_bytes":3}},
+    {"id":"after-zero-delay","probe":{"command":"after","args":["0"],"event":"HTTP_REQUEST","profiles":["TCP","HTTP"]},"expect":{"status":"ok","value":"","value_bytes":0}},
+    {"id":"vlan-id-default","probe":{"command":"vlan_id","event":"HTTP_REQUEST","profiles":["TCP","HTTP"]},"expect":{"status":"ok","value":"0","value_bytes":1}},
+    {"id":"client-server-peer-side-switching","scenario":{"profiles":["TCP","HTTP"],"irule":"when HTTP_REQUEST { set a [clientside { return client }]; set b [serverside { return server }]; set c [peer { return peer }]; HTTP::respond 200 content \"$a|$b|$c\" }","request":{"uri":"/sides"}},"expect":{"status":"ok","assertions":[{"path":["results",0,"response","body"],"equals":"client|server|peer"}]}},
+    {"id":"diagnostic-check-and-tcpdump","scenario":{"profiles":["TCP","HTTP"],"irule":"when HTTP_REQUEST { set level [check syntax]; set capture [tcpdump start foo bar]; HTTP::respond 200 content \"$level|$capture\" }","request":{"uri":"/diagnostics"}},"expect":{"status":"ok","assertions":[{"path":["results",0,"response","body"],"equals":"syntax|"},{"path":["results",0,"semantic","diagnostics","check","level"],"equals":"syntax"},{"path":["results",0,"semantic","diagnostics","tcpdump","accesses"],"equals":[["start","foo","bar"]]}]}},
+    {"id":"drop-control","scenario":{"profiles":["TCP","HTTP"],"irule":"when HTTP_REQUEST { drop }","request":{"uri":"/drop"}},"expect":{"status":"ok","assertions":[{"path":["results",0,"decisions"],"equals":["connection drop {}"]},{"path":["results",0,"connection_state"],"equals":"closing"}]}},
+    {"id":"discard-control","scenario":{"profiles":["TCP","HTTP"],"irule":"when HTTP_REQUEST { discard }","request":{"uri":"/discard"}},"expect":{"status":"ok","assertions":[{"path":["results",0,"decisions"],"equals":["connection discard {}"]},{"path":["results",0,"connection_state"],"equals":"new"}]}},
+    {"id":"reject-control","scenario":{"profiles":["TCP","HTTP"],"irule":"when HTTP_REQUEST { reject }","request":{"uri":"/reject"}},"expect":{"status":"ok","assertions":[{"path":["results",0,"events_fired"],"equals":["HTTP_REQUEST","HTTP_REJECT","CLIENT_CLOSED"]},{"path":["results",0,"http_rejected"],"equals":true},{"path":["results",0,"connection_state"],"equals":"closing"}]}},
+    {"id":"accumulate-control-suspends-handler","scenario":{"profiles":["TCP","HTTP"],"irule":"when HTTP_REQUEST { accumulate }","request":{"uri":"/accumulate"}},"expect":{"status":"ok","assertions":[{"path":["results",0,"suspended"],"equals":true},{"path":["results",0,"suspension"],"equals":"accumulate"},{"path":["results",0,"semantic","diagnostics","accumulate"],"equals":{"pending":true,"invoked":true,"suspended":true,"count":1,"accesses":[{"event":"HTTP_REQUEST","count":1}]}}]}},
+    {"id":"active-node-list","probe":{"command":"active_nodes","args":["-list","api_pool"],"event":"HTTP_REQUEST","profiles":["TCP","HTTP"],"scenario":{"pools":{"api_pool":["192.0.2.10:80","192.0.2.11:80"]}}},"expect":{"status":"ok","value":"192.0.2.10 192.0.2.11","value_bytes":21}}
+  ]
+}

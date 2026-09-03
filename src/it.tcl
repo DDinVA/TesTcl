@@ -127,6 +127,14 @@ proc ::testcl::it {description body} {
 
   reset_expectations
 
+  # Variables supplied to run are scoped to one specification. Keeping the
+  # array across specifications makes an omitted variable look present in a
+  # later test and does not match a fresh iRule execution context.
+  variable variables
+  if {[array exists variables]} {
+    array unset variables
+  }
+
   variable before
   if { [info exists before] } {
     log::log debug "Calling before"

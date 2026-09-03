@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "http-17.5-capture-plan",
+  "source": "replace-with-bigip-or-vlab-source",
+  "provenance": {
+    "collector": "replace-with-collector-name",
+    "tmos_build": "17.5.4",
+    "capture_id": "replace-with-capture-id"
+  },
+  "observations": [
+    {
+      "id": "http-host",
+      "operation": "command_probe",
+      "input": {
+        "command": "HTTP::host",
+        "event": "HTTP_REQUEST",
+        "profiles": ["TCP", "HTTP"],
+        "request": {
+          "host": "api.example.com",
+          "uri": "/health"
+        }
+      },
+      "comparisons": [
+        {
+          "label": "HTTP host",
+          "actual_path": ["execution", "value"],
+          "reference_path": ["value"]
+        }
+      ]
+    }
+  ]
+}

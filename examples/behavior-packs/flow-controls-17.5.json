@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "flow-controls-17.5",
+  "cases": [
+    {
+      "id": "connection-and-related-flow-controls",
+      "scenario": {
+        "profiles": ["TCP", "HTTP", "FLOW"],
+        "pools": {"app": ["192.0.2.20:80"]},
+        "irule": "when CLIENT_ACCEPTED { set ::client_flow [FLOW::this]; set ::server_flow [FLOW::peer $::client_flow]; FLOW::priority clientside 2; FLOW::idle_timeout $::client_flow 42; log local0. \"client=$::client_flow peer=$::server_flow\" }\nwhen SERVER_CONNECTED { FLOW::priority serverside 4; set ::related [FLOW::create_related -hairpin {\n proto 17\n clientflow -local-ip 10.0.0.10 -local-port 5000 10.0.0.11 6000 vlan-a\n serverflow 10.0.0.12 7000 vlan-b\n inherit-vs /Common/app\n }]; set ::related_peer [FLOW::peer $::related]; FLOW::idle_timeout $::related 9; FLOW::priority $::related 6; set ::before [FLOW::idle_duration $::related]; FLOW::refresh $::related; set ::after [FLOW::idle_duration $::related]; log local0. \"server=[FLOW::this] priority=[FLOW::priority] related=$::related peer=$::related_peer before=$::before after=$::after\" }\nwhen HTTP_REQUEST { pool app }",
+        "requests": [{"uri": "/health"}]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "flow", "flow_count"], "equals": 4},
+          {"path": ["results", 0, "semantic", "flow", "current_side"], "equals": "server"},
+          {"path": ["results", 0, "semantic", "flow", "current_handle"], "equals": "flow-server-0"},
+          {"path": ["results", 0, "semantic", "flow", "flows", 0, "handle"], "equals": "flow-client-0"},
+          {"path": ["results", 0, "semantic", "flow", "flows", 0, "peer"], "equals": "flow-server-0"},
+          {"path": ["results", 0, "semantic", "flow", "flows", 0, "timeout"], "equals": 42},
+          {"path": ["results", 0, "semantic", "flow", "flows", 0, "priority"], "equals": 2},
+          {"path": ["results", 0, "semantic", "flow", "flows", 1, "handle"], "equals": "flow-related-1-client"},
+          {"path": ["results", 0, "semantic", "flow", "flows", 1, "peer"], "equals": "flow-related-1-server"},
+          {"path": ["results", 0, "semantic", "flow", "flows", 1, "protocol"], "equals": 17},
+          {"path": ["results", 0, "semantic", "flow", "flows", 1, "timeout"], "equals": 9},
+          {"path": ["results", 0, "semantic", "flow", "flows", 1, "priority"], "equals": 6},
+          {"path": ["results", 0, "semantic", "flow", "flows", 1, "local_addr"], "equals": "10.0.0.10"},
+          {"path": ["results", 0, "semantic", "flow", "flows", 1, "remote_addr"], "equals": "10.0.0.11"},
+          {"path": ["results", 0, "semantic", "flow", "flows", 1, "hairpin"], "equals": true}
+        ]
+      }
+    }
+  ]
+}

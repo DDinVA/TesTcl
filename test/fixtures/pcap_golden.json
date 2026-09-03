@@ -1,0 +1,61 @@
+{
+  "name": "http-out-of-order-retransmission",
+  "scenario": {
+    "profiles": ["TCP", "HTTP"],
+    "pools": {"api_pool": ["10.0.0.10:80"]},
+    "irule": "when HTTP_REQUEST { pool api_pool }"
+  },
+  "direction": "auto",
+  "client_addr": "10.0.0.5",
+  "server_addr": "192.0.2.10",
+  "records": [
+    {
+      "seconds": 10,
+      "fraction": 0,
+      "direction": "client_to_server",
+      "flags": 2,
+      "sequence": 1000,
+      "payload": ""
+    },
+    {
+      "seconds": 10,
+      "fraction": 100000,
+      "direction": "client_to_server",
+      "flags": 24,
+      "sequence": 1029,
+      "payload": "api.example.com\r\n\r\n"
+    },
+    {
+      "seconds": 10,
+      "fraction": 200000,
+      "direction": "client_to_server",
+      "flags": 24,
+      "sequence": 1001,
+      "payload": "GET /golden HTTP/1.1\r\nHost: "
+    },
+    {
+      "seconds": 10,
+      "fraction": 300000,
+      "direction": "client_to_server",
+      "flags": 24,
+      "sequence": 1029,
+      "payload": "api.example.com\r\n\r\n"
+    },
+    {
+      "seconds": 10,
+      "fraction": 400000,
+      "direction": "server_to_client",
+      "flags": 24,
+      "sequence": 5000,
+      "payload": "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+    }
+  ],
+  "expected": {
+    "packets_processed": 5,
+    "request_uri": "/golden",
+    "response_status": 200,
+    "response_body": "ok",
+    "retransmission_trace_index": 3,
+    "timestamp": 10.4
+  }
+}

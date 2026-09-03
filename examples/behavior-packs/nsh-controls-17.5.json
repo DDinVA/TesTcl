@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "nsh-controls-17.5",
+  "cases": [
+    {
+      "id": "network-service-header-state-and-connection-scope",
+      "scenario": {
+        "profiles": ["TCP", "HTTP"],
+        "irule": "when HTTP_REQUEST { if {[NSH::path_id clientside_ingress] == 0} { if {[HTTP::uri] eq \"/first\"} { NSH::path_id clientside_ingress 10 } else { NSH::path_id clientside_ingress 20 }; NSH::chain serverside_egress chain-a; NSH::context 1 serverside_egress 1111; NSH::md1 serverside_egress 1 4 [binary format H* 00ff1020]; NSH::mocksf; NSH::service_index serverside_egress 7 }; log local0. \"path=[NSH::path_id clientside_ingress] service=[NSH::service_index serverside_egress] context=[NSH::context 1 serverside_egress] md1=[b64encode [NSH::md1 serverside_egress 1 4]]\" }",
+        "requests": [
+          {"uri": "/first"},
+          {"uri": "/same"},
+          {"uri": "/second", "close_before": true}
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["results", 0, "semantic", "nsh", "chains", 0, "direction"], "equals": "serverside_egress"},
+          {"path": ["results", 0, "semantic", "nsh", "chains", 0, "chain"], "equals": "chain-a"},
+          {"path": ["results", 0, "semantic", "nsh", "contexts", 0, "index"], "equals": 1},
+          {"path": ["results", 0, "semantic", "nsh", "contexts", 0, "context"], "equals": 1111},
+          {"path": ["results", 0, "semantic", "nsh", "md1", 0, "metadata_base64"], "equals": "AP8QIA=="},
+          {"path": ["results", 0, "semantic", "nsh", "mocksf"], "equals": true},
+          {"path": ["results", 0, "semantic", "nsh", "path_ids", 0, "value"], "equals": 10},
+          {"path": ["results", 0, "semantic", "nsh", "service_indices", 0, "value"], "equals": 7},
+          {"path": ["results", 1, "semantic", "nsh", "path_ids", 0, "value"], "equals": 10},
+          {"path": ["results", 2, "semantic", "nsh", "path_ids", 0, "value"], "equals": 20}
+        ]
+      }
+    }
+  ]
+}

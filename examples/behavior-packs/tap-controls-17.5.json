@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "profile": "tmos-17.5",
+  "name": "tap-controls-17.5",
+  "cases": [
+    {
+      "id": "token-action-score-and-insight-controls",
+      "scenario": {
+        "profiles": ["TAP"],
+        "irule": "when TAP_REQUEST {\n  set old_action [TAP::action]\n  set old_score [TAP::score]\n  set config [TAP::config fraud mode]\n  set requested [TAP::insight_requested]\n  set action_result [TAP::action block]\n  set score_result [TAP::score 85]\n  TAP::insight set device mobile signal suspicious\n  set token [TAP::insight send login suspicious]\n  log local0. \"old=$old_action/$old_score config=$config requested=$requested updates=$action_result/$score_result token=$token\"\n}",
+        "packets": [
+          {
+            "protocol": "event",
+            "event": "TAP_REQUEST",
+            "state": {
+              "tap": {
+                "action": "allow",
+                "score": 10,
+                "insight_requested": true,
+                "insight_token": "block",
+                "config": {"fraud": {"mode": "strict"}},
+                "insight": {"precondition": "present"}
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "status": "ok",
+        "assertions": [
+          {"path": ["trace", 0, "events", 0, "fired"], "equals": true},
+          {"path": ["trace", 0, "events", 0, "state", "tap", "action"], "equals": "block"},
+          {"path": ["trace", 0, "events", 0, "state", "tap", "score"], "equals": "85"},
+          {"path": ["trace", 0, "events", 0, "state", "tap", "insight_requested"], "equals": "1"},
+          {"path": ["trace", 0, "events", 0, "state", "tap", "insight_token"], "equals": "block"},
+          {"path": ["trace", 0, "events", 0, "state", "tap", "insight"], "equals": ""}
+        ]
+      }
+    }
+  ]
+}

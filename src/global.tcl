@@ -123,7 +123,31 @@ namespace eval ::testcl {
 proc ::testcl::getfield { str delim ind } {
   log::log debug "GLOBAL::getfield $str $delim $ind invoked"
 
-  return [lindex [split $str $delim] [expr {$ind - 1}]]
+  if {[string length $delim] == 1} {
+    return [lindex [split $str $delim] [expr {$ind - 1}]]
+  }
+
+  if {$delim eq ""} {
+    return [lindex [split $str {}] [expr {$ind - 1}]]
+  }
+
+  # Tcl's split command treats its delimiter as a character set, while
+  # GLOBAL::getfield treats it as a literal string. Build the fields by
+  # searching for the complete delimiter so embedded NUL bytes and other
+  # unusual input remain data rather than becoming separators.
+  set fields {}
+  set start 0
+  set delimiter_length [string length $delim]
+  while {1} {
+    set position [string first $delim $str $start]
+    if {$position < 0} {
+      lappend fields [string range $str $start end]
+      break
+    }
+    lappend fields [string range $str $start [expr {$position - 1}]]
+    set start [expr {$position + $delimiter_length}]
+  }
+  return [lindex $fields [expr {$ind - 1}]]
 }
 
 # testcl::log --
