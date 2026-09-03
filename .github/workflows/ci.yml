@@ -69,6 +69,10 @@ jobs:
           docker compose config --quiet
           docker build --build-arg TCL_LSP_COMMIT="$TCL_LSP_COMMIT" -f Dockerfile.emulator -t testcl-irule-emulator:ci .
 
+      - name: Smoke test the portable container harness
+        run: |
+          TESTCL_IMAGE=testcl-irule-emulator:ci ./scripts/container-smoke-17.5.sh --no-build
+
       - name: Smoke test the portable emulator image
         run: |
           container_name="testcl-irule-emulator-ci-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-$$"
