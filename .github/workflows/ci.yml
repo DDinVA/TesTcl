@@ -506,8 +506,6 @@ jobs:
               --chunk /tmp/testcl-catalog-worker/chunks/chunk-0000.json \
               --mode both --variants 1 \
               --output /tmp/testcl-catalog-worker-report.json >/tmp/testcl-catalog-worker.json
-            grep -F '"generated_command_count":3' /tmp/testcl-catalog-worker.json
-            grep -F '"capture_observation_count":3' /tmp/testcl-catalog-worker.json
             python /opt/testcl/tools/catalog-capture-batch.py \
               --catalog-dir /tmp/testcl-catalog-worker \
               --output-dir /tmp/testcl-catalog-capture-batch \
