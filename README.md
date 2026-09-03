@@ -101,6 +101,12 @@ To turn every exported chunk into a resumable collector batch, run
 the catalog manifest and every chunk hash before generating runner-compatible
 plans; change `--variants` to 2 through 8 only when the exported chunk size
 keeps each plan at or below 256 observations.
+For a persistent, inspectable local checkpoint containing the catalog, every
+local chunk report, the capture batch, the split schedule, and the external
+campaign plan, run
+`TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/local-checkpoint-17.5.sh
+/tmp/testcl-17.5-checkpoint`. The output directory must be new; the command
+does not contact a device.
 To split that batch by stimulus family and generate all operator-ready runner
 commands, run
 `./scripts/tmos17-capture-campaign-17.5.sh --schedule

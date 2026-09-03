@@ -142,6 +142,18 @@ def test_campaign_plan_routes_http2_group_to_tcp_endpoint(tmp_path: Path) -> Non
     assert result["groups"][0]["traffic_url"] == "tcp://vip.example.test:443"
 
 
+def test_campaign_accepts_driver_http2_endpoint_marker(tmp_path: Path) -> None:
+    schedule_path = _write_schedule(tmp_path, mode="http2")
+    schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
+    schedule["groups"][0]["endpoint_schemes"] = ["h2c"]
+    schedule_path.write_text(json.dumps(schedule), encoding="utf-8")
+    result = campaign.build_campaign(
+        schedule_path,
+        tcp_traffic_url="tcp://vip.example.test:443",
+    )
+    assert result["groups"][0]["traffic_url"] == "tcp://vip.example.test:443"
+
+
 def test_campaign_group_output_names_are_distinct_and_safe() -> None:
     first = campaign._group_output_name("raw:CLIENT_DATA")
     second = campaign._group_output_name("raw/CLIENT_DATA")

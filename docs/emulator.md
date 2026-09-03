@@ -1225,6 +1225,22 @@ groups, so rerunning the same command resumes from the runner checkpoints.
 `--allow-scenario-rule` remains a separate acknowledgement for scenario plans,
 and `--capture-wire` retains bounded wire responses for differential vectors.
 
+For a single inspectable local checkpoint, use the repository wrapper below.
+It preserves all generated artifacts under a new output directory: the
+17.5 catalog bundle, per-chunk local reports, capture batch, protocol/event
+split schedule, and dry-run campaign plan. It uses only the repo's uv-managed
+Python 3.13 environment and never contacts a device:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp \
+  ./scripts/local-checkpoint-17.5.sh /tmp/testcl-17.5-checkpoint
+```
+
+The final JSON summary reports the catalog command count, local evaluation
+count, capture accounting, and scheduled group count. The generated
+`scheduled-batches/schedule.json` can later be passed to the campaign planner
+with authorized BIG-IP/vLab endpoint details.
+
 The container also carries the checked-in behavior packs and golden vectors,
 so a clean local regression can be run without installing a second Python:
 

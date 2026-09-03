@@ -95,10 +95,10 @@ def _normalise_group(raw: Any, index: int) -> dict[str, Any]:
         raise CampaignError(f"schedule group {group_id!r} has an invalid mode")
     schemes = raw.get("endpoint_schemes", [])
     if not isinstance(schemes, list) or any(
-        scheme not in {"tcp", "udp"} for scheme in schemes
+        scheme not in {"tcp", "udp", "h2c", "h2s"} for scheme in schemes
     ):
         raise CampaignError(
-            f"schedule group {group_id!r} endpoint_schemes must contain tcp or udp"
+            f"schedule group {group_id!r} endpoint_schemes must contain tcp, udp, h2c, or h2s"
         )
     if len(set(schemes)) != len(schemes):
         raise CampaignError(f"schedule group {group_id!r} repeats an endpoint scheme")
@@ -106,9 +106,17 @@ def _normalise_group(raw: Any, index: int) -> dict[str, Any]:
         raise CampaignError(
             f"schedule group {group_id!r} mixes endpoint schemes; split it first"
         )
-    if mode in {"http1", "http2", "websocket"} and schemes and schemes != ["tcp"]:
+    if (
+        mode in {"http1", "websocket"}
+        and schemes
+        and schemes != ["tcp"]
+    ) or (
+        mode == "http2"
+        and schemes
+        and schemes not in (["tcp"], ["h2c"], ["h2s"])
+    ):
         raise CampaignError(
-            f"schedule group {group_id!r} HTTP mode requires a tcp endpoint scheme"
+            f"schedule group {group_id!r} HTTP mode requires a tcp or HTTP/2 endpoint scheme"
         )
     if mode in {"dns", "pcp", "radius", "sip"} and schemes and schemes != ["udp"]:
         raise CampaignError(
