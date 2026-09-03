@@ -80,15 +80,35 @@ fi
 
 echo "Captured UDP upstream phases:"
 curl --silent --show-error --fail \
-  "http://127.0.0.1:$api_port/v1/live-observations?limit=10" \
+  "http://127.0.0.1:$api_port/v1/live-observations?limit=50" \
   | "$python_bin" -c '
 import json
 import sys
 
 payload = json.load(sys.stdin)
-phases = [item.get("phase") for item in payload.get("observations", [])]
-pairs = [phases[index:index + 2] for index in range(0, len(phases), 2)]
-if not pairs or any(pair != ["datagram", "upstream_data"] for pair in pairs):
-    raise SystemExit(f"unexpected observation phases: {phases!r}")
-print(json.dumps({"profile": payload.get("profile"), "phases": pairs[-1]}, indent=2))
+if payload.get("profile") != "tmos-17.5":
+    raise SystemExit("live observation response has the wrong profile")
+observations = payload.get("observations")
+if not isinstance(observations, list) or not observations:
+    raise SystemExit("live observation response did not contain observations")
+phase_by_session = {}
+for item in observations:
+    if not isinstance(item, dict):
+        raise SystemExit("live observation response contained a non-object record")
+    session_id = item.get("session_id")
+    phase = item.get("phase")
+    if not isinstance(session_id, str) or not session_id:
+        raise SystemExit("live observation record is missing session_id")
+    if not isinstance(phase, str) or not phase:
+        raise SystemExit("live observation record is missing phase")
+    phase_by_session.setdefault(session_id, set()).add(phase)
+if not any({"datagram", "upstream_data"} <= phases for phases in phase_by_session.values()):
+    raise SystemExit(
+        "no UDP session contained both datagram and upstream_data phases: "
+        f"{phase_by_session!r}"
+    )
+print(json.dumps({
+    "profile": payload.get("profile"),
+    "session_phase_sets": [sorted(phases) for phases in phase_by_session.values()],
+}, indent=2, sort_keys=True))
 '
