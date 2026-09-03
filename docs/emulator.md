@@ -45,6 +45,17 @@ and any events reported by the upstream framework. It also includes a
 when a recognized command is backed by a generated stub, has no runtime
 handler, or is gated by the attached profiles.
 
+For a compact end-to-end container check, run the repository harness:
+
+```sh
+./scripts/container-smoke-17.5.sh
+```
+
+It builds the pinned image unless `--no-build` is supplied, allocates
+non-conflicting loopback ports, checks the API and browser workbench, evaluates
+a catalog chunk, and sends one real HTTP request through the live data plane.
+The harness runs Python only inside the image, which is Python 3.13.
+
 ### Export catalog chunks
 
 For workers that should consume the full registry incrementally, export an
