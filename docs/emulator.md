@@ -1200,6 +1200,31 @@ TCL_LSP_ROOT=/path/to/tcl-lsp uv run --python 3.13 \
   python tools/tmos17-protocol-driver.py --capabilities
 ```
 
+To turn the split schedule into one operator-ready campaign, use the campaign
+planner. In its default mode it validates every group, selects the matching
+HTTP/TCP/UDP endpoint, and prints the exact resumable runner commands without
+contacting a device:
+
+```sh
+TCL_LSP_ROOT=/path/to/tcl-lsp uv run --python 3.13 \
+  python tools/tmos17-capture-campaign.py \
+  --schedule /tmp/tmos-17.5-scheduled-batches/schedule.json \
+  --http-traffic-url https://198.18.0.10:443 \
+  --tcp-traffic-url tcp://198.18.0.10:1024 \
+  --udp-traffic-url udp://198.18.0.10:1024
+```
+
+The local wrapper `scripts/tmos17-capture-campaign-17.5.sh` enforces the
+repository's uv-managed Python 3.13 environment. Add `--preflight` plus the
+BIG-IP URL and virtual to run read-only checks for every scheduled group. Add
+`--execute --allow-device-write` to run the resumable collectors sequentially;
+the built-in protocol driver is selected automatically for groups that need
+one, and each group stores `records.ndjson` plus `capture-state.json` beside
+its manifest. A failed group stops the campaign without discarding completed
+groups, so rerunning the same command resumes from the runner checkpoints.
+`--allow-scenario-rule` remains a separate acknowledgement for scenario plans,
+and `--capture-wire` retains bounded wire responses for differential vectors.
+
 The container also carries the checked-in behavior packs and golden vectors,
 so a clean local regression can be run without installing a second Python:
 

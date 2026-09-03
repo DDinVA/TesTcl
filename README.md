@@ -101,6 +101,14 @@ To turn every exported chunk into a resumable collector batch, run
 the catalog manifest and every chunk hash before generating runner-compatible
 plans; change `--variants` to 2 through 8 only when the exported chunk size
 keeps each plan at or below 256 observations.
+To split that batch by stimulus family and generate all operator-ready runner
+commands, run
+`./scripts/tmos17-capture-campaign-17.5.sh --schedule
+/tmp/testcl-scheduled-batches/schedule.json --http-traffic-url
+https://198.18.0.10:443 --tcp-traffic-url tcp://198.18.0.10:1024
+--udp-traffic-url udp://198.18.0.10:1024`. The campaign planner is dry-run by
+default; add `--preflight` for read-only device checks or
+`--execute --allow-device-write` to run resumable external capture groups.
 For one end-to-end local catalog checkpoint that exports, evaluates every
 chunk, and builds the external capture batch, run
 `TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/catalog-evaluation-checkpoint-17.5.sh`.

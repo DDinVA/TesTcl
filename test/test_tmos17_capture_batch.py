@@ -50,6 +50,38 @@ def test_driver_preflight_uses_datagram_url_for_datagram_protocols() -> None:
     assert result["endpoint_scheme"] == "udp"
 
 
+def test_driver_preflight_uses_udp_profile_for_generic_lifecycle_events() -> None:
+    result = batch._driver_preflight(
+        {
+            "id": "command_probe:udp-data",
+            "input": {
+                "event": "CLIENT_DATA",
+                "request": {"payload": "fixture"},
+                "profiles": ["UDP"],
+            },
+            "event_supported": False,
+        }
+    )
+    assert result["mode"] == "raw"
+    assert result["status"] == "raw-fallback"
+    assert result["endpoint_scheme"] == "udp"
+
+
+def test_driver_preflight_keeps_tcp_for_generic_tcp_lifecycle_events() -> None:
+    result = batch._driver_preflight(
+        {
+            "id": "command_probe:tcp-data",
+            "input": {
+                "event": "CLIENT_DATA",
+                "request": {"payload": "fixture"},
+                "profiles": ["TCP"],
+            },
+            "event_supported": False,
+        }
+    )
+    assert result["endpoint_scheme"] == "tcp"
+
+
 def test_profile_driven_events_get_http_capture_fixtures() -> None:
     assert batch.EMULATOR._capture_plan_request_template(
         "ACCESS_POLICY_AGENT_EVENT", ["TCP", "HTTP", "ACCESS"]

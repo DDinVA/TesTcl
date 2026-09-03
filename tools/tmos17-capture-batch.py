@@ -74,9 +74,19 @@ def _event_counts(observations: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def _driver_preflight_url(event: str) -> str:
-    """Return a transport-appropriate placeholder URL for driver preflight."""
-    if event.startswith(("DNS_", "SIP_", "PCP_", "RADIUS_AAA_")):
+def _driver_preflight_url(
+    event: str, profiles: list[str] | tuple[str, ...] = ()
+) -> str:
+    """Return a transport-appropriate placeholder URL for driver preflight.
+
+    Generic lifecycle events such as ``CLIENT_DATA`` do not encode their
+    transport in the event name. In that case the attached UDP profile is the
+    authoritative hint for the reusable protocol driver.
+    """
+    if event.startswith(("DNS_", "SIP_", "PCP_", "RADIUS_AAA_")) or any(
+        isinstance(profile, str) and profile.upper() == "UDP"
+        for profile in profiles
+    ):
         return "udp://192.0.2.10:1024"
     return "tcp://192.0.2.10:1024"
 
@@ -204,7 +214,9 @@ def _driver_preflight(observation: dict[str, Any]) -> dict[str, Any]:
         "event": event,
         "request": request,
         "profiles": observation["input"].get("profiles", []),
-        "traffic_url": _driver_preflight_url(event),
+        "traffic_url": _driver_preflight_url(
+            event, observation["input"].get("profiles", [])
+        ),
     }
     mode = "unknown"
     try:
