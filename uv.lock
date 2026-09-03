@@ -226,7 +226,7 @@ wheels = [
 
 [[package]]
 name = "testcl-irule-emulator"
-version = "0.1.0"
+version = "0.2.0rc1"
 source = { virtual = "." }
 dependencies = [
     { name = "cryptography" },

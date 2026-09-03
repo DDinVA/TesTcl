@@ -13,12 +13,10 @@ detail.
 
 ## Run locally
 
-Create the repo-local uv environment once, then point the adapter at a checkout
-of `tcl-lsp`:
+Create the repo-local uv environment and pinned Tcl-LSP checkout once:
 
 ```sh
-uv sync --python 3.13
-export TCL_LSP_ROOT=/path/to/tcl-lsp
+./scripts/setup-17.5.sh
 ./scripts/emulate-irule.sh <<'JSON'
 {
   "tmos_version": "17.5",
@@ -32,13 +30,9 @@ export TCL_LSP_ROOT=/path/to/tcl-lsp
 JSON
 ```
 
-The setup can be automated with the repository helper. It creates the Python
-3.13 uv environment and a managed checkout of the exact Tcl-LSP commit used by
-the 17.5 catalog:
-
-```sh
-./scripts/setup-17.5.sh
-```
+The setup helper provisions `.cache/tcl-lsp-17.5`, which the adapter discovers
+automatically. To use a different clean checkout at the pinned commit, set
+`TCL_LSP_ROOT` explicitly.
 
 If `TCL_LSP_ROOT` is supplied, the helper verifies that checkout is clean and
 already at the pinned commit; it will not change a user-owned checkout.
@@ -73,8 +67,7 @@ For workers that should consume the full registry incrementally, export an
 on-disk bundle rather than carrying the complete JSON response in one message:
 
 ```sh
-TCL_LSP_ROOT=/path/to/tcl-lsp ./scripts/export-catalog-17.5.sh \
-  /tmp/testcl-catalog --chunk-size 250
+./scripts/export-catalog-17.5.sh /tmp/testcl-catalog --chunk-size 250
 ```
 
 The bundle contains `manifest.json`, hashed `chunks/chunk-*.json` command files,

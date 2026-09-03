@@ -1,6 +1,6 @@
 [project]
 name = "testcl-irule-emulator"
-version = "0.1.0"
+version = "0.2.0rc1"
 description = "TMOS 17.5 iRule emulator adapter"
 requires-python = ">=3.13"
 dependencies = [

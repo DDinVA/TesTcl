@@ -4,7 +4,7 @@ set -euo pipefail
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 python_bin="$repo_root/.venv/bin/python"
-tcl_lsp_root=${TCL_LSP_ROOT:-}
+tcl_lsp_root=${TCL_LSP_ROOT:-$repo_root/.cache/tcl-lsp-17.5}
 work_dir=$(mktemp -d -t testcl-catalog-checkpoint.XXXXXX)
 
 cleanup() {
@@ -19,8 +19,9 @@ if [[ ! -x "$python_bin" ]] || ! "$python_bin" -c \
   exit 2
 fi
 
-if [[ -z "$tcl_lsp_root" ]]; then
-  echo "Set TCL_LSP_ROOT to the pinned tcl-lsp checkout" >&2
+if [[ ! -d "$tcl_lsp_root" ]]; then
+  echo "Pinned tcl-lsp checkout not found: $tcl_lsp_root" >&2
+  echo "Run ./scripts/setup-17.5.sh or set TCL_LSP_ROOT explicitly" >&2
   exit 2
 fi
 

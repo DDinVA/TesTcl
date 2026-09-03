@@ -5,6 +5,8 @@
 are used when configuring [F5 BIG-IP](http://www.f5.com/products/big-ip/) devices.
 
 ## News
+- 3rd September 2026 - TesTcl 0.2.0rc1 preview: TMOS 17.5 emulator, catalog
+  export/evaluation, API/MCP access, and portable Python 3.13/container harness
 - 4th May 2020 - Version [1.0.14](https://github.com/landro/TesTcl/releases) released
 - 10th November 2018 - Version [1.0.13](https://github.com/landro/TesTcl/releases) released
 - 26th September 2018 - Version [1.0.12](https://github.com/landro/TesTcl/releases) released
@@ -20,7 +22,9 @@ to BIG-IP/TMOS 17.5 and is separate from the original Tcl unit-test API.
 Local emulator commands use the repo-local uv environment; initialize it with
 `uv sync --python 3.13`.
 For a single setup command that creates the uv environment and provisions the
-pinned Tcl-LSP checkout, run `./scripts/setup-17.5.sh`.
+pinned Tcl-LSP checkout, run `./scripts/setup-17.5.sh`. After setup, the
+repo-local `.cache/tcl-lsp-17.5` checkout is discovered automatically; an
+explicit `TCL_LSP_ROOT` is only needed when using a different checkout.
 When the emulator is started with `--serve`, open `http://127.0.0.1:8080/` for
 the dependency-free browser workbench. It can create a session, run HTTP
 requests, inject events, replay packet arrays, and search the complete 17.5

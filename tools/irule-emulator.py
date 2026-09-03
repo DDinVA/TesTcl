@@ -1363,7 +1363,13 @@ def _find_tcl_lsp_root(explicit: str | None) -> Path:
     if env_root:
         candidates.append(Path(env_root))
     here = Path(__file__).resolve()
-    candidates.extend((here.parent.parent / "tcl-lsp", here.parent / "tcl-lsp"))
+    candidates.extend(
+        (
+            here.parent.parent / ".cache" / "tcl-lsp-17.5",
+            here.parent.parent / "tcl-lsp",
+            here.parent / "tcl-lsp",
+        )
+    )
 
     for candidate in candidates:
         root = candidate.expanduser().resolve()
