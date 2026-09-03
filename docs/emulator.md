@@ -32,6 +32,17 @@ export TCL_LSP_ROOT=/path/to/tcl-lsp
 JSON
 ```
 
+The setup can be automated with the repository helper. It creates the Python
+3.13 uv environment and a managed checkout of the exact Tcl-LSP commit used by
+the 17.5 catalog:
+
+```sh
+./scripts/setup-17.5.sh
+```
+
+If `TCL_LSP_ROOT` is supplied, the helper verifies that checkout is clean and
+already at the pinned commit; it will not change a user-owned checkout.
+
 The second request uses the same connection, exercising the framework's
 keep-alive lifecycle. Set `close_before`, `close_after`, or `new_connection`
 on a request to control connection boundaries. `irule_file` may be used in

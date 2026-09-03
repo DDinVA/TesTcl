@@ -19,6 +19,8 @@ in `tcl-lsp`, see [docs/emulator.md](docs/emulator.md). The emulator is pinned
 to BIG-IP/TMOS 17.5 and is separate from the original Tcl unit-test API.
 Local emulator commands use the repo-local uv environment; initialize it with
 `uv sync --python 3.13`.
+For a single setup command that creates the uv environment and provisions the
+pinned Tcl-LSP checkout, run `./scripts/setup-17.5.sh`.
 When the emulator is started with `--serve`, open `http://127.0.0.1:8080/` for
 the dependency-free browser workbench. It can create a session, run HTTP
 requests, inject events, replay packet arrays, and search the complete 17.5
