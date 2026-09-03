@@ -111,13 +111,18 @@ grep -F 'TesTcl · TMOS 17.5 iRule workbench' "$workbench_file" >/dev/null
 grep -F 'Evaluate local chunk' "$workbench_file" >/dev/null
 retry_curl "$capability_file" \
   "http://127.0.0.1:$api_port/v1/capabilities?namespace=HTTP&target_status=available-in-tmos-17.5&limit=2"
+if [[ ! -s "$capability_file" ]]; then
+  echo "capability endpoint returned an empty response" >&2
+  docker logs "$container_name" >&2 || true
+  exit 1
+fi
 
 request_file=$(mktemp -t testcl-container-request.XXXXXX)
 cleanup_request() {
   rm -f "$request_file"
 }
 trap 'cleanup_request; cleanup_files; cleanup' EXIT
-docker run --rm --entrypoint python --network container:"$container_name" "$image_name" \
+docker run --rm --interactive --entrypoint python --network container:"$container_name" "$image_name" \
   -c 'import json,sys; chunk=json.load(open(sys.argv[1])); print(json.dumps({"chunk": chunk, "mode": "both", "variants": 1}))' \
   /dev/stdin <"$capability_file" >"$request_file"
 retry_curl "$evaluation_file" -X POST \
