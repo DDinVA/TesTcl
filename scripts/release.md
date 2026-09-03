@@ -14,12 +14,19 @@ and TMOS parity requires authorized reference captures from a 17.5 device.
 ./scripts/catalog-evaluation-checkpoint-17.5.sh
 ./scripts/checkpoint-17.5.sh
 ./scripts/container-smoke-17.5.sh
+./scripts/live-udp-upstream-compose-smoke.sh
+./scripts/live-http-upstream-compose-smoke.sh
 ```
 
 All Python commands must run through the repo's uv-managed `.venv` and Python
 3.13 or newer. The setup helper provisions the pinned Tcl-LSP checkout at
 `.cache/tcl-lsp-17.5`; the emulator discovers that managed checkout without an
 extra `TCL_LSP_ROOT` export.
+
+The UDP Compose check is required locally and advisory on GitHub-hosted
+runners because their Docker UDP forwarding can drop a datagram before it
+reaches the container. A failed advisory check remains visible in CI; it does
+not turn into emulator parity evidence.
 
 ## Publish a preview
 
