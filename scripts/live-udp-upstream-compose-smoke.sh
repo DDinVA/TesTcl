@@ -44,6 +44,7 @@ if [[ "$ready" != 1 ]]; then
 fi
 
 echo "UDP upstream response:"
+set +e
 "$python_bin" - "$data_port" <<'PY'
 import socket
 import sys
@@ -67,6 +68,15 @@ while time.monotonic() < deadline:
 else:
     raise SystemExit(f"UDP upstream smoke failed: {last_error!r}")
 PY
+udp_status=$?
+set -e
+if [[ "$udp_status" -ne 0 ]]; then
+  echo "Compose service state after UDP smoke failure:" >&2
+  "${compose[@]}" ps >&2 || true
+  echo "Compose logs after UDP smoke failure:" >&2
+  "${compose[@]}" logs --no-color >&2 || true
+  exit "$udp_status"
+fi
 
 echo "Captured UDP upstream phases:"
 curl --silent --show-error --fail \
