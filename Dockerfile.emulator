@@ -29,6 +29,7 @@ COPY tools/tmos17-collector.py /opt/testcl/tools/tmos17-collector.py
 COPY tools/catalog-export.py /opt/testcl/tools/catalog-export.py
 COPY tools/catalog-worker.py /opt/testcl/tools/catalog-worker.py
 COPY tools/catalog-capture-batch.py /opt/testcl/tools/catalog-capture-batch.py
+COPY tools/catalog-smoke-check.py /opt/testcl/tools/catalog-smoke-check.py
 COPY tools/tmos17-capture-campaign.py /opt/testcl/tools/tmos17-capture-campaign.py
 COPY tools/tmos17-protocol-driver.py /opt/testcl/tools/tmos17-protocol-driver.py
 COPY tools/udp-fixture.py /opt/testcl/tools/udp-fixture.py
